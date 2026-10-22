@@ -208,7 +208,7 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
     expect(getRes.text).toBe('inside');
   });
 
-  it('refuses a compose file that links into another stack and leaves that stack untouched', async () => {
+  it('opens a compose file that links into another stack but refuses to save through it', async () => {
     const otherDir = path.join(composeDir, 'other');
     fs.mkdirSync(otherDir, { recursive: true });
     const otherCompose = path.join(otherDir, 'compose.yaml');
@@ -218,9 +218,12 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
     fs.symlinkSync('../other/compose.yaml', path.join(stackDir, 'docker-compose.yml'));
 
     try {
+      // The link stays inside the compose root, so this stack's compose file is
+      // the shared one and docker compose loads it on a deploy. The editor opens
+      // it, and the save is refused so the write never lands in the other stack.
       const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
-      expect(getRes.status).toBe(409);
-      expect(getRes.text).not.toContain('other');
+      expect(getRes.status).toBe(200);
+      expect(getRes.text).toBe('services: { other: {} }');
 
       const putRes = await request(app)
         .put(`/api/stacks/${STACK}`)
@@ -228,10 +231,31 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
         .set('X-Compose-File', 'docker-compose.yml')
         .send({ content: 'services: { pwned: {} }' });
       expect(putRes.status).toBe(409);
+      expect(putRes.body.error).toContain('cannot save it here');
       expect(fs.readFileSync(otherCompose, 'utf-8')).toBe('services: { other: {} }');
     } finally {
       fs.rmSync(otherDir, { recursive: true, force: true });
     }
+  });
+
+  it('refuses to read or save a compose file that links out of the compose directory', async () => {
+    const outside = path.join(tmpDir, 'outside-compose.yaml');
+    fs.writeFileSync(outside, 'services: { outside: {} }', 'utf-8');
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync(outside, path.join(stackDir, 'compose.yaml'));
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(409);
+    expect(getRes.body.error).toBe('The compose file links outside the stack directory. Use include: to share a file between stacks.');
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('X-Compose-File', 'compose.yaml')
+      .send({ content: 'services: { pwned: {} }' });
+    expect(putRes.status).toBe(409);
+    expect(fs.readFileSync(outside, 'utf-8')).toBe('services: { outside: {} }');
   });
 
   it('refuses a dangling compose.yaml even when compose.yml is present', async () => {
@@ -242,7 +266,7 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
 
     const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
     expect(getRes.status).toBe(409);
-    expect(getRes.body.error).toBe('The compose file does not resolve inside the stack directory');
+    expect(getRes.body.error).toBe('The compose file links outside the stack directory. Use include: to share a file between stacks.');
     expect(fs.readFileSync(path.join(stackDir, 'compose.yml'), 'utf-8')).toBe('fallback');
   });
 

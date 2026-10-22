@@ -288,6 +288,9 @@ export class GitProjectManifestService {
             if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'invalid input entry';
             const e = entry as Record<string, unknown>;
             if (e.sourcePath !== null && typeof e.sourcePath !== 'string') return 'invalid input sourcePath';
+            if (e.hostSourcePath !== undefined && e.hostSourcePath !== null && typeof e.hostSourcePath !== 'string') {
+                return 'invalid input hostSourcePath';
+            }
             if (e.materializedPath !== null && !isNonEmptyRelPath(e.materializedPath)) return `invalid input materializedPath ${String(e.materializedPath)}`;
             if (!isOneOf(e.dependencyKind, DEPENDENCY_KINDS)) return `invalid input kind ${String(e.dependencyKind)}`;
             if (!isOneOf(e.role, INPUT_ROLES)) return `invalid input role ${String(e.role)}`;

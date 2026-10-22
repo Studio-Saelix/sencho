@@ -227,6 +227,43 @@ describe('FileSystemService stack methods', () => {
       expect(leftovers).toEqual([]);
     });
 
+    it('promotes a requested mode with the content, including through an in-stack link', async () => {
+      if (isWindows) return;
+
+      const target = path.join(stackDir, 'target.env');
+      await fs.writeFile(target, 'BEFORE');
+      await fs.chmod(target, 0o600);
+      await fs.symlink('target.env', path.join(stackDir, 'linked.env'));
+
+      // A permissive umask would otherwise give the promoted file 0644.
+      const previousUmask = process.umask(0o022);
+      try {
+        const service = FileSystemService.getInstance();
+        await service.writeStackFile(STACK, 'linked.env', 'AFTER', { mode: 0o600 });
+      } finally {
+        process.umask(previousUmask);
+      }
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('AFTER');
+      expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
+      expect((await fs.lstat(path.join(stackDir, 'linked.env'))).isSymbolicLink()).toBe(true);
+      expect(await fs.readlink(path.join(stackDir, 'linked.env'))).toBe('target.env');
+      expect((await fs.readdir(stackDir)).filter(name => name.includes('.sencho-tmp-'))).toEqual([]);
+    });
+
+    it('refuses invalid permission bits before touching the target', async () => {
+      const target = path.join(stackDir, 'mode.txt');
+      await fs.writeFile(target, 'KEEP');
+
+      const service = FileSystemService.getInstance();
+      await expect(
+        service.writeStackFile(STACK, 'mode.txt', 'NEW', { mode: 0o1000 }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' });
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('KEEP');
+      expect((await fs.readdir(stackDir)).filter(name => name.includes('.sencho-tmp-'))).toEqual([]);
+    });
+
     it('preserves the original target when the rename step throws', async () => {
       const target = path.join(stackDir, 'crash.txt');
       await fs.writeFile(target, 'ORIGINAL');

@@ -12,10 +12,69 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
+import { execFileSync, spawnSync } from 'child_process';
+import net from 'net';
 import path from 'path';
 import os from 'os';
 
 const isWindows = process.platform === 'win32';
+const BACKEND_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * Read a stack's compose file through the production service in a child
+ * process. A regression that opens a FIFO in blocking mode would hang the child
+ * instead of the test worker; the external deadline kills it and the signal is
+ * reported as the failure.
+ */
+async function readStackInChild(workDir: string, composeDir: string, stackName: string) {
+  const script = path.join(workDir, 'fifo-read-child.cjs');
+  await fs.writeFile(
+    script,
+    [
+      "const path = require('path');",
+      'const backendRoot = process.argv[2];',
+      'const composeDir = process.argv[3];',
+      'const stackName = process.argv[4];',
+      "const registryPath = require.resolve(path.join(backendRoot, 'src/services/NodeRegistry'));",
+      'require.cache[registryPath] = {',
+      '  id: registryPath,',
+      '  filename: registryPath,',
+      '  loaded: true,',
+      '  exports: {',
+      '    NodeRegistry: {',
+      '      getInstance: () => ({ getComposeDir: () => composeDir, getDefaultNodeId: () => 1 }),',
+      '    },',
+      '  },',
+      '};',
+      "const { FileSystemService } = require(path.join(backendRoot, 'src/services/FileSystemService'));",
+      'new FileSystemService(1).getStackContentWithMtime(stackName).then(',
+      "  (read) => { process.stdout.write('OK ' + read.content); },",
+      "  (error) => { process.stdout.write('ERR ' + (error && error.code)); process.exitCode = 2; },",
+      ');',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  return spawnSync(
+    process.execPath,
+    ['-r', 'ts-node/register', script, BACKEND_ROOT, composeDir, stackName],
+    {
+      cwd: BACKEND_ROOT,
+      encoding: 'utf8',
+      timeout: 10_000,
+      killSignal: 'SIGKILL',
+      env: {
+        ...process.env,
+        TS_NODE_TRANSPILE_ONLY: '1',
+        TS_NODE_COMPILER_OPTIONS: JSON.stringify({
+          module: 'commonjs',
+          moduleResolution: 'node10',
+          ignoreDeprecations: '6.0',
+        }),
+      },
+    },
+  );
+}
 
 // Mutable state the mocked NodeRegistry reads; beforeEach rewrites it before any
 // FileSystemService is instantiated (the constructor reads composeDir eagerly).
@@ -143,7 +202,7 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: symlinked stack di
   it('writeFileIfUnchanged/statMtime through the symlinked stack dir reject (env PUT route sinks)', async () => {
     const svc = FileSystemService.getInstance();
     const envAbs = path.join(composeDir, STACK, '.env');
-    await expect(svc.writeFileIfUnchanged(envAbs, 'PWNED=1\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.writeFileIfUnchanged(STACK, envAbs, 'PWNED=1\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     await expect(svc.statMtime(envAbs)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
     expect(await fs.readFile(path.join(externalTarget, '.env'), 'utf-8')).toBe('SECRET=leaked\n');
   });
@@ -402,15 +461,19 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: alternate compose 
   });
 
   it.each(['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'])(
-    'refuses a %s that links into a sibling stack and leaves both stacks untouched',
+    'reads a %s that links into a sibling stack but refuses every save through it',
     async (basename) => {
       const sibling = path.join(composeDir, 'other');
       await fs.mkdir(sibling);
       await fs.writeFile(path.join(sibling, 'compose.yaml'), 'services: { other: {} }\n', 'utf-8');
       await fs.symlink('../other/compose.yaml', path.join(stackDir, basename));
       const svc = FileSystemService.getInstance();
-      await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
-      await expect(svc.getStackContent(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+      // The link stays inside the compose root, so this stack deploys the shared
+      // file and a read follows it. Every write refuses, so nothing this stack
+      // saves can land in the other stack's file.
+      const read = await svc.getStackContentWithMtime(STACK);
+      expect(read).toMatchObject({ content: 'services: { other: {} }\n', filename: basename });
+      await expect(svc.getStackContent(STACK)).resolves.toBe('services: { other: {} }\n');
       await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, basename)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
       await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
       expect(await fs.readFile(path.join(sibling, 'compose.yaml'), 'utf-8')).toBe('services: { other: {} }\n');
@@ -460,6 +523,208 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: alternate compose 
     expect(saved).toMatchObject({ ok: true, filename: 'docker-compose.yml' });
     expect(await fs.readFile(path.join(stackDir, 'env', 'prod.yml'), 'utf-8')).toBe('services: { api: {} }\n');
     expect((await fs.lstat(path.join(stackDir, 'docker-compose.yml'))).isSymbolicLink()).toBe(true);
+  });
+});
+
+// ── A compose file that links into the shared compose directory: reads follow, ─
+//    writes refuse, and the stack directory itself is still never followed ──────
+describe.skipIf(isWindows)('FileSystemService: compose file linked into the shared compose directory', () => {
+  let tmpBase: string;
+  let composeDir: string;
+  let stackDir: string;
+  let sharedDir: string;
+  let sharedCompose: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-sharedlink-'));
+    composeDir = path.join(tmpBase, 'compose');
+    stackDir = path.join(composeDir, STACK);
+    sharedDir = path.join(composeDir, 'shared');
+    await fs.mkdir(stackDir, { recursive: true });
+    await fs.mkdir(sharedDir, { recursive: true });
+    sharedCompose = path.join(sharedDir, 'base.yaml');
+    await fs.writeFile(sharedCompose, 'services:\n  shared: {}\n', 'utf-8');
+    mockState.composeDir = composeDir;
+    await fs.symlink(sharedCompose, path.join(stackDir, 'compose.yaml'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('reads the linked file and reports the link basename', async () => {
+    const svc = FileSystemService.getInstance();
+    const read = await svc.getStackContentWithMtime(STACK);
+    expect(read).toMatchObject({ content: 'services:\n  shared: {}\n', filename: 'compose.yaml' });
+    await expect(svc.getStackContent(STACK)).resolves.toBe('services:\n  shared: {}\n');
+    await expect(svc.assertComposeFileReadable(STACK)).resolves.toBeUndefined();
+  });
+
+  it('refuses a shared target that is a directory', async () => {
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    const target = path.join(sharedDir, 'nested');
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    // Containment admits a link inside the compose root, but only a regular
+    // file is a project. A directory must be refused before any read.
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    await expect(svc.getComposeFilename(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+  });
+
+  it.skipIf(isWindows)('refuses a shared target that is a socket', async () => {
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    const target = path.join(sharedDir, 'target.sock');
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(target, resolve);
+    });
+    try {
+      await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+      const svc = FileSystemService.getInstance();
+      await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.skipIf(isWindows)('refuses a shared target that is a fifo without waiting for a writer', async () => {
+    const target = path.join(sharedDir, 'pipe.yaml');
+    execFileSync('mkfifo', [target]);
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    await fs.symlink(target, path.join(stackDir, 'compose.yaml'));
+
+    // Run in a child with an external deadline: a blocking open on a FIFO with
+    // no writer would otherwise hold this test worker indefinitely.
+    const result = await readStackInChild(tmpBase, composeDir, STACK);
+
+    expect(result.signal, `child did not finish (status=${result.status}): ${result.stderr}`).toBeNull();
+    expect(result.stdout).toContain('ERR NOT_A_FILE');
+    expect(result.status).toBe(2);
+  }, 15_000);
+
+  it('refuses a shared override that is a directory', async () => {
+    const target = path.join(sharedDir, 'override-target');
+    await fs.mkdir(target);
+    await fs.symlink(target, path.join(stackDir, 'compose.override.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+    // The main file is a regular shared file and stays readable.
+    await expect(svc.getStackContentWithMtime(STACK)).resolves.toMatchObject({ filename: 'compose.yaml' });
+  });
+
+  it.skipIf(isWindows)('refuses a shared override that is a fifo', async () => {
+    const target = path.join(sharedDir, 'override-target');
+    execFileSync('mkfifo', [target]);
+    await fs.symlink(target, path.join(stackDir, 'compose.override.yaml'));
+    const svc = FileSystemService.getInstance();
+
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'NOT_A_FILE' });
+  });
+
+  it('refuses every save through the link and leaves the target untouched', async () => {
+    const svc = FileSystemService.getInstance();
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null, 'compose.yaml'))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContent(STACK, 'pwned\n')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(sharedCompose, 'utf-8')).toBe('services:\n  shared: {}\n');
+    expect((await fs.lstat(path.join(stackDir, 'compose.yaml'))).isSymbolicLink()).toBe(true);
+  });
+
+  it('still refuses a link out of the compose directory', async () => {
+    const outside = path.join(tmpBase, 'outside.yml');
+    await fs.writeFile(outside, 'services: { outside: {} }\n', 'utf-8');
+    await fs.rm(path.join(stackDir, 'compose.yaml'));
+    await fs.symlink(outside, path.join(stackDir, 'compose.yaml'));
+
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveStackContentIfUnchanged(STACK, 'pwned\n', null)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(outside, 'utf-8')).toBe('services: { outside: {} }\n');
+  });
+
+  it('still refuses a stack directory that links to another location', async () => {
+    const elsewhere = path.join(composeDir, 'elsewhere');
+    await fs.mkdir(elsewhere);
+    await fs.writeFile(path.join(elsewhere, 'compose.yaml'), 'services: { other: {} }\n', 'utf-8');
+    await fs.rm(stackDir, { recursive: true, force: true });
+    await fs.symlink(elsewhere, stackDir);
+
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getStackContentWithMtime(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.assertComposeFileReadable(STACK)).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
+});
+
+// ── An env file that links into another stack: reads follow, writes refuse ─────
+describe.skipIf(isWindows)('FileSystemService: env file linked into another stack', () => {
+  let tmpBase: string;
+  let composeDir: string;
+  let stackDir: string;
+  let siblingEnv: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-envlink-'));
+    composeDir = path.join(tmpBase, 'compose');
+    stackDir = path.join(composeDir, STACK);
+    const siblingDir = path.join(composeDir, 'other');
+    await fs.mkdir(stackDir, { recursive: true });
+    await fs.mkdir(siblingDir, { recursive: true });
+    await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf-8');
+    siblingEnv = path.join(siblingDir, '.env');
+    await fs.writeFile(siblingEnv, 'OTHER=1\n', 'utf-8');
+    mockState.composeDir = composeDir;
+    await fs.symlink(siblingEnv, path.join(stackDir, '.env'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('reads the linked env file and saves through a link that stays inside the stack', async () => {
+    const svc = FileSystemService.getInstance();
+    await expect(svc.getEnvContent(STACK)).resolves.toBe('OTHER=1\n');
+
+    // The same save path with an in-stack link keeps working.
+    await fs.rm(path.join(stackDir, '.env'));
+    await fs.writeFile(path.join(stackDir, 'real.env'), 'A=1\n', 'utf-8');
+    await fs.symlink('real.env', path.join(stackDir, '.env'));
+    const saved = await svc.writeFileIfUnchanged(
+      STACK,
+      path.join(stackDir, '.env'),
+      'A=2\n',
+      null,
+    );
+    expect(saved.ok).toBe(true);
+    expect(await fs.readFile(path.join(stackDir, 'real.env'), 'utf-8')).toBe('A=2\n');
+  });
+
+  it('refuses both env write paths when the link leaves the stack, and leaves the target untouched', async () => {
+    const svc = FileSystemService.getInstance();
+    await expect(svc.writeFileIfUnchanged(STACK, path.join(stackDir, '.env'), 'PWNED=1\n', null))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveEnvContent(STACK, 'PWNED=1\n')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    expect(await fs.readFile(siblingEnv, 'utf-8')).toBe('OTHER=1\n');
+    expect((await fs.lstat(path.join(stackDir, '.env'))).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses a link whose sibling target does not exist yet instead of creating it there', async () => {
+    await fs.rm(siblingEnv);
+    const svc = FileSystemService.getInstance();
+
+    // The link is dangling, and a write would create the file at its target, so
+    // the containment guard has to refuse before any create.
+    await expect(svc.writeFileIfUnchanged(STACK, path.join(stackDir, '.env'), 'PWNED=1\n', null))
+      .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(svc.saveEnvContent(STACK, 'PWNED=1\n')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(fs.access(siblingEnv)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 

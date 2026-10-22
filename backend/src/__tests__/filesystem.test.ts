@@ -164,16 +164,21 @@ describe('FileSystemService.getOverrideFilename', () => {
     );
   }
 
-  it('returns the first existing override variant in priority order', async () => {
-    // compose.override.yaml is absent, so the next priority (.yml) wins over the
-    // lower-priority docker-compose.override.yml that also exists.
-    existing('compose.override.yml', 'docker-compose.override.yml');
-    await expect(service.getOverrideFilename('my-stack')).resolves.toBe('compose.override.yml');
+  it('returns the first existing override variant in Compose resolution order', async () => {
+    // compose.override.yml is absent, so the next variant in Compose's order
+    // (.yaml) wins over the lower-priority docker-compose.override.yml that also
+    // exists. The order is Compose's own: it prefers .yml over .yaml for an
+    // override, the other way round from the compose.* root family.
+    existing('compose.override.yaml', 'docker-compose.override.yml');
+    await expect(service.getOverrideFilename('my-stack')).resolves.toBe('compose.override.yaml');
   });
 
-  it('prefers compose.override.yaml over all lower-priority variants', async () => {
+  it('prefers compose.override.yml over all lower-priority variants, as Compose does', async () => {
+    // Verified against docker compose v5: with both present it warns and picks
+    // compose.override.yml. Pinning the other one would deploy a different
+    // project than Compose's own discovery loads.
     existing('compose.override.yaml', 'compose.override.yml', 'docker-compose.override.yml');
-    await expect(service.getOverrideFilename('my-stack')).resolves.toBe('compose.override.yaml');
+    await expect(service.getOverrideFilename('my-stack')).resolves.toBe('compose.override.yml');
   });
 
   it('returns null when no override variant exists', async () => {

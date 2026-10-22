@@ -27,7 +27,12 @@ import { getErrorMessage } from '../utils/errors';
 import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
-import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
+import {
+  authoredComposeFileArgs,
+  authoredComposeEnvFileArgs,
+  composeEnvFilesFromProcess,
+} from '../utils/authoredComposeArgs';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -159,6 +164,9 @@ export function getComposeCommandTimeoutMs(): number {
 // by default because a working pull can be briefly silent while a large layer
 // extracts; operators on slow links or heavy local builds can raise it.
 const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
+const EMPTY_ENV_FILE = '/dev/null';
 
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
@@ -1752,6 +1760,72 @@ export class ComposeService {
 
 
   /**
+   * True when the global-flag prefix carries an explicit `--env-file`.
+   * Positional scan: a compose file or env file literally named `--env-file`
+   * is a flag value, not the flag itself, so skip each flag's value token.
+   * Sencho always emits the two-token form, and the `=` form is accepted too
+   * so a future writer cannot silently defeat the check.
+   */
+  private hasExplicitEnvFileFlag(args: string[]): boolean {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (token.startsWith('--env-file=')) return true;
+      if (
+        token === '-f'
+        || token === '--file'
+        || token === '--env-file'
+        || token === '--project-directory'
+        || token === '-p'
+        || token === '--project-name'
+      ) {
+        if (token === '--env-file') return true;
+        i++;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Refuse a process-selected interpolation env file that is not a regular file.
+   *
+   * Every Compose child inherits `COMPOSE_ENV_FILES` from the Sencho process,
+   * while a recovery replay only pins the files its generation recorded. A FIFO
+   * named there is not in the argv at all, so Compose would open it and wait for
+   * a writer instead of naming the unusable input. Entries resolve against the
+   * working directory Compose gets, the way Compose resolves them. A missing or
+   * unresolvable entry is left to Compose, which reports it without waiting.
+   * An explicit `--env-file` replaces the variable for interpolation, so a list
+   * that run never reads cannot refuse it.
+   *
+   * The working directory is the validated stack path, and the entry is the
+   * operator's own process environment, never request data. The check is a
+   * metadata stat only: the same value is already passed unchanged to the
+   * Compose child, so refusing to inspect it would not narrow the child's reach.
+   */
+  private async assertProcessEnvFilesRegular(workingDir: string, args: string[]): Promise<void> {
+    if (this.hasExplicitEnvFileFlag(args)) return;
+    // The capture reads the same selection, so the guard names the file Compose
+    // opens. Compose splits on commas and skips empty entries, but every
+    // non-empty entry is used verbatim: spaces around a name are filename
+    // characters, not separators.
+    for (const entry of composeEnvFilesFromProcess()) {
+      const abs = path.resolve(workingDir, entry);
+      let stat: import('fs').Stats;
+      try {
+        stat = await fs.promises.stat(abs);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw Object.assign(
+          new Error(`Env file ${entry} selected by COMPOSE_ENV_FILES is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+    }
+  }
+
+  /**
    * Pinned compose-up with a recovery override layered last
    * (`--pull never --no-build`). Used by manual rollback and deploy/update
    * compensation. When `invocation` is set, Compose args come from the
@@ -1775,7 +1849,17 @@ export class ComposeService {
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }
-    const stackDir = overlay?.overlayDir ?? path.join(this.baseDir, stackName);
+    // Canonical js/path-injection barrier at the working directory shared by
+    // the spawn and the inherited env-file guard: the stack name is resolved
+    // against the compose root and must stay inside it. An overlay working
+    // directory is prepared by Sencho for this operation and carries no
+    // request path.
+    const overlayDir = overlay?.overlayDir;
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = overlayDir ?? this.resolveValidatedStackDir(stackName);
+    if (!overlayDir && !stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
@@ -1800,6 +1884,10 @@ export class ComposeService {
       args.slice(0, args.length - upAction.length),
     );
     await this.withRegistryAuth(async (env) => {
+      // The child inherits COMPOSE_ENV_FILES from this process whether or not
+      // the invocation names that file, so check it at the last moment before
+      // the spawn.
+      await this.assertProcessEnvFilesRegular(stackDir, args);
       await this.execute(
         'docker',
         args,
@@ -1828,7 +1916,7 @@ export class ComposeService {
   ): Promise<string[]> {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
-      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
+      ? ['compose', ...await this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
       : await this.authoredComposePrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
@@ -1836,9 +1924,14 @@ export class ComposeService {
     }
 
     if (recoveryOverridePath) {
-      // Captured invocations already encode their file set; live args may need
-      // an explicit base (+ user override) so docker compose accepts a trailing -f.
-      await this.ensureExplicitComposeFiles(stackName, out, !useCaptured);
+      // A captured invocation encodes its file set once it recorded its compose
+      // layers; older generations did not, so for those the implicit override
+      // still has to be named or the trailing layer silently drops it.
+      await this.ensureExplicitComposeFiles(
+        stackName,
+        out,
+        !useCaptured || !invocation?.composeLayers,
+      );
       out.push('-f', recoveryOverridePath);
     }
     await this.appendPersistentBindRemap(
@@ -1936,12 +2029,9 @@ export class ComposeService {
       if (args[i] === '-f' || args[i] === '--file') files.push(args[i + 1]);
     }
     if (files.length === 0) {
-      files.push(
-        'compose.yaml', 'compose.yml',
-        'compose.override.yaml', 'compose.override.yml',
-        'docker-compose.yaml', 'docker-compose.yml',
-        'docker-compose.override.yaml', 'docker-compose.override.yml',
-      );
+      // No explicit -f, so Compose's own discovery decides: the two families in
+      // the order Compose resolves them, roots before the implicit override.
+      files.push(...COMPOSE_ROOT_FILENAMES, ...COMPOSE_OVERRIDE_FILENAMES);
     }
     for (const file of files) {
       const abs = path.resolve(resolvedStackDir, file);
@@ -1989,21 +2079,288 @@ export class ComposeService {
   }
 
   /**
+   * The real form of a captured path, falling back to the lexical one when it
+   * does not resolve (missing, dangling, or unreadable). Compose reports a
+   * missing env file itself; an unresolvable path is not a path escape.
+   */
+  private async realCapturedPath(abs: string): Promise<string> {
+  try {
+    return await fs.promises.realpath(abs);
+  } catch {
+    return abs;
+  }
+}
+
+  /**
+   * Resolve a captured `--env-file` to the path recovery must launch with.
+   *
+   * Capture emits the path of a selected project env file, which is the real
+   * path for a configured file and the compose-root spelling for the
+   * context-directory fallback, and the helper that produced it authorizes any
+   * path inside the compose root, not only inside the stack directory. A stack
+   * whose selected env file links to a sibling in that root therefore captures
+   * an env-file recovery has to accept, so recovery validates against the same
+   * root instead of a narrower one. Containment is decided on the real path, as
+   * capture does, so a name inside the root whose link target leaves it is
+   * refused rather than followed. An in-stack path is mirrored under the
+   * overlay root; an authorized path outside the stack directory keeps its live
+   * location, because a recovery overlay mirrors the stack directory alone.
+   * Both the lexical and the real compose root are matched, so a relocated
+   * (symlinked) compose directory still resolves, and the mirror is derived in
+   * the coordinates of the root that matched. Anything outside the compose root
+   * is refused, at the entry barrier in the form static analysis credits and
+   * again on the real path below.
+   *
+   * A target that exists has to be a regular file: the generation omitted it, so
+   * a restore never replaced whatever now sits there, and a FIFO reaching Compose
+   * waits for a writer instead of naming the invalid input.
+   */
+  private async resolveCapturedEnvFile(
+    stackName: string,
+    abs: string,
+    stackDir: string,
+    pathRoot: string,
+  ): Promise<string> {
+    const baseResolved = path.resolve(this.baseDir);
+    // Real compose base plus the lexical stack name, the same rule the
+    // generation store applies, so a stack dir that links elsewhere stays out.
+    const realBase = await this.realCapturedPath(baseResolved);
+    // Canonical js/path-injection barrier inline with the realpath read below:
+    // the guard sits at the read and covers one constant root, because the
+    // analysis does not credit a guard over two alternative roots. A linked
+    // compose root lets a captured env file be spelled through the physical
+    // root; that spelling is rebased onto the lexical root first, so the one
+    // barrier covers both spellings and refuses everything outside the compose
+    // root with the message the refusal already used.
+    let absResolved = path.resolve(abs);
+    if (realBase !== baseResolved && absResolved.startsWith(realBase + path.sep)) {
+      absResolved = path.join(baseResolved, absResolved.slice(realBase.length + path.sep.length));
+    }
+    if (!absResolved.startsWith(baseResolved + path.sep)) {
+      throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+    }
+    const roots = [{ stackDir, base: baseResolved }];
+    if (realBase !== baseResolved) {
+      roots.push({ stackDir: path.join(realBase, stackName), base: realBase });
+    }
+    let realAbs: string;
+    try {
+      realAbs = await fs.promises.realpath(absResolved);
+    } catch {
+      // Compose reports a missing env file itself; an unresolvable path is
+      // not a path escape, so the guarded spelling stands.
+      realAbs = absResolved;
+    }
+    const overlayResolved = path.resolve(pathRoot);
+    for (const root of roots) {
+      if (!isPathWithinBase(realAbs, root.stackDir)) continue;
+      // The root that matched decides the coordinate system the path is rebased
+      // in. A captured spelling that already lives under it is kept, so a stack
+      // file that links to a sibling keeps its own name; otherwise the real path
+      // is used, because a linked compose root puts the captured lexical name
+      // outside the real stack directory while the file itself is inside it.
+      const matched = isPathWithinBase(abs, root.stackDir) ? abs : realAbs;
+      const remapped = this.remapCapturedAbsToRoot(matched, root.stackDir, pathRoot);
+      if (!remapped) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      // Canonical js/path-injection barrier inline with the stat below, in the
+      // same single-root shape as the entry barrier. The type is checked on the
+      // path recovery passes to Compose, not the captured spelling: an in-stack
+      // file is read through the overlay, and a captured link may only keep
+      // working because the overlay holds the target.
+      const overlayPath = path.resolve(remapped);
+      if (!overlayPath.startsWith(overlayResolved + path.sep)) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      let overlayIsFile: boolean;
+      try {
+        overlayIsFile = (await fs.promises.stat(overlayPath)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        // A missing file is left for Compose, which reports it itself.
+        if (code === 'ENOENT') return remapped;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        overlayIsFile = false;
+      }
+      if (!overlayIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+      return remapped;
+    }
+    if (roots.some(root => isPathWithinBase(realAbs, root.base))) {
+      // Authorized input outside the stack directory keeps its live location.
+      // The checked spelling is the one the entry barrier covered, which is how
+      // a linked compose root rebases the physical spelling onto the lexical
+      // one; both resolve to the same file.
+      let liveIsFile: boolean;
+      try {
+        liveIsFile = (await fs.promises.stat(absResolved)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return abs;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        liveIsFile = false;
+      }
+      if (!liveIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+      return abs;
+    }
+    throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+  }
+
+  /**
+   * Refuse a captured compose layer whose real target Compose would open
+   * outside the compose root, and one that exists but is not a regular file. The
+   * path is the one recovery passes to `-f`, resolved against the working
+   * directory (the stack, or an overlay outside that root). A lexical name
+   * inside the stack can still be a symlink.
+   * A missing path is left for Compose: restore writes held files back, and an
+   * omitted layer that is simply absent is not an escape. A dangling or
+   * looping link cannot be shown to stay inside the root, so it is refused.
+   * A target inside the compose root stays allowed, including a shared file
+   * outside the stack directory, but only while it is a regular file: a FIFO or
+   * socket there reaches Compose and waits or fails there instead of naming the
+   * invalid input, and the generation omitted the file, so a restore never
+   * replaced it. When the working directory itself is an overlay outside the
+   * compose root, a target inside that overlay is allowed too.
+   */
+  private async assertCapturedComposeLayerTarget(layer: string, pathRoot: string): Promise<void> {
+    // Canonical js/path-injection barrier inline with the sinks below: the
+    // containment check sits at the sink because static analysis credits
+    // neither the caller's check nor a helper. The layer is opened relative to
+    // the working directory, so that directory is the base.
+    const rootResolved = path.resolve(pathRoot);
+    const lexical = path.resolve(rootResolved, layer);
+    if (!lexical.startsWith(rootResolved + path.sep)) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" escapes the recovery working directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
+    try {
+      await fs.promises.lstat(lexical);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    let real: string;
+    try {
+      real = await fs.promises.realpath(lexical);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENOTDIR') {
+        throw Object.assign(
+          new Error(`Captured compose layer "${layer}" does not resolve inside the compose directory`),
+          { code: 'SYMLINK_ESCAPE' },
+        );
+      }
+      throw e;
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const realBase = await this.realCapturedPath(baseResolved);
+    const cwdInside = isPathWithinBase(pathRoot, baseResolved) || isPathWithinBase(pathRoot, realBase);
+    const allowed = isPathWithinBase(real, baseResolved)
+      || isPathWithinBase(real, realBase)
+      || (!cwdInside && isPathWithinBase(real, pathRoot));
+    if (!allowed) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" resolves outside the compose directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
+    // Containment is settled; now ask what Compose would actually open. A shared
+    // layer inside the compose root is a supported partial input, but only
+    // while it stays a regular file: a FIFO or socket there would reach Compose
+    // and wait or fail there instead of naming the input. The stat follows the
+    // link to the target Compose opens, and a missing file is left for Compose.
+    let targetIsFile: boolean;
+    try {
+      targetIsFile = (await fs.promises.stat(lexical)).isFile();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return;
+      if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+      targetIsFile = false;
+    }
+    if (!targetIsFile) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" is not a regular file`),
+        { code: 'NOT_A_FILE' },
+      );
+    }
+  }
+
+  /**
    * Rebuild a spawn-safe compose global-flag prefix from a generation's
    * captured invocation. Captured paths must resolve inside the stack
-   * directory; when overlayDir is set, absolute --env-file and
-   * --project-directory paths are rewritten under that overlay.
+   * directory (a captured `--env-file` inside the compose root, which is the
+   * root its capture-time validation uses); when overlayDir is set, absolute
+   * --env-file and --project-directory paths are rewritten under that overlay.
+   * Compose layers are also checked on the real path Compose will open.
    */
-  private composePrefixFromCapturedInvocation(
+  private async composePrefixFromCapturedInvocation(
     stackName: string,
     invocation: RollbackInvocationRecord,
     overlayDir?: string,
-  ): string[] {
+  ): Promise<string[]> {
     const stackDir = this.resolveValidatedStackDir(stackName);
     const pathRoot = overlayDir ? path.resolve(overlayDir) : stackDir;
     // Empty prefix is valid (single-file auto-discovery at capture time).
     const raw = [...invocation.composeArgsPrefix];
     const out: string[] = [];
+    // Compose picks the root compose file and the implicit override by name, so
+    // an ordinary single-file stack captured no -f and left the choice to
+    // discovery. Recovery pins the layers the generation captured instead:
+    // otherwise a root added after capture wins discovery and the recovery runs
+    // a configuration the generation never held. Only the layers Compose
+    // selects at the project root belong here, never an included file.
+    if (invocation.composeLayers && !raw.includes('-f') && !raw.includes('--file')) {
+      for (const layer of invocation.composeLayers) {
+        if (!isValidRelativeStackPath(layer)) {
+          throw new Error(`Invalid captured compose layer path for stack "${stackName}"`);
+        }
+        if (!isPathWithinBase(path.resolve(stackDir, layer), stackDir)) {
+          throw new Error(`Captured compose layer path escapes stack directory for "${stackName}"`);
+        }
+        await this.assertCapturedComposeLayerTarget(layer, pathRoot);
+        out.push('-f', layer);
+      }
+    }
+    // Pinning a COMPOSE_FILE selection as an -f list drops the working
+    // directory's env file out of the interpolation environment. The recorded
+    // files go back as ordered --env-file flags, the same order the live run
+    // applied them in, so a value only the stack root .env holds survives the
+    // translation and a key both files define keeps its live winner. Repeated
+    // --env-file flags replace the project directory default, which is why
+    // the recorded list carries that file too instead of letting the flags
+    // drop it. A prefix that already named an env file selected its own and
+    // is replayed below unchanged.
+    // The list is also recorded outside a COMPOSE_FILE chain, but only as an
+    // empty list that pins the absence of a default env file; see below.
+    if (invocation.interpolationEnvFiles !== undefined && !raw.includes('--env-file')) {
+      // An empty record means no default env file existed at capture. Naming
+      // an empty input replaces discovery, so an `.env` that appeared since
+      // stays out of the recovered project's interpolation environment.
+      if (invocation.interpolationEnvFiles.length === 0) out.push('--env-file', EMPTY_ENV_FILE);
+      for (const envRel of invocation.interpolationEnvFiles) {
+        if (!isValidRelativeStackPath(envRel)) {
+          throw new Error(`Invalid captured interpolation env file for stack "${stackName}": "${envRel}"`);
+        }
+        const envAbs = path.resolve(stackDir, envRel);
+        if (!isPathWithinBase(envAbs, stackDir)) {
+          throw new Error(`Captured interpolation env file escapes stack directory for "${stackName}"`);
+        }
+        out.push('--env-file', await this.resolveCapturedEnvFile(stackName, envAbs, stackDir, pathRoot));
+      }
+    }
     for (let i = 0; i < raw.length; i++) {
       const token = raw[i];
       if (token === '-f' || token === '--file') {
@@ -2014,6 +2371,7 @@ export class ComposeService {
         if (!isPathWithinBase(path.resolve(stackDir, file), stackDir)) {
           throw new Error(`Captured compose file path escapes stack directory for "${stackName}"`);
         }
+        await this.assertCapturedComposeLayerTarget(file, pathRoot);
         out.push('-f', file);
         continue;
       }
@@ -2022,15 +2380,12 @@ export class ComposeService {
         if (!envPath) {
           throw new Error(`Invalid captured --env-file for stack "${stackName}"`);
         }
-        const abs = path.resolve(envPath);
-        if (!isPathWithinBase(abs, stackDir)) {
-          throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
-        }
-        const remapped = this.remapCapturedAbsToRoot(abs, stackDir, pathRoot);
-        if (!remapped) {
-          throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
-        }
-        out.push('--env-file', remapped);
+        out.push('--env-file', await this.resolveCapturedEnvFile(
+          stackName,
+          path.resolve(envPath),
+          stackDir,
+          pathRoot,
+        ));
         continue;
       }
       if (token === '--project-directory') {
@@ -2450,7 +2805,7 @@ export class ComposeService {
     // scan with the live deploy-spec / project-env selection.
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const fileAndEnvPrefix = useCaptured
-      ? [...this.composePrefixFromCapturedInvocation(stackName, invocation)]
+      ? await this.composePrefixFromCapturedInvocation(stackName, invocation)
       : [
         ...authoredComposeFileArgs(stackName, this.nodeId),
         ...(await authoredComposeEnvFileArgs(stackName, this.nodeId)),

@@ -224,6 +224,15 @@ function rejectIfStackOpBlocksRootTrustFileWrite(
   return true;
 }
 
+const COMPOSE_OUTSIDE_STACK_ERROR =
+  'The compose file links outside the stack directory. Use include: to share a file between stacks.';
+
+// A compose file that links into the shared compose directory opens and
+// deploys, but the save is refused: writing through the link would overwrite the
+// shared target, which this stack does not own.
+const COMPOSE_LINK_SAVE_ERROR =
+  'This stack\'s compose file is a link to a file outside the stack directory, so Sencho cannot save it here. Edit the linked file at its own location, or use include: to share a file between stacks.';
+
 function stackFileEtag(mtimeMs: number): string {
   return `W/"${Math.floor(mtimeMs)}"`;
 }
@@ -740,7 +749,7 @@ stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     res.status(500).json({ error: 'Failed to read stack' });
   }
@@ -785,8 +794,11 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
     res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs, filename: result.filename });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+    if (code === 'SYMLINK_ESCAPE') {
+      return res.status(409).json({ error: COMPOSE_LINK_SAVE_ERROR });
+    }
+    if (code === 'INVALID_PATH') {
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     console.error('Failed to save stack:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to save stack' });
@@ -916,7 +928,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
         return res.status(409).json({ error: 'No env file target is available for this stack' });
       }
       const result = forceRequested
-        ? await fsService.writeFileIfUnchanged(target, content, null)
+        ? await fsService.writeFileIfUnchanged(stackName, target, content, null)
         : await fsService.createFileExclusive(target, content);
       if (!result.ok) {
         res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
@@ -949,7 +961,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     }
 
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
-    const result = await fsService.writeFileIfUnchanged(envPath, content, expectedMtimeMs);
+    const result = await fsService.writeFileIfUnchanged(stackName, envPath, content, expectedMtimeMs);
     if (!result.ok) {
       res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
       return res.status(412).json({
@@ -1992,7 +2004,7 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
-      return res.status(409).json({ error: 'The compose file does not resolve inside the stack directory' });
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
     }
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
