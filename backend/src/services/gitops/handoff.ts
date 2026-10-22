@@ -884,21 +884,18 @@ function policyForDispatch(
     : { kind: 'policy', policy: DEFAULT_HEALTH_ROLLOUT_POLICY };
 }
 
-/** The stack a Blueprint target is deployed under, as the intent names it. */
-function deployStackNameFor(
-  store: GitOpsStore,
-  app: GitOpsApplicationRow,
-  nodeId: number,
-): string | null {
-  const target = store.getTarget(app.id, nodeId);
-  const targetIntent = target?.intent_revision_id
-    ? store.getIntentRevision(target.intent_revision_id)
-    : undefined;
-  const appIntent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
-  return targetIntent?.deploy_stack_name
-    ?? app.configured_source_stack_name
-    ?? appIntent?.deploy_stack_name
-    ?? null;
+/**
+ * The stack a Blueprint target is deployed under, as the intent names it.
+ *
+ * The intent's `deploy_stack_name` is the name the apply writes, on a local node
+ * and on a remote one, so it is the only stack a health run can observe. The
+ * source stack an application was converted from is a different workload, and a
+ * target that has not acked its first Blueprint rollout has no intent of its own
+ * yet, so falling back to that name would watch, or 404 on, the wrong stack.
+ */
+function deployStackNameFor(store: GitOpsStore, app: GitOpsApplicationRow): string | null {
+  if (!app.intent_revision_id) return null;
+  return store.getIntentRevision(app.intent_revision_id)?.deploy_stack_name ?? null;
 }
 
 /**
@@ -1292,7 +1289,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         app: liveApp,
         binding,
         node,
-        stackName: deployStackNameFor(store, liveApp, nodeId),
+        stackName: deployStackNameFor(store, liveApp),
         policy: healthPolicy,
         actor: generation.actor ?? null,
       });

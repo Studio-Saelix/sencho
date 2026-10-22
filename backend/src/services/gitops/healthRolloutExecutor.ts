@@ -319,11 +319,18 @@ export async function executeHealthRolloutDecision(args: {
   }
 }
 
-/** The stack a target is deployed under, as the intent that placed it names. */
+/**
+ * The stack a target is deployed under, as the intent that placed it names.
+ *
+ * The target's own intent is the stack the recovery point was captured from, so
+ * it wins when present. Otherwise the application's intent names the stack the
+ * Blueprint deploys; the source stack an application was converted from is a
+ * different workload and is never a stand-in for it.
+ */
 function targetStackNameFor(
-  application: { id: string; intent_revision_id: string | null; configured_source_stack_name: string | null },
+  application: { id: string; intent_revision_id: string | null },
   target: { intent_revision_id: string | null },
-): string {
+): string | null {
   const store = GitOpsStore.getInstance();
   const targetIntent = target.intent_revision_id
     ? store.getIntentRevision(target.intent_revision_id)
@@ -332,9 +339,8 @@ function targetStackNameFor(
     ? store.getIntentRevision(application.intent_revision_id)
     : undefined;
   return targetIntent?.deploy_stack_name
-    ?? application.configured_source_stack_name
     ?? appIntent?.deploy_stack_name
-    ?? '';
+    ?? null;
 }
 
 /**
