@@ -1,113 +1,87 @@
 [
   {
-    "id": "stack-health-all-nodes",
+    "id": "v0-98-payload-templates",
+    "title": "Notification payload templates",
+    "blurb": "Shape the JSON a notification channel posts. Open Edit Payload on a channel tab and write your own body with variables such as {{level}} and {{message}}; leave it blank for the built-in payload.",
+    "docUrl": "https://docs.sencho.io/features/alerts-notifications#payload-templates"
+  },
+  {
+    "id": "v0-98-native-https",
+    "title": "HTTPS on the Sencho instance",
+    "blurb": "Terminate TLS on Sencho itself when you are not using a reverse proxy. Point SENCHO_TLS_CERT_FILE and SENCHO_TLS_KEY_FILE at a mounted certificate and key and set SENCHO_PUBLIC_URL to https, and Pilot agents enroll over a confidential tunnel.",
+    "docUrl": "https://docs.sencho.io/getting-started/configuration#native-tls-on-the-control-instance"
+  },
+  {
+    "id": "v0-98-sealed-registry-credentials",
+    "title": "Sealed private-registry credentials",
+    "blurb": "Credentials for private images travel sealed to compatible remote nodes, even over plain HTTP. Sencho pins each node's sealing key on first use; use Reset seal pin under Settings → Nodes after a rebuild.",
+    "docUrl": "https://docs.sencho.io/features/private-registries"
+  },
+  {
+    "id": "v0-98-health-gated-rollouts",
+    "title": "Health-gated rollouts across the fleet",
+    "blurb": "Choose what a Git-managed Blueprint rollout does when a target's health check fails: observe (the default), pause, retry once, stop, or roll that target back. Each node reports the health of the stack it runs, so a remote target settles on a real verdict.",
+    "docUrl": "https://docs.sencho.io/features/health-rollout-policy"
+  },
+  {
+    "id": "v0-98-digest-drift",
+    "title": "Runtime digest drift",
+    "blurb": "Sencho notices when a tag has moved: it compares what each node runs with the image digest approved for the Blueprint, per service and platform. Enforce repairs the drift by redeploying the approved content, without pulling from a registry.",
+    "docUrl": "https://docs.sencho.io/features/blueprint-model#digest-drift"
+  },
+  {
+    "id": "v0-98-recovery-generations",
+    "title": "Whole-project recovery generations",
+    "blurb": "Protected deploys and updates capture a recovery generation of the whole authored project: compose files, overrides, discoverable include and extends inputs, and env files. Roll back from the stack editor; Resources → Rollback lists each generation and how long it is kept.",
+    "docUrl": "https://docs.sencho.io/features/atomic-deployments"
+  },
+  {
+    "id": "v0-98-git-secrets-sops",
+    "title": "Secrets in Git with SOPS and age",
+    "blurb": "Keep sensitive env files in your repository as SOPS-encrypted documents. Sencho generates an age identity on the owning node and decrypts only while a validation, apply, deploy, or rollback needs the values.",
+    "docUrl": "https://docs.sencho.io/features/git-secrets",
+    "screenshot": "git-secrets-sops.png"
+  },
+  {
+    "id": "v0-98-private-repos-webhooks",
+    "title": "Private repositories and Git-host webhooks",
+    "blurb": "Connect private repositories with an SSH deploy key, trust your own certificate authority for a self-hosted Git host, and let GitHub, GitLab, Gitea, Forgejo, or Bitbucket Cloud trigger a pull with a signed webhook from the Automation tab.",
+    "docUrl": "https://docs.sencho.io/features/git-webhooks",
+    "screenshot": "git-webhooks.png"
+  },
+  {
+    "id": "v0-98-stack-health-all-nodes",
     "title": "Stack Health across every node",
-    "blurb": "Keep Stack Health on This node by default, or switch to All nodes for a progressive multi-node inventory with State, Networks, coverage, and editor jumps that land on the owning node.",
+    "blurb": "Keep Stack Health on This node, or switch to All nodes for a multi-node inventory with state, networks, and coverage. Editor jumps land on the node that owns the stack.",
     "docUrl": "https://docs.sencho.io/features/dashboard#stack-health",
     "screenshot": "stack-health-all-nodes.png"
   },
   {
-    "id": "sso-only-authentication",
-    "title": "SSO-only authentication mode",
-    "blurb": "Require every sign-in on this node to go through your SSO provider instead of a local password. Turn it on once your provider is configured and tested.",
-    "docUrl": "https://docs.sencho.io/features/sso",
-    "screenshot": "sso-only.png"
+    "id": "v0-98-layout-follows-you",
+    "title": "Your layout follows you",
+    "blurb": "Appearance and navigation choices are saved to your account, so your layout is the same in every browser. Pin up to ten quick links to the Compact launcher, and switch the stacks sidebar to Resizable to set its width.",
+    "docUrl": "https://docs.sencho.io/features/appearance#navigation",
+    "screenshot": "layout-follows-you.png"
   },
   {
-    "id": "fleet-prune-itemized-plans",
-    "title": "Itemized fleet prune plans",
-    "blurb": "See exactly what a fleet-wide prune will remove, broken down node by node, before you run it. The destructive action stays locked until every reachable node has returned its dry run.",
-    "docUrl": "https://docs.sencho.io/features/fleet-actions",
-    "screenshot": "fleet-prune.png"
+    "id": "v0-98-resolve-findings",
+    "title": "Resolve findings where you see them",
+    "blurb": "Most Readiness findings carry a button that fixes them on the spot, and a finding you have decided to live with can be dismissed until it changes. Networking and Drift findings can be dismissed the same way.",
+    "docUrl": "https://docs.sencho.io/features/fleet-view#the-readiness-tab",
+    "screenshot": "resolve-findings.png"
   },
   {
-    "id": "audit-log",
-    "title": "Audit Log",
-    "blurb": "Every instance ships with an audit log of who did what, and when. Find it under Security & review → Audit.",
-    "docUrl": "https://docs.sencho.io/features/audit-log",
-    "screenshot": "audit-log.png"
+    "id": "v0-98-git-managed-blueprints",
+    "title": "Git-managed Blueprints end to end",
+    "blurb": "Run one Git repository across several nodes. Convert a Git source onto a Blueprint, then accept source, approve placement, and authorize rollout as separate steps, with pause, resume, and rollback along the way.",
+    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints",
+    "screenshot": "git-managed-blueprints.png"
   },
   {
-    "id": "fleet-secrets",
-    "title": "Fleet Secrets",
-    "blurb": "Share encrypted, fleet-wide environment bundles across your nodes without copying env files by hand.",
-    "docUrl": "https://docs.sencho.io/features/fleet-secrets",
-    "screenshot": "fleet-secrets.png"
-  },
-  {
-    "id": "ntfy-notifications",
-    "title": "ntfy notification channel",
-    "blurb": "Send Sencho alerts straight to ntfy, alongside the channels already supported. Configure it per node under Settings · Notifications · Channels.",
-    "docUrl": "https://docs.sencho.io/features/alerts-notifications",
-    "screenshot": "ntfy.png"
-  },
-  {
-    "id": "resizable-file-explorer",
-    "title": "Resizable file explorer",
-    "blurb": "Drag the divider in the Files tab to give the tree pane more room, or shrink it out of the way. Your preferred width is remembered.",
-    "docUrl": "https://docs.sencho.io/features/stack-file-explorer",
-    "screenshot": "file-explorer.png"
-  },
-  {
-    "id": "rbac",
-    "title": "Role-based access control",
-    "blurb": "Every instance ships with five built-in roles, Admin, Viewer, Deployer, Node Admin, and Auditor, plus scoped permissions to grant access to one stack or node without elevating anywhere else.",
-    "docUrl": "https://docs.sencho.io/features/rbac",
-    "screenshot": "rbac.png"
-  },
-  {
-    "id": "git-managed-blueprints",
-    "title": "Git-managed Blueprint content",
-    "blurb": "Move a live Git source onto a Blueprint so that Blueprint's compose comes from Git instead of the editor. Accept a generation, approve the placement, and authorize the rollout to deploy it; a later commit runs the chain again, automatically when the source policy applies without an operator. Detach restores Inline editing.",
-    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints"
-  },
-  {
-    "id": "native-hub-tls",
-    "title": "HTTPS on the Sencho instance",
-    "blurb": "Terminate TLS on Sencho itself when you are not using a reverse proxy. Mount a certificate and key, set SENCHO_PUBLIC_URL to https, and Pilot agents enroll over a confidential tunnel so private-registry credentials can travel.",
-    "docUrl": "https://docs.sencho.io/getting-started/configuration#native-tls-on-the-control-instance"
-  },
-  {
-    "id": "registry-sealed-envelope",
-    "title": "Sealed private-registry credentials",
-    "blurb": "Hub credentials for private images travel sealed to remote nodes, including over plain HTTP. Each node pins a sealing key on first use; reset the pin under Settings → Nodes after a rebuild.",
-    "docUrl": "https://docs.sencho.io/features/private-registries"
-  },
-  {
-    "id": "gitops-authority-actions",
-    "title": "Decomposed approval actions",
-    "blurb": "Accept source, approve placement, and authorize rollout as separate actions on a Git-managed Blueprint, so each authority step is reviewed and recorded on its own.",
-    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints#accept-source-approve-placement-authorize-rollout"
-  },
-  {
-    "id": "gitops-rollout-controls",
-    "title": "Rollout lifecycle controls",
-    "blurb": "Pause, resume, replan, supersede, or roll back a Blueprint rollout from the GitOps application view, with an explicit recovery scope and per-target results.",
-    "docUrl": "https://docs.sencho.io/features/git-managed-blueprints#pause-resume-replan-or-supersede-a-rollout"
-  },
-  {
-    "id": "home-fleet-triage",
-    "title": "Fleet triage on Home",
-    "blurb": "Recent alerts opens the operational row with a This node / All nodes scope, and each alert leads to the stack, scan history, or update it concerns, switching nodes when needed. Fleet heartbeat sits beside it at the same height, lists problem nodes first, and opens their details, and Configuration summary gives one row per domain with each setting's scope.",
-    "docUrl": "https://docs.sencho.io/features/dashboard",
-    "screenshot": "home-fleet-triage.png"
-  },
-  {
-    "id": "save-and-pull-images",
-    "title": "Save & Pull Images",
-    "blurb": "Download a stack's images without deploying it. The compose editor's save menu now writes your edits and fetches the registry images in one step, so the next deploy in a maintenance window has nothing left to download. Running containers are left exactly as they are.",
-    "docUrl": "https://docs.sencho.io/features/editor"
-  },
-  {
-    "id": "service-url-override",
-    "title": "Custom service URLs",
-    "blurb": "A published port can open the address you configure for that service, such as a tunnel or reverse-proxy domain. Set it from the pencil on the port, or with the sencho.service.url Compose label. With no override, the port still opens the generated host and port.",
-    "docUrl": "https://docs.sencho.io/features/stack-management"
-  },
-  {
-    "id": "remote-rollout-health",
-    "title": "Health-gated rollouts across the fleet",
-    "blurb": "Health rollout policies work on every node in a Blueprint's placement, not just the one you are signed in to: each target's own node reports the health of the stack it runs, so a remote rollout settles on a real verdict.",
-    "docUrl": "https://docs.sencho.io/features/health-rollout-policy"
+    "id": "v0-98-gitops-portfolio",
+    "title": "GitOps portfolio",
+    "blurb": "One place for every Git-managed application across your nodes. The attention queue resolves in place, so a failed source, a pending review, or a held rollout ends in the action that clears it.",
+    "docUrl": "https://docs.sencho.io/features/gitops-portfolio",
+    "screenshot": "gitops-portfolio.png"
   }
 ]
