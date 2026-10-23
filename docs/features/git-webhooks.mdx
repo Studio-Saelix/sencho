@@ -38,7 +38,7 @@ Sencho exposes one ingest URL per stack and provider, verifies the host's signat
     The **Copy your webhook secret now** notice shows the secret once. Sencho never shows it again, so copy it before you dismiss the notice. **Rotate** issues a new secret and keeps the previous one valid for 24 hours so you can update the host without a gap.
   </Step>
   <Step title="Register it on the Git host">
-    Copy the **Webhook URL** from the hook. In the repository's webhook settings, add that URL and paste the secret into the field the host expects: GitHub **Secret**, GitLab **Secret token**, Gitea and Forgejo **Secret**, Bitbucket Cloud **Secret**. Enable push events, and pull request events (merge request events on GitLab) when the scope includes PRs.
+    Copy the **Webhook URL** from the hook. In the repository's webhook settings, add that URL and paste the secret into the field the host expects: GitHub **Secret**, GitLab **Secret token**, Gitea and Forgejo **Secret**, Bitbucket Cloud **Secret**. On GitHub, set the content type to `application/json`; a form-encoded delivery fails verification and gets the same 404 as a wrong secret. Enable push events, and pull request events (merge request events on GitLab) when the scope includes PRs.
   </Step>
 </Steps>
 
@@ -52,7 +52,7 @@ The webhook URL always carries the node id and endpoint id:
 POST /api/gitops/hooks/{nodeId}/{endpointId}
 ```
 
-Use the public Sencho base URL your Git host can reach. On a fleet hub, the node id is the node that owns the stack, usually **Local**. Ingest is served on the control instance even when the stack runs on a remote node; the hub forwards the payload to the owning instance over the node mesh. You can register one endpoint per provider per stack; a second create for the same provider returns **409**.
+Use the public Sencho base URL your Git host can reach. On a fleet hub, the node id is the node that owns the stack, usually **Local**. Ingest is served on the control instance even when the stack runs on a remote node; the hub forwards the payload and its signature headers to the owning instance over the connection it already uses for that node, and the owning instance verifies the secret. You can register one endpoint per provider per stack; a second create for the same provider returns **409**.
 
 ### What happens on delivery
 
@@ -68,6 +68,7 @@ Sencho authenticates every delivery with provider-specific headers, then applies
 | Pull request event while scope is **Configured ref** | **202 Accepted**, ignored (`ref_policy`) |
 | Ping or connectivity test from the host | **202 Accepted**, ignored (`ping`) |
 | Duplicate delivery id inside the debounce window | **202 Accepted**, recorded as a duplicate. The window is 10 seconds per source, the same as generic webhooks |
+| The stack runs on a remote node the hub cannot reach | **500**, reported by the host as a failed delivery. Redeliver once the node is back |
 
 Open **Recent deliveries** on a hook to see its latest deliveries with state, outcome, event type, ref, and time. After saving the hook on your Git host, send its test event and reopen the list to confirm Sencho received it.
 
@@ -106,6 +107,12 @@ Triggers for one source are debounced on a 10-second window so a runaway pipelin
       -d "$BODY"
 ```
 
+## Limits
+
+- **Five provider hooks.** GitHub, GitLab, Gitea, Forgejo, and Bitbucket Cloud. Any other host, including self-managed Bitbucket, triggers a pull through the CI webhook.
+- **Direct sources only.** A source that belongs to a Git-managed Blueprint is not fetched by a delivery. Use **Pull source** or polling there.
+- **One endpoint per provider per stack.** Rotate its secret rather than creating a second one.
+
 ## Troubleshooting
 
 <AccordionGroup>
@@ -114,7 +121,7 @@ Triggers for one source are debounced on a 10-second window so a runaway pipelin
   </Accordion>
 
   <Accordion title="The Git host reports a failed delivery">
-    A 404 means the endpoint is unknown or disabled, or the signature did not verify. Sencho gives the same answer for all three so callers cannot probe ids. Check that the secret on the host matches the current one (rotating issues a new secret), and that the URL uses the node id of the node that owns the stack.
+    A 404 means the endpoint is unknown or disabled, or the signature did not verify. Sencho gives the same answer for all three so callers cannot probe ids. Check that the secret on the host matches the current one (rotating issues a new secret), that the URL uses the node id of the node that owns the stack, and, on GitHub, that the content type is `application/json`.
   </Accordion>
 
   <Accordion title="A delivery arrives but nothing is fetched">
