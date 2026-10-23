@@ -29,10 +29,10 @@ This tutorial covers creating and triggering one webhook for the **Deploy (down 
 
 <Steps>
   <Step title="Create the webhook">
-    Open **Settings → Automation → Webhooks** and select **Create webhook**. Fill in **Name** (`Deploy storefront`), pick **Stack** (`storefront`), and leave **Action** on its default, **Deploy (down + up)**. **Node** is read-only and shows **Local**: execution stays pinned to whichever node was active when you created the webhook, regardless of which node is active later.
+    Open **Settings → Automation → Webhooks** and select **Create webhook**. Fill in **Name** (`Deploy storefront`), pick **Stack** (`storefront`), and leave **Action** on its default, **Deploy (down + up)**. **Node** is read-only and shows **Local**: execution stays pinned to whichever node was active when you created the webhook, regardless of which node is active later. The **Action** list also offers Restart, Stop, Start, Pull & Update, and **Git source sync**; the last one fetches a stack's linked Git source and is covered on the [Webhooks](/features/webhooks) page.
 
     <Frame>
-      <img src="/images/tutorials/set-up-a-webhook/webhook-create-form-filled.png" alt="New webhook form with Name set to Deploy storefront, Stack set to storefront, Node showing Local, and Action set to Deploy (down + up)." />
+      <img src="/images/tutorials/set-up-a-webhook/webhook-create-form-filled.png" alt="Webhooks page with the New webhook form open: Name set to Deploy storefront, Stack set to storefront, Node showing Local, Action set to Deploy (down + up), and Cancel and Create buttons. The masthead reads scope global, webhooks 0, enabled 0." />
     </Frame>
 
     Select **Create**.
@@ -41,7 +41,7 @@ This tutorial covers creating and triggering one webhook for the **Deploy (down 
     A green callout appears once, showing the full signing secret in a monospace block. Copy it now: every later view of this webhook, in the list or the API, shows only the masked form (`********` plus the last four characters). If you dismiss the callout without copying it, the only fix is to delete the webhook and create a new one, which rotates the secret and the trigger URL's id.
 
     <Frame>
-      <img src="/images/tutorials/set-up-a-webhook/webhook-secret-reveal.png" alt="Green success callout reading Webhook created. Copy your secret now, with the full secret in a monospace block above a Copy button. Below, the configured-webhooks list shows the Deploy storefront card with its trigger URL and masked secret." />
+      <img src="/images/tutorials/set-up-a-webhook/webhook-secret-reveal.png" alt="Green success callout reading Webhook created. Copy your secret now, with the full secret in a monospace block beside a copy button and a Dismiss button. Below, the configured-webhooks list shows the Deploy storefront card with deploy, storefront, and local badges, its trigger URL, the masked secret, and a collapsed Recent executions row." />
     </Frame>
 
     Note the numeric id in the **Trigger URL** (`/api/webhooks/<id>/trigger`); you'll need both the id and the secret in the next steps.
@@ -52,7 +52,7 @@ This tutorial covers creating and triggering one webhook for the **Deploy (down 
     Open the `storefront` stack, edit `compose.yaml`, and bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine`. Instead of **Save & Deploy**, open the dropdown next to it and select **Save Only**. This writes the change to disk without deploying it, the same gap that exists in a real pipeline between committing a new image reference and the moment something actually applies it.
 
     <Frame>
-      <img src="/images/tutorials/set-up-a-webhook/webhook-save-only-menu.png" alt="Compose editor for storefront with the image line changed to nginx:1.28-alpine, and the dropdown next to Save & Deploy open with Save Only visible. The running container's logs below still show nginx/1.27.5, confirming the change is staged but not yet deployed." />
+      <img src="/images/tutorials/set-up-a-webhook/webhook-save-only-menu.png" alt="Compose editor for storefront with the image line changed to nginx:1.28-alpine, and the dropdown next to Save & Deploy open with Save Only, Save & Pull Images, and Discard Changes. The running container's logs behind it still show nginx/1.27.5, confirming the change is staged but not yet deployed." />
     </Frame>
   </Step>
   <Step title="Trigger it like your pipeline would">
@@ -77,16 +77,16 @@ This tutorial covers creating and triggering one webhook for the **Deploy (down 
 
 Check from two independent surfaces so you're not trusting a single UI element.
 
-**The stack itself.** Reopen `storefront`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`.
+**The stack itself.** Reopen `storefront`. The container recreated on the new image: a fresh uptime, and the newest log lines report `nginx/1.28.3` where the earlier run reported `1.27.5`.
 
 <Frame>
-  <img src="/images/tutorials/set-up-a-webhook/webhook-storefront-redeployed.png" alt="storefront stack page showing storefront-web-1 up 22 seconds, with logs starting from nginx/1.28.3, and the compose editor showing image nginx:1.28-alpine." />
+  <img src="/images/tutorials/set-up-a-webhook/webhook-storefront-redeployed.png" alt="storefront stack page showing storefront-web-1 up a few seconds, with the logs showing the new container starting on nginx/1.28.3, and the compose editor showing image nginx:1.28-alpine." />
 </Frame>
 
 **The webhook's own history.** Back on **Settings → Automation → Webhooks**, expand **Recent executions** on the card. A green check confirms `deploy` succeeded, with the timestamp and duration of the run you just triggered.
 
 <Frame>
-  <img src="/images/tutorials/set-up-a-webhook/webhook-recent-executions.png" alt="Deploy storefront webhook card with Recent executions expanded, showing one entry: a green check, deploy, a timestamp, and a duration of 4.1 seconds." />
+  <img src="/images/tutorials/set-up-a-webhook/webhook-recent-executions.png" alt="Deploy storefront webhook card with Recent executions expanded, showing one entry: a green check, deploy, a timestamp, and a duration of 5.1 seconds." />
 </Frame>
 
 ## If something goes wrong
