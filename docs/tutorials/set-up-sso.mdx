@@ -6,7 +6,7 @@ description: Connect Sencho to your identity provider so your team signs in with
 
 Say your team already authenticates against a self-hosted identity provider, such as Keycloak, Authentik, or Authelia, and you'd rather they sign in to Sencho the same way than maintain a second password. This walks through registering Sencho as an OAuth client in that provider, wiring up Sencho's **Custom OIDC** provider to point at it, and confirming a real sign-in works end to end, using Keycloak as the worked example.
 
-By the end, a **Sign in with your identity provider** button appears on the Sencho login page, and signing in through it auto-provisions a new Sencho account with the role you configured.
+By the end, a button named after the **Display Name** you chose appears under **Or continue with** on the Sencho login page, and signing in through it auto-provisions a new Sencho account with the role you configured.
 
 This tutorial covers **Custom OIDC** on Community, connected to a self-hosted provider. It does not cover the built-in **Google**, **GitHub**, or **Okta** presets (the same Sencho-side steps apply, with fewer fields to fill in), **LDAP / Active Directory** (Admiral only), **SSO only** mode, or mapping identity-provider groups to the Sencho Admin role. See the [SSO & LDAP Authentication](/features/sso) feature page for all of those, plus setup notes for other self-hosted providers.
 
@@ -22,7 +22,7 @@ This tutorial covers **Custom OIDC** on Community, connected to a self-hosted pr
 
 <Steps>
   <Step title="Register Sencho as a client in your identity provider">
-    In Keycloak, open **Clients → Create client**. Set **Client ID** to `sencho`, leave **Client type** as **OpenID Connect**, and click **Next**. On the **Capability config** step, turn **Client authentication** on (this makes it a confidential client with a secret, which the form in the next step expects) and click **Next**. On **Login settings**, set **Valid redirect URIs** to your Sencho URL plus the callback path Sencho's SSO page displays at the bottom of the provider list:
+    In Keycloak, open **Clients → Create client**. Set **Client ID** to `sencho`, leave **Client type** as **OpenID Connect**, and click **Next**. On the **Capability config** step, turn **Client authentication** on (this makes it a confidential client with a secret, which the form in the next step expects) and click **Next**. On **Login settings**, set **Valid redirect URIs** to your Sencho URL plus the callback path Sencho's SSO page shows at the bottom of the provider list, where `<provider>` is `oidc_custom` for Custom OIDC:
 
     ```
     https://<your-sencho-url>/api/auth/sso/oidc/oidc_custom/callback
@@ -31,7 +31,7 @@ This tutorial covers **Custom OIDC** on Community, connected to a self-hosted pr
     Click **Save**. Open the new client's **Credentials** tab and copy the **Client secret**; you'll paste it into Sencho in the next step.
   </Step>
   <Step title="Open Custom OIDC in Sencho and fill in the provider">
-    In Sencho, click your avatar, choose **Settings**, then under **Access** pick **SSO**. Click the **Custom OIDC** card to expand it.
+    In Sencho, click your avatar, choose **Settings**, then under **Access** pick **SSO**. Leave **Authentication mode** on **Local and SSO**, then click the **Custom OIDC** card to expand it.
 
     Fill in:
 
@@ -41,28 +41,28 @@ This tutorial covers **Custom OIDC** on Community, connected to a self-hosted pr
     - **Client Secret**: the secret you copied from the Credentials tab.
     - **Default Role**: leave as **Viewer**. This is the role a new SSO user gets unless they match the optional Admin Claim mapping (not covered here; see the feature page for group-based role mapping).
 
-    Leave **Admin Claim**, **Scopes**, and the claim-mapping fields blank; they fall back to sensible OIDC defaults for a standard Keycloak realm.
+    Leave **Admin Claim**, **Admin Claim Value**, **Scopes**, and the three claim-mapping fields (**User ID Claim**, **Username Claim**, **Email Claim**) blank; they fall back to sensible OIDC defaults for a standard Keycloak realm.
 
     <Frame>
-      <img src="/images/tutorials/set-up-sso/custom-oidc-filled.png" alt="The Custom OIDC card expanded and toggled ON, with Display Name 'Corporate SSO', an Issuer URL ending in /realms/master, Client ID 'sencho', a Client Secret entered, and Default Role set to Viewer." />
+      <img src="/images/tutorials/set-up-sso/custom-oidc-filled.png" alt="The Custom OIDC card expanded with an Active badge and its switch ON, showing Display Name 'Corporate SSO', an Issuer URL ending in /realms/master, Client ID 'sencho', a masked Client Secret, empty Admin Claim, Admin Claim Value, Scopes, and claim-mapping fields, Default Role set to Viewer, and Save and Test Connection buttons." />
     </Frame>
 
-    Toggle the card's switch to **ON**, then click **Save**.
+    Toggle the card's switch to **ON** (an **Active** badge appears beside the card name), then click **Save**. The **Providers** and **Enabled** counts in the page header both go to 1.
   </Step>
   <Step title="Test the connection">
-    Click **Test Connection**. Sencho performs live OIDC discovery against your Issuer URL and reports success or failure next to the button within a few seconds, before you attempt a real sign-in.
+    Click **Test Connection**. Sencho performs live OIDC discovery against your Issuer URL and reports success or failure next to the button within a few seconds, before you attempt a real sign-in. A red cross means discovery failed; the same Issuer URL is what a real sign-in uses, so fix it before moving on.
 
     <Frame>
-      <img src="/images/tutorials/set-up-sso/test-connection-success.png" alt="The Custom OIDC card after clicking Test Connection, showing a green checkmark next to the Save and Test Connection buttons." />
+      <img src="/images/tutorials/set-up-sso/test-connection-success.png" alt="The Custom OIDC card after clicking Test Connection, showing a green checkmark next to the Save and Test Connection buttons, with the Client Secret field now reading Enter to update because the secret is stored." />
     </Frame>
 
     A green check confirms Sencho reached the Issuer URL and parsed a valid OIDC discovery document. If it fails, see [If something goes wrong](#if-something-goes-wrong) below before continuing.
   </Step>
   <Step title="Sign out and sign in through SSO">
-    Log out of Sencho. The login page now shows your provider's button under **Or continue with**, using the Display Name you set.
+    Open your avatar and choose **Log Out**. The login page now shows your provider's button under **Or continue with**, using the Display Name you set.
 
     <Frame>
-      <img src="/images/tutorials/set-up-sso/login-page-sso-button.png" alt="The Sencho sign-in page with the normal username and password fields, a divider labeled 'Or continue with', and a Corporate SSO button below it." />
+      <img src="/images/tutorials/set-up-sso/login-page-sso-button.png" alt="The Sencho sign-in page with the normal username and password fields, a Stay signed in checkbox, a Sign in button, a divider labeled 'Or continue with', and a Corporate SSO button with a key icon below it." />
     </Frame>
 
     Click it. Sencho redirects you to your identity provider's own login page.
@@ -71,7 +71,7 @@ This tutorial covers **Custom OIDC** on Community, connected to a self-hosted pr
       <img src="/images/tutorials/set-up-sso/idp-login-redirect.png" alt="Keycloak's hosted sign-in page, reached by redirect from the Sencho login button, showing Username or email and Password fields." />
     </Frame>
 
-    Sign in with a directory account that has never logged into Sencho before. On success, the identity provider redirects back and you land on the Sencho dashboard, already signed in.
+    Sign in with a directory account that has never logged into Sencho before. On success, the identity provider redirects back and you land on the Sencho dashboard, already signed in. If you are still signed in to the identity provider in the same browser, for example in its admin console, it skips its own sign-in page and Sencho signs you in as that account straight away, so sign out of the identity provider first when you want to test with a different account.
   </Step>
 </Steps>
 
@@ -79,16 +79,16 @@ This tutorial covers **Custom OIDC** on Community, connected to a self-hosted pr
 
 Check from two places, since either alone only shows one side of provisioning.
 
-**Your own profile menu.** Click your avatar. It shows the username from your identity provider, a **Viewer** role pill (the Default Role from step 2), and a **Community** tier pill, confirming you're signed in as a newly provisioned account, not your admin session.
+**Your own profile menu.** Click your avatar. It shows the username from your identity provider, a **Viewer** role pill (the Default Role from step 2), and a **Community** tier pill, confirming you're signed in as a newly provisioned account, not your admin session. The avatar initials come from that username too.
 
 <Frame>
   <img src="/images/tutorials/set-up-sso/profile-badge-viewer.png" alt="The profile dropdown for the newly signed-in SSO user, showing the username, a Viewer role badge, and a Community tier badge, with Settings, Documentation, Open New Issue, and Log Out below." />
 </Frame>
 
-**The admin Users list.** Sign back in as an admin (local password, or an SSO account you've mapped to Admin) and open **Settings → Access → Users**. The new account appears in the table with today's date under **Created** and the same **Viewer** role, confirming the server-side record matches what the user saw.
+**The admin Users list.** Sign back in as an admin (local password, or an SSO account you've mapped to Admin) and open **Settings → Access → Users**. The new account appears in the table with today's date under **Created** and the same **Viewer** role, confirming the server-side record matches what the user saw. Use the pencil on the row to change the role later.
 
 <Frame>
-  <img src="/images/tutorials/set-up-sso/users-list-provisioned.png" alt="The Users table under Settings, Access, Users, with a row for the newly auto-provisioned SSO user showing role Viewer and today's date under Created." />
+  <img src="/images/tutorials/set-up-sso/users-list-provisioned.png" alt="The Users table under Settings, Access, Users, with an admin row marked you and a row for the newly auto-provisioned SSO user showing role Viewer, today's date under Created, and edit and delete actions." />
 </Frame>
 
 On every later sign-in, this same account is reused. Its email is re-synced from the identity provider. Its role stays whatever is set on the account, so a manual role edit in **Settings · Users** persists. To have the identity provider reapply the role on each login instead, enable **IdP role synchronization** in **Settings · SSO**; then promoting or removing someone from your directory takes effect on their next login.
