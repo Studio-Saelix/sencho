@@ -79,7 +79,7 @@ A replica binds to the first non-empty fingerprint it sees. After that:
 
 - A push carrying the same fingerprint is accepted.
 - A push carrying a different non-empty fingerprint is rejected with `HTTP 409` and the body code `CONTROL_IDENTITY_MISMATCH`. This prevents an operator from accidentally pointing a second control at an existing replica and overwriting its mirrored state.
-- A push with no fingerprint at all is accepted (this is the legacy code path; the receiver treats absence as "unknown control" and applies the rows without binding).
+- A push with no fingerprint at all is accepted (the receiver treats absence as "unknown control" and applies the rows without binding).
 
 When you need to re-bind a replica to a different control (for example, the original control was rebuilt and now carries a fresh install ID), the control itself surfaces the mismatch: **Settings → Nodes** shows a banner on the affected node reading "Node is anchored to another central," with a **Reset anchor on peer** button. An admin clicks it and the control proxies the reset to the peer over its existing bearer token, no direct access to the replica required.
 
