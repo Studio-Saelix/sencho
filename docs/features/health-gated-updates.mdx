@@ -124,7 +124,7 @@ Two settings under **Settings > Infrastructure > Stacks > Deploy Guardrails** co
 
 ## Classified failures
 
-When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, an invalid compose file, mixed replica images that cannot be captured exactly, or a stack whose recovery generation cannot be captured, for example because two managed files differ only by letter case. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
+When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, an invalid compose file, mixed replica images that cannot be captured exactly, or **Rollback coverage unavailable**, a stack whose recovery generation cannot be captured, for example because two managed files differ only by letter case (each cause and its fix is listed under [Atomic Deployments troubleshooting](/features/atomic-deployments#troubleshooting)). The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
 
 ## Troubleshooting
 

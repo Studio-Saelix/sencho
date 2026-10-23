@@ -40,6 +40,16 @@ The most common causes:
 
 ---
 
+## Deploy or update stops with "Rollback coverage is unavailable"
+
+**Symptom:** A deploy, update, Save & Deploy, scheduled update or Git apply fails before any container changes, with a message that starts `Rollback coverage is unavailable:` and names a cause.
+
+**Cause:** Before a protected run Sencho captures a recovery generation, and it refuses to proceed when the stack cannot be captured safely: a compose file that is a link out of the compose directory or a broken link, a compose file that cannot be read or parsed, a `COMPOSE_FILE` entry outside the stack folder, two files whose names differ only by letter case, or no compose file in the folder.
+
+**Fix:** Correct the cause named in the message and run the action again. The stack was not touched. The [Atomic Deployments](/features/atomic-deployments#troubleshooting) page lists each message with its fix. A stack that includes or extends a file outside its own folder is not refused.
+
+---
+
 ## The 1:1 path rule - volumes resolve to wrong paths
 
 **Symptom:** Stacks deploy but relative volume paths (e.g. `./config:/config`) point to the wrong location inside the container, or `docker compose` exits with a path error.
