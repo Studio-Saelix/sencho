@@ -110,7 +110,7 @@ Control how Sencho looks and how dense the workspace feels. Your choices follow 
 
 | Control | What it does |
 |---------|--------------|
-| **Visual style** | Master switch between **Calm** (upright headings, muted charts, reduced effects, the default) and **Signature** (italic Instrument Serif headings, saturated charts). |
+| **Visual style** | Master switch between **Calm** (upright headings, muted charts, reduced effects) and **Signature** (italic Instrument Serif headings, saturated charts). A new account starts with upright headings, reduced effects, and the Signature chart palette, so neither card is selected until you pick one. |
 | **Readability mode** | One switch for the most legible result: upright headings, muted charts, reduced effects, and a contrast lift. Locks the heading and chart controls while on. |
 | **Header style** | Clean (upright interface face) or Signature (italic serif). |
 | **Contrast** | Spreads the page tone, borders, and text tiers together. |
@@ -121,8 +121,9 @@ Control how Sencho looks and how dense the workspace feels. Your choices follow 
 |---------|--------------|
 | **Chart palette** | Colors the Security page charts: **Muted**, **Heat** (one warm ramp), or **Signature** (saturated, the default). |
 | **Reduced motion** | Minimizes interface animations and transitions. Calm enables it by default; Signature disables it. Independently toggleable afterward. First control to try for high idle GPU use on constrained graphics. Toasts are unaffected. |
-| **Reduced effects** | Flattens card bevels, the accent glow, and chart gradients, turns off glass blur with solid chrome fills, and stops decorative masthead rail animations. Optional secondary material simplification; not a substitute for Reduced motion on the reported idle-GPU symptom. |
+| **Reduced effects** | Flattens card bevels, the accent glow, and chart gradients, turns off glass blur with solid chrome fills, and stops decorative masthead rail animations. Optional secondary material simplification; not a substitute for Reduced motion on the reported idle-GPU symptom. A new account starts with it on. |
 | **Ambient glow** | Intensity of the accent-tinted page glow. |
+| **Reset to default** | Restores upright headings, reduced effects, reduced motion, and the Signature chart palette. Disabled while Readability mode is on. |
 
 ### Theme and typography
 
@@ -140,8 +141,8 @@ A live preview card shows a sample fleet-status tile so you can see a color choi
 |---------|--------------|
 | **Density** | **Comfortable** (default spacing, roomier rows and tiles for review and orientation) or **Compact** (tighter rows and tiles, fits more stacks, tasks, and audit entries on screen at once). Affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses. |
 | **Log chip color** | Applies on multi-service or multi-container stacks (chips are hidden for a single service with a single container). **Unified** uses the accent color for every service's log chip. **Per service** (the default) assigns each service a stable label color for faster visual scanning across a busy log stream. |
-| **Sidebar layout** | **Fixed** (default) keeps the desktop stacks sidebar at its standard width. **Resizable** makes the sidebar/workspace divider draggable and keyboard-adjustable (248 to 440 px, saved on release or per arrow-key press). **Reset sidebar layout** returns it to Fixed and the default width. Phone layouts are unchanged. |
-| **Stack detail layout** | **Fixed** (default) preserves the even split between stack status and the Anatomy panel. **Resizable** keeps both panes at least 320 px wide and supports an Anatomy preference up to the 4096 px safety ceiling. Width is saved on release or per arrow-key press. **Reset Anatomy panel layout** restores Fixed without changing the sidebar. The compose editor and phone layout are unchanged. |
+| **Sidebar mode** and **Sidebar width** | **Fixed** (default) keeps the desktop stacks sidebar at its standard width. **Resizable** makes the sidebar/workspace divider draggable and keyboard-adjustable (248 to 440 px, saved on release or per arrow-key press), and **Sidebar width** sets the preferred width while it is active. **Reset sidebar layout** returns it to Fixed and the default width. Phone layouts are unchanged. |
+| **Anatomy panel mode** and **Anatomy panel width** | Under the Stack detail layout heading. **Fixed** (default) preserves the even split between stack status and the Anatomy panel. **Resizable** keeps both panes at least 320 px wide and supports an Anatomy preference up to the 4096 px safety ceiling. Width is saved on release or per arrow-key press. **Reset Anatomy panel layout** restores Fixed without changing the sidebar. The compose editor and phone layout are unchanged. |
 
 ### Fleet
 
@@ -154,7 +155,12 @@ A live preview card shows a sample fleet-status tile so you can see a color choi
 | Control | What it does |
 |---------|--------------|
 | **Navigation style** | **Compact launcher** (recommended default): puts every destination in a menu, with optional quick links. **Smart bar** keeps primary destinations visible in the top bar and the rest live under **More**. |
-| **Top navigation labels** | On by default. Shows text labels beside the top navigation icons; turn off for a more compact bar with icons only. |
+| **Quick links** | Compact launcher only. Up to ten pinned destinations on the top bar. Remove a pin, add a reachable destination from the list, or **Reset to defaults**. The trailing **+** on the bar adds one too. |
+| **Top navigation labels** | Smart bar only. On by default. Shows text labels beside the top navigation icons; turn off for a more compact bar with icons only. |
+| **Top navigation alignment** | Smart bar with labels off. Places the icon-only bar against the left edge or centered. |
+| **Reset all navigation preferences** | Restores the navigation style, quick links, and labels to their defaults, for your account on every device. |
+
+**Reset all appearance preferences** at the bottom of the section restores every visual, display, and navigation preference to its default, for your account on every device.
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences and live in their own [Stacks](#stacks) section under Infrastructure.
 
@@ -219,6 +225,8 @@ Create and manage user accounts with role-based access. The masthead publishes a
 | **Auditor** | Community | Read-only plus audit log access |
 
 See [RBAC & User Management](/features/rbac) for details on what each role can access.
+
+The **Session policy** group below the user list has one control, **Keep active sessions alive** (on by default, admin-only). It silently renews a signed-in session while it stays active; turn it off to enforce a fixed session ceiling regardless of activity. Click **Save session policy** to apply. See [RBAC & User Management](/features/rbac) for the session lifetimes.
 
 ---
 
@@ -468,7 +476,7 @@ For each agent:
 | **Enabled** toggle | Activates or deactivates this agent. Disabled agents receive no messages even if a URL is saved. |
 | **Webhook URL** | The endpoint Sencho will POST to when an alert fires. |
 | **Apprise** | Use a keyed `/notify/<key>` endpoint with optional tags, or a stateless `/notify` endpoint with destination URLs. Apprise accepts HTTP or HTTPS. |
-| **Payload template** | Optional JSON body that replaces the built-in payload for this channel. Blank restores the built-in. Apprise destinations stay managed by the channel fields. See [Payload templates](/features/alerts-notifications#payload-templates). |
+| **Payload template** | Revealed by the **Edit Payload** toggle. Optional JSON body that replaces the built-in payload for this channel. Blank restores the built-in. Apprise destinations stay managed by the channel fields. See [Payload templates](/features/alerts-notifications#payload-templates). |
 
 Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery; the test uses the template currently in the editor when one is set.
 
@@ -547,9 +555,7 @@ Configure how often this node polls container registries to detect available ima
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Enable image update checks** | On | When on, this node polls registries on schedule, raises update notifications, and feeds Home, sidebar, Anatomy, and Fleet Readiness. Turn off when another tool is the update authority for this node. Explicit stack Update, pull, and redeploy remain available. |
-| **Scheduling mode** | Interval | **Interval**: check every fixed period. **Cron**: check on a precise cron schedule (runs in the node's local timezone). Greyed out while image update checks are off. |
-| **Check interval** | 2 hours | How often to poll registries when in Interval mode. Presets: 15 min, 30 min, 1 h, 2 h, 6 h, 12 h, 24 h. Selecting a new preset saves immediately. |
-| **Cron expression** | - | A standard five-field cron expression (for example, `0 3 * * 1` for every Monday at 03:00). A human-readable description appears below the field as you type. Click **Save schedule** to apply. |
+| **Check registries for image updates every** | Interval, 2 hours | The schedule, with an **Interval** / **Cron** switch. **Interval** checks every fixed period; choose 15 minutes, 30 minutes, 1 hour, 2 hours, 6 hours, 12 hours, or 24 hours, and a new choice saves immediately. **Cron** checks on a standard five-field cron expression (for example, `0 3 * * 1` for every Monday at 03:00) in the node's local timezone; a human-readable description appears below the field as you type, and **Save schedule** applies it. Greyed out while image update checks are off. |
 
 The section footer shows the last-checked timestamp and when the next check is scheduled. When checks are off, the footer reads **Next check: disabled** and retains the last-checked time from before detection was turned off.
 
@@ -766,6 +772,8 @@ Node-level safety checks and post-deploy observation used during stack deploys a
 |---------|---------|-------------|
 | **Observe health after updates** | On | After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. |
 | **Observation window** | 90 s | How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Range 15 to 600 seconds. |
+| **Superseded rollback retention** | 7 days | Days an older rollback generation is kept after a newer update supersedes it, before its held image is cleaned up. Range 1 to 90. It only matters when the cap below allows more than one generation. The current generation stays protected until it is superseded or released from Resources → Rollback. |
+| **Maximum retained rollback generations per stack** | 1 | How many rollback generations a stack keeps at once, current generation included. The oldest superseded generations beyond the cap are cleaned up ahead of the retention window. `0` leaves the count unlimited and relies on the retention window alone. Range 0 to 50. |
 | **Block deploy on missing required env vars** | On | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
 | **Automatically create missing external networks during deploy** | Off | When on, safe missing external bridge networks are created automatically before deploy continues. When off, interactive deploy prompts first. Advanced drivers and custom options are never auto-created. Any deploy that triggers an auto-creation records a `network_auto_created` entry in Recent activity, including deploys started by non-admin operators. |
 
