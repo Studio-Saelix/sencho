@@ -1,0 +1,45 @@
+name: Docs Check
+
+# Mintlify drops a page it cannot parse and the site keeps serving every other
+# page, so a malformed MDX file or a dead link reaches production unnoticed.
+# These two commands are the build gate the docs host runs, applied to PRs.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - docs/**
+      - .github/workflows/docs-check.yml
+
+concurrency:
+  group: docs-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docs-check:
+    name: Docs (validate, broken links)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version-file: '.node-version'
+
+      # Pinned so a new CLI release cannot start failing unrelated PRs. Bump it
+      # deliberately, together with a run of both commands against main. It is
+      # run with npx rather than from a lockfile on purpose: a lockfile would
+      # expose the CLI's own transitive advisories to dependency scanning with
+      # no way for this repository to fix them.
+      - name: Validate the docs build
+        working-directory: docs
+        run: npx --yes mint@4.2.1101 validate
+
+      - name: Check internal links
+        working-directory: docs
+        run: npx --yes mint@4.2.1101 broken-links
