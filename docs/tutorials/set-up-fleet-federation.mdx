@@ -23,40 +23,40 @@ This tutorial does not cover creating a Blueprint from scratch (see [Create and 
 - **At least two nodes in the fleet**, both online. Pinning only matters when there's somewhere else to pin to. Multi-node fleets and Federation are both Community-tier, no paid plan required.
 
 <Frame caption="Federation before any changes: no nodes cordoned, one blueprint listed, unpinned.">
-  <img src="/images/tutorials/set-up-fleet-federation/federation-tab-before-pin.png" alt="Fleet Federation tab showing Cordoned nodes 0 of 4 and a Pin policy table with one row for the edge-status blueprint, selector any=[dev], Pinned to (unpinned), Effective any=[dev]." />
+  <img src="/images/tutorials/set-up-fleet-federation/federation-tab-before-pin.png" alt="Fleet Federation tab under the heading Placement control, showing Cordoned nodes 0 of 3 and a Pin policy table with one row for the edge-status blueprint, selector any=[status], Pinned to (unpinned), Effective any=[status]." />
 </Frame>
 
 <Steps>
   <Step title="Pin the blueprint to the destination node">
-    Open **Fleet → Federation** and find your blueprint's row in the **Pin policy** table. Open the **Pinned to** dropdown and select the node you're moving the workload to. A cordoned node would show inline as `<name> · cordoned` here, so you can see at a glance if you're about to pin onto something already out of rotation.
+    Open **Fleet → Federation** and find your blueprint's row in the **Pin policy** table. In this walkthrough `edge-status` runs on `edge-east`, the node being retired, and the destination is `Local`. Open the **Pinned to** dropdown and select the node you're moving the workload to. A cordoned node would show inline as `<name> · cordoned` here, so you can see at a glance if you're about to pin onto something already out of rotation.
 
     <Frame caption="The Pinned to dropdown, before selecting a destination.">
-      <img src="/images/tutorials/set-up-fleet-federation/pin-dropdown-open.png" alt="Pinned to dropdown open for the edge-status blueprint, listing (unpinned) with a checkmark, Local, Pitt-Moba, SLX-Mars, and SLX-Orion." />
+      <img src="/images/tutorials/set-up-fleet-federation/pin-dropdown-open.png" alt="Pinned to dropdown open for the edge-status blueprint, listing (unpinned) with a checkmark, Local, edge-east, and edge-west." />
     </Frame>
 
-    The selection saves immediately and a toast confirms it. The **Effective** column updates to `pin: <destination>`, overriding whatever the selector would otherwise resolve to. Nothing has deployed yet, this only changes what the reconciler wants to do next.
+    The selection saves immediately and a toast reads `edge-status pinned to Local`. The **Effective** column updates to `pin: <destination>`, overriding whatever the selector would otherwise resolve to. Nothing has deployed yet, this only changes what the reconciler wants to do next.
 
     <Frame caption="Pin saved. The Effective column now reads the pinned node.">
-      <img src="/images/tutorials/set-up-fleet-federation/pin-applied-effective.png" alt="Pin policy table with the edge-status row now showing Pinned to SLX-Mars and Effective pin: SLX-Mars." />
+      <img src="/images/tutorials/set-up-fleet-federation/pin-applied-effective.png" alt="Pin policy table with the edge-status row now showing Pinned to Local and Effective pin: Local, with a toast reading edge-status pinned to Local." />
     </Frame>
   </Step>
   <Step title="Cordon the node you're retiring">
-    Go to **Fleet → Overview**. On the source node's card, click the kebab menu (`⋯`) and choose **Cordon node**.
+    Go to **Fleet → Overview**. On the source node's card, click the kebab menu (`⋯`) and choose **Cordon node**. The same action sits in the toolbar of the **Node details** sheet, next to **Edit node** and **Delete node**.
 
     <Frame caption="The node card's kebab menu, with Cordon node as the only Federation action available on an uncordoned node.">
-      <img src="/images/tutorials/set-up-fleet-federation/node-actions-cordon-menu.png" alt="Node actions menu open on the Pitt-Moba card, listing Node details, Edit node, Delete node, Cordon node, and Mute." />
+      <img src="/images/tutorials/set-up-fleet-federation/node-actions-cordon-menu.png" alt="Node actions menu open on the edge-east card, listing Node details, Edit node, Delete node, Cordon node, and Mute." />
     </Frame>
 
-    A confirmation dialog opens with an optional reason field, up to 256 characters. Fill in something that will make sense to whoever looks at this node in a week.
+    A **Cordon edge-east** confirmation opens with an optional reason field, up to 256 characters. Fill in something that will make sense to whoever looks at this node in a week.
 
     <Frame caption="Cordon confirmation dialog with a reason filled in.">
-      <img src="/images/tutorials/set-up-fleet-federation/cordon-confirm-dialog.png" alt="Cordon Pitt-Moba confirmation dialog. Description reads 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.' Reason field filled with 'Retiring host, migrating workloads to SLX-Mars'." />
+      <img src="/images/tutorials/set-up-fleet-federation/cordon-confirm-dialog.png" alt="Cordon edge-east confirmation dialog under a Federation label, with the Reason field filled with 'Retiring host, migrating workloads to Local' and Cancel and Cordon node buttons." />
     </Frame>
 
-    Click **Cordon node**. The card gains a `Cordoned` pill immediately; this alone does not touch anything already running on the node, including the blueprint you're about to move off it.
+    Click **Cordon node**. A toast reads `Cordoned edge-east` and the card gains a `Cordoned` pill immediately; this alone does not touch anything already running on the node, including the blueprint you're about to move off it.
 
     <Frame caption="Node card carrying the Cordoned pill after confirming.">
-      <img src="/images/tutorials/set-up-fleet-federation/node-card-cordoned.png" alt="Fleet Overview grid with the Pitt-Moba node card showing the amber Cordoned pill alongside its Proxy or Pilot marker. Local, SLX-Mars, and SLX-Orion have no cordon indicator." />
+      <img src="/images/tutorials/set-up-fleet-federation/node-card-cordoned.png" alt="Fleet Overview grid with the edge-east node card showing the amber Cordoned pill beside its version badge, with the Proxy marker at the top right. The Local and edge-west cards have no cordon indicator." />
     </Frame>
 
     <Note>
@@ -64,16 +64,16 @@ This tutorial does not cover creating a Blueprint from scratch (see [Create and 
     </Note>
   </Step>
   <Step title="Confirm the rollout that actually moves it">
-    Pinning and cordoning only declared intent, neither one deployed or withdrew anything by itself. Open **Fleet → Blueprints**, select your blueprint, and click **Apply now**. Sencho opens a rollout preview.
+    Pinning and cordoning only declared intent, neither one deployed or withdrew anything by itself. Open **Fleet → Blueprints** and select your blueprint. Its status block reads **Needs confirmation** (`Saved changes are not confirmed yet`) with **Approval pending** under it. Click **Apply now** (or **Review rollout** in the status block) and Sencho opens a rollout preview.
 
     <Frame caption="Rollout preview for the migration: a safe create on the destination, a safe remove on the source.">
-      <img src="/images/tutorials/set-up-fleet-federation/rollout-preview-migration.png" alt="Confirm rollout dialog for the edge-status blueprint reading Safe 2, Warnings 1, Blockers 0. Changes list: SLX-Mars (remote/online) create safe New placement, and Pitt-Moba (remote/online) remove safe Withdraw from selector." />
+      <img src="/images/tutorials/set-up-fleet-federation/rollout-preview-migration.png" alt="Confirm rollout dialog for the edge-status blueprint reading Safe 2, Warnings 1, Blockers 0, with a GitOps authority and evidence block that reads Rollout not executable and a target block for edge-east. The Changes list reads: Local (local/online) create safe New placement, and edge-east (remote/online) remove safe Withdraw from selector." />
     </Frame>
 
-    You should see one **create** on the destination node and one **remove** on the source, both marked safe. If the destination were unreachable, that create would show as a blocker instead and **Confirm Apply** would stay disabled, see [If something goes wrong](#if-something-goes-wrong). Click **Confirm Apply**.
+    You should see one **create** on the destination node and one **remove** on the source, both marked safe. If the destination were unreachable, that create would show as a blocker instead and **Confirm Apply** would stay disabled, see [If something goes wrong](#if-something-goes-wrong). Click **Confirm Apply**. For a few seconds the status block can read **Completion unknown** while the source node confirms the withdrawal; it settles to **In sync** (`1 node running the current revision`).
 
     <Frame caption="After confirming: the deployment table now lists only the destination node, marked Pinned.">
-      <img src="/images/tutorials/set-up-fleet-federation/blueprint-migrated-pinned-badge.png" alt="Blueprint detail sheet for edge-status showing a Pinned to SLX-Mars banner and a Deployments table with a single row: SLX-Mars, marked Pinned, status Active, last activity just now." />
+      <img src="/images/tutorials/set-up-fleet-federation/blueprint-migrated-pinned-badge.png" alt="Blueprint detail sheet for edge-status showing an In sync status block, a Pinned to Local banner with an Unpin button, and a Deployments table with a single row: Local, marked Pinned, status Active." />
     </Frame>
   </Step>
 </Steps>
@@ -82,24 +82,24 @@ This tutorial does not cover creating a Blueprint from scratch (see [Create and 
 
 Check from more than one surface, since a single stale UI element could tell you the wrong thing.
 
-**The Federation tab.** The Pin policy row's **Effective** column reads the pinned node, and the Cordoned nodes card lists the source node with its reason and a timestamp.
+**The Federation tab.** The Pin policy row's **Effective** column reads the pinned node, and the Cordoned nodes card lists the source node with its reason and the time it was cordoned.
 
 <Frame caption="Federation tab after the migration: source node cordoned, blueprint pinned to the destination.">
-  <img src="/images/tutorials/set-up-fleet-federation/federation-tab-after-migration.png" alt="Fleet Federation tab showing Cordoned nodes 1 of 4 with Pitt-Moba listed and the reason 'Retiring host, migrating workloads to SLX-Mars', and a Pin policy row for edge-status with Pinned to SLX-Mars and Effective pin: SLX-Mars." />
+  <img src="/images/tutorials/set-up-fleet-federation/federation-tab-after-migration.png" alt="Fleet Federation tab showing Cordoned nodes 1 of 3 with edge-east listed with a remote chip, a timestamp, and the reason 'Retiring host, migrating workloads to Local', and a Pin policy row for edge-status with Pinned to Local and Effective pin: Local." />
 </Frame>
 
-**The audit log.** Open **Audit** and search or scan for the actions you just took. Each mutating request gets its own row: the pin write, the cordon, and the apply.
+**The audit log.** Open the navigation launcher and, under **Security & review**, pick **Audit** (Smart bar: **More** → **Audit**). Each mutating request gets its own row: the pin write, the cordon, and the apply, followed by the `edge-status` stack the apply created on the destination.
 
-<Frame caption="Audit log entries for the pin, cordon, and apply actions, in reverse chronological order.">
-  <img src="/images/tutorials/set-up-fleet-federation/audit-log-federation-entries.png" alt="Audit log rows: admin post /api/blueprints/15/apply at 15:43:04, admin cordoned node: 7 at 15:40:48, and admin updated blueprint pin: 15 at 15:38:44." />
+<Frame caption="Audit log entries for the new stack, the apply, the cordon, and the pin, newest first.">
+  <img src="/images/tutorials/set-up-fleet-federation/audit-log-federation-entries.png" alt="Audit log rows, newest first: admin created stack: edge-status, admin post /api/blueprints/102/apply, admin cordoned node: 2, and admin updated blueprint pin: 102, each with status 200 on node 1." />
 </Frame>
 
 ## If something goes wrong
 
-The most common first-time confusion is pinning or cordoning and then expecting the workload to move on its own. It won't. Both actions only change what the reconciler *wants*; the blueprint's catalog tile and detail sheet footer show **pending** or **reapproval required** until you open the blueprint and confirm a rollout.
+The most common first-time confusion is pinning or cordoning and then expecting the workload to move on its own. It won't. Both actions only change what the reconciler *wants*; the blueprint's status block reads **Needs confirmation** with a **Review rollout** button, and its approval stays **Pending**, until you open the blueprint and confirm a rollout.
 
 <Frame caption="A pinned blueprint sitting in pending state before the rollout is confirmed.">
-  <img src="/images/tutorials/set-up-fleet-federation/blueprint-pinned-banner-pending.png" alt="Blueprint detail sheet showing a Pinned to SLX-Mars banner while the Deployments table still lists the original node, Pitt-Moba, as Active, and the sheet footer reads pending." />
+  <img src="/images/tutorials/set-up-fleet-federation/blueprint-pinned-banner-pending.png" alt="Blueprint detail sheet showing a Needs confirmation status block with a Review rollout button, Approval pending, and a Pinned to Local banner, while the Deployments table still lists the original node, edge-east, as Active." />
 </Frame>
 
 If **Confirm Apply** is greyed out instead, a blocker is present, most often an offline or unreachable destination node. Check the destination's status in **Fleet → Overview** before retrying, or change the pin to a node that's actually reachable.
