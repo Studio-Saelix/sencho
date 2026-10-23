@@ -21,22 +21,26 @@ Every GitOps drift item carries a class. The class says which part of the chain 
 | **Rollout** | A required rollout target's observed artifact identity against the authorized rollout set. | A required target reports another identity. |
 | **Invocation** | The compose invocation a node recorded when the stack was applied, against the invocation that generation was applied with. | The node's compose file order, project name, project directory, or env file order is not the one it was given. |
 
-This is the model's vocabulary: the boundaries a drift item can fall into, and what each one would be measured against. A class appears only where Sencho holds the evidence for it and the rows prove a mismatch, so a class whose evidence is not held is absent rather than approximated. The table does not promise that every class is reported today; it says what each class means when it is.
+A class appears only where Sencho holds the evidence for it and the rows prove a mismatch. A class whose evidence is not held is absent rather than approximated, and [What Sencho cannot prove](#what-sencho-cannot-prove) lists the cases where a caveat appears in its place.
 
 The [Drift tab](/features/stack-drift) and the application sheet show the classes they have evidence for. The portfolio's drift summary counts them by class, and its attention queue names the ones that are waiting on you.
 
 ## Reading an item
 
-Each item is one line of comparison plus the facts you need to act on it. The drift row shows the class, the owner, the reason, and the expected identity beside the observed one.
+Each item is one line of comparison. The drift row shows the class, the owner, how old the evidence is, the reason, and the expected identity beside the observed one.
+
+<Frame caption="A drift item on the Drift tab of a Git source: the class, the component that derived it, the age of its evidence, the reason, and the expected generation beside an unknown observation.">
+  <img src="/images/gitops-drift-model/drift-row.png" alt="Drift tab of a Git source sheet with one item: a managed project chip, the owner GITPROJECTMANIFESTSERVICE, evidence 22M AGO, the reason that the applied managed project has no usable manifest, and expected generation 7f75337a to observed unknown" />
+</Frame>
 
 - **Class** names the part of the chain that diverged.
+- **Owner** names the component or evidence source that derived the item, such as the Git source service, the Blueprint reconciler, or the observed artifact identity. It tells you which part of Sencho made the comparison; the node it concerns is on the application's target cards.
+- **Evidence age** is when the evidence was recorded. An old observation is weaker proof than a new one, so the age travels with the item. An item derived from two pointers rather than a recorded observation reads **evidence undated**.
+- **Reason** says in one line what differs.
 - **Expected** is the identity Sencho was meant to run: a commit, a generation, an artifact set, an intent, or a health run.
 - **Observed** is what it found: the same kind of identity, or `unknown` when Sencho found nothing to compare.
-- **Reason** says in one line what differs.
-- **Owner** names the surface that owns the fix, so you know whether to go to the Git Source sheet, the Blueprint, or the node.
-- **Affected targets** names the nodes involved. A direct Git source has one; a Blueprint can have many.
-- **Freshness** is when the evidence was recorded, when the evidence carries a time. An old observation is weaker proof than a new one, so the timestamp travels with the item; an item derived from two pointers rather than a recorded observation has no timestamp to show.
-- **Action** is the one step that would resolve the item for the affected target, and only when that step is legal right now. A paused or failed node gets no action rather than one that cannot run.
+
+The step that resolves an item is not on the row. It is the action on the application's status, for example **Retry**, **Review update**, or **Authorize rollout**, and it is offered only when that step is legal right now. A paused or failed node gets no action rather than one that cannot run.
 
 ## When Sencho will not repair it
 
@@ -70,7 +74,7 @@ Where evidence is missing, the card says so. It never renders an empty compariso
 
 When a Blueprint is first applied, Sencho freezes the exact image identity it was approved at by resolving each image against its registry. If that resolution cannot reach the registry, the target has no approved identity to compare against and its drift reads as unverified rather than as agreement.
 
-For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The retry interval is yours to set under **Settings → GitOps**, and it has no effect while every target's identity is already resolved.
+For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The interval is **Retry an unresolved image identity** under **Settings → GitOps**, 5 minutes by default, and it has no effect while every target's identity is already resolved. See the [Settings reference](/reference/settings).
 
 The retry resolves the images the Blueprint was approved at, not whatever compose happens to be in the stack directory at the time. If someone edits a file on the node directly, that change is drift to be reported, never an approved identity to be adopted.
 
@@ -88,7 +92,7 @@ Work in progress is not drift, and the classes above stay silent while it happen
 
 - a commit that has been fetched but not yet accepted, including one waiting on review
 - a placement or authorization decision that is still open
-- a rollout that is queued, canarying, batching, or waiting on its health verdict
+- a rollout that is queued, advancing target by target, or waiting on its health verdict
 - a manifest being written as part of an apply that has not landed on the node yet
 - a node that is deploying, interrupted, or recovering
 - a drift that Enforce is repairing on its current pass, which is why the Blueprint deployment row reads as correcting rather than drifted

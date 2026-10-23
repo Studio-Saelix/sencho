@@ -73,7 +73,7 @@ An accepted commit keeps what you confirmed, including a placement that was not 
 
 ## What a new commit does
 
-A Git-managed Blueprint keeps tracking its source. **Pull source** fetches the next commit, and review and automatic sources also fetch on the poll cadence when polling is on. A manual source is not polled, and provider hooks do not fetch it.
+A Git-managed Blueprint keeps tracking its source. **Pull source** fetches the next commit, and review and automatic sources also fetch on the poll cadence when polling is on. A manual source is not polled. Neither a provider hook nor the CI webhook fetches a source that belongs to a Blueprint, so **Pull source** and polling are the ways new commits arrive.
 
 - On a manual or review source, the pull is the whole action.
 - On an automatic source, the pull can record the commit and start a rollout in the same request, after the confirmation above.
@@ -106,6 +106,19 @@ The source, placement, and rollout authorization policies are independent, and c
 On a Git-managed Blueprint the source policy is set on the Git source, in its apply behavior. The placement policy sits beside **Review and approve placement**. The rollout authorization policy sits in the rollout overflow next to the health rollout policy, because both answer the same question about a rollout: what the system may do on its own, and what it should do when one fails. A policy is offered only to a session that may act on what it governs, and is absent rather than disabled when it may not.
 
 Under **Evidence**, each decision carries its own policy line. The line says who is configured to decide, what the policy did, and when it recorded a decline.
+
+### Who can take each step
+
+| Step | Permission needed |
+|---|---|
+| Pull source | Stack edit |
+| Accept source | Stack create |
+| Review and approve placement | Stack create and stack deploy |
+| Authorize, pause, resume, supersede, or roll back a rollout | Stack deploy |
+| Replan placement | Stack create |
+| Set a policy | Stack deploy on the application and on every target |
+
+The admin and node-admin roles carry all of these. The deployer role carries stack deploy only, so it can run a rollout that others have approved but cannot accept source or approve placement.
 
 ## Pause, resume, replan, or supersede a rollout
 
@@ -147,6 +160,14 @@ Detach is refused when the snapshot is empty, because no generation exists to re
 **Retire to Direct** returns Direct GitOps targeting to the original source stack once every non-withdrawn deployment is gone. Credentials and the Git Source sheet return to that stack, the Blueprint is Inline again with no bound application, and the stack's source is editable.
 
 Retire is refused while deployments are still active. Withdraw them first, then retire.
+
+## Limits
+
+- **One repository, one Git-managed Blueprint.** See [Convert a Git source](#convert-a-git-source).
+- **Rollouts are sequential.** Sencho deploys to the approved targets one after another. There is no parallel or canary mode.
+- **Not every Compose shape can be resolved.** A generation that uses an interpolated image reference, `profiles`, `extends`, `include`, or YAML merge keys is refused until a commit the resolver can read.
+- **Rollback restores the authored project, not data.** See [Roll back a rollout](#roll-back-a-rollout).
+- **No Apply now.** A placement runs only from an authorized accepted generation.
 
 ## Troubleshooting
 

@@ -86,7 +86,7 @@ To act on a Blueprint application, use the outstanding action in the state secti
 
 ## Getting to related pages
 
-Clicking anywhere on a row opens it. Every row also ends in a menu that opens its stack or its Git source (in place over the portfolio), or for a Blueprint application its sheet and the Blueprint's detail sheet. Next to the filters, **Connect a stack to Git** opens the Create Stack dialog on its **From Git** tab, and **New Blueprint** opens the Blueprint create dialog over the portfolio. An empty portfolio offers the same two actions.
+Clicking anywhere on a row opens it. Every row also ends in a menu. A Direct row offers **Open Git source** (in place over the portfolio) and **Open stack**. A Blueprint row offers **Open application** for its sheet, and, for a hub-level Blueprint application, **Open Blueprint** for the Blueprint's detail sheet when your account can open Fleet. Next to the filters, **Connect a stack to Git** opens the Create Stack dialog on its **From Git** tab, and **New Blueprint** opens the Blueprint create dialog over the portfolio. An empty portfolio offers the same two actions.
 
 The way back works too. A stack's Git source panel and a Blueprint's detail each have an **Open in GitOps portfolio** link that opens the portfolio narrowed to that application, and a Fleet node card shows a **GitOps · N attention** chip that opens the applications needing attention on that node.
 
@@ -103,6 +103,12 @@ The Git indicator on a stack (the pending icon in the sidebar, or the source bad
 ## Freshness and honesty
 
 The portfolio refreshes on GitOps transitions, not on a timer. When a node cannot be reached, a coverage banner names it and its applications stay absent from the list rather than being reported with evidence Sencho does not hold. When a refresh fails after a good read, the page keeps the previous data and says it is showing last-known evidence and when it came from.
+
+## Limits
+
+- **Hub only.** The portfolio covers every node but is opened on the hub. It is hidden while a remote node is selected.
+- **Row menus navigate.** Accepting, approving, and authorizing happen on the application's own sheet or the Git Source sheet, where the permission check and confirmation live. Only **Retry** and **Resume** run from the attention queue.
+- **Unreachable nodes are absent, not guessed.** A Direct application on a node that does not answer is missing until the node answers. A Blueprint application with an unreachable target stays listed and is flagged as partial.
 
 ## What it is for
 

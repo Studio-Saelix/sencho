@@ -10,7 +10,7 @@ This page covers what every Blueprint shares and the Inline workflow. A Git-mana
 Blueprints live under **Fleet · Blueprints**.
 
 <Note>
-  Blueprints are Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** (admin role required).
+  Blueprints are Sencho's Compose-first orchestration model. Reading the catalog and the detail sheet needs node read access, which viewers and auditors have. Creating, editing, applying, withdrawing, and deleting need the stack permissions that the admin and node-admin roles carry. Pinning a blueprint to a node lives under **Fleet · Federation** and needs node management on that node.
 </Note>
 
 <Frame caption="Fleet · Blueprints catalog with blueprint tiles, the All / Needs attention / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right of a one-line header that counts the blueprints.">
@@ -24,9 +24,9 @@ Four moving parts cooperate per blueprint.
 1. **The declared spec.** A blueprint is a row in Sencho's database. It carries the compose YAML (or a frozen detach snapshot when Git-managed), the selector (labels or explicit node IDs), the drift policy, and a monotonic revision number. The revision auto-increments every time the Inline compose changes.
 2. **Approvals.** Fleet mutation is gated on distinct approvals, not a single combined fingerprint. An Inline **Confirm Apply** writes the **placement approval** (and an Inline rollout generation). A Git-managed Blueprint additionally needs **source acceptance** and **rollout authorization**, each its own action. See [the three authority steps](/features/gitops-overview#who-decides-each-step) and [Git-managed Blueprints](/features/git-managed-blueprints).
 3. **The reconciler.** A background loop on the controlling Sencho ticks every 60 seconds (with a 5-second initial delay after startup) and on demand after **Confirm Apply**. Each tick only mutates the fleet where a current approval authorizes the plan: the placement approval you confirmed, or a placement the policy approved on an Inline Blueprint while rollout authorization is automatic. The tick resolves the selector, compares every desired-vs-live node, and runs only the place or remove outcomes already approved.
-4. **The executor.** Per-node deploy and withdraw run against the local Docker socket on local nodes, and through the authenticated proxy to `/api/blueprints/apply-local` and `/api/blueprints/withdraw-local` on remote nodes (older remotes fail closed until upgraded). Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, the last-applied timestamp, and, when Git-managed, the application and binding revision that produced the place.
+4. **The executor.** Per-node deploy and withdraw run against the local Docker socket on a local node. On a remote node the controlling instance sends the request over the authenticated connection it already uses for that node, and the node runs the same deploy itself, so its own vulnerability policy and scanner state apply. A remote node must run a Sencho release that supports Blueprint apply and withdraw. Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, the last-applied timestamp, and, when Git-managed, the application and binding revision that produced the place.
 
-The marker is the trust root. If a directory by the blueprint's name already exists on a node and does not carry a matching marker, the reconciler refuses to touch it and surfaces a **Name conflict** on the deployment row. A Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
+The marker is the trust root. The reconciler only deploys into, changes, or withdraws a directory whose marker names this blueprint. If a directory by the blueprint's name already exists on a node without a matching marker (missing, malformed, or another blueprint's), the reconciler refuses to touch it and surfaces a **Name conflict** on the deployment row. A Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
 
 <Note>
   The revision number counts compose edits. It is a label on the spec, not a statement about the fleet: two nodes can both sit at revision 7 with one of them still deploying it. What Sencho has established per node is reported separately: the **Deployments** table on the detail sheet for each node's status, and the stack's Drift tab for its GitOps state. Where the two seem to disagree, the established state is the one that has been proven. The **GitOps** section of the detail sheet is narrower than either: it appears only when something about this Blueprint's own state could not be read or could not be proven.
@@ -48,17 +48,17 @@ Any selector edit the policy does not cover clears the approval you confirmed, s
 
 **Stateful safety rails.** Stateful and state-unknown blueprints enter **Awaiting confirmation** on every fresh node before the first deploy, and **Evict blocked** when a node falls out of the selector while still hosting a stateful deployment. The reconciler never deploys empty volumes or destroys named volumes without a human acknowledging the action.
 
-**Pin override and cordon respect.** Admins can pin a blueprint to a single node from **Fleet · Federation**. A pin replaces the selector entirely, deploys only to the pinned node, and overrides the cordon flag on that node. Cordoning a node otherwise prevents the reconciler from picking it for new placements; existing deployments on a cordoned node keep running and stay drift-checked.
+**Pin override and cordon respect.** A user with node management on the target node can pin a blueprint to it from **Fleet · Federation**. A pin replaces the selector entirely, deploys only to the pinned node, and overrides the cordon flag on that node. Cordoning a node otherwise prevents the reconciler from picking it for new placements; existing deployments on a cordoned node keep running and stay drift-checked.
 
-**Vulnerability-policy participation.** Local blueprint deploys evaluate against the same pre-deploy policy gate that the per-stack deploy lane uses. If an enabled policy blocks one of the blueprint's image references, the deployment row moves to **Failed** and the stack is never written to disk. Remote blueprint deploys are routed through the remote node's stack deploy endpoint, so policy enforcement runs on the remote instance with that node's credentials and scanner state.
+**Vulnerability-policy participation.** A Blueprint deploy evaluates against the same pre-deploy [vulnerability scan](/features/vulnerability-scanning) policy gate that the per-stack deploy lane uses, on the node that runs it. If an enabled policy blocks one of the blueprint's image references, the deployment row moves to **Failed** and the stack is never written to disk. A successful deploy also triggers the normal post-deploy scan. On a remote node the policy and scanner state are that node's own; the controlling instance does not bypass them.
 
-**Per-node, per-revision marker ownership.** Every blueprint deployment writes a `.blueprint.json` marker carrying the blueprint ID, revision, and last-applied timestamp. The reconciler refuses to touch any directory whose marker does not match its blueprint ID, so user-authored stacks and other blueprints can coexist on the same node without collision.
+**Marker ownership.** The `.blueprint.json` marker lets user-authored stacks and other blueprints coexist on a node without collision.
 
 ## Prerequisites
 
 | Requirement | Detail |
 |---|---|
-| User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
+| Permissions | Stack create, edit, deploy, and delete permissions to author, apply, and withdraw (the admin and node-admin roles carry them). Viewers and auditors can read the catalog and the detail sheet. Pinning needs node management on the target node. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid Compose YAML, 96 KiB or fewer. |
 | Blueprint name | 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. The name doubles as the stack directory on every targeted node. Rename is blocked while any non-withdrawn deployment or guard exists. |
@@ -91,9 +91,7 @@ The first time you visit the tab, the catalog is empty and a three-step explaine
 | **Drift policy** | Observe, Suggest, or Enforce. Drift detection always runs; only the response differs. |
 | **Reconciler enabled** | Toggle the reconciliation loop without deleting the blueprint. The **Disable** button on the detail sheet flips this toggle off; **Enable** turns it back on. Useful when you want to pause auto-deploys without losing the configuration. |
 
-Sencho writes a `.blueprint.json` marker into each targeted node's stack directory. The marker carries the blueprint ID, revision, and the timestamp of the last apply. The reconciler refuses to touch any directory that does not carry a matching marker, so a Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node. When the directory exists without a matching marker, the deployment row enters the **Name conflict** status until you rename one of the two.
-
-Before a local Blueprint deploy starts, Sencho applies the same pre-deploy [vulnerability scan](/features/vulnerability-scanning) policy gate used by standard stack deploys. If an enabled policy blocks one of the Blueprint's image references, the deployment row moves to **Failed** and the stack is not written to disk. Successful local Blueprint deploys also trigger the normal post-deploy scan. Remote Blueprint deploys are routed through the remote node's stack deploy endpoint, so policy enforcement runs on the remote instance with that node's credentials and scanner state.
+When a directory by the Blueprint's name already exists on a node without a matching [marker](#mental-model), the deployment row enters **Name conflict** until you rename one of the two.
 
 ## The editor
 
@@ -151,7 +149,7 @@ Enforce's auto-fix restores the exact generation and image identity the target a
 - **Frozen image-digest disagreement** uses a digest-pinned overlay with `--pull never`, so authored tags on disk stay unchanged.
 - **A remote target** is frozen and repaired against that node's own rendered Compose model and Docker platform, fetched over the authenticated proxy, not the controlling instance's local filesystem.
 
-A digest repair on a remote target also needs the node to run a Sencho release that honors digest pins. A node that predates them would drop the pins and redeploy by tag, so the repair is refused and the node is reported as needing an upgrade. The same applies when the node cannot be reached to confirm. The row ends in **Failed** with the reason, and a `blueprint_drift_correction_failed` notification fires. Upgrade the node, then trigger a deploy as you would for any other failed deployment. Other drift modes are unaffected.
+A digest repair on a remote target also needs the node to run a Sencho release that honors digest pins; without that, the node would redeploy by tag. Sencho therefore refuses the repair when the node cannot confirm it honors pins, or cannot be reached to confirm, and reports the node as needing an upgrade. The row ends in **Failed** with the reason, and a `blueprint_drift_correction_failed` notification fires. Upgrade the node, then trigger a deploy as you would for any other failed deployment. Other drift modes are unaffected.
 
 A compose edit never reaches the auto-fix path on a stateful or state-unknown blueprint. Any revision change re-enters **Awaiting confirmation** on every targeted node first, whatever the drift mode, so a human signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
 
@@ -189,7 +187,7 @@ A compose file names images by tag, and a tag is a promise rather than an identi
 
 Click any tile in the catalog to open the blueprint detail sheet on the right. The sheet header shows the name, the meta line (`<selector> · <drift mode> · rev <n>`), and the action bar. For an Inline Blueprint, one status block answers whether the Blueprint is in sync and, when it is not, names the nodes and offers the verb that resolves it (**Re-apply**, **Review rollout**, **Review state**, **Evict**, or **Enable**). A quiet row under it shows approval and how many nodes are active.
 
-After the status come the Inline or Git-managed badge with its conversion actions, the pin note when the Blueprint is pinned, the description, the deployment table, and a collapsible compose source. The action bar offers **Apply now**, **Edit**, **Disable** (or **Enable**), and **Delete**. **Convert to Git** sits beside the Inline badge.
+After the status come the Inline or Git-managed badge with its conversion actions, the pin note when the Blueprint is pinned, the description, the deployment table, and a collapsible compose source. The action bar offers **Apply now**, **Edit**, **Disable** (or **Enable**), and **Delete**. **Convert to Git** sits beside the Inline badge. **Open in GitOps portfolio** under the status block opens the Blueprint's application in the [portfolio](/features/gitops-portfolio), and the placement policy and rollout authorization policy controls sit beside it in the next-authority-step row.
 
 A Git-managed Blueprint shows its GitOps status block instead, withholds **Apply now** (a placement runs from an authorized accepted generation, not from the detach snapshot), and waits to delete until you **Detach Git** or **Retire to Direct**. See [Git-managed Blueprints](/features/git-managed-blueprints).
 
@@ -284,17 +282,15 @@ The preview also reads out the application's recorded GitOps authority, using th
 
 Confirming binds to the evidence shown. If any recorded authority fact changes before the confirmation is stored, the apply is refused as stale and the dialog refreshes with the new evidence.
 
-Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, gitopsFingerprint, actions }` from a fresh `GET .../preview`. `gitopsFingerprint` is the evidence digest carried by that preview, and it is `null` only when there is no application evidence to bind. Both fingerprints must still match when the apply is processed; a body whose values no longer match, or that omits `gitopsFingerprint` when the preview carried one, is rejected.
-
 ### Edit
 
 Click **Edit** on the detail sheet. On an Inline Blueprint, editing the compose bumps the revision and clears the approval you confirmed, so the reconciler waits for Apply before it places, withdraws, or repairs anything. Stateful and state-unknown blueprints also re-enter **Awaiting confirmation** on every targeted node so you can decide whether the new revision is safe for each node's local data, whether or not the change actually touches a volume. On a Git-managed Blueprint the compose editor is read-only; selector, drift policy, and enabled still save.
 
 ### Confirm a stateful first deploy
 
-The first time a stateful blueprint reaches a node, the deployment row enters **Awaiting confirmation**. Click **Confirm deploy** in the action column to open the state review dialog. **Deploy fresh** creates empty named volumes on the target node and starts the stack with the default state from each container image. **Restore from snapshot** is reserved for the future Volume Migration feature and is currently disabled.
+The first time a stateful blueprint reaches a node, the deployment row enters **Awaiting confirmation**. Click **Confirm deploy** in the action column to open the state review dialog. **Deploy fresh** creates empty named volumes on the target node and starts the stack with the default state from each container image. **Restore from snapshot** is disabled: Sencho does not move volume data between nodes.
 
-<Frame caption="State review dialog. Deploy fresh creates empty named volumes on the target node; Restore from snapshot is reserved for the future Volume Migration feature.">
+<Frame caption="State review dialog. Deploy fresh creates empty named volumes on the target node; Restore from snapshot is shown disabled.">
   <img src="/images/blueprint-model/state-review-dialog.png" alt="State review dialog with Deploy fresh enabled and Restore from snapshot disabled" />
 </Frame>
 
@@ -314,9 +310,7 @@ In the deployment table, click **Withdraw** on the node's row. For stateless blu
   <img src="/images/blueprint-model/eviction-stateless.png" alt="Stateless eviction dialog with a single Withdraw deployment action" />
 </Frame>
 
-<Note>
-  **Snapshot, then evict** captures the compose definition only. Volume bytes are not shipped. The named volumes managed by this stack on the target node are removed by `docker compose down` just as with **Evict and destroy data**. To preserve data, capture volumes manually before withdrawing (see *Migrating stateful data between nodes* below).
-</Note>
+To preserve data, capture volumes manually before withdrawing (see *Migrating stateful data between nodes* below). Bind mounts on the host filesystem are left in place by both eviction modes.
 
 ### Delete the blueprint
 
@@ -324,7 +318,7 @@ Click **Delete** on the detail sheet, then type the blueprint's name to confirm.
 
 ## Federation: pin a blueprint to a single node
 
-Admins can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a `Pin` section when a pin is in place, with an **Unpin** button; choosing a different node still happens in the Federation tab.
+A user with node management on the target node can pin a blueprint to it from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a `Pin` section when a pin is in place, with an **Unpin** button; choosing a different node still happens in the Federation tab.
 
 <Frame caption="Fleet · Federation, Blueprints subsection. Each row shows the blueprint, its configured selector, the Pinned to dropdown, and the effective placement that the reconciler will use.">
   <img src="/images/blueprint-model/federation-pin.png" alt="Federation tab pin policy table with one blueprint pinned and one unpinned" />
@@ -338,13 +332,13 @@ Cordoning a node prevents the reconciler from selecting it for **new** placement
 
 ## Notifications
 
-Two notification events fire from the reconciler:
+Three notification events fire from the reconciler:
 
 - `blueprint_drift_detected` (warning severity), in Observe and Suggest modes when drift is detected. In Observe the row updates silently in the table; in Suggest the notification is also dispatched through your notification routes, once when the drift is detected and again only if the drift clears and then returns.
 - `blueprint_drift_correction_failed` (error severity), in Enforce mode when an auto-fix attempt fails.
 - `blueprint_drift_repair_held` (warning severity), in Enforce mode when a repair is declined. The deployment row reads **Repair held** with the reason.
 
-Both events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/alerts-notifications#notification-routing).
+These events route through the standard alert pipeline. Configure delivery channels under [Notification routing](/features/alerts-notifications#notification-routing).
 
 GitOps authority and rollout lifecycle decisions are also recorded in the notification history as they happen:
 
@@ -357,13 +351,13 @@ Each entry names the Blueprint and records the GitOps operation it came from. Th
 
 ## Security and trust boundaries
 
-**Who can do what.** The user role determines the available actions. Reading the catalog, the detail sheet, and the deployment status is open to every role. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
+**Who can do what.** Your role's permissions decide the available actions; see the note at the top of the page. Authoring and applying need stack permissions, so a viewer or auditor can watch a rollout but not change it.
 
-**The marker file is the trust root.** The reconciler will only deploy into, modify, or withdraw a directory that carries a `.blueprint.json` marker whose blueprint ID matches. A pre-existing directory with no marker, or a marker referencing a different blueprint, surfaces as **Name conflict** and is never modified.
+**The marker file is the trust root.** The reconciler only touches a directory whose `.blueprint.json` marker names the Blueprint. Anything else surfaces as **Name conflict** and is never modified.
 
-**Local vs remote policy enforcement.** Local blueprint deploys evaluate the pre-deploy vulnerability policy gate against the local scanner state and credentials before the compose file is written to disk. Remote blueprint deploys are routed through the remote node's standard `/api/stacks` and `/api/stacks/<name>/deploy` endpoints over the proxy, so the remote node enforces its own policy with its own scanner state. The controlling instance does not bypass remote policy.
+**Policy runs where the deploy runs.** The vulnerability policy gate evaluates against the scanner state and credentials of the node that deploys, before the compose file is written. The controlling instance does not bypass a remote node's policy.
 
-**Remote-node call path.** Sencho's controlling instance reaches remote nodes through the same authenticated proxy used by the rest of the fleet management surfaces, carrying the remote node's bearer token. Remote nodes do not need to accept any inbound connection beyond the one they already accept for fleet operations.
+**Remote-node call path.** The controlling instance reaches a remote node over the connection the rest of fleet management uses, the authenticated proxy connection or the Pilot tunnel, so Blueprints need no extra network path.
 
 **Audit.** Blueprint create, edit, delete, pin, withdraw, accept, convert, and detach are administrative actions and are recorded through the standard [Audit log](/features/audit-log) pipeline along with the rest of the admin surface.
 
@@ -375,7 +369,7 @@ By design, Blueprints do not include:
 - Automatic volume migration between nodes.
 - Per-node parameter overrides or templating (one compose, all nodes).
 - Staged or canary rollouts.
-- Versioning history with one-click rollback. To revert, paste the prior compose into the editor and save.
+- Revision history for an Inline Blueprint. To revert, paste the prior compose into the editor and save. A Git-managed Blueprint can [roll back a rollout](/features/git-managed-blueprints#roll-back-a-rollout) to an earlier generation.
 
 Concrete operational constraints:
 
@@ -383,8 +377,7 @@ Concrete operational constraints:
 - **Compose size.** YAML must be 96 KiB or fewer. Split very large compose files into smaller blueprints, or move generated content out of the compose body.
 - **Selector size.** A selector accepts up to 200 entries per side (200 `nodes.ids`, or up to 200 each in `labels.any` and `labels.all`).
 - **Name.** 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. Rename is allowed only when every deployment is withdrawn (or there are none). Live placements and guards must be resolved first; rename clears approval back to pending.
-- **Snapshot semantics.** **Snapshot, then evict** captures the compose YAML only. Volume bytes are removed by `docker compose down` just as with **Evict and destroy data**.
-- **Restore from snapshot.** Reserved for the future Volume Migration feature and currently disabled in the state review dialog.
+- **Snapshots hold the compose only.** See [Withdraw a single deployment](#withdraw-a-single-deployment). **Restore from snapshot** appears in the state review dialog but is disabled.
 
 These omissions keep Blueprints honest: a compose-native fleet primitive that distributes the file you already have to the nodes you choose.
 
@@ -397,15 +390,13 @@ Sencho's compose-native lane does not include automatic volume shipping. **Snaps
 3. Transfer the artifact to node B and restore it into the named volume there.
 4. Update the Blueprint's selector to include node B; click **Apply now**, review the preview, and **Confirm Apply**.
 
-A future Volume Migration feature will automate this with app-aware backup tooling.
-
 ## Practical workflows
 
 **Multi-node identical reverse proxy.** A stateless `caddy-edge` blueprint with a labels selector matching `any=[edge]` and drift mode **Enforce**. Adding a new edge node deploys the proxy automatically within one tick. Editing the compose to bump the Caddy image redeploys every edge node on the next tick without operator intervention. Drift caused by a manual `docker compose down` on one edge node is corrected silently within a minute.
 
 **Single-node managed Postgres.** A stateful `pg-fleet` blueprint with a `nodes` selector pointing at one database node and drift mode **Suggest**. The first deploy enters **Awaiting confirmation** so the operator chooses **Deploy fresh**. Subsequent compose changes (image bump, config change) re-enter **Awaiting confirmation** on the same node so the operator can decide whether the new revision is safe for the existing volume. Drift on the running container fires a `blueprint_drift_detected` notification but never auto-redeploys.
 
-**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Blueprints, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
+**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the node from **Pinned to**. The pin saves immediately and clears approval, so nothing moves until you open the blueprint here, click **Apply now**, and **Confirm Apply**. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin and confirm again to restore selector-driven placement.
 
 **Observe-only audit blueprint.** A stateless monitoring stack (Vector, Promtail, a Prometheus exporter) with drift mode **Observe**. Drift is recorded silently in the deployment table; no notification fires and no auto-fix runs. Useful when you want Sencho to track placement and detect divergence on a low-signal stack without paging anyone.
 
@@ -428,7 +419,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     The row moves to **Failed** with the remote error. Reconnect the node (see [Pilot Agent](/features/pilot-agent) and [Multi-node management](/features/multi-node)), verify whether the stack directory contains `compose.yaml` and `.blueprint.json`, then click **Apply now**. If the directory exists without a matching marker, Sencho treats it as a name conflict until you rename or remove the remote stack manually.
   </Accordion>
   <Accordion title="Remote apply or withdraw fails asking for an upgrade">
-    Blueprint apply and withdraw on a remote node require that node's Sencho build to expose the atomic node-local endpoints (`/api/blueprints/apply-local` and `/api/blueprints/withdraw-local`). Older remotes refuse the mutation with a failed deployment row rather than writing files without ownership checks. Upgrade the remote instance to a matching Sencho release, then retry **Apply now** or withdraw.
+    A remote node must run a Sencho release that supports Blueprint apply and withdraw, because the node itself checks marker ownership before it writes anything. When it does not, the deployment row fails with a message asking you to upgrade that instance. Upgrade the remote to a matching Sencho release, then retry **Apply now** or withdraw.
   </Accordion>
   <Accordion title="A Docker daemon or registry failure surfaced during apply">
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
@@ -445,7 +436,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     Blueprints with active or drifted deployments refuse to disable, because doing so would orphan the running containers without a follow-up plan. Withdraw each affected deployment first, then disable the blueprint.
   </Accordion>
   <Accordion title="The data is gone after 'Snapshot, then evict'">
-    Both eviction modes run `docker compose down`, which removes the named volumes managed by the stack on the target node. The snapshot stored in **Fleet · Snapshots** captures the compose definition only; the volume bytes are not included. To preserve data, capture the volume by hand before withdrawing (see *Migrating stateful data between nodes*). Bind mounts on the host filesystem are left in place by both eviction modes.
+    Both eviction modes remove the stack's named volumes on the target node, and the snapshot holds the compose definition only. See [Withdraw a single deployment](#withdraw-a-single-deployment) and capture the volume by hand before withdrawing.
   </Accordion>
   <Accordion title="Eviction was aborted with 'Failed to capture compose snapshot before eviction'">
     Sencho aborted the eviction because the pre-eviction compose snapshot could not be written to the database. The deployment is still in place; nothing was destroyed. Check that the database is reachable, then retry the eviction. If you accept data loss and want to evict regardless, use **Evict and destroy data** instead.
@@ -479,10 +470,10 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     Yes, from an authorized accepted Git generation. Accept the source, approve the placement, then authorize the rollout. See [Git-managed Blueprints](/features/git-managed-blueprints).
   </Accordion>
   <Accordion title="Does the snapshot in 'Snapshot, then evict' contain my database?">
-    No. The snapshot captures the compose YAML only, so you can redeploy the same definition elsewhere. Volume bytes (the database files, the cached state, the uploads directory) are removed by `docker compose down` along with the named volumes. To preserve data across an eviction, capture the volume by hand before withdrawing.
+    No. The snapshot captures the compose YAML only, so you can redeploy the same definition elsewhere. The volume contents are removed with the named volumes, so capture them by hand before withdrawing.
   </Accordion>
   <Accordion title="Why doesn't Sencho move volumes between nodes for me?">
-    Volume migration is app-aware. A Postgres datadir is not the same kind of artifact as a Redis RDB file or a MinIO bucket, and a generic `tar` of the volume is rarely safe while the container is running. A future Volume Migration feature will integrate app-aware backup tooling. Until then, the manual workflow in *Migrating stateful data between nodes* is the supported path.
+    Volume migration is app-aware. A Postgres datadir is not the same kind of artifact as a Redis RDB file or a MinIO bucket, and a generic `tar` of the volume is rarely safe while the container is running. Sencho therefore leaves the data move to you; see *Migrating stateful data between nodes* for the manual workflow.
   </Accordion>
   <Accordion title="If I cordon a node, does that uninstall the Blueprints on it?">
     No. Cordoning only blocks new placements and skips state-review provisioning. Existing deployments on the cordoned node keep running and continue drift-checking. To uninstall a deployment from a cordoned node, withdraw it explicitly from the deployment table.

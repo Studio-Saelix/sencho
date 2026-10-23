@@ -20,6 +20,8 @@ For the full list of supported transports, ref types, and Git hosts, with the ev
   <img src="/images/git-authentication/ssh-deploy-key.png" alt="New stack dialog on the From Git tab with Deploy key (SSH) selected, showing the Fetch host key fingerprint button, an empty PEM private key field, and the apply behavior options Manual, Review only, Auto-write files, and Auto-deploy" />
 </Frame>
 
+Those are the only methods. GitHub App installation tokens, for example, are not supported.
+
 Sencho stores tokens, deploy keys, and CA bundles encrypted at rest and never returns them in API responses or the UI. When you edit a source later, a secret field shows a masked placeholder. Leave it blank to keep the stored value, or type a new one to replace it. Switching **Authentication** away from a method clears what that method stored.
 
 ## HTTPS with a personal access token
@@ -28,9 +30,9 @@ Create a token with read access to the target repository only:
 
 - **GitHub:** a fine-grained token with **Contents: Read** on the repository, or a classic token with the `repo` scope.
 - **GitLab:** a project or group access token with the `read_repository` scope.
-- **Bitbucket:** an app password with **Repositories: Read**.
+- **Bitbucket Cloud:** app passwords are deprecated in favor of API tokens, and Sencho sends a token with a fixed username. Only public Bitbucket Cloud repositories have been verified, so private access with a token or a deploy key is not yet a tested combination. [Git transport support](/features/git-transport-support) lists what has been verified.
 
-Paste it into the **Token** field and save. Every pull caches the fetched compose and env content in the database so the change plan can reopen without refetching. That cache is encrypted the same way as the token, because compose files often embed secrets through env interpolation.
+Select **Personal Access Token**, paste the token into the field that appears, and save. Sencho gives the token only to the repository's own host. It never appears in the repository URL or in a process argument. Every pull caches the fetched compose and env content in the database so the change plan can reopen without refetching. That cache is encrypted the same way as the token, because compose files often embed secrets through env interpolation.
 
 ## SSH with a deploy key
 
@@ -89,7 +91,27 @@ A redirect to a different server is refused, and the pull reports that the host 
     The server's certificate is not signed by an authority Sencho trusts. Paste the issuing CA into **Custom CA certificate** on the source and pull again.
   </Accordion>
 
-  <Accordion title="Only unsupported URL schemes">
-    Git sources accept `https://` URLs and SSH URLs (`git@host:org/repo.git` or `ssh://git@host:port/path`). Other schemes are rejected when you save.
+  <Accordion title="Certificate expired, not yet valid, or for another hostname">
+    A custom CA does not fix these. Renew the server's certificate, check the Sencho host's clock, or change the repository URL to the hostname the certificate names.
+  </Accordion>
+
+  <Accordion title="Unsupported repository URL">
+    Git sources accept `https://` URLs and SSH URLs (`git@host:org/repo.git` or `ssh://git@host:port/path`), and a URL cannot carry a username and token (`https://user:token@host/...`). Other schemes and embedded credentials are refused when you save. Put the token in the **Personal Access Token** field instead.
+  </Accordion>
+
+  <Accordion title="SSH repository URLs require a deploy key">
+    An SSH URL cannot be used with **Public (no auth)** or a token. Switch **Authentication** to **Deploy key (SSH)**, or use the repository's `https://` URL.
+  </Accordion>
+
+  <Accordion title="Repository host is not allowed">
+    The repository resolves to a loopback, link-local, multicast, or other special-use address, which Sencho refuses before sending any request. A host on your LAN or VPN is fine. See [Git transport support](/features/git-transport-support#not-supported).
+  </Accordion>
+
+  <Accordion title="Rate limited">
+    The Git host answered that too many requests arrived in a short window. Wait a few minutes and pull again. If polling is on, a longer **Poll interval** in **Settings → GitOps** lowers the request rate.
+  </Accordion>
+
+  <Accordion title="Could not resolve, connection refused, or timed out">
+    The Sencho host could not reach the repository host. Check DNS, firewalls, and proxies from the node that owns the stack, because pulls run there. A fetch that has not finished in 30 seconds reports a timeout.
   </Accordion>
 </AccordionGroup>
