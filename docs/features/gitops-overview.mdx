@@ -54,11 +54,11 @@ Two more policies decide what happens after a rollout starts or after something 
 
 | Policy | Options | Where it lives |
 |---|---|---|
-| **Source policy** | Manual, Review only, Auto-write files, Auto-deploy | The Git source's **Automation** tab |
-| **Placement policy** | Operator approves each change, One stateless change at a time | Beside **Review and approve placement** |
-| **Rollout authorization policy** | Operator authorizes each rollout, Authorizes without an operator | Beside the placement policy on an Inline Blueprint, in the rollout overflow on a Git-managed Blueprint |
+| **Source policy** | Manual, Review only, Auto-write files, Auto-deploy | **Apply behavior** on the Git source's **Automation** tab |
+| **Placement policy** | Operator approves each change, One stateless change at a time | The **Placement policy** button beside **Review and approve placement** |
+| **Rollout authorization policy** | Operator authorizes each rollout, Authorizes without an operator | The **Rollout authorization policy** button beside the placement policy on an Inline Blueprint, and an item in the rollout overflow menu on a Git-managed Blueprint |
 | **Drift mode** | Observe, Suggest, Enforce | The Blueprint editor. See [Blueprints](/features/blueprint-model#drift-policy) |
-| **Health rollout policy** | Observe, Pause, Retry once, Stop, Roll back | The application's **Rollout controls**. See [Health rollout policy](/features/health-rollout-policy) |
+| **Health rollout policy** | Observe, Pause, Retry once, Stop, Roll back | **Health rollout policy** in the rollout overflow menu. See [Health rollout policy](/features/health-rollout-policy) |
 
 A new application, and any Blueprint you convert or adopt, starts on operator review at every step. Nothing about it has yet proved that a node can take a generation. Each setting sits beside the action it governs, so turning one on is a single click.
 
@@ -88,12 +88,14 @@ Auto-write files stops after writing the files; Auto-deploy also redeploys the s
 This is the whole of what the placement policy approves without you, and it is deliberately narrow. Sencho approves a placement change on its own only when it adds exactly one node or removes exactly one, and the workload is stateless. Everything else falls back to you with the reason on the placement card:
 
 - A change that adds and removes nodes, or moves more than one node either way.
-- A workload that carries data, or whose contents Sencho could not establish.
+- A workload that carries data, or whose contents Sencho could not establish. Sencho reads this from the Compose content that would be placed, not from the Blueprint's stored classification.
 - A first placement that spans more than one node.
+- A placement that moved because a pin moved. Where a workload runs by pin is your choice.
 - A node that is cordoned, not answering, or last seen unreachable.
 - A node that has not reported, or that this Sencho does not know.
 - A change that would leave the application with nothing running it.
 - An operation already in flight for the application or for a node in the plan.
+- Evidence Sencho needed and could not read, or read and could not use.
 
 A withdrawal is judged from what the node itself reported: it must be answering now and must have reported the workload that ran there. A node that has never reported keeps running where it is, and the withdrawal falls back to you. A cordoned node is never withdrawn automatically, because cordoning says where work may not go, not that work should leave. The workload keeps running there; uncordon the node or approve the move yourself.
 
@@ -111,15 +113,20 @@ A commit SHA says which files Sencho wrote. It does not say whether that commit 
 | **Pending update** | A fetched commit is ready to apply. |
 | **Review required** | A fetched commit is waiting for review before it can apply. |
 | **Pending update blocked** | The change plan has local conflicts. Apply stays disabled until they are resolved. |
-| **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
+| **Reconcile required** | What was reconciled no longer matches the configuration in force. Fetch again to rebuild the candidate. |
 | **Applying** | A commit is being written to the stack directory. |
+| **Poll scheduled** | The source is healthy and waiting for its next scheduled poll. |
 | **Retry scheduled** | The last attempt failed and another is queued. |
 | **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, automatic apply, and Pull now stay off for this source. |
 | **Source failed** | The last operation on this source failed. |
 | **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
 | **Recovering** | A recovery is running on this stack. |
+| **Recovery failed** | Recovery of this stack did not complete. |
+| **Not live** | The source was detached or its application deleted. The identity shown is what it was. |
 
-The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of reading as up to date.
+When several conditions hold at once, the state names the most serious one: a recovery, an operation in progress, an interrupted operation, or a suspension comes before a failure, a failure comes before a pending update, and a scheduled poll shows only when nothing stronger applies. A failure is never hidden behind a scheduled poll.
+
+**Outcome unknown** and **Recovery failed** matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of reading as up to date.
 
 Some state comes with qualifications: a managed manifest that does not identify this stack on this node, an approval that could not be restored after a recovery, a record that has gone. Each is its own line at the top of the status. They are not failures. They tell you which part of the state to trust less, because a stack with partly missing evidence would otherwise look identical to one with complete evidence.
 
