@@ -13,7 +13,7 @@ New to GitOps in Sencho? [GitOps overview](/features/gitops-overview) defines th
 
 ## How it works
 
-1. Open a stack and click the **Git Source** button in the editor toolbar.
+1. Open a stack and click the **Git Source** button in the editor toolbar. From the [GitOps portfolio](/features/gitops-portfolio), **Connect a stack to Git** opens the same form as a new stack, and a row's menu opens an existing source over the portfolio.
 2. Fill in the repository URL and ref, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add credentials if the repository is private; see [Git hosts and authentication](/features/git-authentication).
 3. Click **Pull now** to fetch the latest commit. Sencho opens a classified change plan: adds, modifications, removals, and any local conflicts.
 4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local file conflicts are present. A Compose invocation change (for example a `.env` file added or removed outside Git) is shown in the plan and does not disable Apply. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
@@ -26,13 +26,13 @@ Writes land in the stack's existing directory, using the same storage as the in-
   <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, a toolbar of Pull now and Detach, the Overview, Source, Automation, and Secrets tabs, and an Overview showing Review required with a Review update button and a path row of source, artifact, and runtime" />
 </Frame>
 
-Git Source opens as a right-side sheet from the editor toolbar. It has a crumb (`Stack › {name} › Git source`), a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs; the sheet opens on the form.
+Git Source opens as a right-side sheet from the editor toolbar. It has a crumb (`Stack › {name} › Git source`, or `GitOps › {name} › Git source` when opened from the portfolio), a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs; the sheet opens on the form.
 
 The toolbar offers **Pull now** when a source is linked and not suspended, **Detach** when a source is linked, **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored. Confirmations open as separate dialogs on top of the sheet.
 
 A linked source groups the sheet into tabs:
 
-- **Overview.** The source's state with the commit it concerns, and the action that resolves it right there (**Review update**, **Retry**, or **Resume**, each when offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority and anything Sencho could not prove. The header shows the last-applied commit (or **never applied**), the state, and the ref.
+- **Overview.** The source's state with the commit it concerns, and the action that resolves it right there (**Review update**, **Retry**, or **Resume**, each when offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority and anything Sencho could not prove. **Open in GitOps portfolio** at the bottom jumps to the application's row. The header shows the last-applied commit (or **never applied**), the state, and the ref.
 - **Source.** The repository, ref, compose files, project directory, sibling `.env` sync, authentication, and custom CA as a summary, with the managed-project manifest summary below it. **Edit** opens the form, and **Cancel** puts it back. A live Direct source can **Adopt onto Blueprint** from here.
 - **Automation.** The apply behavior (changing it also offers **Update**), **Suspend** or **Resume**, and the provider hooks described in [Git webhooks](/features/git-webhooks).
 - **Secrets.** Age identities and the encrypted-source policy; see [Repository secrets](/features/git-secrets).
@@ -47,7 +47,7 @@ Polling interval lives in **Settings → GitOps**. There is no per-source interv
 Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields the Git Source sheet uses.
 
 <Frame>
-  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
+  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, ref, an ordered compose files list with Browse, project directory, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
 </Frame>
 
 Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the source in one step. The last-applied commit is seeded from the fetch, so the first pull starts from a clean plan. Tick **Deploy after create** to run `docker compose up -d` straight away.
@@ -89,14 +89,14 @@ On disk, the primary file lands as the stack's `compose.yaml` and each additiona
 
 | Mode | What Sencho does after a fetch |
 |------|-----------|
-| **Manual** | Nothing. The source is not polled and no provider hook fetches it. The stack changes only when you ask for a pull. |
+| **Manual** | Nothing on its own. The source is not polled and never retries automatically. A pull you start, or a webhook delivery, still fetches the commit and stages the change plan, and nothing is written until you apply it. |
 | **Review only** | Fetches and validates the incoming commit and marks the stack as having a pending update. You review the change plan and apply. |
 | **Auto-write files** | Writes the new compose and env files to disk but does not redeploy. Use it when another process handles rollout. |
 | **Auto-deploy** | Writes the files and runs `docker compose up -d`. |
 
 Auto-deploy implies Auto-write. Whatever the mode, a **Deploy after apply** checkbox in the change plan lets you deploy on the spot.
 
-**Manual** is the absence of the cadence, not a lighter review: the other three modes fetch, and differ in who applies what they found. A manual source still answers when you ask. **Pull now** on a stack-owned source only fetches. **Suspend** pauses one source temporarily; **Manual** removes it from the cadence until you change it back.
+**Manual** is the absence of the schedule, not a lighter review: the other three modes poll and retry on their own, and differ in who applies what they find. A manual source still answers when you ask. **Pull now** on a stack-owned source only fetches. **Suspend** pauses one source temporarily, webhooks included; **Manual** keeps it off the polling schedule until you change it back.
 
 Automatic modes carry one safety check. When the incoming commit withdraws or renames a service that persists data (named volumes or bind mounts), or Sencho cannot prove it does not, the change is held for review and the stack shows **stateful change blocked**. The hold clears when you accept the change explicitly, dismiss it, or a newer commit is staged. Nothing is written or redeployed while it is held.
 
@@ -104,15 +104,22 @@ Git sources apply to stacks you link from the editor. An Inline Blueprint never 
 
 ## Polling
 
-Unattended fetches use a node-wide interval under **Settings → GitOps**, the **Poll Git sources** control. The default is off (interval `0`). With polling off, sources still pull on demand, on a webhook, and on retry.
+Unattended fetches use one interval per node, set under **Settings → GitOps** in the **Git sources** section (labelled *this node*). It applies to the node you have selected, so each node in a fleet keeps its own.
 
-Linked sources inherit the interval. Manual sources are never polled. Review-only sources fetch on the schedule and stage a plan for review. Automatic sources fetch and then follow their apply behavior.
+| Control | What it does |
+|---|---|
+| **Poll Git sources** | Turns scheduled fetches on or off. Off by default. Turning it on starts at 5 minutes. |
+| **Poll interval** | Minutes between fetches, from 1 to 10080 (one week). Shown while polling is on. |
+
+With polling off, sources still pull on demand, on a webhook, and on retry. Changing the setting reschedules every linked source that polls at once.
+
+Every linked source inherits the interval, and there is no per-source interval. **Manual** sources are never polled. **Review only** sources fetch on the schedule and stage a plan for review. **Auto-write files** and **Auto-deploy** sources fetch and then follow their apply behavior.
 
 ## Suspend, resume, and retry
 
 **Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. **Suspend** and **Resume** are on the **Automation** tab, and **Resume** is also in the **Overview** while the source is suspended. An optional reason is stored with the suspension. **Resume** re-evaluates the source immediately rather than waiting for the next poll.
 
-**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry; use **Retry** after you fix the cause.
+**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry, and neither does a **Manual** source; use **Retry** after you fix the cause.
 
 ## Pulling and reviewing changes
 
@@ -134,7 +141,7 @@ Secret-bearing paths appear as "secret-bearing managed path" instead of a filena
 
 ### Pending updates
 
-In **Review only** mode, a fetched commit gives the stack a pending GitBranch icon in the sidebar and a pulsing dot on the **Git Source** button. Clicking either re-fetches the commit and opens the change plan; the sheet also shows a pending-update card with a **Review** button. If the stack also has an image update, the image-update dot takes priority in the sidebar, and the pending source is still shown on the **Git Source** button.
+While a fetched commit is staged, whatever the apply behavior, the stack gets a Git branch icon in the sidebar and a pulsing dot on the **Git Source** button. Hovering the icon names the state, and clicking it opens the [GitOps portfolio](/features/gitops-portfolio) on that stack. The **Git Source** button opens the sheet, where **Review update** on the **Overview** re-fetches the commit and opens the change plan. **Review update** in the portfolio does the same from there. If the stack also has an image update, the image-update dot takes priority in the sidebar, and the pending source is still shown on the **Git Source** button.
 
 <Frame>
   <img src="/images/git-sources/sidebar-badge.png" alt="Sidebar stack list with a small GitBranch icon next to the demo-app entry indicating a pending Git source update" />
@@ -167,6 +174,23 @@ Git apply captures a recovery generation before it promotes files. If promotion 
 **Detach** renders the effective compose model into a single `compose.yaml`, keeps the remaining materialized files, removes auto-discovered override files so the exported model is final, and removes Git tracking. Resolved environment values are baked into the exported file. If removal is interrupted, Sencho restores the original files.
 
 Some read-only views, such as the dependency graph, drift snapshot, and networking inspector, summarize the primary compose file, so a service declared only in an override may not appear there. Deploy, update, image-update checks, and mesh attachment use the full merged set.
+
+## Common setups
+
+| Goal | Apply behavior | What triggers a fetch |
+|---|---|---|
+| Keep a homelab stack on `main` with no clicks | **Auto-deploy** | [Polling](#polling) or a [provider hook](/features/git-webhooks) |
+| Review every change, then apply it | **Review only** | Polling or a provider hook, then **Review update** |
+| Let Sencho write the files while another tool restarts the stack | **Auto-write files** | Polling or a provider hook |
+| Change only when you decide | **Manual** | **Pull now** |
+
+## What Git Sources do not do
+
+- **They only read.** Sencho never commits or pushes. A file you edit in the editor stays local and shows as a local conflict on the next pull.
+- **One source links one stack on one node.** To run one repository on several nodes, use a [Git-managed Blueprint](/features/git-managed-blueprints).
+- **They do not delete what they do not manage.** Applying leaves unmanaged files on disk, and a rollback never touches named volumes or bind-mounted data.
+- **A commit SHA never moves.** A source whose ref is a full SHA changes only when you edit the ref.
+- **Not every Git feature is reproduced.** LFS pointers, submodule contents, symbolic links, and URL includes are refused; see [What a pull materializes](#what-a-pull-materializes).
 
 ## Troubleshooting
 

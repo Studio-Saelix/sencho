@@ -15,11 +15,11 @@ A push event can start a fetch on a linked Git source in two ways. Use whichever
 
 Either path queues the same reconciliation as **Pull now** or polling. The source's [apply behavior](/features/git-sources#apply-behavior) then decides the outcome:
 
-- **Review only:** fetch, validate, diff, mark pending.
+- **Manual** and **Review only:** fetch, validate, diff, mark pending. You apply the change.
 - **Auto-write files:** fetch, validate, write to disk.
 - **Auto-deploy:** fetch, validate, write, deploy.
 
-A **Manual** source is never joined to a webhook. A suspended source ignores them until you resume it.
+A suspended source ignores webhooks until you resume it.
 
 ## Provider hooks
 
