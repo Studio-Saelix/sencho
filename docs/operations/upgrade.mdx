@@ -42,9 +42,17 @@ Sencho handles all schema changes internally. When the application starts, it ch
 - **Encryption of node API tokens** stored in plaintext (registry credentials are always stored encrypted, so they need no migration)
 - **SSO and RBAC setup** for single sign-on provider config and role-based access
 - **Obsolete column cleanup**, removing unused SSH/TLS configuration columns no longer read or written by the current schema
+- **GitOps history** tables and a default retention window of 30 days, set under **Settings → GitOps**, after which older entries are pruned
+- **Account preferences**: explicit appearance and navigation choices already saved in a browser are copied to your account when you first sign in there, and follow you to other browsers
 - **Blueprint rollout approval** columns (`approval_status`, intent fingerprint, and blast JSON). Existing Blueprints start **pending**. Automatic reconciliation and enforcement pause until an admin opens **Apply now**, reviews the rollout preview, and confirms. New installs behave the same way for each Blueprint until the first confirmation.
 
 You never need to run SQL commands, migration scripts, or any manual database operations.
+
+---
+
+## Behind a reverse proxy
+
+Sencho trusts forwarded client addresses and schemes only from the peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`. Set it to your proxy before exposing Sencho through it. Without it, every client behind the proxy shares one sign-in rate limit, and a few failed sign-ins lock out everyone for 15 minutes. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup), and [Clients share one rate-limit bucket](/operations/troubleshooting#clients-share-one-rate-limit-bucket-behind-a-reverse-proxy) if that is already happening.
 
 ---
 
@@ -67,7 +75,7 @@ See the [Backup & Restore guide](/operations/backup) for full backup procedures.
 If you prefer to control exactly which version you run, pin the image tag in your `docker-compose.yml`:
 
 ```yaml
-image: saelix/sencho:0.96.0
+image: saelix/sencho:0.98.0
 ```
 
 Fleet can update semver pins directly from the [Node updates](/features/remote-updates) sheet: it rewrites the tag to the selected release before recreating the container. Digest pins and compose values that use variable interpolation must be changed manually before Fleet can update the node.
