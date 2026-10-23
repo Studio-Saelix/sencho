@@ -10,7 +10,7 @@ This tutorial covers the runtime drift detection described on the Drift feature 
 
 ## Prerequisites
 
-- Any role that can view a stack, including the read-only **viewer** and **auditor** roles, can open the Drift tab and click **re-check**. Actually resolving drift means redeploying, which needs the `stack:deploy` permission for this stack (the same permission Start, Stop, Restart, and Update already require); the redeploy button does not appear without it.
+- Any role that can view a stack, including the read-only **viewer** and **auditor** roles, can open the Drift tab and click **re-check**. Actually resolving drift means redeploying, which needs the `stack:deploy` permission for this stack (the same permission Start, Stop, Restart, and Update already require); the redeploy button does not appear without it, and dismissing or restoring a finding needs the same permission.
 - The stack must have been deployed through Sencho at least once. Drift's "since last deploy" signal has nothing to compare against until then, and shows **No deploy baseline** instead of a useful state.
 - No plan requirement and nothing to turn on. Drift detection runs automatically as soon as a stack has a compose file and Docker is reachable on the node.
 - Shell or SSH access to the host, if you want to reproduce this tutorial's own out-of-band change yourself. Any real manual Docker operation that changes a running container without going back through Sencho works just as well.
@@ -77,10 +77,10 @@ Deploy this stack (or adapt an existing one) before continuing.
       <img src="/images/tutorials/resolve-stack-drift/drift-redeploy-menu.png" alt="The Drift tab with the app image finding and its overflow menu open, showing Redeploy to compose image." />
     </Frame>
 
-    A confirmation names the consequence: "The running app image is newer than the one compose names. Redeploying moves it back to the older compose image." Click **Redeploy**.
+    A **Redeploy landing-page** confirmation names the consequence: "The running app image is newer than the one compose names. Redeploying moves it back to the older compose image." Its footer reads **Recreates differing services**. Click **Redeploy**.
 
     <Frame>
-      <img src="/images/tutorials/resolve-stack-drift/drift-redeploy-confirm.png" alt="The Redeploy landing-page confirmation, explaining that redeploying moves the running app image back to the older compose image, with Cancel and Redeploy buttons." />
+      <img src="/images/tutorials/resolve-stack-drift/drift-redeploy-confirm.png" alt="The Redeploy landing-page confirmation, explaining that redeploying moves the running app image back to the older compose image, with a Recreates differing services label and Cancel and Redeploy buttons." />
     </Frame>
 
     Sencho runs the same deploy as the editor's **Deploy** button, with the same progress view, and recreates the `app` container from the compose file, which puts it back on `nginx:1.27-alpine`. If you would rather keep the newer image, click **Open stack editor** instead, change the image in the Compose file to match, and save; the finding clears the same way.
@@ -97,17 +97,17 @@ Back on the **Drift** tab, the status returns to **in sync**, and the drift hist
   <img src="/images/tutorials/resolve-stack-drift/drift-resolved-in-sync.png" alt="The Drift tab back to In sync status, with the drift history entry now marked RESOLVED, showing both a detected and a resolved timestamp." />
 </Frame>
 
-On the **Activity** tab, which lists most-recent-first, the new **landing-page deployed** entry sits above a **Drift resolved** entry, which sits above the **Drift detected** entry from earlier in this tutorial: the finding was detected, then resolved by the redeploy.
+On the **Activity** tab, which lists most-recent-first, the new **landing-page deployed** entry (with a health gate entry above it once the container passes its check) sits above a **Drift resolved** entry, which sits above the **Drift detected** entry from earlier in this tutorial: the finding was detected, then resolved by the redeploy.
 
 <Frame>
-  <img src="/images/tutorials/resolve-stack-drift/activity-drift-resolved.png" alt="The Activity tab showing, in order: landing-page deployed by admin, Drift resolved on landing-page: 1 finding cleared, Drift detected on landing-page: 1 new finding, and the earlier landing-page deployed entry." />
+  <img src="/images/tutorials/resolve-stack-drift/activity-drift-resolved.png" alt="The Activity tab showing, in order: landing-page health gate passed, landing-page deployed by admin, Drift resolved on landing-page: 1 finding cleared, Drift detected on landing-page: 1 new finding, and the earlier health gate and landing-page deployed entries." />
 </Frame>
 
 ## If something goes wrong
 
 **Clicking re-check doesn't fix anything, and the status still says drifted.** That's not a bug, it's the read-only design: re-check only reconciles the ledger (recording what it currently sees, as in the screenshot above) so the finding shows up in history and on the Activity timeline. It never changes what Docker is running. If you want the drifted container gone, redeploy it from the finding as in the last step above (or **Save & Deploy** from the compose editor); that's the only action that actually reconciles the runtime with the compose file.
 
-**A finding is in the way and you know it is expected.** Click **Dismiss** on the row to set it aside for the team until it changes. It moves under **1 dismissed**, where **Restore** brings it back, and the status keeps reading **drifted** because dismissing a finding does not change what is running.
+**A finding is in the way and you know it is expected.** Click **Dismiss** on the row to set it aside for the team until it changes. A toast reads `Dismissed. It returns if it changes.` with an **Undo** button. The finding moves under **1 dismissed**, where **Restore** brings it back, and the status keeps reading **drifted** because dismissing a finding does not change what is running.
 
 ## Related
 
