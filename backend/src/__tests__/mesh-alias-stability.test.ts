@@ -354,6 +354,26 @@ describe('stopped services keep their saved ports', () => {
         expect((await svc.listAliases()).map((a) => a.host)).toEqual([`web.pg.${localNode.name}.sencho`]);
     });
 
+    it('drops the alias of an exited container that still reports a port', async () => {
+        // Docker can keep PrivatePort metadata on an exited container. That is
+        // not a live binding, so it must not keep the service's alias
+        // published; the saved port still carries forward as a reservation.
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        const stack = 'exited-ports-stack';
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        db.insertMeshStack(localNode.id, stack, 'tester');
+        seedLastKnown(localNode.id, stack, [{ service: 'db', ports: [5432] }]);
+
+        await withLocalDocker(async () => [container('db', 'exited', [5432])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect((await svc.listAliases()).map((a) => a.host)).not.toContain(host);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
     it('rejects a competing opt-in on a port held by a stopped stack', async () => {
         const db = DatabaseService.getInstance();
         const localNode = db.getDefaultNode();
@@ -784,6 +804,54 @@ describe('declaration reconciliation trusts only readable compose content', () =
         const internals = svc as unknown as Internals;
         expect(internals.reservedPorts.has(5432)).toBe(false);
         expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
+    });
+
+    it('ignores an override Compose does not load for a one-file Git spec', async () => {
+        // An explicit `-f` list suppresses Compose's override discovery, so a
+        // stale compose.override.yml is not part of the project. Counting it
+        // would keep a removed service's port reserved indefinitely.
+        const stack = 'git-single-file-stack';
+        const db = DatabaseService.getInstance();
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        writeComposeFile(stack, ['web']);
+        writeComposeFile(stack, ['db'], 'compose.override.yml');
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([{ service: 'web', ports: [8080] }]);
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(false);
+    });
+
+    it('keeps all claims when a selected layer is empty', async () => {
+        // A file caught mid-rewrite can read as empty. An empty document is
+        // not evidence that the stack stopped declaring its services, so the
+        // declaration is unknown rather than a zero contribution.
+        const stack = 'empty-layer-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        writeRawComposeFile(stack, '', 'compose.override.yml');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
     });
 
     it('keeps all claims when one layer of the chain is malformed', async () => {

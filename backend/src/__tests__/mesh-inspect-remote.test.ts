@@ -398,6 +398,22 @@ describe('MeshService.inspectDeclaredServices (peer declaration read)', () => {
         DatabaseService.getInstance().deleteNode(remoteNodeId);
     });
 
+    it('treats an empty declaration as unknown', async () => {
+        // A Compose project declares at least one service, so an empty list is
+        // not a valid answer. Accepting it would free every saved claim on a
+        // peer that answered with an empty body.
+        const remoteNodeId = addRemoteNode('declared-remote-empty');
+        mockTarget();
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: [] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the malformed log */ });
+
+        expect(await readDeclared(remoteNodeId)).toBeNull();
+        DatabaseService.getInstance().deleteNode(remoteNodeId);
+    });
+
     it('keeps a saved claim that the peer still declares during a partial inventory', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();

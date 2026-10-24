@@ -2635,12 +2635,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 return null;
             }
             relFiles = await this.resolveStackComposeFiles(fsSvc, stackName);
-            // Compose auto-loads the hand-authored override beside a
-            // single-file stack, so a service declared only there is part of
-            // the project and must count as declared. An explicit `-f` list
-            // (Git multi-file stacks) suppresses that discovery, but reading
-            // it anyway only risks keeping a claim, never releasing one.
-            if (relFiles.length === 1) {
+            // Compose auto-loads the hand-authored override beside a stack it
+            // discovers, so a service declared only there is part of the
+            // project and must count as declared. An explicit `-f` list,
+            // including a one-file Git spec, suppresses that discovery, so an
+            // override Compose does not load must not keep a removed
+            // service's claim alive.
+            if ((!spec || spec.files.length === 0) && relFiles.length === 1) {
                 const override = await fsSvc.getOverrideFilename(stackName);
                 if (override && !relFiles.includes(override)) relFiles = [...relFiles, override];
             }
@@ -2659,9 +2660,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             } catch {
                 return null;
             }
-            // An empty layer contributes nothing; it is not a declaration that
-            // the stack stopped owning every service.
-            if (parsed === null || parsed === undefined) continue;
+            // An empty document is what a file caught mid-rewrite looks like,
+            // so it is unknown rather than a declaration that the stack owns
+            // no services.
+            if (parsed === null || parsed === undefined) return null;
             if (!isRecord(parsed)) return null;
             // `include` pulls services in from other files this reader does
             // not follow. The parsed map is then partial, and a partial
@@ -2719,7 +2721,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 return null;
             }
             const body = await res.json() as { declared?: unknown };
-            if (!Array.isArray(body.declared) || !body.declared.every((name): name is string => typeof name === 'string')) {
+            // A Compose project declares at least one service. An empty list
+            // is not a valid answer, and treating it as authoritative would
+            // free every saved claim on a peer that answered with an empty
+            // body. The local route never returns one; this guards the peer
+            // response boundary.
+            if (
+                !Array.isArray(body.declared)
+                || body.declared.length === 0
+                || !body.declared.every((name): name is string => typeof name === 'string')
+            ) {
                 console.error(`[MeshService] inspectDeclaredServices: malformed response from node ${nodeId} (${sanitizeForLog(node.name)})`);
                 return null;
             }
@@ -2777,13 +2788,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 const svc = c.Labels?.['com.docker.compose.service'];
                 if (!svc) continue;
                 const entry = byService.get(svc) ?? { ports: new Set<number>(), running: false };
-                // Only a running container reports live port bindings. An
-                // exited container's empty port list is not evidence that the
-                // service publishes nothing, so the refresh must not treat it
-                // as authoritative.
-                if (c.State === 'running') entry.running = true;
-                for (const p of c.Ports || []) {
-                    if (p.PrivatePort) entry.ports.add(p.PrivatePort);
+                // Only a running container holds live port bindings. An exited
+                // container can still carry PrivatePort metadata, and reading
+                // it as a binding would keep a stopped service's alias
+                // published instead of suspending it.
+                if (c.State === 'running') {
+                    entry.running = true;
+                    for (const p of c.Ports || []) {
+                        if (p.PrivatePort) entry.ports.add(p.PrivatePort);
+                    }
                 }
                 byService.set(svc, entry);
             }
