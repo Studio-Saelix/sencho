@@ -10,8 +10,9 @@ name: PR Title
 # breaking marker or a Release-As override as a version transition, and that is a
 # maintainer decision: the job fails until the pull request carries the
 # version-transition-approved label. The release PR is checked against its
-# proposed manifest instead, so a patch step passes and an accidental minor or
-# major step needs the same approval.
+# proposed manifest instead: below 1.0.0 a minor step needs the same approval, a
+# major step needs it at every version, and from 1.0.0 a feature release passes
+# without it.
 #
 # Re-runs on `edited` so a title fixed after the push goes green without needing
 # a new commit, and on `labeled` and `unlabeled` so applying or removing the

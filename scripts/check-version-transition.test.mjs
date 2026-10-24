@@ -75,6 +75,20 @@ describe('findMarkers', () => {
     ])
   })
 
+  it('finds a breaking subject in any type text the parser accepts', () => {
+    for (const subject of [
+      'feat_thing!: replace the proxy',
+      'docs/api!: replace the proxy',
+      '123!: replace the proxy',
+    ]) {
+      assert.deepEqual(lines(findMarkers({ title: subject })), [`title: ${subject}`])
+    }
+  })
+
+  it('does not treat the same type text as breaking without the bang', () => {
+    assert.deepEqual(findMarkers({ title: 'feat_thing: add a row' }), [])
+  })
+
   it('finds both breaking footer spellings', () => {
     const spaced = findMarkers({ body: 'BREAKING CHANGE: the field is gone' })
     const hyphenated = findMarkers({ body: 'BREAKING-CHANGE: the field is gone' })
@@ -87,6 +101,19 @@ describe('findMarkers', () => {
     assert.deepEqual(lines(findMarkers({ body: 'breaking change: the field is gone' })), [
       'body: breaking change: the field is gone',
     ])
+  })
+
+  it('finds a breaking footer with the " #" separator', () => {
+    const spaced = findMarkers({ body: 'BREAKING CHANGE #123' })
+    const hyphenated = findMarkers({ body: 'BREAKING-CHANGE #123' })
+
+    assert.deepEqual(lines(spaced), ['body: BREAKING CHANGE #123'])
+    assert.deepEqual(lines(hyphenated), ['body: BREAKING-CHANGE #123'])
+  })
+
+  it('does not treat the words alone as a footer', () => {
+    assert.deepEqual(findMarkers({ body: 'BREAKING CHANGE policy applies.' }), [])
+    assert.deepEqual(findMarkers({ body: 'BREAKING CHANGES are listed below.' }), [])
   })
 
   it('finds a footer behind a bullet or a numbered list marker', () => {
@@ -107,6 +134,15 @@ describe('findMarkers', () => {
     ])
     assert.deepEqual(lines(findMarkers({ body: 'Release As: 1.0.0' })), [
       'body: Release As: 1.0.0',
+    ])
+  })
+
+  it('finds Release-As with the " #" separator', () => {
+    assert.deepEqual(lines(findMarkers({ body: 'Release-As #1.0.0' })), [
+      'body: Release-As #1.0.0',
+    ])
+    assert.deepEqual(lines(findMarkers({ body: 'Release As #1.0.0' })), [
+      'body: Release As #1.0.0',
     ])
   })
 
@@ -272,7 +308,41 @@ describe('checkVersionTransition markers', () => {
       pr({ commits: ['feat: add a row', '', 'Release-As: 1.0.0'] }),
     )
 
-    assert.match(failure, /commit: Release-As: 1.0.0/)
+    assert.match(failure, /commit: Release-As: 1\.0\.0/)
+  })
+
+  it('fails a " #" breaking footer with no approval', () => {
+    for (const footer of ['BREAKING CHANGE #123', 'BREAKING-CHANGE #123']) {
+      const failure = checkVersionTransition(
+        pr({ body: `The old key is gone.\n\n${footer}` }),
+      )
+
+      assert.match(failure, /version-transition-approved/)
+      assert.match(failure, new RegExp(`body: ${footer}`))
+    }
+  })
+
+  it('fails " #" footer forms in a commit with no approval', () => {
+    for (const footer of ['BREAKING CHANGE #123', 'Release-As #1.0.0']) {
+      const failure = checkVersionTransition(
+        pr({ commits: [`feat: add a row\n\n${footer}`] }),
+      )
+
+      assert.match(failure, new RegExp(`commit: ${footer}`))
+    }
+  })
+
+  it('passes the " #" footer forms with the approval label', () => {
+    assert.equal(
+      checkVersionTransition(
+        pr({
+          body: 'BREAKING CHANGE #123',
+          commits: ['feat: add a row\n\nRelease-As #1.0.0'],
+          approved: true,
+        }),
+      ),
+      null,
+    )
   })
 
   it('fails closed when the commits could not be read', () => {
@@ -339,6 +409,108 @@ describe('checkVersionTransition release PRs', () => {
 
     assert.match(failure, /1\.0\.0 from 0\.98\.0/)
     assert.match(failure, /major version transition/)
+  })
+
+  it('fails the step into 1.0 from the last minor with no approval', () => {
+    const failure = checkVersionTransition(
+      releasePr({
+        title: 'chore(main): release 1.0.0',
+        baseManifest: { '.': '0.99.0' },
+        headManifest: { '.': '1.0.0' },
+      }),
+    )
+
+    assert.match(failure, /1\.0\.0 from 0\.99\.0/)
+    assert.match(failure, /version-transition-approved/)
+  })
+
+  it('passes an ordinary feature release after 1.0', () => {
+    assert.equal(
+      checkVersionTransition(
+        releasePr({
+          title: 'chore(main): release 1.1.0',
+          baseManifest: { '.': '1.0.0' },
+          headManifest: { '.': '1.1.0' },
+        }),
+      ),
+      null,
+    )
+  })
+
+  it('fails an ordinary breaking release after 1.0', () => {
+    const failure = checkVersionTransition(
+      releasePr({
+        title: 'chore(main): release 2.0.0',
+        baseManifest: { '.': '1.4.2' },
+        headManifest: { '.': '2.0.0' },
+      }),
+    )
+
+    assert.match(failure, /2\.0\.0 from 1\.4\.2/)
+    assert.match(failure, /major version transition/)
+    assert.match(failure, /version-transition-approved/)
+  })
+
+  it('passes a breaking release after 1.0 with the approval label', () => {
+    assert.equal(
+      checkVersionTransition(
+        releasePr({
+          title: 'chore(main): release 2.0.0',
+          baseManifest: { '.': '1.4.2' },
+          headManifest: { '.': '2.0.0' },
+          approved: true,
+        }),
+      ),
+      null,
+    )
+  })
+
+  it('still fails a pre-1.0 minor step after the patch line has moved', () => {
+    const failure = checkVersionTransition(
+      releasePr({
+        title: 'chore(main): release 0.100.0',
+        baseManifest: { '.': '0.99.3' },
+        headManifest: { '.': '0.100.0' },
+      }),
+    )
+
+    assert.match(failure, /0\.100\.0 from 0\.99\.3/)
+    assert.match(failure, /version-transition-approved/)
+  })
+
+  it('treats a pre-release base on the 0.x line as pre-1.0', () => {
+    const failure = checkVersionTransition(
+      releasePr({
+        title: 'chore(main): release 1.0.0',
+        baseManifest: { '.': '0.99.0-rc.1' },
+        headManifest: { '.': '1.0.0' },
+      }),
+    )
+
+    assert.match(failure, /1\.0\.0 from 0\.99\.0-rc\.1/)
+    assert.match(failure, /version-transition-approved/)
+  })
+
+  it('treats a pre-release base on the 1.x line as post-1.0', () => {
+    assert.equal(
+      checkVersionTransition(
+        releasePr({
+          title: 'chore(main): release 1.1.0',
+          baseManifest: { '.': '1.0.0-rc.1' },
+          headManifest: { '.': '1.1.0' },
+        }),
+      ),
+      null,
+    )
+  })
+
+  it('fails closed when a manifest version cannot be parsed', () => {
+    const failure = checkVersionTransition(
+      releasePr({ baseManifest: { '.': 'not-a-version' } }),
+    )
+
+    assert.match(failure, /could not be compared: not-a-version to 0\.98\.1/)
+    assert.match(failure, /fails closed/)
   })
 
   it('fails closed when the head manifest is missing', () => {

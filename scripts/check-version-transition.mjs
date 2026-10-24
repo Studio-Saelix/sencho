@@ -17,10 +17,12 @@
  *
  * The release PR itself is the exception. release-please derives its version
  * from the commits already on main, not from markers in its own body, so for
- * that PR the check compares the base manifest with the proposed manifest and
- * fails a minor or major step unless the label is present. This also closes the
- * gap where a `BEGIN_COMMIT_OVERRIDE` added to an already-merged PR can add a
- * breaking note with no new commit to review.
+ * that PR the check compares the base manifest with the proposed manifest.
+ * While the base is below 1.0.0 a minor or major step needs the label. From
+ * 1.0.0 a feature release proposes the next minor and passes, while a major
+ * step stays an incompatible change and needs the label at every version. This
+ * also closes the gap where a `BEGIN_COMMIT_OVERRIDE` added to an already-merged
+ * PR can add a breaking note with no new commit to review.
  *
  * Usage:
  *   PR_TITLE=... PR_BODY=... PR_AUTHOR=... PR_HEAD_REF=... PR_APPROVED=...
@@ -46,14 +48,16 @@ const APPROVAL_LABEL = 'version-transition-approved'
 
 // A conventional subject with a `!` immediately before the colon. Any type and
 // any scope counts, including `feature!`, which release-please aliases to
-// `feat`.
-const BREAKING_SUBJECT = /^[A-Za-z][A-Za-z0-9-]*(?:\([^()]*\))?!:/
+// `feat`, and any type text the bundled parser accepts before the bang.
+const BREAKING_SUBJECT = /^[^\s()!:]+(?:\([^()]*\))?!:/
 
-// The two footer spellings the Conventional Commits specification allows.
-const BREAKING_FOOTER = /^BREAKING[ -]CHANGE:/i
+// The two footer spellings the Conventional Commits specification allows. A
+// footer separates its token with ":" or " #", the two forms the parser
+// release-please bundles accepts, so a valid footer cannot slip past the scan.
+const BREAKING_FOOTER = /^BREAKING[ -]CHANGE(?::| #)/i
 
 // release-please's exact-version override note.
-const RELEASE_AS = /^Release[- ]As:/i
+const RELEASE_AS = /^Release[- ]As(?::| #)/i
 
 // One leading list marker, so a bullet cannot hide a footer from the scan.
 const LIST_MARKER = /^(?:[-*]\s*|\d+\.\s*)/
@@ -172,8 +176,8 @@ function markerFailure(markers) {
     'release-please reads these markers as a minor bump, a major bump, or an',
     'exact version:',
     '  a conventional subject with "!" before the colon, such as feat!: or fix(x)!:',
-    '  a BREAKING CHANGE: or BREAKING-CHANGE: footer',
-    '  a Release-As: or Release As: override',
+    '  a BREAKING CHANGE or BREAKING-CHANGE footer, separated by ":" or " #"',
+    '  a Release-As or Release As override, separated by ":" or " #"',
     '',
     'For a compatible change, reword the title, the body, and the commits so none',
     'of them carries a marker. If this change really is a version transition, a',
@@ -186,8 +190,10 @@ function releaseTransitionFailure(baseVersion, headVersion, transition) {
     `This release pull request proposes ${headVersion} from ${baseVersion}, a`,
     `${transition} version transition, and no maintainer has approved it.`,
     '',
-    'Compatible changes stay on the patch line. If the transition is intended, a',
-    `maintainer applies the ${APPROVAL_LABEL} label to this pull request.`,
+    'A version transition is a maintainer decision: below 1.0.0 a compatible',
+    'change stays on the patch line, and an incompatible change moves the major',
+    'digit at any version. If the transition is intended, a maintainer applies',
+    `the ${APPROVAL_LABEL} label to this pull request.`,
   ].join('\n')
 }
 
@@ -198,8 +204,21 @@ const MANIFEST_FAILURE = [
 ].join('\n')
 
 /**
- * The release PR decision: a patch step passes, and a minor or major step needs
- * the approval label. An unreadable manifest fails closed.
+ * True below 1.0.0, where a compatible change ships as a patch, so moving the
+ * minor digit is a maintainer decision. From 1.0.0 a feature release proposes
+ * the next minor and passes.
+ */
+function isPreMajor(version) {
+  const parsed = parseVersion(version)
+  return parsed !== null && parsed.major === 0
+}
+
+/**
+ * The release PR decision. Below 1.0.0 the release line is patch-only, so a
+ * minor step needs the approval label. A major step is an incompatible change
+ * and needs it at every version, including the step into 1.0.0. From 1.0.0 a
+ * feature release proposes the next minor and passes. An unreadable manifest
+ * fails closed.
  */
 function checkReleaseTransition({ approved, baseManifest, headManifest }) {
   const baseVersion = manifestVersion(baseManifest)
@@ -219,6 +238,15 @@ function checkReleaseTransition({ approved, baseManifest, headManifest }) {
   }
 
   if (transition !== 'major' && transition !== 'minor') {
+    return null
+  }
+
+  // A feature release from 1.0.0 onward is ordinary semver and passes without a
+  // label. The step into 1.0 and every later major move stays a maintainer
+  // decision, at every version.
+  const needsApproval = transition === 'major' || isPreMajor(baseVersion)
+
+  if (!needsApproval) {
     return null
   }
 
