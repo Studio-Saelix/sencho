@@ -135,6 +135,8 @@ Each release publishes two moving tags plus one immutable tag, so you can choose
 
 For production, pin to `X.Y.Z` or `X.Y` and verify the signature on every pull. For staging or development, `latest` is fine.
 
+Until 1.0, patch releases can also add features, so `X.Y` and `latest` can bring new behavior. Pin `X.Y.Z` to change versions only when you decide to.
+
 ### Integration tag (post-merge, pre-release)
 
 Every push to `main` publishes the current integration build so you can pull and smoke-test the exact code queued for the next release before it is ever tagged. This tag is GHCR-only, published to a separate package from the release image, and carries no signature, SBOM, or VEX attestation.
