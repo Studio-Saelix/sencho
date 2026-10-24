@@ -259,6 +259,7 @@
               "tutorials/set-up-sso",
               "tutorials/grant-scoped-stack-access",
               "tutorials/configure-environment-guardrails",
+              "tutorials/keep-secrets-in-git-with-sops",
               "tutorials/set-up-a-webhook",
               "tutorials/resolve-stack-drift"
             ]
