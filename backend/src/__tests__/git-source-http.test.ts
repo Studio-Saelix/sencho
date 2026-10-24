@@ -10,7 +10,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Response } from 'express';
 import { gitSourceStatus, sendGitSourceError, webhookPullStatus } from '../utils/gitSourceHttp';
-import { GitSourceError, type GitSourceErrorCode } from '../services/GitSourceService';
+import { GitSourceError, asGitSourceFailure, type GitSourceErrorCode } from '../services/GitSourceService';
+import { SopsDecryptError } from '../services/gitops/sops/decode';
 
 describe('gitSourceStatus', () => {
     it('maps AUTH_FAILED to 400, never 401', () => {
@@ -30,6 +31,10 @@ describe('gitSourceStatus', () => {
 
     it('maps SSH_HOST_KEY_FAILED to 400', () => {
         expect(gitSourceStatus('SSH_HOST_KEY_FAILED')).toBe(400);
+    });
+
+    it('maps SOPS_DECRYPT_FAILED to 400', () => {
+        expect(gitSourceStatus('SOPS_DECRYPT_FAILED')).toBe(400);
     });
 
     it('maps NETWORK_TIMEOUT to 504', () => {
@@ -68,7 +73,7 @@ describe('gitSourceStatus', () => {
             'REPO_NOT_FOUND', 'AUTH_FAILED', 'REF_NOT_FOUND', 'REF_DELETED', 'UNSUPPORTED_REF',
             'SSH_HOST_KEY_FAILED', 'FILE_NOT_FOUND', 'RATE_LIMITED', 'NETWORK_TIMEOUT', 'GIT_ERROR', 'STALE_PLAN',
             'PLAN_FINGERPRINT_REQUIRED', 'PLAN_BLOCKED', 'LEGACY_PENDING', 'PLAN_UNAVAILABLE',
-            'OPERATION_IN_FLIGHT', 'SOURCE_CLAIMED_BY_BLUEPRINT',
+            'OPERATION_IN_FLIGHT', 'SOURCE_CLAIMED_BY_BLUEPRINT', 'SOPS_DECRYPT_FAILED',
         ];
         for (const code of codes) {
             expect(typeof gitSourceStatus(code)).toBe('number');
@@ -87,6 +92,21 @@ describe('webhookPullStatus', () => {
 
     it('maps a failed pull/apply to 422, never 200', () => {
         expect(webhookPullStatus('error')).toBe(422);
+    });
+});
+
+describe('asGitSourceFailure', () => {
+    it('maps a SOPS decrypt failure to SOPS_DECRYPT_FAILED', () => {
+        const mapped = asGitSourceFailure(new SopsDecryptError('decrypt_failed', 'SOPS value authentication failed'));
+        expect(mapped).toBeInstanceOf(GitSourceError);
+        expect((mapped as GitSourceError).code).toBe('SOPS_DECRYPT_FAILED');
+    });
+
+    it('leaves other failures untouched', () => {
+        const original = new GitSourceError('GIT_ERROR', 'boom');
+        expect(asGitSourceFailure(original)).toBe(original);
+        const plain = new Error('unrelated');
+        expect(asGitSourceFailure(plain)).toBe(plain);
     });
 });
 
@@ -113,6 +133,16 @@ describe('sendGitSourceError', () => {
         sendGitSourceError(res, new Error('unrelated crash'));
         expect(res.status).toHaveBeenCalledWith(500);
         expect(res.json).toHaveBeenCalledWith({ error: 'Git source operation failed' });
+    });
+
+    it('sends 400 with code=SOPS_DECRYPT_FAILED for a decrypt failure', () => {
+        const res = mockRes();
+        sendGitSourceError(res, new SopsDecryptError('decrypt_failed', 'SOPS value authentication failed'));
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({
+            error: 'SOPS value authentication failed',
+            code: 'SOPS_DECRYPT_FAILED',
+        });
     });
 
     it('attaches plan extras on STALE_PLAN and PLAN_BLOCKED', () => {

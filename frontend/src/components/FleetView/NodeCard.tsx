@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
-    Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
+    Layers, WifiOff, AlertTriangle, Download, Loader2,
     MoreVertical, Ban, Pencil, Trash2, Info, FlaskConical,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge, badgeVariants } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ConfirmModal } from '@/components/ui/modal';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -24,7 +23,7 @@ import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes, type Node } from '@/context/NodeContext';
-import { cordonNode, uncordonNode } from '@/lib/nodesApi';
+import { NodeCordonModal } from './NodeCordonModal';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
@@ -38,10 +37,6 @@ import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, i
 export interface NodeCardProps {
     node: FleetNode;
     onNavigate: (nodeId: number, stackName: string) => void;
-    /** Switches to this node and opens its Networking page. */
-    onOpenNetworking?: (nodeId: number) => void;
-    /** Networking posture signal from computeNodeNetworkingSummary, if loaded. */
-    networkingSignal?: { exposed: boolean; unknown: boolean; drift: boolean };
     /** GitOps applications needing attention that involve this node, if loaded. */
     gitopsAttention?: number;
     labelMap?: Record<string, StackLabel[]>;
@@ -73,13 +68,11 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
     const [cordonModalOpen, setCordonModalOpen] = useState(false);
-    const [cordonReason, setCordonReason] = useState('');
-    const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
@@ -103,6 +96,7 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
+    const isPilot = (registryNode?.mode ?? node.mode) === 'pilot_agent';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
@@ -110,31 +104,6 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const memUsed = getNodeMemUsed(node);
     const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
-
-    const openCordonModal = () => {
-        setCordonReason('');
-        setCordonModalOpen(true);
-    };
-
-    const handleCordonConfirm = async () => {
-        setCordonSubmitting(true);
-        try {
-            if (node.cordoned) {
-                await uncordonNode(node.id);
-                toast.success(`Uncordoned ${node.name}`);
-            } else {
-                await cordonNode(node.id, cordonReason.trim() || null);
-                toast.success(`Cordoned ${node.name}`);
-            }
-            setCordonModalOpen(false);
-            onCordonChange?.();
-        } catch (error) {
-            const message = error instanceof Error ? error.message : 'Failed to update cordon state';
-            toast.error(message);
-        } finally {
-            setCordonSubmitting(false);
-        }
-    };
 
     const handleExpand = async () => {
         const next = !expanded;
@@ -167,9 +136,16 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
         <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses} ${isOnline ? '' : 'opacity-60'}`}>
             {/* Card Header */}
             <div className="relative p-4 pb-3">
-                {isLocal && (
+                {isLocal ? (
                     <span className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
                         ★ Local
+                    </span>
+                ) : (
+                    <span
+                        className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground"
+                        title={isPilot ? 'Pilot agent: this node connects out to the control instance over a tunnel' : 'Proxy: the control instance reaches this node over its API'}
+                    >
+                        {isPilot ? 'Pilot' : 'Proxy'}
                     </span>
                 )}
                 <div className="absolute top-2 right-2">
@@ -207,7 +183,7 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                 </DropdownMenuItem>
                             )}
                             {canCordon && (
-                                <DropdownMenuItem onSelect={openCordonModal}>
+                                <DropdownMenuItem onSelect={() => setCordonModalOpen(true)}>
                                     <Ban className="w-3.5 h-3.5 mr-2" />
                                     {node.cordoned ? 'Uncordon node' : 'Cordon node'}
                                 </DropdownMenuItem>
@@ -224,16 +200,11 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                         <div className="min-w-0">
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                <Badge variant={isOnline ? 'default' : 'secondary'} className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                    {isOnline ? (
-                                        <><Wifi className="w-2.5 h-2.5 mr-0.5" /> Online</>
-                                    ) : (
-                                        <><WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline</>
-                                    )}
-                                </Badge>
-                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
-                                    {node.type}
-                                </Badge>
+                                {!isOnline && (
+                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                        <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
+                                    </Badge>
+                                )}
                                 {formattedVersion && (
                                     <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono tabular-nums shrink-0">
                                         {formattedVersion}
@@ -277,17 +248,6 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
-                                    </Badge>
-                                )}
-                                {onOpenNetworking && networkingSignal && (networkingSignal.exposed || networkingSignal.unknown || networkingSignal.drift) && (
-                                    <Badge
-                                        variant="outline"
-                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
-                                        onClick={(event) => { event.stopPropagation(); onOpenNetworking(node.id); }}
-                                        title="Open this node's Networking page"
-                                    >
-                                        Networking ·
-                                        {networkingSignal.drift ? ' drift' : networkingSignal.exposed ? ' exposed' : ' unknown exposure'}
                                     </Badge>
                                 )}
                                 {gitopsAttention !== undefined && gitopsAttention > 0 && (
@@ -409,38 +369,12 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                 )}
             </div>
 
-            <ConfirmModal
+            <NodeCordonModal
+                node={node}
                 open={cordonModalOpen}
-                onOpenChange={(open) => {
-                    if (!cordonSubmitting) setCordonModalOpen(open);
-                }}
-                kicker="Federation"
-                title={node.cordoned ? `Uncordon ${node.name}` : `Cordon ${node.name}`}
-                description={node.cordoned
-                    ? 'Re-enable this node for new blueprint placements. Existing deployments are unchanged.'
-                    : 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.'}
-                confirmLabel={node.cordoned ? 'Uncordon node' : 'Cordon node'}
-                confirming={cordonSubmitting}
-                onConfirm={handleCordonConfirm}
-            >
-                {!node.cordoned && (
-                    <div className="space-y-1.5">
-                        <label htmlFor={`cordon-reason-${node.id}`} className="text-xs font-medium text-muted-foreground">
-                            Reason (optional)
-                        </label>
-                        <input
-                            id={`cordon-reason-${node.id}`}
-                            type="text"
-                            maxLength={256}
-                            value={cordonReason}
-                            onChange={(e) => setCordonReason(e.target.value)}
-                            placeholder="e.g. draining for maintenance"
-                            className="w-full h-8 px-2 text-sm rounded-md border border-input bg-background"
-                            disabled={cordonSubmitting}
-                        />
-                    </div>
-                )}
-            </ConfirmModal>
+                onOpenChange={setCordonModalOpen}
+                onChanged={onCordonChange}
+            />
 
             {/* Expandable Stack List with Container Drill-Down */}
             {isOnline && (

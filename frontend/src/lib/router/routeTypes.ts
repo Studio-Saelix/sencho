@@ -53,7 +53,7 @@ export interface RouteState {
 
 /** Result of loading a stack for URL hydration (includes env inventory snapshot). */
 export type RouteStackLoadResult =
-  | { ok: false }
+  | { ok: false; error?: string }
   | { ok: true; envFiles: string[] };
 
 export interface ParsedRoute {

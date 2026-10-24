@@ -9,8 +9,8 @@
 const fs = require('fs');
 const { loadClaimSet, MDX_PATH } = require('./loadClaimSet');
 
-const MARKER_BEGIN = '<!-- GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) -->';
-const MARKER_END = '<!-- GENERATED:END -->';
+const MARKER_BEGIN = '{/* GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) */}';
+const MARKER_END = '{/* GENERATED:END */}';
 
 const TRANSPORT_LABELS = { https: 'HTTPS', ssh: 'SSH' };
 const TRANSPORT_NOTES = {

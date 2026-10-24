@@ -533,9 +533,13 @@ export class SSOService {
         if (provider === 'oidc_github') {
             // GitHub is not a standard OIDC provider. Construct Configuration
             // directly from known endpoints instead of going through discovery.
+            // The issuer must equal the RFC 9207 `iss` GitHub returns on the
+            // authorization response (its published metadata names
+            // https://github.com/login/oauth); a differing `iss` is rejected
+            // as a mix-up attempt.
             return new Configuration(
                 {
-                    issuer: 'https://github.com',
+                    issuer: 'https://github.com/login/oauth',
                     authorization_endpoint: 'https://github.com/login/oauth/authorize',
                     token_endpoint: 'https://github.com/login/oauth/access_token',
                     userinfo_endpoint: 'https://api.github.com/user',

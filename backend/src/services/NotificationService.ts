@@ -39,6 +39,7 @@ export type NotificationCategory =
     | 'blueprint_deployment_failed'
     | 'blueprint_drift_detected'
     | 'blueprint_drift_correction_failed'
+    | 'blueprint_drift_repair_held'
     // Stack drift ledger transitions. Written to history only (the Activity
     // timeline), never dispatched to channels, so they are deliberately excluded
     // from ALL_NOTIFICATION_CATEGORIES (the routable-category whitelist) below.
@@ -77,6 +78,9 @@ export type NotificationCategory =
     | 'gitops_rollback_completed'
     | 'gitops_rollback_partial_failed'
     | 'gitops_stateful_confirmation'
+    | 'gitops_health_rollout_policy_set'
+    | 'gitops_placement_policy_changed'
+    | 'gitops_rollout_authorization_policy_changed'
     | 'node_update_available'
     | 'dev_build_update_available'
     | 'system';
@@ -87,6 +91,7 @@ export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
     'autoheal_triggered', 'monitor_alert', 'scan_finding',
     'blueprint_deployed', 'blueprint_deployment_failed',
     'blueprint_drift_detected', 'blueprint_drift_correction_failed',
+    'blueprint_drift_repair_held',
     'node_update_available', 'dev_build_update_available', 'system',
 ];
 
@@ -101,7 +106,8 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     'gitops_source_accepted', 'gitops_placement_approved', 'gitops_rollout_authorized',
     'gitops_rollout_paused', 'gitops_rollout_resumed', 'gitops_rollout_superseded',
     'gitops_rollback_started', 'gitops_rollback_completed', 'gitops_rollback_partial_failed',
-    'gitops_stateful_confirmation',
+    'gitops_stateful_confirmation', 'gitops_health_rollout_policy_set',
+    'gitops_placement_policy_changed', 'gitops_rollout_authorization_policy_changed',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

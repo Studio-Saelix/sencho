@@ -9,7 +9,7 @@
  * owns generation content directories.
  */
 import { createHash, randomUUID } from 'crypto';
-import { promises as fsPromises } from 'fs';
+import { constants as fsConstants, promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
 import { FileSystemService } from './FileSystemService';
@@ -37,15 +37,48 @@ const PRE_RESTORE_BLOBS = 'blobs';
 
 interface PreRestoreIndexEntry {
   relativePath: string;
-  state: 'present' | 'absent';
+  state: 'present' | 'absent' | 'link';
   blobId?: string;
   mode?: number | null;
   encrypted?: boolean;
+  /**
+   * Raw readlink value, for state 'link' (a managed path only unlinked, so the
+   * link is all there is to put back) and for a 'present' entry whose path was
+   * a link the write followed, so a revert can put that link back too.
+   */
+  linkTarget?: string;
 }
 
 interface PreRestoreIndex {
   version: 1;
   entries: PreRestoreIndexEntry[];
+}
+
+/**
+ * The lexical stack root, and the physical one a realpath'd file is compared
+ * against. Every stage that reads or writes generation content resolves the
+ * live file physically, so they all need the real root: a symlinked COMPOSE_DIR
+ * keeps each file exactly where its name claims while the physical path differs
+ * from the lexical root. A stack directory that links elsewhere stays refused,
+ * because the real root is the compose root plus the stack name rather than the
+ * link target.
+ */
+async function resolveStackRoots(nodeId: number, stackName: string): Promise<{ lexical: string; real: string }> {
+  const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+  const lexical = path.resolve(composeBase, stackName);
+  if (!lexical.startsWith(composeBase + path.sep)) {
+    throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
+  }
+  try {
+    return { lexical, real: path.join(await fsPromises.realpath(composeBase), stackName) };
+  } catch (e) {
+    // A compose root that is not there holds nothing to resolve through. Startup
+    // reconciliation runs this against a directory an operator may have removed
+    // since the restore was interrupted, and must answer "missing" rather than
+    // throw before it can look.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    return { lexical, real: lexical };
+  }
 }
 
 function getDataDir(): string {
@@ -78,6 +111,27 @@ async function mkdirPrivate(dir: string): Promise<void> {
 async function writePrivate(target: string, data: string | Buffer): Promise<void> {
   await fsPromises.writeFile(target, data);
   await chmodPrivate(target, 0o600);
+}
+
+/**
+ * The bytes and permission bits of one snapshot source, read through the
+ * descriptor the caller already opened after its containment check. Stat and
+ * read share that descriptor, so a path swapped between the two calls cannot
+ * give the metadata of one file and the bytes of another. A non-regular file is
+ * refused before any read, so a device or a fifo can never be read as content.
+ */
+async function readSnapshotBytes(
+  fh: import('fs/promises').FileHandle,
+  rel: string,
+): Promise<{ bytes: Buffer; mode: number }> {
+  const st = await fh.stat();
+  if (!st.isFile()) {
+    throw Object.assign(
+      new Error(`Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`),
+      { code: 'DIRECTORY_COLLISION' },
+    );
+  }
+  return { bytes: await fh.readFile(), mode: st.mode & 0o777 };
 }
 
 function assertSafeGenerationId(generationId: string): void {
@@ -187,11 +241,7 @@ export class RollbackGenerationStore {
       });
     }
 
-    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
-    const stackRoot = path.resolve(composeBase, stackName);
-    if (!stackRoot.startsWith(composeBase + path.sep)) {
-      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
-    }
+    const { lexical: stackRoot, real: realStackRoot } = await resolveStackRoots(nodeId, stackName);
 
     const stagingName = `staging-${randomUUID()}`;
     const stagingDir = path.resolve(gensResolved, stagingName);
@@ -248,7 +298,7 @@ export class RollbackGenerationStore {
             { cause: e },
           );
         }
-        if (!realPath.startsWith(stackRoot + path.sep)) {
+        if (!realPath.startsWith(realStackRoot + path.sep)) {
           throw Object.assign(
             new Error(`Inventory path escapes stack root via symlink: ${relativePath}`),
             { code: 'SYMLINK_ESCAPE' },
@@ -355,6 +405,11 @@ export class RollbackGenerationStore {
         operationKind,
         entries,
         managedRelativePaths,
+        uncapturedRelativePaths: [...inventory.uncapturedRelativePaths],
+        uncapturedInputs: [...inventory.uncapturedInputs],
+        ...(inventory.dynamicApplicationDataSources.length > 0
+          ? { dynamicApplicationDataSources: [...inventory.dynamicApplicationDataSources] }
+          : {}),
         invocation: inventory.invocation,
         git: inventory.git,
         priorRecords: {
@@ -519,7 +574,40 @@ export class RollbackGenerationStore {
    * content checksums before any live mutation. Writes present entries;
    * deletes live paths that are in managedRelativePaths or liveManagedPaths
    * but not present in the generation (tombstones and post-capture additions
-   * inside the managed set). Paths outside both sets are left untouched.
+   * inside the managed set). Paths outside both sets are left untouched, and
+   * so are the manifest's uncapturedRelativePaths even when a caller lists them.
+   *
+   * A generation that recorded any uncaptured input deletes nothing from the
+   * caller's live discovery. An uncaptured input can name a file the generation
+   * never held, at any path, and its name is no proof of ownership: a shared
+   * include can pull in a local override, and an interpolated include can name a
+   * conventional compose file, so deleting a live file because its basename
+   * looks like a Compose layer can remove a required dependency. Recovery stays
+   * exact without that deletion because the generation pins the layers it
+   * captured, and an explicit `-f` list suppresses both discovery and the
+   * implicit override merge. A generation with no uncaptured input may still
+   * delete the caller's live discovery set, because it holds every input its
+   * project declared.
+   *
+   * The same rule applies, more broadly, to application data whose path holds a
+   * Compose variable. The variable may resolve to a directory name or the whole
+   * path, so neither the recorded managed paths nor the caller's live discovery
+   * can establish ownership: a file there may be the operator's data. Such a
+   * generation writes its held files and deletes nothing. `liveUnresolved` lets
+   * a caller protect a generation captured before it recorded its dynamic
+   * sources, when the live project still shows one.
+   *
+   * `liveOwnershipUnclear` is the live counterpart of the dynamic rule: the
+   * live project selected a COMPOSE_FILE layer or an include/extends source
+   * whose declarations the inventory never parsed. That source can name any
+   * path, including one the generation recorded as managed or tombstoned, so no
+   * deletion is safe. The generation still writes what it holds.
+   *
+   * `liveProtectedPaths` are paths the live inventory proved are application
+   * data or build inputs. They are never cleanup candidates from any source,
+   * including a manifest tombstone or a managed path that shares the name,
+   * because the live project is using the path for data. A present entry at the
+   * path is still written back.
    *
    * Durability: copies the affected live paths into pre-restore/ and writes
    * restore-intent.json (including Git DB + manifesto preimage) before mutation.
@@ -532,6 +620,10 @@ export class RollbackGenerationStore {
     generationId: string,
     liveManagedPaths: string[],
     transactionMeta?: RollbackRestoreTransactionMeta,
+    liveUnresolvedApplicationData = false,
+    liveOwnershipUnclear = false,
+    liveProtectedPaths: readonly string[] = [],
+    liveProtectedPrefixes: readonly string[] = [],
   ): Promise<RollbackGenerationManifest> {
     assertSafeStackName(stackName);
     assertSafeGenerationId(generationId);
@@ -545,18 +637,53 @@ export class RollbackGenerationStore {
       if (entry.state === 'present') presentByKey.set(posixRel(entry.relativePath), entry);
     }
 
+    // Paths left out at capture (links that escaped the stack, dangled, or
+    // pointed at a non-file) were never part of the generation. A real file
+    // there now is the operator's, so it is not stale managed content to remove,
+    // even when the caller's live discovery lists it.
+    const uncapturedKeys = new Set((manifest.uncapturedRelativePaths ?? []).map(posixRel));
+    const protectedKeys = new Set(liveProtectedPaths.map(posixRel));
+    const protectedPrefixes = [...new Set(liveProtectedPrefixes.map(posixRel))]
+      .filter((prefix) => prefix.length > 0 && prefix !== '.' && prefix !== '..' && !prefix.startsWith('../'));
     const deleteRelByKey = new Map<string, string>();
     const considerDelete = (relRaw: string): void => {
       const rel = posixRel(relRaw);
-      if (presentByKey.has(rel) || deleteRelByKey.has(rel)) return;
+      if (
+        presentByKey.has(rel)
+        || protectedKeys.has(rel)
+        || protectedPrefixes.some((prefix) => rel.startsWith(prefix + '/'))
+        || deleteRelByKey.has(rel)
+        || uncapturedKeys.has(rel)
+      ) return;
       deleteRelByKey.set(rel, rel);
     };
 
-    for (const rel of manifest.managedRelativePaths) considerDelete(rel);
-    for (const entry of manifest.entries) {
-      if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
+    // An application-data source with a variable in its path cannot be tied to
+    // a live path: a literal suffix is no proof when the variable can contain
+    // directories or name the whole source, and the value can change between
+    // capture and restore. Every recorded path may therefore be that data, so
+    // this generation deletes nothing and only writes what it holds.
+    const unresolvedApplicationData = (manifest.dynamicApplicationDataSources ?? []).length > 0
+      || liveUnresolvedApplicationData
+      || liveOwnershipUnclear;
+
+    if (!unresolvedApplicationData) {
+      for (const rel of manifest.managedRelativePaths) considerDelete(rel);
+      for (const entry of manifest.entries) {
+        if (entry.state === 'tombstoned') considerDelete(entry.relativePath);
+      }
+      // A partial generation cannot say what its uncaptured inputs resolved to,
+      // so a file that appeared since capture may be one of them: an env file a
+      // ${VAR} path now names, or a local override an external include extends
+      // from. A Compose basename is no proof of ownership, so a generation that
+      // recorded any uncaptured input keeps every unrecorded live file. Recovery
+      // still runs the captured project: the generation pins the layers it
+      // selected, and an explicit -f list suppresses Compose's own discovery and
+      // the implicit override merge.
+      if ((manifest.uncapturedInputs ?? []).length === 0) {
+        for (const rel of liveManagedPaths) considerDelete(rel);
+      }
     }
-    for (const rel of liveManagedPaths) considerDelete(rel);
 
     const restores: Array<{
       relativePath: string;
@@ -573,17 +700,30 @@ export class RollbackGenerationStore {
       });
     }
 
-    const affectedPaths = [
-      ...restores.map((r) => r.relativePath),
-      ...deleteRelByKey.values(),
-    ];
+    const restorablePaths = restores.map((r) => r.relativePath);
+    const affectedPaths = [...restorablePaths, ...deleteRelByKey.values()];
 
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
 
     // Refuse directory-at-file-path collisions before any snapshot or mutation.
-    for (const rel of affectedPaths) {
+    // A path being written is followed, because the write itself follows it and
+    // has to stay inside the stack. A path only being deleted is observed on the
+    // leaf, so a managed path that has become a link is judged as a link: the
+    // delete removes the link and never reaches a target outside the stack.
+    for (const rel of restorablePaths) {
       const kind = await fsSvc.pathKind(stackName, rel, scope);
+      if (kind === 'directory') {
+        throw Object.assign(
+          new Error(
+            `Managed path "${rel}" is a directory; refusing restore that would replace or delete it as a file`,
+          ),
+          { code: 'DIRECTORY_COLLISION' },
+        );
+      }
+    }
+    for (const rel of deleteRelByKey.values()) {
+      const kind = await fsSvc.observeStackPath(stackName, rel, scope);
       if (kind === 'directory') {
         throw Object.assign(
           new Error(
@@ -602,6 +742,7 @@ export class RollbackGenerationStore {
       stackName,
       genResolved,
       affectedPaths,
+      new Set(restorablePaths.map(posixRel)),
       sensitivityByPath,
     );
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
@@ -650,7 +791,7 @@ export class RollbackGenerationStore {
 
       for (const rel of deleteRelByKey.values()) {
         try {
-          const kind = await fsSvc.pathKind(stackName, rel, scope);
+          const kind = await fsSvc.observeStackPath(stackName, rel, scope);
           if (kind === null) continue;
           if (kind === 'directory') {
             throw Object.assign(
@@ -678,6 +819,12 @@ export class RollbackGenerationStore {
           '[RollbackGenerationStore] Failed to revert interrupted restore:',
           (revertErr as Error).message,
         );
+        // The live files may now be a mix of the generation and the
+        // pre-restore snapshot. Carry that fact with the original failure so
+        // the caller cannot classify it as a refusal that moved nothing.
+        if (typeof e === 'object' && e !== null) {
+          Object.assign(e, { restoreRevertFailed: true });
+        }
       }
       throw e;
     }
@@ -784,16 +931,100 @@ export class RollbackGenerationStore {
     }
   }
 
+  private static async recreateManagedSymlink(
+    nodeId: number,
+    stackName: string,
+    rel: string,
+    linkTarget: string,
+  ): Promise<void> {
+    // The lexical check cannot see that a parent directory was replaced by a
+    // link since the snapshot, which would put the new link outside the stack,
+    // and a check that ran after mkdir would already have written through it.
+    const { lexical: stackRoot } = await this.assertManagedParentContained(nodeId, stackName, rel);
+    const linkPath = path.resolve(stackRoot, posixRel(rel));
+    // Inline barrier at the symlink sink: the path being created is contained
+    // against the stack root. linkTarget is the operator's own value and is
+    // intentionally not resolved, because restoring a link means restoring the
+    // link, and nothing is written through it.
+    if (!linkPath.startsWith(stackRoot + path.sep)) {
+      throw Object.assign(new Error('Path escapes stack root'), { code: 'INVALID_PATH' });
+    }
+    await fsPromises.mkdir(path.dirname(linkPath), { recursive: true });
+    await fsPromises.symlink(linkTarget, linkPath);
+  }
+
+  /**
+   * Put a managed path back to the link the snapshot recorded, when it no longer
+   * is that link. A missing leaf is created; a link that now points elsewhere is
+   * unlinked (removing a link never touches its target) and recreated. A regular
+   * file or directory is left in place: the caller still writes the preimage
+   * over it, as it does for any managed path that is no longer a link, and
+   * removing the operator's own entry is not a revert's job.
+   */
+  private static async restoreManagedLinkShape(
+    nodeId: number,
+    stackName: string,
+    rel: string,
+    linkTarget: string,
+  ): Promise<void> {
+    // Containment first: a parent directory replaced by a link out of the stack
+    // would otherwise be unlinked or written through before the check below ran.
+    const roots = await this.assertManagedParentContained(nodeId, stackName, rel);
+    const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
+    if (liveKind === 'symlink') {
+      const linkPath = path.resolve(roots.lexical, posixRel(rel));
+      if (await fsPromises.readlink(linkPath) === linkTarget) return;
+      await fsPromises.unlink(linkPath);
+    } else if (liveKind !== 'missing') {
+      return;
+    }
+    await this.recreateManagedSymlink(nodeId, stackName, rel, linkTarget);
+  }
+
+  /**
+   * Confirm that every existing directory above `rel` still resolves inside the
+   * real stack root, before anything is created or unlinked under it. Resolving
+   * the nearest existing ancestor is what catches a parent directory that was
+   * replaced by a link out of the stack while the process was down; a check that
+   * ran only after `mkdir` would already have written through it.
+   */
+  private static async assertManagedParentContained(
+    nodeId: number,
+    stackName: string,
+    rel: string,
+  ): Promise<{ lexical: string; real: string }> {
+    const roots = await resolveStackRoots(nodeId, stackName);
+    const target = path.resolve(roots.lexical, posixRel(rel));
+    if (!target.startsWith(roots.lexical + path.sep)) {
+      throw Object.assign(new Error('Path escapes stack root'), { code: 'INVALID_PATH' });
+    }
+    let existing = path.dirname(target);
+    for (;;) {
+      let real: string;
+      try {
+        real = await fsPromises.realpath(existing);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        const next = path.dirname(existing);
+        if (next === existing) {
+          throw Object.assign(new Error('Path escapes stack root'), { code: 'SYMLINK_ESCAPE' });
+        }
+        existing = next;
+        continue;
+      }
+      if (real !== roots.real && !real.startsWith(roots.real + path.sep)) {
+        throw Object.assign(new Error('Symlink escapes stack root'), { code: 'SYMLINK_ESCAPE' });
+      }
+      return roots;
+    }
+  }
+
   private static async lstatManagedPath(
     nodeId: number,
     stackName: string,
     rel: string,
   ): Promise<'missing' | 'file' | 'directory' | 'symlink' | 'other'> {
-    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
-    const stackRoot = path.resolve(composeBase, stackName);
-    if (!stackRoot.startsWith(composeBase + path.sep)) {
-      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
-    }
+    const { lexical: stackRoot } = await resolveStackRoots(nodeId, stackName);
     const candidate = path.resolve(stackRoot, posixRel(rel));
     if (!candidate.startsWith(stackRoot + path.sep)) {
       throw Object.assign(new Error('Path escapes stack root'), { code: 'INVALID_PATH' });
@@ -815,6 +1046,7 @@ export class RollbackGenerationStore {
     stackName: string,
     genResolved: string,
     relativePaths: string[],
+    writtenPaths: ReadonlySet<string>,
     sensitivityByPath: Map<string, InputSensitivity>,
   ): Promise<void> {
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
@@ -829,11 +1061,7 @@ export class RollbackGenerationStore {
     }
     await mkdirPrivate(blobsRoot);
 
-    const composeBase = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
-    const stackRoot = path.resolve(composeBase, stackName);
-    if (!stackRoot.startsWith(composeBase + path.sep)) {
-      throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
-    }
+    const { lexical: stackRoot, real: realStackRoot } = await resolveStackRoots(nodeId, stackName);
 
     const seen = new Set<string>();
     const index: PreRestoreIndex = { version: 1, entries: [] };
@@ -846,41 +1074,53 @@ export class RollbackGenerationStore {
       const srcCandidate = path.resolve(stackRoot, rel);
       if (!srcCandidate.startsWith(stackRoot + path.sep)) continue;
       try {
+        const leafStat = await fsPromises.lstat(srcCandidate);
+        const leafIsLink = leafStat.isSymbolicLink();
+        // A path restore only deletes is unlinked as a leaf, so the link is the
+        // whole preimage. A path restore writes is followed by that write, so
+        // what the write mutates is the target's bytes and the target is the
+        // preimage: snapshotting only the link would lose them, leaving a
+        // failed restore with an untracked mutation and nothing to revert to.
+        const linkTarget = leafIsLink ? await fsPromises.readlink(srcCandidate) : undefined;
+        if (leafIsLink && !writtenPaths.has(rel)) {
+          index.entries.push({ relativePath: rel, state: 'link', linkTarget });
+          continue;
+        }
         const realSrc = await fsPromises.realpath(srcCandidate);
-        if (!realSrc.startsWith(stackRoot + path.sep)) continue;
-        const st = await fsPromises.lstat(realSrc);
-        if (!st.isFile()) {
-          throw Object.assign(
-            new Error(
-              `Managed path "${rel}" is not a regular file; refusing to snapshot it as absent`,
-            ),
-            { code: 'DIRECTORY_COLLISION' },
-          );
-        }
-        const realForRead = await fsPromises.realpath(srcCandidate);
-        if (!realForRead.startsWith(stackRoot + path.sep)) continue;
-        const bytes = await fsPromises.readFile(realForRead);
-        const blobId = randomUUID();
-        const blobPath = path.resolve(blobsRoot, blobId);
-        if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
-        const encrypted = shouldEncryptPreRestore(sensitivity) && bytes.length > 0;
-        if (encrypted) {
-          const crypto = CryptoService.getInstance();
-          const cipher = crypto.encrypt(bytes.toString('base64'));
-          if (!crypto.isEncrypted(cipher)) {
-            throw new Error(`Could not encrypt pre-restore content for ${rel}`);
+        if (!realSrc.startsWith(realStackRoot + path.sep)) continue;
+        // Open without blocking, then check the descriptor: a fifo, device, or
+        // directory is refused there, and a blocking open of a fifo waits for a
+        // writer and never reaches that check. O_NONBLOCK keeps the open from
+        // waiting when a fifo is swapped in after the path was resolved, and
+        // the descriptor the check reads is the one the bytes come from.
+        const fh = await fsPromises.open(realSrc, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+        try {
+          const { bytes, mode } = await readSnapshotBytes(fh, rel);
+          const blobId = randomUUID();
+          const blobPath = path.resolve(blobsRoot, blobId);
+          if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
+          const encrypted = shouldEncryptPreRestore(sensitivity) && bytes.length > 0;
+          if (encrypted) {
+            const crypto = CryptoService.getInstance();
+            const cipher = crypto.encrypt(bytes.toString('base64'));
+            if (!crypto.isEncrypted(cipher)) {
+              throw new Error(`Could not encrypt pre-restore content for ${rel}`);
+            }
+            await writePrivate(blobPath, cipher);
+          } else {
+            await writePrivate(blobPath, bytes);
           }
-          await writePrivate(blobPath, cipher);
-        } else {
-          await writePrivate(blobPath, bytes);
+          index.entries.push({
+            relativePath: rel,
+            state: 'present',
+            blobId,
+            mode,
+            encrypted,
+            linkTarget,
+          });
+        } finally {
+          await fh.close();
         }
-        index.entries.push({
-          relativePath: rel,
-          state: 'present',
-          blobId,
-          mode: st.mode & 0o777,
-          encrypted,
-        });
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
           index.entries.push({ relativePath: rel, state: 'absent' });
@@ -942,6 +1182,22 @@ export class RollbackGenerationStore {
     for (const entry of index.entries) {
       const rel = posixRel(entry.relativePath);
       if (!rel) continue;
+      if (entry.state === 'link') {
+        // Recreate the link exactly as it was. The target is deliberately not
+        // resolved or checked: it is the operator's own, may sit outside the
+        // stack, and restore never wrote through it.
+        if (typeof entry.linkTarget !== 'string' || entry.linkTarget === '') {
+          throw Object.assign(
+            new Error(`Pre-restore link entry for "${rel}" has no target`),
+            { code: 'PRE_RESTORE_INDEX_INVALID' },
+          );
+        }
+        const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
+        if (liveKind === 'missing') {
+          await this.recreateManagedSymlink(nodeId, stackName, rel, entry.linkTarget);
+        }
+        continue;
+      }
       if (entry.state === 'absent') {
         const liveKind = await this.lstatManagedPath(nodeId, stackName, rel);
         if (liveKind === 'missing') continue;
@@ -983,21 +1239,44 @@ export class RollbackGenerationStore {
           );
         }
       }
-      await fsSvc.writeStackFile(stackName, rel, buf);
-      if (typeof entry.mode === 'number' && process.platform !== 'win32') {
-        try {
-          await fsSvc.chmodStackPath(stackName, rel, entry.mode & 0o777, scope);
-        } catch (e) {
-          throw Object.assign(
-            new Error(
-              `Could not restore pre-restore permissions on "${rel}": ${(e as Error).message}`,
-            ),
-            { code: 'RESTORE_CHMOD_FAILED', cause: e },
-          );
-        }
+      // The snapshot recorded this path as a link, so the write below has to go
+      // through it to reach the target whose bytes it restores. Put that link
+      // back first: if it is gone, or now points somewhere else, writing would
+      // drop the bytes in a plain file or through the operator's replacement
+      // link, and leave the target the restore actually changed untouched.
+      if (typeof entry.linkTarget === 'string' && entry.linkTarget !== '') {
+        await this.restoreManagedLinkShape(nodeId, stackName, rel, entry.linkTarget);
       }
+      // The write follows an in-stack link, so `entry.mode` is the target's mode
+      // and applying it to the staged file restores the target's bytes and
+      // permissions in one atomic promotion. A permission failure therefore
+      // leaves the preimage untouched and this revert throwing, which keeps the
+      // snapshot and restore-intent.json for a retry instead of reporting a
+      // compensation that only put the bytes back.
+      const mode = this.preRestoreWriteMode(rel, entry.mode);
+      await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
+  }
+
+  /**
+   * The mode to reapply when reverting one present entry, or undefined when the
+   * snapshot recorded none (or the platform has no POSIX modes). A malformed
+   * value is refused rather than masked, so a corrupt index cannot quietly
+   * widen the permissions of the file it restores.
+   */
+  private static preRestoreWriteMode(
+    rel: string,
+    recorded: number | null | undefined,
+  ): number | undefined {
+    if (recorded === undefined || recorded === null) return undefined;
+    if (!Number.isInteger(recorded) || recorded < 0 || recorded > 0o777) {
+      throw Object.assign(
+        new Error(`Pre-restore entry for "${rel}" has invalid permission bits`),
+        { code: 'PRE_RESTORE_INDEX_INVALID' },
+      );
+    }
+    return process.platform === 'win32' ? undefined : recorded;
   }
 
   /** Resolve a pre-restore blob id under blobsRoot; rejects traversal. */
@@ -1091,6 +1370,15 @@ export class RollbackGenerationStore {
     }
     if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.managedRelativePaths)) {
       throw new Error('Generation manifest is missing entries or managedRelativePaths');
+    }
+    for (const field of [
+      manifest.uncapturedRelativePaths,
+      manifest.uncapturedInputs,
+      manifest.dynamicApplicationDataSources,
+    ]) {
+      if (field !== undefined && !(Array.isArray(field) && field.every((v) => typeof v === 'string'))) {
+        throw new Error('Generation manifest has a malformed uncaptured list');
+      }
     }
     await this.verifyManifestContent(genResolved, manifest);
     return manifest;

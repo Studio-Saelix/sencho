@@ -74,6 +74,14 @@ interface PendingRow {
   id: string;
   stage: GitOpsHistoryStage;
   outcome: HistoryOutcome;
+  /**
+   * The transition's `after` record, carried so the drain reaches the same
+   * outbox decision the insert made. A stage whose notification depends on what
+   * the transition recorded cannot be decided from the stage alone, and the
+   * insert and drain disagreeing about whether a row exists is a notification
+   * that never fires.
+   */
+  after: Record<string, unknown>;
   applicationId: string;
   targetMode: GitOpsTargetMode;
   stackName: string | null;
@@ -136,9 +144,10 @@ function drain(): void {
   for (const row of batch) {
     if (!survived(row)) continue;
     metrics.record(row.stage, row.outcome);
-    // The same plan the insert uses, so a stage that writes an outbox row is
-    // always drained and a stage that writes none is never looked up.
-    if (gitOpsOutboxPlan(row.stage, row.targetMode) !== null) {
+    // The same plan the insert uses, with the same transition record, so a
+    // stage that writes an outbox row is always drained and a stage that
+    // writes none is never looked up.
+    if (gitOpsOutboxPlan(row.stage, row.targetMode, row.after) !== null) {
       drainGitOpsOutboxRow(row.db, row.id);
     }
     if (!sink) {

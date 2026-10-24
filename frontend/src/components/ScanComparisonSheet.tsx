@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
@@ -116,6 +116,10 @@ export function ScanComparisonSheet({
   const [data, setData] = useState<ScanCompareResult | null>(null);
   const [filter, setFilter] = useState<DiffFilter>('added');
   const [page, setPage] = useState(0);
+  // Parents commonly pass an inline arrow; keeping it in a ref stops each parent
+  // render from re-running the fetch and blanking the sheet.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; });
 
   const load = useCallback(async () => {
     if (baselineScanId == null || currentScanId == null) return;
@@ -135,11 +139,11 @@ export function ScanComparisonSheet({
       setData(body);
     } catch (err) {
       toast.error((err as Error)?.message || 'Failed to load comparison');
-      onClose();
+      onCloseRef.current();
     } finally {
       setLoading(false);
     }
-  }, [baselineScanId, currentScanId, onClose]);
+  }, [baselineScanId, currentScanId]);
 
   useEffect(() => {
     if (baselineScanId != null && currentScanId != null) load();

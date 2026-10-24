@@ -118,6 +118,46 @@ describe('networking summary', () => {
     expect(res.body.networkDrift.stacks).toEqual([]);
   });
 
+  it('summarizes a stack whose compose file links into a sibling stack', async () => {
+    const linked = `${STACK}-linked`;
+    const linkedDir = path.join(process.env.COMPOSE_DIR as string, linked);
+    fs.mkdirSync(linkedDir, { recursive: true });
+    fs.symlinkSync(path.join(stackDir, 'compose.yaml'), path.join(linkedDir, 'compose.yaml'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      // The link stays inside the compose root, so this stack deploys the shared
+      // file and its declared exposure belongs in the report.
+      expect(res.body.exposed.stacks).toContain(STACK);
+      expect(res.body.exposed.stacks).toContain(linked);
+      expect(res.body.unknownExposure.stacks).toContain(linked);
+      expect(warn.mock.calls.filter(call => String(call[0]).includes('Skipped stack'))).toEqual([]);
+    } finally {
+      fs.rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a stack whose compose file links out of the compose directory', async () => {
+    const linked = `${STACK}-outside`;
+    const linkedDir = path.join(process.env.COMPOSE_DIR as string, linked);
+    fs.mkdirSync(linkedDir, { recursive: true });
+    const outside = path.join(tmpDir, 'outside-compose.yaml');
+    fs.writeFileSync(outside, fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8'));
+    fs.symlinkSync(outside, path.join(linkedDir, 'compose.yaml'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(res.body.exposed.stacks).not.toContain(linked);
+      expect(res.body.unknownExposure.stacks).not.toContain(linked);
+      const skipped = warn.mock.calls.find(call => call[1] === linked);
+      expect(skipped?.[0]).toContain('Skipped stack');
+    } finally {
+      fs.rmSync(linkedDir, { recursive: true, force: true });
+    }
+  });
+
   it('drops the stack from unknown-exposure once an intent is set', async () => {
     DatabaseService.getInstance().setStackExposureIntent(1, STACK, '', 'public', 'admin');
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);

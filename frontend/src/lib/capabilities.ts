@@ -49,6 +49,8 @@ export const CAPABILITIES = [
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
   'fleet-readiness-v1',
+  'blueprint-digest-pins-v1',
+  'health-gate-observation-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

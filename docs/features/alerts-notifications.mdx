@@ -179,7 +179,9 @@ All non-empty matchers must match (AND). Suppressed alerts are still written to 
 
 Rules you create on the control instance replicate to remote nodes so alerts emitted on a remote stack honor the same suppression. Replication is best-effort. Remotes that do not support weekly windows do not receive scheduled replicas as all-day mutes: Sencho skips the push and attempts to remove any prior replica. If a remote is unreachable, cleanup may stay pending until connectivity returns and you re-save or clear the rule. Before downgrading a node past a release that introduced weekly windows, clear every weekly window (or disable those rules) so an older binary does not treat them as always-on.
 
-From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
+From the bell and from the **Recent alerts** card on Home, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
+
+Deleting a stack removes the mute rules that target only that stack on that node, so a later stack created under the same name is not muted by accident. Rules that also cover other stacks (a wildcard, several stacks, or a whole node) or other nodes are kept. The removal reaches remote nodes the same way deleting a rule in Settings does, and it also runs when a Blueprint withdraws a stack from a node.
 
 The masthead carries `SCOPE` (`global`), `RULES` (total), and `ACTIVE` (count).
 
@@ -211,13 +213,16 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `blueprint_deployment_failed` | `blueprint_deployment_failed` | Blueprint deployment errored out |
 | `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode |
 | `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed |
+| `blueprint_drift_repair_held` | `blueprint_drift_repair_held` | Blueprint enforce-mode auto-fix declined, with the reason |
 
 The four `blueprint_*` categories are accepted by routing rules but are missing from the bell's category filter and the Settings category pickers because the frontend label map omits them.
 
 Twenty-four further categories are written to notification history. They are never dispatched to external channels or accepted by a routing rule, and because a mute rule is applied when an alert is dispatched, a rule naming one of them is accepted by the API but does not hide the entry from the bell:
 
 - Lifecycle markers: `drift_detected` (Drift detected), `drift_resolved` (Drift resolved), `update_started` (Update started), `health_gate_passed` (Health gate passed), `health_gate_failed` (Health gate failed), `rollback_generation_released` (Rollback protection released), and `network_auto_created`.
+- A health failure is covered by the single `health_gate_failed` entry rather than by a second GitOps entry. The health gate is what produces a health verdict, and it announces the failure as it records it, so a GitOps-managed stack reports the failure once. A passing check, and a check that could not reach a verdict, are both silent.
 - Git source attempts: `git_pull_ready`, `git_plan_blocked`, `git_pull_failed`, `git_apply`, `git_apply_failed`, `git_apply_rolled_back`, and `git_create`.
+- A Git source attempt reaches the bell once, for the one thing it changed. The result an attempt stages and the settled outcome that confirms it are one entry between them, not two. A staged candidate announces itself once, whether it is waiting on review or blocked by a local conflict, and later polls of that same candidate add nothing while that entry is still in the bell; a candidate staged again later announces again, a safety hold that turns an automatic candidate into one needing review announces as its own event, and clearing the bell or letting the retention pass prune the entry lets the next poll announce the candidate once more. A settled outcome that reports nothing new, such as an idle source, a candidate still waiting, a candidate superseded before acceptance, a suspended source, or a retry already armed, adds no entry of its own.
 - GitOps authority, rollout, and confirmation decisions: `gitops_source_accepted`, `gitops_placement_approved`, `gitops_rollout_authorized`, `gitops_rollout_paused`, `gitops_rollout_resumed`, `gitops_rollout_superseded`, `gitops_rollback_started`, `gitops_rollback_completed`, `gitops_rollback_partial_failed`, and `gitops_stateful_confirmation`.
 
 The Git source, GitOps, and `network_auto_created` categories are missing from the bell's category filter and the Settings category pickers because the frontend label map omits them, same as the `blueprint_*` categories above. The lifecycle markers appear under their labels.
@@ -325,7 +330,7 @@ Each row carries:
 - A **severity icon** in the same hue: `Info`, `AlertTriangle`, or `AlertOctagon`.
 - The **message body**, slightly dimmer once read.
 - A **kicker line** below the message with an optional **node-name pill** (only rendered for multi-node fleets), a `·` separator, and a relative timestamp (`just now`, `Nm ago`, `Nh ago`, `yesterday`, then a short locale date).
-- A **dismiss** target on hover, top-right.
+- **Row actions** at the top right, shown on hover or keyboard focus (always visible on a phone): a **Mute options** menu for admins (the presets above), **Mark read** on unread rows, and **Dismiss**, which deletes the row. **Mark read** and **Mute options** act in place, so the popover stays open and the row does not open its stack. Read state is shared by everyone on the node, the same as **Mark all read**.
 
 There is no level chip in the row; the rail color and icon do that work. Rows whose payload carries a `stack_name` become click targets that jump to the stack and, when a `container_name` is present, surface that container's logs.
 
@@ -444,7 +449,8 @@ Local-target failure reasons stay node-neutral (`Target node is offline`, `Conta
 ### Blueprints
 
 - `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on this node: <reason>` for a local target, or `Blueprint "<n>" drifted on node "<remote>": <reason>` for a remote. Stateful marker-loss uses the same local/remote clause.
-- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote).
+- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote). The repair is retried on the next reconciler tick, so this fires once for a given reason rather than on every retry, and fires again when the reason changes.
+- `warning`/`blueprint_drift_repair_held`: `Auto-fix for "<n>" on this node was declined: <reason>` (local) or the same on the remote node name (remote). This fires once per hold, when the reason changes, not on every tick.
 
 See [Blueprints](/features/blueprint-model).
 

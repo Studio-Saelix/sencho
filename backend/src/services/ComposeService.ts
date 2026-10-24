@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse as parseYaml } from 'yaml';
 import WebSocket from 'ws';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
@@ -18,7 +19,7 @@ import { recordRegistryDeliveryEvent } from '../helpers/registryDeliveryEvidence
 import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
-import { parseEffectiveModel } from './preflight/effectiveModel';
+import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
@@ -26,7 +27,12 @@ import { getErrorMessage } from '../utils/errors';
 import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
-import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
+import {
+  authoredComposeFileArgs,
+  authoredComposeEnvFileArgs,
+  composeEnvFilesFromProcess,
+} from '../utils/authoredComposeArgs';
 import type { RollbackInvocationRecord } from '../types/rollbackGeneration';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
@@ -43,8 +49,21 @@ import {
 import { digestPinsOverlayYaml, type DigestPinsMap } from './gitops/digestPins';
 import { DIGEST_PIN_TEMP_PREFIX } from '../helpers/digestPinTempDir';
 import { assertGitOverlaySource, SOPS_DIRECT_MUTATION_MESSAGE } from './gitops/sops/prepareOverlay';
-import { resolveActiveRequiredRecipients } from './gitops/sops/capability';
+import { classifyInputEncryption, resolveActiveRequiredRecipients } from './gitops/sops/capability';
 import { GitOpsDecryptOverlay } from './gitops/sops/overlay';
+import { gitSecretsAreaBase } from './gitops/managedPaths';
+import {
+  PERSISTENT_BIND_REFUSAL,
+  PERSISTENT_BIND_UNSAFE,
+  planPersistentBindRemap,
+} from './gitops/sops/persistentBinds';
+import {
+  decryptedComposeOutputWithheld,
+  runWithDecryptedComposeOutput,
+  WITHHELD_DECRYPTED_COMPOSE_OUTPUT,
+  WITHHELD_DECRYPTED_COMPOSE_STREAM,
+  WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT,
+} from '../helpers/decryptedComposeOutput';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
@@ -146,12 +165,37 @@ export function getComposeCommandTimeoutMs(): number {
 // extracts; operators on slow links or heavy local builds can raise it.
 const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
+const EMPTY_ENV_FILE = '/dev/null';
+
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
     return configured;
   }
   return DEFAULT_COMPOSE_STALL_TIMEOUT_MS;
+}
+
+/**
+ * Top-level `volumes.*.driver_opts.device` values from a rendered model.
+ *
+ * A named volume whose local driver binds a host directory carries its host
+ * path here rather than in a service mount, so the pilot mapping check has to
+ * read it from the same render. Read only to compare containment against the
+ * managed trees; the values are never retained, logged, or quoted, because a
+ * device can be interpolated from a decrypted env file.
+ */
+function volumeDeviceSources(parsed: unknown): string[] {
+  const volumes = (parsed as { volumes?: unknown } | null)?.volumes;
+  if (!volumes || typeof volumes !== 'object' || Array.isArray(volumes)) return [];
+  const devices: string[] = [];
+  for (const entry of Object.values(volumes as Record<string, unknown>)) {
+    const opts = (entry as { driver_opts?: unknown } | null)?.driver_opts;
+    if (!opts || typeof opts !== 'object' || Array.isArray(opts)) continue;
+    const device = (opts as Record<string, unknown>).device;
+    if (typeof device === 'string' && device !== '') devices.push(device);
+  }
+  return devices;
 }
 
 /**
@@ -255,15 +299,75 @@ export class ComposeService {
     return path.join(this.baseDir, stackName);
   }
 
-  private assertSopsOverlayOrRefuse(stackName: string, overlayDir?: string): void {
-    const required = resolveActiveRequiredRecipients({ stackName, nodeId: this.nodeId });
-    if (required.length === 0 || overlayDir) return;
-    throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+  private async assertSopsOverlayOrRefuse(stackName: string, overlayDir?: string): Promise<void> {
+    if (overlayDir) return;
+    const required = resolveActiveRequiredRecipients({
+      stackName,
+      nodeId: this.nodeId,
+      basis: 'applied',
+    });
+    if (required.length > 0) throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+    await this.assertLiveEnvNotEncrypted(stackName);
+  }
+
+  /**
+   * Refuse a direct mutation on a git-linked stack when the live `.env`
+   * or a configured project env file is still age-encrypted. The caller
+   * uses this when the applied generation recorded no required recipients.
+   */
+  private async assertLiveEnvNotEncrypted(stackName: string): Promise<void> {
+    if (!DatabaseService.getInstance().getGitSource(stackName)) return;
+    const names = new Set<string>(['.env']);
+    for (const file of DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName)) {
+      if (file && !file.includes('/') && !file.includes('\\') && !file.includes('..')) names.add(file);
+    }
+    const stackDir = path.resolve(this.baseDir, stackName);
+    for (const name of names) {
+      const target = path.resolve(stackDir, name);
+      if (!target.startsWith(stackDir + path.sep)) continue;
+      let content: string;
+      try {
+        content = await fs.promises.readFile(target, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        console.error(
+          '[ComposeService] could not read %s while checking encrypted env:',
+          sanitizeForLog(name),
+          err instanceof Error ? err.message : String(err),
+        );
+        throw new Error(`Could not read project env file "${name}" for stack "${stackName}".`);
+      }
+      if (classifyInputEncryption(content, 'env').encryption === 'sops-age') {
+        throw new Error(SOPS_DIRECT_MUTATION_MESSAGE);
+      }
+    }
   }
 
   private async authoredComposeArgs(
     stackName: string,
     action: string[],
+    stackDirOverride?: string,
+    refuseIfUnreadable = false,
+  ): Promise<string[]> {
+    const args = await this.authoredComposePrefix(stackName, stackDirOverride);
+    await this.appendPersistentBindRemap(
+      stackName,
+      args,
+      stackDirOverride,
+      refuseIfUnreadable || action.includes('up') || action.includes('create'),
+    );
+    args.push(...action);
+    return args;
+  }
+
+  /**
+   * Global-flag prefix for one command: authored `-f` files, the stack's env
+   * files, the Mesh override layer, and the project-name pin. No action, and no
+   * bind remap: a caller that layers a file of its own (a recovery override)
+   * between the two appends both itself, so the remap stays the last layer.
+   */
+  private async authoredComposePrefix(
+    stackName: string,
     stackDirOverride?: string,
   ): Promise<string[]> {
     const args: string[] = ['compose'];
@@ -316,8 +420,72 @@ export class ComposeService {
       }
       args.push('-f', overridePath);
     }
-    args.push(...action);
+    this.pinProjectNameForOverride(stackName, args, stackDirOverride);
     return args;
+  }
+
+  /**
+   * Ordinary relative data binds must keep the live stack as their host path
+   * when Compose's working directory is a decrypt overlay. Secret files that
+   * were decrypted into the overlay stay there. The rewrite is a compose layer
+   * inside the overlay, so cleanup removes it with the decrypted copies.
+   */
+  private async appendPersistentBindRemap(
+    stackName: string,
+    args: string[],
+    stackDirOverride?: string,
+    refuseIfUnreadable = false,
+  ): Promise<void> {
+    const overlayDir = this.remapOverlayDir(stackDirOverride);
+    if (!overlayDir) return;
+    await this.pinComposeFilesForRemap(stackName, args);
+    const plan = await planPersistentBindRemap({
+      overlayDir,
+      liveRoot: this.resolveValidatedStackDir(stackName),
+      liveComposeRoot: path.resolve(this.baseDir),
+      secretsRoot: path.resolve(gitSecretsAreaBase()),
+      composeArgs: args,
+      refuseIfUnreadable,
+    });
+    if (plan.action === 'skip') return;
+    if (plan.action === 'refuse') throw new Error(plan.reason);
+    if (!args.includes('-f') && !args.includes('--file')) throw new Error(PERSISTENT_BIND_UNSAFE);
+    args.push('-f', plan.file);
+  }
+
+  /**
+   * The GitOps decrypt overlay a command runs in, or null when it does not run
+   * in one. Which layers an argv carries is not part of the question: the
+   * generated remap layer is appended once per assembly, by the callers below,
+   * so nothing here has to recognize it back out of a token (see
+   * `planPersistentBindRemap` for the one collision this could otherwise hide).
+   */
+  private remapOverlayDir(stackDirOverride: string | undefined): string | null {
+    if (!stackDirOverride) return null;
+    const overlayDir = path.resolve(stackDirOverride);
+    const secretsRoot = path.resolve(gitSecretsAreaBase());
+    if (!overlayDir.startsWith(secretsRoot + path.sep) || !fs.existsSync(overlayDir)) return null;
+    return overlayDir;
+  }
+
+  /** Name the base compose file before adding another `-f`, which disables discovery. */
+  private async pinComposeFilesForRemap(stackName: string, args: string[]): Promise<void> {
+    if (args.includes('-f') || args.includes('--file')) return;
+    // Canonical js/path-injection barrier at the existsSync sink.
+    const baseResolved = path.resolve(this.baseDir);
+    const liveRoot = path.resolve(baseResolved, stackName);
+    if (!liveRoot.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    if (!fs.existsSync(liveRoot)) return;
+    try {
+      await this.ensureExplicitComposeFiles(stackName, args, true);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') throw err;
+      if (err instanceof Error && err.message.startsWith('No compose file found')) return;
+      throw err;
+    }
   }
 
   /**
@@ -340,7 +508,7 @@ export class ComposeService {
         flag: 'wx',
         mode: 0o600,
       });
-      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride);
+      const args = await this.authoredComposeArgs(stackName, [], stackDirOverride, true);
       await this.ensureExplicitComposeFiles(stackName, args, true);
       args.push('-f', overlayPath, ...action, '--pull', 'never');
       return { args, overlayDir };
@@ -365,6 +533,10 @@ export class ComposeService {
   ): Promise<void> {
     const deliveryAbortSignal = getRegistryDeliveryContext()?.abortSignal;
     const effectiveAbortSignal = abortSignal ?? deliveryAbortSignal;
+    // Read once, at the top of the run: a decrypted operation must not leak
+    // the subprocess output that reaches the progress stream or the rejection,
+    // and the decision has to be stable for the life of the child.
+    const withholdOutput = decryptedComposeOutputWithheld();
 
     if (effectiveAbortSignal?.aborted) {
       return Promise.reject(new Error('OPERATION_ABORTED: client disconnected'));
@@ -387,11 +559,19 @@ export class ComposeService {
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let forceKillTimeout: ReturnType<typeof setTimeout> | null = null;
       let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+      let withheldNoticeSent = false;
 
       const sendOutput = (text: string) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(text);
         }
+      };
+
+      /** One notice in place of a withheld stream, so silence reads as policy. */
+      const sendWithheldNotice = () => {
+        if (withheldNoticeSent) return;
+        withheldNoticeSent = true;
+        sendOutput(WITHHELD_DECRYPTED_COMPOSE_STREAM);
       };
 
       const terminateChild = (error: Error) => {
@@ -478,8 +658,14 @@ export class ComposeService {
 
       const onData = (data: Buffer) => {
         const text = data.toString();
-        errorLog += text;
-        sendOutput(text);
+        if (withholdOutput) {
+          // Compose echoes interpolated values back, so the chunk is dropped
+          // rather than filtered; the stall backstop still counts it as output.
+          sendWithheldNotice();
+        } else {
+          errorLog += text;
+          sendOutput(text);
+        }
         armIdleTimeout();
       };
 
@@ -496,7 +682,11 @@ export class ComposeService {
             return;
           }
           if (code === 0) resolve();
-          else if (throwOnError) reject(new Error(redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`));
+          else if (throwOnError) reject(new Error(
+            withholdOutput
+              ? WITHHELD_DECRYPTED_COMPOSE_OUTPUT
+              : redactSensitiveText(errorLog.trim()) || `Command failed with code ${code}`,
+          ));
           else resolve();
         });
       });
@@ -670,25 +860,102 @@ export class ComposeService {
 
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
-    await this.execute('docker', await this.authoredComposeArgs(stackName, [action]), stackDir, ws);
+    // Resolve the arguments first: a stack whose compose cannot be resolved is
+    // refused before anything is touched, and must not cost a live gate.
+    const args = await this.authoredComposeArgs(stackName, [action]);
+    // Before the command, not after: compose stops containers one at a time
+    // against a 10s Docker stop timeout, and a gate poll landing in that window
+    // would record the deliberate stop as a failed update. `start` is excluded
+    // because it does not disturb the containers a gate is observing.
+    if (action !== 'start') {
+      await this.supersedeGatesForContainerOp(
+        stackName,
+        `the stack was ${action === 'down' ? 'taken down' : action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+      );
+    }
+    await this.execute('docker', args, stackDir, ws);
   }
 
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
-    await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackDir, ws);
+    const composeArgs = await this.authoredComposeArgs(stackName, args);
+    await this.supersedeGatesForContainerOp(stackName, 'the stack was taken down during the observation');
+    await this.execute('docker', composeArgs, stackDir, ws);
   }
 
   /**
-   * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
-   * deploy whose required `${VAR:?err}` variables are unset OR empty, before any
-   * backup, cleanup, pull, or `up` runs. Compose's own resolution is authoritative
-   * (it passes process.env), and on the failing path it emits no rendered model, so
-   * no env value is materialized. Default off and any settings-read failure both
-   * fall through without blocking.
+   * End the gates that a compose run is about to invalidate, immediately before
+   * the compose command starts, so no gate poll can read the replaced containers
+   * first and report the operation as a failed update. Covers both a deliberate
+   * container action (the run commands and the take-downs below) and a
+   * stack-scoped deploy or update: from a gate's point of view those are the same
+   * event, the runtime it observes is about to be replaced. Awaited dynamic
+   * import: HealthGateService imports this module, so a static import would be a
+   * cycle.
+   *
+   * Every caller resolves its compose arguments, and a deploy resolves its
+   * registry auth, before getting here, so a run refused at that stage costs no
+   * live gate. Ending a gate that the compose run then fails to perform is the
+   * honest direction: the verdict is `unknown` with the attempted operation
+   * named, never a failure. Callers that open a replacement gate supersede the
+   * same gates again a moment later, so this is a harmless no-op for them.
    */
-  private async assertRequiredEnvPresent(stackName: string, stackDirOverride?: string): Promise<void> {
+  private async supersedeGatesForContainerOp(stackName: string, reason: string): Promise<void> {
+    try {
+      const { HealthGateService } = await import('./HealthGateService');
+      HealthGateService.getInstance().supersedeForContainerOp(this.nodeId, stackName, reason);
+    } catch (error) {
+      console.error(
+        '[ComposeService] Failed to end health gate observations for %s:',
+        sanitizeForLog(stackName),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * How the missing-variable refusal names the blocked action and the next step.
+   *
+   * The default is the deploy wording, kept byte-identical because it is quoted
+   * verbatim in a published tutorial and its screenshots. An operation that is not
+   * a deploy passes its own remedy, and omits `blocked` when the caller already
+   * names the action: the editor's pull path surfaces this text behind its own
+   * "Image pull failed:" prefix, and a second "Image pull blocked:" in front of it
+   * reads as a stutter rather than a clearer message.
+   */
+  private static readonly ENV_REFUSAL_WORDING = {
+    blocked: 'Deploy blocked:',
+    remedy: 'then deploy again.',
+  } as const;
+
+  /**
+   * Ceiling on the decrypt-overlay required-variable check, matching
+   * `renderConfig`'s. It only reads an exit code, so the bound matters: without
+   * one, a Compose that never returns would hold the deploy open forever with
+   * no diagnostic to explain the wait.
+   */
+  private static readonly REQUIRED_ENV_CHECK_TIMEOUT_MS = 20_000;
+
+  /**
+   * Guard (on by default): when `env_block_deploy_on_missing_required` is enabled, refuse a
+   * compose operation whose required `${VAR:?err}` variables are unset OR empty,
+   * before any backup, cleanup, pull, or `up` runs. Compose's own resolution is
+   * authoritative (it passes process.env). A settings-read failure falls
+   * through without blocking.
+   *
+   * Two confidentiality regimes, split by the input. The live project is
+   * readable by whoever can read the stack directory, so its diagnostic is
+   * parsed and the refusal names the variables. A GitOps decrypt overlay holds
+   * plaintext secrets, so its diagnostic is never read at all; see the overlay
+   * branch for why a name-only parse is not a boundary there.
+   */
+  private async assertRequiredEnvPresent(
+    stackName: string,
+    stackDirOverride?: string,
+    wording: { blocked?: string; remedy: string } = ComposeService.ENV_REFUSAL_WORDING,
+  ): Promise<void> {
     let enabled = false;
     try {
       enabled = DatabaseService.getInstance().getGlobalSettings()['env_block_deploy_on_missing_required'] === '1';
@@ -696,40 +963,91 @@ export class ComposeService {
       return; // safe default: a settings-read failure never blocks a deploy
     }
     if (!enabled) return;
-    let missing: string[] = [];
+    const lead = wording.blocked ? `${wording.blocked} ` : '';
     if (stackDirOverride) {
+      // Withheld for the same reason renderConfig withholds it for this input:
+      // Compose quotes whatever it resolved back into its diagnostic, and a
+      // `:?` message is itself interpolated, so a decrypted value can land
+      // inside it. Nothing here collects output at all, so nothing here can
+      // leak it.
+      let code: number | null;
       try {
         const args = await this.authoredComposeArgs(stackName, ['config', '--quiet'], stackDirOverride);
-        const result = await new Promise<{ stderr: string; code: number | null }>((resolve, reject) => {
+        code = await new Promise<number | null>((resolve, reject) => {
+          // Both streams to /dev/null: no pipe to fill, and no collected text
+          // that could later be mistaken for something safe to publish.
           const child = spawn('docker', args, {
             cwd: stackDirOverride,
+            stdio: 'ignore',
             env: {
               ...process.env,
               PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             },
           });
-          let stderr = '';
-          child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-          child.on('error', reject);
-          child.on('close', (code) => resolve({ stderr, code }));
+          // The exit code is the only signal this check gets, so a wedged
+          // Compose is bounded here rather than left to hang the deploy.
+          const timer = setTimeout(() => child.kill('SIGKILL'), ComposeService.REQUIRED_ENV_CHECK_TIMEOUT_MS);
+          child.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+          child.on('close', (code) => {
+            clearTimeout(timer);
+            resolve(code);
+          });
         });
-        missing = parseMissingRequiredVars(result.stderr);
-      } catch {
-        return;
+      } catch (err) {
+        if (err instanceof Error && (
+          err.message === PERSISTENT_BIND_REFUSAL || err.message === PERSISTENT_BIND_UNSAFE
+        )) {
+          throw err;
+        }
+        return; // a launch failure is not a missing variable
       }
-    } else {
-      const result = await this.renderConfig(stackName);
-      missing = parseMissingRequiredVars(result.stderr);
+      // A render that resolved reports no required-variable error at all, so
+      // the exit code is the whole signal here. Anything else, including a
+      // child killed on timeout (which closes with no code at all), is refused
+      // without a name: the guard cannot tell a missing variable from any
+      // other render fault without reading the diagnostic it must not read,
+      // so it fails closed the way the network gate already does.
+      if (code === 0) return;
+      throw new Error(`${lead}${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}${wording.remedy}`);
     }
+    const result = await this.renderConfig(stackName);
+    const missing = parseMissingRequiredVars(result.stderr);
     if (missing.length === 0) return;
     const plural = missing.length > 1;
     throw new Error(
-      `Deploy blocked: required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
-      `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, then deploy again.`,
+      `${lead}required environment variable${plural ? 's' : ''} ${missing.join(', ')} ` +
+      `${plural ? 'are' : 'is'} missing. Define ${plural ? 'them' : 'it'} in a .env or env_file, ${wording.remedy}`,
     );
   }
 
-  private async assertSafePilotBindMapping(stackName: string): Promise<void> {
+  /**
+   * Pilot host-path guard. The question it answers is whether any host path
+   * resolves into a directory Sencho manages for the stack, given that the host
+   * path for that directory is somewhere else: the live stack directory is what
+   * the Pilot Agent maps, so a relative bind, or the host directory a named
+   * volume's local driver binds, lands on a host path Sencho did not choose.
+   *
+   * `overlayDir` is the GitOps decrypt overlay a Git deploy runs Compose in. The
+   * live project cannot answer the question for such a deploy when a typed value
+   * (a published port, an external network name) is held in an encrypted env
+   * file, because the live render fails on the ciphertext. Reading the overlay is
+   * therefore not a way around the check, it is how the check still runs; see
+   * `renderPilotBinds` for why the overlay is the render that speaks for a deploy.
+   *
+   * `composeArgsPrefix` is for a command whose invocation was rebuilt rather than
+   * derived from live state (a rollback from a captured generation). The caller
+   * hands over the exact prefix it is about to execute, so the model this guard
+   * reads is the one that command would run: same files, env selection, recovery
+   * layer, and working directory.
+   */
+  private async assertSafePilotBindMapping(
+    stackName: string,
+    overlayDir?: string,
+    composeArgsPrefix?: string[],
+  ): Promise<void> {
     if (process.env.SENCHO_MODE !== 'pilot') return;
 
     let mounts: Array<{ source: string; destination: string }> | null;
@@ -745,41 +1063,149 @@ export class ComposeService {
     const hostComposeDir = resolveHostBindPath(composeDir, mounts);
     if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
 
-    const rendered = await this.renderConfig(stackName);
-    if (rendered.rendered === null) return;
+    const analysis = await this.renderPilotBinds(stackName, overlayDir, composeArgsPrefix);
+    if (!analysis) return;
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rendered.rendered);
-    } catch (error) {
-      console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-      return;
-    }
-    const model = parseEffectiveModel(parsed, stackName);
-    const unsafeBind = model.services
+    const unsafeBind = analysis.model.services
       .flatMap((service) => service.binds)
-      .find((bind) => isPathWithinBase(path.resolve(bind.source), composeDir));
-    if (!unsafeBind) return;
+      .find((bind) => analysis.bases.some((base) => isPathWithinBase(path.resolve(bind.source), base)));
+    // Only an absolute device is a host path; a remote export (`:/export`,
+    // `//server/share`) is not, and must not be resolved against the process
+    // working directory to decide whether it lands in a managed tree.
+    const unsafeDevice = analysis.deviceSources
+      .filter((device) => path.isAbsolute(device))
+      .find((device) => analysis.bases.some((base) => isPathWithinBase(device, base)));
+    if (!unsafeBind && !unsafeDevice) return;
 
     throw new Error(
-      `Deploy blocked: relative bind mounts resolve under ${composeDir}, but the host path is ${hostComposeDir}. ` +
+      `Deploy blocked: a mount resolves into a directory Sencho manages on this node. ` +
+      `The host maps ${composeDir} to ${hostComposeDir}, so the data would land at a path this stack was not configured for. ` +
       `Use a 1:1 mount with the same absolute path on the host and in the Pilot Agent, then retry.`,
     );
   }
 
   /**
+   * The rendered binds for the pilot check, with the trees a bind must stay out
+   * of.
+   *
+   * The render has to describe the project Compose will actually run, and for a
+   * Git deploy that is the overlay, so the overlay is the only render that speaks
+   * for it. Reading the live project instead inspects a model the deploy does not
+   * use, and a bind can resolve differently once the values in front of it are
+   * decrypted. An interpolated source is the clearest case: ciphertext that
+   * Compose accepts as a relative path resolves under the live stack directory,
+   * while the decrypted value beside it can name an absolute external path the
+   * deploy is entitled to use.
+   *
+   * An overlay adds a second tree to stay out of, it does not replace the first.
+   * Ordinary relative data binds are rewritten onto the live stack before this
+   * render, so they show up inside the compose tree. A decrypted secret file
+   * that is itself mounted stays under the overlay, and the tree to compare
+   * that against sits one level above the overlay directory, the same depth
+   * `this.baseDir` sits above a live stack. Comparing against the overlay
+   * directory itself would let `../data` through when the rewrite did not move
+   * it. The compose tree stays in the set as well, because a bind can also name
+   * it outright, and that is the tree the Pilot Agent maps.
+   *
+   * A named volume whose local driver binds a host directory is read from the
+   * same render: its path is a `driver_opts.device`, not a service mount, and a
+   * relative device is rewritten onto the live stack exactly as a relative bind
+   * is. Leaving that form out would let a rewritten device reach the host as
+   * the container path this check exists to refuse.
+   *
+   * The set has the same reach the live arm has always had, no more: one level of
+   * `..` from the project directory is inside it and two is not, and a service
+   * bind is read from a `type: bind` mount only. Widening either is a separate
+   * change.
+   * The overlay tree is taken from the directory the render ran in rather than
+   * rebuilt from the stack identity, so it can never fail to contain the project
+   * Compose just resolved against, whatever shape the overlay layout takes.
+   *
+   * `null` when the render could not be read, which leaves the guard without a
+   * decision, exactly as an unreadable render always has.
+   */
+  private async renderPilotBinds(
+    stackName: string,
+    overlayDir?: string,
+    composeArgsPrefix?: string[],
+  ): Promise<{ model: EffectiveModel; bases: string[]; deviceSources: string[] } | null> {
+    let rendered: Awaited<ReturnType<ComposeService['renderConfig']>>;
+    if (composeArgsPrefix) {
+      // A rebuilt invocation is the project this command runs, so the render
+      // reuses its exact global flags instead of deriving a second one.
+      rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir, composePrefix: composeArgsPrefix });
+    } else if (overlayDir) {
+      rendered = await this.renderConfig(stackName, { stackDirOverride: overlayDir });
+    } else {
+      rendered = await this.renderConfig(stackName);
+    }
+    if (rendered.rendered === null) return null;
+
+    const parsed = this.parsePilotBinds(rendered.rendered, stackName);
+    if (!parsed) return null;
+
+    const composeDir = path.resolve(this.baseDir);
+    return {
+      model: parsed.model,
+      bases: overlayDir ? [path.dirname(path.resolve(overlayDir)), composeDir] : [composeDir],
+      deviceSources: parsed.deviceSources,
+    };
+  }
+
+  /**
+   * Parse one rendered model for the pilot check. Only the bind sources and the
+   * named-volume devices are read, and neither this nor the refusal quotes one:
+   * an overlay's source can be an interpolated value, and the operator is told
+   * which two paths disagree, not what a bind said.
+   */
+  private parsePilotBinds(
+    rendered: string,
+    stackName: string,
+  ): { model: EffectiveModel; deviceSources: string[] } | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rendered);
+    } catch {
+      // A parse error quotes the text around the fault, and an overlay render can
+      // carry a decrypted value, so the log names the fault without Compose's own
+      // words on either arm. The render is JSON by construction, so this is only
+      // reachable through corrupt output.
+      console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety: the render was not JSON.');
+      return null;
+    }
+    return { model: parseEffectiveModel(parsed, stackName), deviceSources: volumeDeviceSources(parsed) };
+  }
+
+  /**
    * Missing-external gate: after env/Pilot asserts, before atomic backup.
    * Creates safe bridge networks only when the opt-in setting is on.
+   *
+   * A Git deploy runs Compose out of a decrypt overlay, so the gate renders
+   * that same overlay. Reading the live project instead resolves a published
+   * port or an external network name out of ciphertext, refuses the deploy
+   * before `up`, and leaves the applied generation and the running one
+   * describing different models.
+   *
+   * Overlay parity covers the node, project identity, authored files, and env
+   * inputs. It does not cover the layers only `up` adds: the generated mesh
+   * override (which `renderConfig` omits by design, so it cannot report the
+   * managed `sencho_mesh` network as missing) and an ephemeral digest-pin
+   * overlay (which changes image digests, not network declarations).
    */
   private async ensureExternalNetworksForDeploy(
     stackName: string,
     ctx?: DeployInvocationContext,
   ): Promise<void> {
-    const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    const renderCtx = { stackDirOverride: ctx?.overlayDir };
+    const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName, renderCtx);
     if (resolved.status === 'render_unavailable') {
+      // The resolver already reduced the render failure to a specific,
+      // redacted cause. Surface it rather than a generic sentence that names
+      // none of the possible faults, so the operator learns what to fix.
       throw new MissingExternalNetworksError({
         kind: 'unavailable',
-        message: 'Sencho could not render this stack\'s Compose model to check external networks.',
+        message: resolved.renderError
+          || 'Sencho could not render this stack\'s Compose model to check external networks.',
       });
     }
     if (resolved.status === 'runtime_unavailable') {
@@ -852,8 +1278,8 @@ export class ComposeService {
       }
     }
 
-    // Re-resolve before Compose.
-    const recheck = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    // Re-resolve before Compose, out of the same project the first pass read.
+    const recheck = await resolveMissingExternalNetworks(this.nodeId, stackName, renderCtx);
     if (recheck.status !== 'ok' || recheck.networks.length > 0) {
       recordCreatedNetworks('warning');
       throw new MissingExternalNetworksError({
@@ -952,6 +1378,34 @@ export class ComposeService {
     }
   }
 
+  /**
+   * Retire the stack's per-service recovery snapshots after a successful
+   * stack-scoped deploy or update replaced its runtime. Those snapshots point at
+   * images the stack is no longer running, so offering one would be a rollback
+   * behind the deploy the operator just ran.
+   *
+   * Deliberately after the compose up and only on success: a run that failed
+   * before handing off left the previous workload provably intact, and its
+   * snapshots still describe what is running.
+   *
+   * Best effort by design: the deploy already succeeded and its own evidence is
+   * recorded, so failing it over an offer the operator can decline would be the
+   * worse outcome. Dynamic import for the same reason as above: this module and
+   * the recovery services form an import cycle.
+   */
+  private async retireStaleServiceRecoveries(stackName: string): Promise<void> {
+    try {
+      const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
+      ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(this.nodeId, stackName);
+    } catch (error) {
+      console.error(
+        '[ComposeService] Failed to retire stale service recovery records for %s:',
+        sanitizeForLog(stackName),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   async deployStack(
     stackName: string,
     ws?: WebSocket,
@@ -960,11 +1414,22 @@ export class ComposeService {
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     if (ctx?.overlayDir) {
       assertGitOverlaySource(ctx.source);
+      // The whole deploy reads the overlay, so every Compose run it starts,
+      // including the compensation compose up in the catch below, runs inside
+      // this scope and withholds its output.
+      if (!decryptedComposeOutputWithheld()) {
+        return runWithDecryptedComposeOutput(
+          { stackName, nodeId: this.nodeId },
+          () => this.deployStack(stackName, ws, atomic, ctx),
+        );
+      }
     }
-    this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
+    await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
-    await this.assertSafePilotBindMapping(stackName);
+    // The overlay is the project this deploy will actually run, so the guard
+    // reads it rather than the live stack.
+    await this.assertSafePilotBindMapping(stackName, ctx?.overlayDir);
     await this.ensureExternalNetworksForDeploy(stackName, ctx);
 
     const debug = isDebugEnabled();
@@ -1043,6 +1508,13 @@ export class ComposeService {
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
+          // End the gates from any earlier run here, after the arguments and the
+          // registry auth have resolved and immediately before the compose up
+          // replaces the containers they are observing, so neither a refused
+          // deploy nor a poll in the compose up's own seconds costs a live gate.
+          // The snapshots are retired further down, once this has provably
+          // succeeded.
+          await this.supersedeGatesForContainerOp(stackName, 'the stack was redeployed during the observation');
           composeHandedOff = true;
           await this.execute('docker', args, stackDir, ws, true, env, getComposeStallTimeoutMs());
         } finally {
@@ -1081,6 +1553,12 @@ export class ComposeService {
           );
         }
       }
+      // The deploy replaced every service's image, so the per-service snapshots
+      // taken before it stop being rollback targets. This is the one commit every
+      // deploy path (route, template, webhook, scheduler, mesh, blueprint, Git
+      // apply) passes through. A stack rollback runs its own compose up, so the
+      // route settles it there.
+      await this.retireStaleServiceRecoveries(stackName);
       if (debug) console.debug(`[ComposeService:debug] deployStack completed in ${Date.now() - t0}ms`, { stackName });
       gitopsDeploy?.bound();
     } catch (deployError) {
@@ -1282,6 +1760,72 @@ export class ComposeService {
 
 
   /**
+   * True when the global-flag prefix carries an explicit `--env-file`.
+   * Positional scan: a compose file or env file literally named `--env-file`
+   * is a flag value, not the flag itself, so skip each flag's value token.
+   * Sencho always emits the two-token form, and the `=` form is accepted too
+   * so a future writer cannot silently defeat the check.
+   */
+  private hasExplicitEnvFileFlag(args: string[]): boolean {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (token.startsWith('--env-file=')) return true;
+      if (
+        token === '-f'
+        || token === '--file'
+        || token === '--env-file'
+        || token === '--project-directory'
+        || token === '-p'
+        || token === '--project-name'
+      ) {
+        if (token === '--env-file') return true;
+        i++;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Refuse a process-selected interpolation env file that is not a regular file.
+   *
+   * Every Compose child inherits `COMPOSE_ENV_FILES` from the Sencho process,
+   * while a recovery replay only pins the files its generation recorded. A FIFO
+   * named there is not in the argv at all, so Compose would open it and wait for
+   * a writer instead of naming the unusable input. Entries resolve against the
+   * working directory Compose gets, the way Compose resolves them. A missing or
+   * unresolvable entry is left to Compose, which reports it without waiting.
+   * An explicit `--env-file` replaces the variable for interpolation, so a list
+   * that run never reads cannot refuse it.
+   *
+   * The working directory is the validated stack path, and the entry is the
+   * operator's own process environment, never request data. The check is a
+   * metadata stat only: the same value is already passed unchanged to the
+   * Compose child, so refusing to inspect it would not narrow the child's reach.
+   */
+  private async assertProcessEnvFilesRegular(workingDir: string, args: string[]): Promise<void> {
+    if (this.hasExplicitEnvFileFlag(args)) return;
+    // The capture reads the same selection, so the guard names the file Compose
+    // opens. Compose splits on commas and skips empty entries, but every
+    // non-empty entry is used verbatim: spaces around a name are filename
+    // characters, not separators.
+    for (const entry of composeEnvFilesFromProcess()) {
+      const abs = path.resolve(workingDir, entry);
+      let stat: import('fs').Stats;
+      try {
+        stat = await fs.promises.stat(abs);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw Object.assign(
+          new Error(`Env file ${entry} selected by COMPOSE_ENV_FILES is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+    }
+  }
+
+  /**
    * Pinned compose-up with a recovery override layered last
    * (`--pull never --no-build`). Used by manual rollback and deploy/update
    * compensation. When `invocation` is set, Compose args come from the
@@ -1294,23 +1838,59 @@ export class ComposeService {
     invocation?: RollbackInvocationRecord | null,
     overlay?: Pick<DeployInvocationContext, 'overlayDir' | 'overlayBinding'>,
   ): Promise<ComposeMutationResult> {
+    // Same confidentiality boundary as a deploy against an overlay: a manual
+    // rollback restores into one and streams its Compose output.
+    if (overlay?.overlayDir && !decryptedComposeOutputWithheld()) {
+      return runWithDecryptedComposeOutput(
+        { stackName, nodeId: this.nodeId },
+        () => this.composeUpWithRecoveryOverride(stackName, overridePath, ws, invocation, overlay),
+      );
+    }
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }
-    const stackDir = overlay?.overlayDir ?? path.join(this.baseDir, stackName);
+    // Canonical js/path-injection barrier at the working directory shared by
+    // the spawn and the inherited env-file guard: the stack name is resolved
+    // against the compose root and must stay inside it. An overlay working
+    // directory is prepared by Sencho for this operation and carries no
+    // request path.
+    const overlayDir = overlay?.overlayDir;
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = overlayDir ?? this.resolveValidatedStackDir(stackName);
+    if (!overlayDir && !stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
+    const upAction = ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'];
+    const args = await this.buildComposeArgsWithRecoveryOverride(
+      stackName,
+      upAction,
+      overridePath,
+      invocation ?? null,
+      stackDir,
+    );
+    // The recovery is about to run this exact invocation, so the Pilot host-path
+    // guard reads the same one: the captured file set, the env selection, the
+    // recovery layer, and the decrypt overlay, all as assembled. Ordinary
+    // deployment already refuses a mismapped overlay; a rollback restoring a
+    // relative mount has the same consequence, so it refuses on the same terms.
+    // `buildComposeArgsWithRecoveryOverride` appends the action last, so the
+    // global-flag prefix is this argv without those tokens.
+    await this.assertSafePilotBindMapping(
+      stackName,
+      overlay?.overlayDir,
+      args.slice(0, args.length - upAction.length),
+    );
     await this.withRegistryAuth(async (env) => {
+      // The child inherits COMPOSE_ENV_FILES from this process whether or not
+      // the invocation names that file, so check it at the last moment before
+      // the spawn.
+      await this.assertProcessEnvFilesRegular(stackDir, args);
       await this.execute(
         'docker',
-        await this.buildComposeArgsWithRecoveryOverride(
-          stackName,
-          ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
-          overridePath,
-          invocation ?? null,
-          stackDir,
-        ),
+        args,
         stackDir,
         ws,
         true,
@@ -1322,9 +1902,10 @@ export class ComposeService {
   }
 
   /**
-   * Authored (+ mesh) compose args with an optional recovery override layered LAST.
-   * When `invocation` is provided, use its validated captured prefix so recovery
-   * does not mix restored files with the live deploy-spec / project-env selection.
+   * Authored (+ mesh) compose args with an optional recovery override, and the
+   * bind remap layered last. When `invocation` is provided, use its validated
+   * captured prefix so recovery does not mix restored files with the live
+   * deploy-spec / project-env selection.
    */
   public async buildComposeArgsWithRecoveryOverride(
     stackName: string,
@@ -1335,19 +1916,30 @@ export class ComposeService {
   ): Promise<string[]> {
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const out = useCaptured
-      ? ['compose', ...this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
-      : await this.authoredComposeArgsPrefix(stackName, stackDirOverride);
+      ? ['compose', ...await this.composePrefixFromCapturedInvocation(stackName, invocation, stackDirOverride)]
+      : await this.authoredComposePrefix(stackName, stackDirOverride);
 
     if (useCaptured && invocation.meshEnabled) {
       await this.appendCapturedMeshLayer(stackName, out);
     }
 
     if (recoveryOverridePath) {
-      // Captured invocations already encode their file set; live args may need
-      // an explicit base (+ user override) so docker compose accepts a trailing -f.
-      await this.ensureExplicitComposeFiles(stackName, out, !useCaptured);
+      // A captured invocation encodes its file set once it recorded its compose
+      // layers; older generations did not, so for those the implicit override
+      // still has to be named or the trailing layer silently drops it.
+      await this.ensureExplicitComposeFiles(
+        stackName,
+        out,
+        !useCaptured || !invocation?.composeLayers,
+      );
       out.push('-f', recoveryOverridePath);
     }
+    await this.appendPersistentBindRemap(
+      stackName,
+      out,
+      stackDirOverride,
+      action.includes('up') || action.includes('create'),
+    );
     out.push(...action);
     return out;
   }
@@ -1365,17 +1957,6 @@ export class ComposeService {
     }
     await this.ensureExplicitComposeFiles(stackName, args, true);
     args.push('-f', overridePath);
-  }
-
-  /** Slice the global-flag prefix from authoredComposeArgs (no action tokens). */
-  private async authoredComposeArgsPrefix(
-    stackName: string,
-    stackDirOverride?: string,
-  ): Promise<string[]> {
-    const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__'], stackDirOverride);
-    const idx = withSentinel.indexOf('__SENCHO_ACTION_SENTINEL__');
-    const prefix = idx >= 0 ? withSentinel.slice(0, idx) : withSentinel;
-    return [...prefix];
   }
 
   /**
@@ -1414,6 +1995,83 @@ export class ComposeService {
     return stackDir;
   }
 
+  /**
+   * Pin `-p <stack>` when Compose runs from an override directory.
+   *
+   * The project name normally comes from the working-directory basename, so a
+   * single-file stack carries no `-p` in its live or captured prefix. A SOPS
+   * decrypt overlay changes that basename to the operation id; without the pin
+   * Compose creates a stray project and leaves the real stack untouched.
+   */
+  private pinProjectNameForOverride(
+    stackName: string,
+    args: string[],
+    stackDirOverride?: string,
+  ): void {
+    if (!stackDirOverride) return;
+    if (path.resolve(stackDirOverride) === this.resolveValidatedStackDir(stackName)) return;
+    if (this.hasProjectNameFlag(args)) return;
+    if (this.composeDeclaresProjectName(args, path.resolve(stackDirOverride))) return;
+    const composeIdx = args.indexOf('compose');
+    args.splice(composeIdx >= 0 ? composeIdx + 1 : 0, 0, '-p', stackName);
+  }
+
+  /**
+   * A compose file with a top-level `name:` already fixes the project name, so
+   * an overlay's working-directory basename cannot leak into it. The pin must
+   * not override the authored name, or a SOPS deploy would start a second
+   * project beside the one the stack already runs.
+   */
+  private composeDeclaresProjectName(args: string[], stackDir: string): boolean {
+    const resolvedStackDir = path.resolve(stackDir);
+    const files: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-f' || args[i] === '--file') files.push(args[i + 1]);
+    }
+    if (files.length === 0) {
+      // No explicit -f, so Compose's own discovery decides: the two families in
+      // the order Compose resolves them, roots before the implicit override.
+      files.push(...COMPOSE_ROOT_FILENAMES, ...COMPOSE_OVERRIDE_FILENAMES);
+    }
+    for (const file of files) {
+      const abs = path.resolve(resolvedStackDir, file);
+      // Canonical inline js/path-injection barrier at the read sink: only the
+      // stack tree is read. Generated overlay layers (digest pin, mesh,
+      // recovery) live outside it and cannot declare a project name.
+      if (!abs.startsWith(resolvedStackDir + path.sep)) continue;
+      try {
+        const content = fs.readFileSync(abs, 'utf8');
+        // A compose layer is small; anything larger is not one, and the read is
+        // synchronous on the deploy path.
+        if (content.length > 1_048_576) continue;
+        const doc: unknown = parseYaml(content);
+        if (doc !== null && typeof doc === 'object' && !Array.isArray(doc)) {
+          const name = (doc as Record<string, unknown>).name;
+          if (typeof name === 'string' && name.trim() !== '') return true;
+        }
+      } catch {
+        // A missing, unreadable, or non-YAML layer cannot declare a name.
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Positional scan: a compose file or env file literally named `-p` is a flag
+   * value, not a project-name flag, so skip each flag's value token.
+   */
+  private hasProjectNameFlag(args: string[]): boolean {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i];
+      if (token === '-f' || token === '--file' || token === '--env-file' || token === '--project-directory') {
+        i++;
+        continue;
+      }
+      if (token === '-p' || token === '--project-name') return true;
+    }
+    return false;
+  }
+
   /** Rebase a captured absolute stack path onto the overlay root when present. */
   private remapCapturedAbsToRoot(abs: string, stackDir: string, pathRoot: string): string | null {
     const remapped = path.resolve(pathRoot, path.relative(stackDir, abs));
@@ -1421,21 +2079,288 @@ export class ComposeService {
   }
 
   /**
+   * The real form of a captured path, falling back to the lexical one when it
+   * does not resolve (missing, dangling, or unreadable). Compose reports a
+   * missing env file itself; an unresolvable path is not a path escape.
+   */
+  private async realCapturedPath(abs: string): Promise<string> {
+  try {
+    return await fs.promises.realpath(abs);
+  } catch {
+    return abs;
+  }
+}
+
+  /**
+   * Resolve a captured `--env-file` to the path recovery must launch with.
+   *
+   * Capture emits the path of a selected project env file, which is the real
+   * path for a configured file and the compose-root spelling for the
+   * context-directory fallback, and the helper that produced it authorizes any
+   * path inside the compose root, not only inside the stack directory. A stack
+   * whose selected env file links to a sibling in that root therefore captures
+   * an env-file recovery has to accept, so recovery validates against the same
+   * root instead of a narrower one. Containment is decided on the real path, as
+   * capture does, so a name inside the root whose link target leaves it is
+   * refused rather than followed. An in-stack path is mirrored under the
+   * overlay root; an authorized path outside the stack directory keeps its live
+   * location, because a recovery overlay mirrors the stack directory alone.
+   * Both the lexical and the real compose root are matched, so a relocated
+   * (symlinked) compose directory still resolves, and the mirror is derived in
+   * the coordinates of the root that matched. Anything outside the compose root
+   * is refused, at the entry barrier in the form static analysis credits and
+   * again on the real path below.
+   *
+   * A target that exists has to be a regular file: the generation omitted it, so
+   * a restore never replaced whatever now sits there, and a FIFO reaching Compose
+   * waits for a writer instead of naming the invalid input.
+   */
+  private async resolveCapturedEnvFile(
+    stackName: string,
+    abs: string,
+    stackDir: string,
+    pathRoot: string,
+  ): Promise<string> {
+    const baseResolved = path.resolve(this.baseDir);
+    // Real compose base plus the lexical stack name, the same rule the
+    // generation store applies, so a stack dir that links elsewhere stays out.
+    const realBase = await this.realCapturedPath(baseResolved);
+    // Canonical js/path-injection barrier inline with the realpath read below:
+    // the guard sits at the read and covers one constant root, because the
+    // analysis does not credit a guard over two alternative roots. A linked
+    // compose root lets a captured env file be spelled through the physical
+    // root; that spelling is rebased onto the lexical root first, so the one
+    // barrier covers both spellings and refuses everything outside the compose
+    // root with the message the refusal already used.
+    let absResolved = path.resolve(abs);
+    if (realBase !== baseResolved && absResolved.startsWith(realBase + path.sep)) {
+      absResolved = path.join(baseResolved, absResolved.slice(realBase.length + path.sep.length));
+    }
+    if (!absResolved.startsWith(baseResolved + path.sep)) {
+      throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+    }
+    const roots = [{ stackDir, base: baseResolved }];
+    if (realBase !== baseResolved) {
+      roots.push({ stackDir: path.join(realBase, stackName), base: realBase });
+    }
+    let realAbs: string;
+    try {
+      realAbs = await fs.promises.realpath(absResolved);
+    } catch {
+      // Compose reports a missing env file itself; an unresolvable path is
+      // not a path escape, so the guarded spelling stands.
+      realAbs = absResolved;
+    }
+    const overlayResolved = path.resolve(pathRoot);
+    for (const root of roots) {
+      if (!isPathWithinBase(realAbs, root.stackDir)) continue;
+      // The root that matched decides the coordinate system the path is rebased
+      // in. A captured spelling that already lives under it is kept, so a stack
+      // file that links to a sibling keeps its own name; otherwise the real path
+      // is used, because a linked compose root puts the captured lexical name
+      // outside the real stack directory while the file itself is inside it.
+      const matched = isPathWithinBase(abs, root.stackDir) ? abs : realAbs;
+      const remapped = this.remapCapturedAbsToRoot(matched, root.stackDir, pathRoot);
+      if (!remapped) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      // Canonical js/path-injection barrier inline with the stat below, in the
+      // same single-root shape as the entry barrier. The type is checked on the
+      // path recovery passes to Compose, not the captured spelling: an in-stack
+      // file is read through the overlay, and a captured link may only keep
+      // working because the overlay holds the target.
+      const overlayPath = path.resolve(remapped);
+      if (!overlayPath.startsWith(overlayResolved + path.sep)) {
+        throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
+      }
+      let overlayIsFile: boolean;
+      try {
+        overlayIsFile = (await fs.promises.stat(overlayPath)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        // A missing file is left for Compose, which reports it itself.
+        if (code === 'ENOENT') return remapped;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        overlayIsFile = false;
+      }
+      if (!overlayIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+      return remapped;
+    }
+    if (roots.some(root => isPathWithinBase(realAbs, root.base))) {
+      // Authorized input outside the stack directory keeps its live location.
+      // The checked spelling is the one the entry barrier covered, which is how
+      // a linked compose root rebases the physical spelling onto the lexical
+      // one; both resolve to the same file.
+      let liveIsFile: boolean;
+      try {
+        liveIsFile = (await fs.promises.stat(absResolved)).isFile();
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return abs;
+        if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+        liveIsFile = false;
+      }
+      if (!liveIsFile) {
+        throw Object.assign(
+          new Error(`Captured env-file for stack "${stackName}" is not a regular file`),
+          { code: 'NOT_A_FILE' },
+        );
+      }
+      return abs;
+    }
+    throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
+  }
+
+  /**
+   * Refuse a captured compose layer whose real target Compose would open
+   * outside the compose root, and one that exists but is not a regular file. The
+   * path is the one recovery passes to `-f`, resolved against the working
+   * directory (the stack, or an overlay outside that root). A lexical name
+   * inside the stack can still be a symlink.
+   * A missing path is left for Compose: restore writes held files back, and an
+   * omitted layer that is simply absent is not an escape. A dangling or
+   * looping link cannot be shown to stay inside the root, so it is refused.
+   * A target inside the compose root stays allowed, including a shared file
+   * outside the stack directory, but only while it is a regular file: a FIFO or
+   * socket there reaches Compose and waits or fails there instead of naming the
+   * invalid input, and the generation omitted the file, so a restore never
+   * replaced it. When the working directory itself is an overlay outside the
+   * compose root, a target inside that overlay is allowed too.
+   */
+  private async assertCapturedComposeLayerTarget(layer: string, pathRoot: string): Promise<void> {
+    // Canonical js/path-injection barrier inline with the sinks below: the
+    // containment check sits at the sink because static analysis credits
+    // neither the caller's check nor a helper. The layer is opened relative to
+    // the working directory, so that directory is the base.
+    const rootResolved = path.resolve(pathRoot);
+    const lexical = path.resolve(rootResolved, layer);
+    if (!lexical.startsWith(rootResolved + path.sep)) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" escapes the recovery working directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
+    try {
+      await fs.promises.lstat(lexical);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    let real: string;
+    try {
+      real = await fs.promises.realpath(lexical);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENOTDIR') {
+        throw Object.assign(
+          new Error(`Captured compose layer "${layer}" does not resolve inside the compose directory`),
+          { code: 'SYMLINK_ESCAPE' },
+        );
+      }
+      throw e;
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const realBase = await this.realCapturedPath(baseResolved);
+    const cwdInside = isPathWithinBase(pathRoot, baseResolved) || isPathWithinBase(pathRoot, realBase);
+    const allowed = isPathWithinBase(real, baseResolved)
+      || isPathWithinBase(real, realBase)
+      || (!cwdInside && isPathWithinBase(real, pathRoot));
+    if (!allowed) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" resolves outside the compose directory`),
+        { code: 'SYMLINK_ESCAPE' },
+      );
+    }
+    // Containment is settled; now ask what Compose would actually open. A shared
+    // layer inside the compose root is a supported partial input, but only
+    // while it stays a regular file: a FIFO or socket there would reach Compose
+    // and wait or fail there instead of naming the input. The stat follows the
+    // link to the target Compose opens, and a missing file is left for Compose.
+    let targetIsFile: boolean;
+    try {
+      targetIsFile = (await fs.promises.stat(lexical)).isFile();
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return;
+      if (code !== 'ELOOP' && code !== 'ENOTDIR') throw e;
+      targetIsFile = false;
+    }
+    if (!targetIsFile) {
+      throw Object.assign(
+        new Error(`Captured compose layer "${layer}" is not a regular file`),
+        { code: 'NOT_A_FILE' },
+      );
+    }
+  }
+
+  /**
    * Rebuild a spawn-safe compose global-flag prefix from a generation's
    * captured invocation. Captured paths must resolve inside the stack
-   * directory; when overlayDir is set, absolute --env-file and
-   * --project-directory paths are rewritten under that overlay.
+   * directory (a captured `--env-file` inside the compose root, which is the
+   * root its capture-time validation uses); when overlayDir is set, absolute
+   * --env-file and --project-directory paths are rewritten under that overlay.
+   * Compose layers are also checked on the real path Compose will open.
    */
-  private composePrefixFromCapturedInvocation(
+  private async composePrefixFromCapturedInvocation(
     stackName: string,
     invocation: RollbackInvocationRecord,
     overlayDir?: string,
-  ): string[] {
+  ): Promise<string[]> {
     const stackDir = this.resolveValidatedStackDir(stackName);
     const pathRoot = overlayDir ? path.resolve(overlayDir) : stackDir;
     // Empty prefix is valid (single-file auto-discovery at capture time).
     const raw = [...invocation.composeArgsPrefix];
     const out: string[] = [];
+    // Compose picks the root compose file and the implicit override by name, so
+    // an ordinary single-file stack captured no -f and left the choice to
+    // discovery. Recovery pins the layers the generation captured instead:
+    // otherwise a root added after capture wins discovery and the recovery runs
+    // a configuration the generation never held. Only the layers Compose
+    // selects at the project root belong here, never an included file.
+    if (invocation.composeLayers && !raw.includes('-f') && !raw.includes('--file')) {
+      for (const layer of invocation.composeLayers) {
+        if (!isValidRelativeStackPath(layer)) {
+          throw new Error(`Invalid captured compose layer path for stack "${stackName}"`);
+        }
+        if (!isPathWithinBase(path.resolve(stackDir, layer), stackDir)) {
+          throw new Error(`Captured compose layer path escapes stack directory for "${stackName}"`);
+        }
+        await this.assertCapturedComposeLayerTarget(layer, pathRoot);
+        out.push('-f', layer);
+      }
+    }
+    // Pinning a COMPOSE_FILE selection as an -f list drops the working
+    // directory's env file out of the interpolation environment. The recorded
+    // files go back as ordered --env-file flags, the same order the live run
+    // applied them in, so a value only the stack root .env holds survives the
+    // translation and a key both files define keeps its live winner. Repeated
+    // --env-file flags replace the project directory default, which is why
+    // the recorded list carries that file too instead of letting the flags
+    // drop it. A prefix that already named an env file selected its own and
+    // is replayed below unchanged.
+    // The list is also recorded outside a COMPOSE_FILE chain, but only as an
+    // empty list that pins the absence of a default env file; see below.
+    if (invocation.interpolationEnvFiles !== undefined && !raw.includes('--env-file')) {
+      // An empty record means no default env file existed at capture. Naming
+      // an empty input replaces discovery, so an `.env` that appeared since
+      // stays out of the recovered project's interpolation environment.
+      if (invocation.interpolationEnvFiles.length === 0) out.push('--env-file', EMPTY_ENV_FILE);
+      for (const envRel of invocation.interpolationEnvFiles) {
+        if (!isValidRelativeStackPath(envRel)) {
+          throw new Error(`Invalid captured interpolation env file for stack "${stackName}": "${envRel}"`);
+        }
+        const envAbs = path.resolve(stackDir, envRel);
+        if (!isPathWithinBase(envAbs, stackDir)) {
+          throw new Error(`Captured interpolation env file escapes stack directory for "${stackName}"`);
+        }
+        out.push('--env-file', await this.resolveCapturedEnvFile(stackName, envAbs, stackDir, pathRoot));
+      }
+    }
     for (let i = 0; i < raw.length; i++) {
       const token = raw[i];
       if (token === '-f' || token === '--file') {
@@ -1446,6 +2371,7 @@ export class ComposeService {
         if (!isPathWithinBase(path.resolve(stackDir, file), stackDir)) {
           throw new Error(`Captured compose file path escapes stack directory for "${stackName}"`);
         }
+        await this.assertCapturedComposeLayerTarget(file, pathRoot);
         out.push('-f', file);
         continue;
       }
@@ -1454,15 +2380,12 @@ export class ComposeService {
         if (!envPath) {
           throw new Error(`Invalid captured --env-file for stack "${stackName}"`);
         }
-        const abs = path.resolve(envPath);
-        if (!isPathWithinBase(abs, stackDir)) {
-          throw new Error(`Captured env-file path escapes stack directory for "${stackName}"`);
-        }
-        const remapped = this.remapCapturedAbsToRoot(abs, stackDir, pathRoot);
-        if (!remapped) {
-          throw new Error(`Captured env-file path escapes overlay directory for "${stackName}"`);
-        }
-        out.push('--env-file', remapped);
+        out.push('--env-file', await this.resolveCapturedEnvFile(
+          stackName,
+          path.resolve(envPath),
+          stackDir,
+          pathRoot,
+        ));
         continue;
       }
       if (token === '--project-directory') {
@@ -1491,6 +2414,7 @@ export class ComposeService {
       }
       throw new Error(`Unsupported captured compose flag "${token}" for stack "${stackName}"`);
     }
+    this.pinProjectNameForOverride(stackName, out, overlayDir);
     return out;
   }
 
@@ -1499,7 +2423,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1606,6 +2530,11 @@ export class ComposeService {
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
         const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // End the gates from any earlier run here, for the same reason as the
+        // deploy path: after the arguments and the registry auth have resolved,
+        // and immediately before the compose up replaces the containers they are
+        // observing.
+        await this.supersedeGatesForContainerOp(stackName, 'the stack was updated during the observation');
         // Set only once Compose is genuinely about to receive the mutation:
         // reading compose args or resolving registry auth can still fail with
         // the previous workload provably intact.
@@ -1638,6 +2567,11 @@ export class ComposeService {
           sanitizeForLog(candidate.id),
         );
       }
+
+      // The update replaced every service's image, so the per-service snapshots
+      // taken before it stop being rollback targets. With the same step on the
+      // deploy path, this is the one place a stack runtime change retires them.
+      await this.retireStaleServiceRecoveries(stackName);
 
       sendOutput('=== Stack updated successfully ===\n');
 
@@ -1722,6 +2656,70 @@ export class ComposeService {
   }
 
   /**
+   * Acquire registry-backed images for a stack without touching the runtime.
+   *
+   * Never builds, and never pulls a build-backed service: `--ignore-buildable`
+   * is passed unconditionally, so a service declaring `build:` is skipped rather
+   * than pulled or built whether or not this method knows about it. The
+   * unconditional flag is what makes that true; the name list is a report only.
+   * A service declaring both `image:` and `build:` does have a fetchable image;
+   * skipping it is the deliberate choice, not a lack of one. That list comes from
+   * `loadStackBuildServices`, the same helper the update path uses: the rendered
+   * effective model when a Git deploy spec is applied and renders, the root
+   * compose file otherwise, which includes a Git-sourced stack whose effective
+   * render failed. A `build:` that only an override file declares is therefore
+   * skipped by the CLI but not named in the list. This method opens no rollback
+   * generation, writes no deployment generation, and starts no health gate,
+   * because it does not reconcile the runtime and therefore has nothing to roll
+   * back to. The only state it changes is which images exist in the local Docker
+   * image store.
+   */
+  async pullStackImages(
+    stackName: string,
+    ws?: WebSocket,
+  ): Promise<{ skippedBuildBacked: string[] }> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+
+    // Same preflight every sibling compose operation runs. Without it, ${VAR} in
+    // an image reference resolves against still-encrypted files on a SOPS stack,
+    // so the pull can fetch a different image than a deploy would use.
+    await this.assertSopsOverlayOrRefuse(stackName);
+    // No `blocked` clause: the editor surfaces this behind its own "Image pull
+    // failed:" prefix, and the remedy names the action the operator actually chose.
+    await this.assertRequiredEnvPresent(stackName, undefined, {
+      remedy: 'then run Save & Pull Images again.',
+    });
+
+    // Best-effort, and only for the skip report. loadStackBuildServices reads the
+    // root compose file for stacks without a Git source, so a build: declared
+    // only in compose.override.yaml is not listed below.
+    const skippedBuildBacked = await loadStackBuildServices(this.nodeId, stackName);
+
+    await this.withRegistryAuth(async (env) => {
+      if (skippedBuildBacked.length > 0) {
+        sendOutput(
+          `=== Skipping build-backed services: ${skippedBuildBacked.join(', ')} ===\n`,
+        );
+      }
+      // --ignore-buildable is unconditional: it is what makes "skip, never
+      // build" true at the CLI level, for a service declaring both `image:` and
+      // `build:`. It does not rely on the skip list above being complete, so a
+      // build: that only an override file declares is still skipped.
+      sendOutput('=== Pulling registry images ===\n');
+      await this.execute(
+        'docker',
+        await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']),
+        stackDir, ws, true, env, getComposeStallTimeoutMs(),
+      );
+    }, sendOutput);
+
+    return { skippedBuildBacked };
+  }
+
+  /**
    * Service-scoped update: pull (or `build --pull` for a build-backed service)
    * and recreate a single service's replicas in place. Always
    * `--no-deps --force-recreate`, never `--remove-orphans`, so sibling services
@@ -1729,7 +2727,7 @@ export class ComposeService {
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1757,7 +2755,7 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
-    this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -1776,6 +2774,10 @@ export class ComposeService {
       const args = options?.removeVolumes
         ? ['down', '--volumes', '--remove-orphans']
         : ['down', '--remove-orphans'];
+      // Teardown removes the containers a gate would be observing (stack deletion,
+      // and the rollback down of a failed template deploy), so it ends the gates
+      // first, for the same reason runDown does.
+      await this.supersedeGatesForContainerOp(stackName, 'the stack was torn down during the observation');
       await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackPath, undefined, false);
     } catch (error) {
       console.warn(`[Teardown] Docker down failed or nothing to clean up for ${sanitizeForLog(stackName)}`);
@@ -1803,7 +2805,7 @@ export class ComposeService {
     // scan with the live deploy-spec / project-env selection.
     const useCaptured = hasUsableCapturedInvocation(invocation);
     const fileAndEnvPrefix = useCaptured
-      ? [...this.composePrefixFromCapturedInvocation(stackName, invocation)]
+      ? await this.composePrefixFromCapturedInvocation(stackName, invocation)
       : [
         ...authoredComposeFileArgs(stackName, this.nodeId),
         ...(await authoredComposeEnvFileArgs(stackName, this.nodeId)),
@@ -1985,10 +2987,32 @@ export class ComposeService {
    * on a non-zero exit, so the Compose Doctor can turn a failed render into a
    * finding rather than an exception. Bounded by a timeout and an output cap.
    * Rejects only when the docker binary cannot be spawned.
+   *
+   * `opts.stackDirOverride` renders the model the deployment it gates will
+   * actually use: a GitOps decrypt overlay, whose env files are plaintext while
+   * the live stack's stay ciphertext. The working directory, the authored
+   * files, the env-file arguments, and the project-name pin are all selected
+   * for that overlay, so the preflight and the Compose run that follows resolve
+   * the same project, the same variables, and the same typed values (a
+   * published port, an external network name).
+   *
+   * Such a render withholds its own diagnostics: `stderr` comes back empty and
+   * `withheld` is set, because Compose quotes interpolated values back and those
+   * are plaintext secrets. The rendered model is still returned, since the
+   * caller reads it structurally (which external networks are declared) and
+   * never hands it to the operator; a caller that has to explain a failed
+   * render reports the withheld text instead of Compose's own words.
+   *
+   * `opts.composePrefix` renders a caller-assembled invocation (a rollback
+   * rebuilt from a captured generation) instead of one derived from live
+   * state. The prefix already carries the files, the env selection, the
+   * project-name pin, and any generated layer, so it is used verbatim; only
+   * the action is replaced with the render.
    */
   public async renderConfig(
     stackName: string,
-  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean }> {
+    opts?: { stackDirOverride?: string; composePrefix?: string[] },
+  ): Promise<{ rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }> {
     if (!isValidStackName(stackName)) {
       throw new Error('Invalid stack path');
     }
@@ -1998,22 +3022,61 @@ export class ComposeService {
     // closure, so the spawn is hoisted out of the executor. startsWith already
     // rejects the base dir itself, since base does not start with base + sep.
     const baseResolved = path.resolve(this.baseDir);
-    const stackDir = path.resolve(baseResolved, stackName);
-    if (!stackDir.startsWith(baseResolved + path.sep)) {
+    const overlayDir = opts?.stackDirOverride ? path.resolve(opts.stackDirOverride) : null;
+    let stackDir: string;
+    let allowedRoot: string;
+    if (overlayDir) {
+      // The git-secrets root is the only tree a decrypt overlay lives in, so it
+      // is the one base an overridden working directory may be contained by.
+      // Checked here, at the sink, rather than trusted from the caller.
+      allowedRoot = path.resolve(gitSecretsAreaBase());
+      if (!overlayDir.startsWith(allowedRoot + path.sep)) {
+        throw new Error('Invalid stack path');
+      }
+      stackDir = overlayDir;
+    } else {
+      allowedRoot = baseResolved;
+      stackDir = path.resolve(baseResolved, stackName);
+      if (!stackDir.startsWith(allowedRoot + path.sep)) {
+        throw new Error('Invalid stack path');
+      }
+    }
+    const stackDirOverride = overlayDir ?? undefined;
+    let composeArgs: string[];
+    if (opts?.composePrefix) {
+      composeArgs = [...opts.composePrefix];
+    } else {
+      // Render the authored multi-file model (no mesh override) so the Compose Doctor
+      // sees every override file; single-file stacks get an empty prefix. The env-file
+      // flag keeps render resolving the same root .env the validator and deploy use.
+      let filePrefix: string[];
+      try {
+        filePrefix = authoredComposeFileArgs(stackName, this.nodeId, stackDirOverride);
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId, stackDirOverride);
+      composeArgs = ['compose', ...filePrefix, ...envFileArgs];
+      // The overlay renames the working directory to the operation id, so the
+      // render gets the same project-name pin the ensuing `up` gets. A no-op for
+      // the live path, where the stack directory already names the project.
+      // The bind remap is the same layer `up` loads, so the bind sources in this
+      // model are the ones the deploy will mount.
+      this.pinProjectNameForOverride(stackName, composeArgs, stackDirOverride);
+      if (overlayDir) await this.appendPersistentBindRemap(stackName, composeArgs, overlayDir);
+    }
+    composeArgs.push('config', '--format', 'json');
+    const withholdDiagnostics = overlayDir !== null;
+    // Canonical inline js/path-injection barrier immediately above the spawn
+    // sink: the checks above are scoped to the branch that assigned stackDir,
+    // and only a check that dominates the sink line is credited. `allowedRoot`
+    // is the root of whichever branch assigned it.
+    const cwdResolved = path.resolve(stackDir);
+    if (!cwdResolved.startsWith(allowedRoot + path.sep)) {
       throw new Error('Invalid stack path');
     }
-    // Render the authored multi-file model (no mesh override) so the Compose Doctor
-    // sees every override file; single-file stacks get an empty prefix. The env-file
-    // flag keeps render resolving the same root .env the validator and deploy use.
-    let filePrefix: string[];
-    try {
-      filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
-    const child = spawn('docker', ['compose', ...filePrefix, ...envFileArgs, 'config', '--format', 'json'], {
-      cwd: stackDir,
+    const child = spawn('docker', composeArgs, {
+      cwd: cwdResolved,
       env: {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
@@ -2028,7 +3091,7 @@ export class ComposeService {
       let capped = false;
       let settled = false;
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
-      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean }) => {
+      const finish = (result: { rendered: string | null; stderr: string; code: number | null; timedOut: boolean; withheld?: boolean }) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -2039,6 +3102,7 @@ export class ComposeService {
         if (stdout.length > MAX_OUTPUT && !capped) { capped = true; child.kill('SIGKILL'); }
       });
       child.stderr.on('data', (data: Buffer) => {
+        if (withholdDiagnostics) return;
         if (stderr.length < MAX_OUTPUT) stderr += data.toString();
       });
       child.on('error', (err: NodeJS.ErrnoException) => {
@@ -2048,7 +3112,14 @@ export class ComposeService {
         reject(new Error(describeSpawnError(err, { command: 'docker compose' }).message));
       });
       child.on('close', (code) => {
-        if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
+        if (withholdDiagnostics) {
+          // A decrypted render keeps the model, which the caller reads
+          // structurally, and drops the diagnostic, which is where Compose
+          // quotes interpolated values back. Every failure reason collapses
+          // into that one withheld result.
+          const rendered = code === 0 && !timedOut && !capped ? stdout : null;
+          finish({ rendered, stderr: '', code, timedOut, withheld: true });
+        } else if (timedOut) finish({ rendered: null, stderr: stderr.trim() || 'docker compose config timed out', code, timedOut: true });
         else if (capped) finish({ rendered: null, stderr: 'Rendered model exceeded the size limit', code, timedOut: false });
         else if (code === 0) finish({ rendered: stdout, stderr, code, timedOut: false });
         else finish({ rendered: null, stderr: stderr.trim() || `docker compose config failed with code ${code}`, code, timedOut: false });

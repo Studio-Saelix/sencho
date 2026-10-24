@@ -64,14 +64,14 @@ The **Fleet** view is the multi-node command center. The masthead summarizes onl
 
 The Fleet toolbar includes **Check Updates**, **Refresh**, and **Add node** for admins. The **Overview** tab supports search, sort, status filters, label filters, and a Grid or Topology view. Node cards show online state, resource use, container counts, version state, update actions, and direct drill-down into stacks on that node.
 
-Beyond **Overview**, Fleet provides tabs for **Snapshots**, node **Readiness**, a dependency **Map**, a **Docker Labels** audit, blueprint **Deployments**, **Secrets**, **Federation**, and fleet **Actions**. Federation placement (cordon and pin) is available on every tier. Routing is a limited-availability tab when enabled on an instance. See [Licensing](/features/licensing) for the full tier breakdown.
+Beyond **Overview**, Fleet provides tabs for **Snapshots**, node **Readiness**, a dependency **Map**, a **Docker Labels** audit, **Blueprints**, **Secrets**, **Federation**, and fleet **Actions**. Federation placement (cordon and pin) is available on every tier. Routing is a limited-availability tab when enabled on an instance. See [Licensing](/features/licensing) for the full tier breakdown.
 
 ## Resources, templates, and logs
 
-The **Resources** view shows what Docker is using on the active node. It starts with reclaimable storage, a Docker Disk Footprint treemap, and **Quick Clean** actions. The tabs below split resources into **images**, **volumes**, **networks**, and **Unmanaged** containers. Filters separate **All**, **Managed**, and **External** resources, and protected Sencho resources are marked so they are not removed accidentally.
+The **Resources** view shows what Docker is using on the active node. It starts with a masthead that states how much storage a cleanup would free, and a **Reclaim** action. The tabs below split resources into **images**, **volumes**, **external** containers, and **rollback** points. Filters separate **All**, **Managed**, and **External** resources, and protected Sencho resources are marked so they are not removed accidentally.
 
 <Frame>
-  <img src="/images/introduction/resources-overview.png" alt="Sencho Resources view with reclaimable storage, Docker Disk Footprint, Quick Clean, and resource tabs" />
+  <img src="/images/introduction/resources-overview.png" alt="Sencho Resources view with the reclaimable-storage masthead, Reclaim action, and resource tabs" />
 </Frame>
 
 The **App Store** lets you search templates, filter by category, open a deploy sheet, adjust essentials, customize advanced ports, volumes, and environment variables, and deploy a stack with live progress feedback.

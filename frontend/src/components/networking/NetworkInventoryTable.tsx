@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Eye, Search, Trash2, ExternalLink, GitBranch } from 'lucide-react';
+import { Eye, Search, Trash2, ExternalLink, GraphStar } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
@@ -297,7 +297,7 @@ export function NetworkInventoryTable({
                                 onClick={() => onFilterTopology(row.name)}
                                 aria-label={`Show ${row.name} in topology`}
                               >
-                                <GitBranch className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                <GraphStar className="w-3.5 h-3.5" strokeWidth={1.5} />
                               </Button>
                             </TooltipTrigger>
                             <TooltipContent>Show in topology</TooltipContent>

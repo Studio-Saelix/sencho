@@ -22,6 +22,7 @@ const { mockDocker, composeDirRef, mockExecFileAsync } = vi.hoisted(() => {
     pruneNetworks: vi.fn().mockResolvedValue({}),
     pruneVolumes: vi.fn().mockResolvedValue({ SpaceReclaimed: 0 }),
     createNetwork: vi.fn(),
+    modem: { dial: vi.fn() },
   };
   return {
     mockDocker,
@@ -84,6 +85,19 @@ beforeEach(() => {
 /** Hold specific images via the stack-side recovery service for one test. */
 const holdStackImages = (ids: string[]) => {
   vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(ids));
+};
+
+/**
+ * Answer the typed `docker system df?type=` sections (volume, container) that
+ * the Resources figures and volume prune use instead of the slow full df.
+ */
+const mockDfSections = (sections: { volume?: object; container?: object }) => {
+  mockDocker.modem.dial.mockImplementation(
+    (opts: { path: string; options?: { type?: string } }, cb: (err: Error | null, data?: unknown) => void) => {
+      const type = opts.options?.type;
+      cb(null, type === 'volume' ? (sections.volume ?? { Volumes: [] }) : (sections.container ?? { Containers: [] }));
+    },
+  );
 };
 
 // ── validateApiData ────────────────────────────────────────────────────
@@ -1010,29 +1024,20 @@ describe('DockerController - getClassifiedResources', () => {
     // the held image's bytes and count leave reclaimableImages, while the
     // managed/unmanaged inventory totals are untouched.
     holdStackImages(['img-held']);
-    mockDocker.df.mockResolvedValue({
-      ImageUsage: { Reclaimable: 1_500 },
-      Images: [
-        { Id: 'img-held', Containers: 0, Size: 1_000, VirtualSize: 1_000, SharedSize: 0 },
-        { Id: 'img-free', Containers: 0, Size: 500, VirtualSize: 500, SharedSize: 0 },
-        { Id: 'img-used', Containers: 1, Size: 2_000, VirtualSize: 2_000, SharedSize: 0 },
-        { Id: 'img-unmanaged', Containers: 1, Size: 300, VirtualSize: 300, SharedSize: 0 },
-      ],
-      Volumes: [],
-      Containers: [],
-    });
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-held', RepoTags: ['sencho-rb/abc123456789/web:hold'], Size: 1_000, Containers: 0 },
-      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 500, Containers: 0 },
-      { Id: 'img-used', RepoTags: ['myregistry/app:2.0'], Size: 2_000, Containers: 1 },
-      { Id: 'img-unmanaged', RepoTags: ['other/container:1'], Size: 300, Containers: 1 },
+      { Id: 'img-held', RepoTags: ['sencho-rb/abc123456789/web:hold'], Size: 1_000, SharedSize: 0, Containers: 0 },
+      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 500, SharedSize: 0, Containers: 0 },
+      { Id: 'img-used', RepoTags: ['myregistry/app:2.0'], Size: 2_000, SharedSize: 0, Containers: 1 },
+      { Id: 'img-unmanaged', RepoTags: ['other/container:1'], Size: 300, SharedSize: 0, Containers: 1 },
     ]);
-    mockDocker.listContainers.mockResolvedValue([
-      { Id: 'c1', ImageID: 'img-used', Labels: { 'com.docker.compose.project': 'my-stack' } },
-      { Id: 'c2', ImageID: 'img-unmanaged', Labels: { 'com.docker.compose.project': 'other' } },
-    ]);
-    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
-    mockDocker.listNetworks.mockResolvedValue([]);
+    mockDfSections({
+      container: {
+        Containers: [
+          { Id: 'c1', ImageID: 'img-used', State: 'running', Labels: { 'com.docker.compose.project': 'my-stack' } },
+          { Id: 'c2', ImageID: 'img-unmanaged', State: 'running', Labels: { 'com.docker.compose.project': 'other' } },
+        ],
+      },
+    });
 
     const dc = DockerController.getInstance(1);
     const result = await dc.getDiskUsageClassified(['my-stack']);
@@ -1049,17 +1054,10 @@ describe('DockerController - getClassifiedResources', () => {
     // so the response claims 0 reclaimable images while every classified
     // image is badged protected, never the reverse.
     vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
-    mockDocker.df.mockResolvedValue({
-      ImageUsage: { Reclaimable: 1_500 },
-      Images: [
-        { Id: 'img-free', Containers: 0, Size: 1_500, VirtualSize: 1_500, SharedSize: 0 },
-      ],
-      Volumes: [],
-      Containers: [],
-    });
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 1_500, Containers: 0 },
+      { Id: 'img-free', RepoTags: ['myregistry/app:1.4'], Size: 1_500, SharedSize: 0, Containers: 0 },
     ]);
+    mockDfSections({});
     mockDocker.listContainers.mockResolvedValue([]);
     mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
     mockDocker.listNetworks.mockResolvedValue([]);
@@ -1075,6 +1073,205 @@ describe('DockerController - getClassifiedResources', () => {
     const classified = await dc.getClassifiedResources(['my-stack']);
     const img = classified.images.find(i => i.Id === 'img-free');
     expect(img?.rollbackProtected).toBe(true);
+  });
+
+  it('getDiskUsageClassified counts only the bytes an unused image does not share with another image', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'old-a', RepoTags: ['app:1'], Size: 1_000, SharedSize: 900, Containers: 0 },
+      { Id: 'old-b', RepoTags: ['app:2'], Size: 1_000, SharedSize: 800, Containers: 0 },
+      { Id: 'current', RepoTags: ['app:3'], Size: 1_000, SharedSize: 900, Containers: 1 },
+    ]);
+    mockDfSections({});
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(result.reclaimableImages).toBe(100 + 200);
+    expect(result.reclaimableImageCount).toBe(2);
+  });
+
+  it('getDiskUsageClassified never reads the slow image section of docker df', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-free', RepoTags: ['app:1'], Size: 100, SharedSize: 0, Containers: 0 },
+    ]);
+    mockDfSections({});
+
+    const dc = DockerController.getInstance(1);
+    await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    const types = mockDocker.modem.dial.mock.calls.map((call) => (call[0] as { options: { type: string } }).options.type).sort();
+    expect(types).toEqual(['container', 'volume']);
+    expect(mockDocker.listImages).toHaveBeenCalledWith(expect.objectContaining({ 'shared-size': true }));
+    expect(mockDocker.listVolumes).not.toHaveBeenCalled();
+    expect(mockDocker.listContainers).not.toHaveBeenCalled();
+  });
+
+  it('getDiskUsageClassified falls back to the exact df figure when the daemon leaves shared sizes unknown', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-free', RepoTags: ['app:1'], Size: 700, SharedSize: -1, Containers: 0 },
+    ]);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 650 },
+      Images: [{ Id: 'img-free', Containers: 0, Size: 700, VirtualSize: 700, SharedSize: 50 }],
+    });
+    mockDfSections({});
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(mockDocker.df).toHaveBeenCalledTimes(1);
+    expect(result.reclaimableImages).toBe(650);
+    expect(result.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsageClassified keeps rollback-held images out of the exact fallback figure too', async () => {
+    holdStackImages(['img-held']);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-free', RepoTags: ['app:1'], Size: 700, SharedSize: -1, Containers: 0 },
+      { Id: 'img-held', RepoTags: ['sencho-rb/abc123456789/web:hold'], Size: 300, SharedSize: -1, Containers: 0 },
+    ]);
+    mockDocker.df.mockResolvedValue({
+      ImageUsage: { Reclaimable: 1_000 },
+      Images: [
+        { Id: 'img-free', Containers: 0, Size: 700, VirtualSize: 700, SharedSize: 0 },
+        { Id: 'img-held', Containers: 0, Size: 300, VirtualSize: 300, SharedSize: 0 },
+      ],
+    });
+    mockDfSections({});
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(result.reclaimableImages).toBe(700);
+    expect(result.reclaimableImageCount).toBe(1);
+  });
+
+  it('getDiskUsageClassified takes volume bytes from df usage and splits them by compose project', async () => {
+    // listVolumes returns UsageData: null on real daemons, so the figure has to
+    // come from df. A volume with no usage data, or -1 (not computed), counts 0.
+    mockDocker.listImages.mockResolvedValue([]);
+    mockDfSections({
+      volume: {
+        Volumes: [
+          { Name: 'mine', Labels: { 'com.docker.compose.project': 'my-stack' }, UsageData: { RefCount: 1, Size: 4_000 } },
+          { Name: 'theirs', Labels: { 'com.docker.compose.project': 'other' }, UsageData: { RefCount: 0, Size: 700 } },
+          { Name: 'unlabelled', UsageData: { RefCount: 0, Size: 50 } },
+          { Name: 'unmeasured', UsageData: { RefCount: 0, Size: -1 } },
+          { Name: 'no-usage', UsageData: null },
+        ],
+      },
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getDiskUsageClassified(['my-stack']);
+
+    expect(result.managedVolumeBytes).toBe(4_000);
+    expect(result.unmanagedVolumeBytes).toBe(750);
+    expect(result.reclaimableVolumes).toBe(750);
+    expect(result.reclaimableVolumeCount).toBe(3);
+  });
+});
+
+// ── buildPrunePlan Docker call budget ──────────────────────────────────
+
+describe('DockerController - buildPrunePlan call budget', () => {
+  const idleNetwork = { Id: 'net-idle', Name: 'idle_net', Driver: 'bridge', Scope: 'local', Labels: { 'com.docker.compose.project': 'my-stack' } };
+
+  beforeEach(() => {
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listNetworks.mockResolvedValue([idleNetwork]);
+    mockDocker.getNetwork.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ Containers: {} }) });
+    mockDocker.listImages.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDfSections({});
+  });
+
+  it('a networks-only plan skips the sized container listing and every df call', async () => {
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['networks'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['net-idle']);
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    expect(mockDocker.modem.dial).not.toHaveBeenCalled();
+    expect(mockDocker.listContainers).toHaveBeenCalledWith({ all: true, size: false });
+  });
+
+  it('a containers plan still asks the daemon for container sizes', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'c-stopped', Names: ['/old'], State: 'exited', SizeRw: 2_048, Labels: { 'com.docker.compose.project': 'my-stack' } },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers'], 'managed', ['my-stack'], 1);
+
+    expect(mockDocker.listContainers).toHaveBeenCalledWith({ all: true, size: true });
+    expect(plan.items).toEqual([expect.objectContaining({ id: 'c-stopped', sizeBytes: 2_048 })]);
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    expect(mockDocker.modem.dial).not.toHaveBeenCalled();
+  });
+
+  it('a volumes plan reads only the volume section of df, never the full snapshot', async () => {
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: 'old-data', Driver: 'local', Labels: { 'com.docker.compose.project': 'my-stack' } }] });
+    mockDfSections({ volume: { Volumes: [{ Name: 'old-data', UsageData: { RefCount: 0, Size: 900 } }] } });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['volumes'], 'managed', ['my-stack'], 1);
+
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    expect(mockDocker.modem.dial).toHaveBeenCalledTimes(1);
+    expect(mockDocker.modem.dial.mock.calls[0][0]).toMatchObject({ path: '/system/df?', options: { type: 'volume' } });
+    expect(plan.items).toEqual([expect.objectContaining({ id: 'old-data', sizeBytes: 900 })]);
+  });
+
+  it('an images plan takes shared sizes from the listing and skips df', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-old', RepoTags: ['app:1'], Size: 1_000, SharedSize: 700, Containers: 0, Labels: { 'com.docker.compose.project': 'my-stack' } },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    expect(mockDocker.listImages).toHaveBeenCalledWith(expect.objectContaining({ 'shared-size': true }));
+    expect(plan.items).toEqual([expect.objectContaining({ id: 'img-old', sizeBytes: 300 })]);
+  });
+
+  it('an images plan falls back to df shared sizes when the listing leaves them unknown', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-old', RepoTags: ['app:1'], Size: 1_000, SharedSize: -1, Containers: 0, Labels: { 'com.docker.compose.project': 'my-stack' } },
+    ]);
+    mockDocker.df.mockResolvedValue({ Images: [{ Id: 'img-old', SharedSize: 600 }] });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', ['my-stack'], 1);
+
+    expect(plan.items).toEqual([expect.objectContaining({ id: 'img-old', sizeBytes: 400 })]);
+  });
+
+  it('starts every idle-network inspect before any finishes, and keeps plan order and failures out', async () => {
+    const nets = ['net-c', 'net-a', 'net-b', 'net-broken'];
+    mockDocker.listNetworks.mockResolvedValue(
+      nets.map((id) => ({ ...idleNetwork, Id: id, Name: `${id}_name` })),
+    );
+    const started: string[] = [];
+    const finish: Record<string, () => void> = {};
+    mockDocker.getNetwork.mockImplementation((id: string) => ({
+      inspect: () => new Promise((resolve, reject) => {
+        started.push(id);
+        finish[id] = () => (id === 'net-broken' ? reject(new Error('daemon busy')) : resolve({ Containers: {} }));
+      }),
+    }));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const dc = DockerController.getInstance(1);
+    const planned = dc.buildPrunePlan(['networks'], 'managed', ['my-stack'], 1);
+    await vi.waitFor(() => expect(started).toHaveLength(4));
+    // Resolve in reverse order: the plan must still list networks in a stable order.
+    for (const id of [...nets].reverse()) finish[id]();
+    const plan = await planned;
+
+    expect(plan.items.map((i) => i.id)).toEqual(['net-a', 'net-b', 'net-c']);
   });
 });
 
@@ -2099,9 +2296,14 @@ describe('DockerController - getBulkStackStatuses mainPort', () => {
     CacheService.getInstance().flush();
   });
 
-  const withPorts = (project: string, ports: { PrivatePort: number; PublicPort: number; Type?: string }[]) => ({
+  const withPorts = (project: string, ports: { PrivatePort: number; PublicPort: number; Type?: string }[], service?: string) => ({
     Id: `${project}-c1`, Names: [`/${project}-c1`], State: 'running', Status: 'Up',
-    Image: 'nginx', Created: 1000, Labels: { 'com.docker.compose.project': project }, Ports: ports,
+    Image: 'nginx', Created: 1000,
+    Labels: {
+      'com.docker.compose.project': project,
+      ...(service === undefined ? {} : { 'com.docker.compose.service': service }),
+    },
+    Ports: ports,
   });
 
   it('does not set mainPort for a UDP-only published port', async () => {
@@ -2117,11 +2319,22 @@ describe('DockerController - getBulkStackStatuses mainPort', () => {
     mockDocker.listContainers.mockResolvedValue([withPorts('tcp-stack', [
       { PrivatePort: 53, PublicPort: 5353, Type: 'udp' },
       { PrivatePort: 80, PublicPort: 8080, Type: 'tcp' },
-    ])]);
+    ], 'app')]);
     mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
 
     const result = await DockerController.getInstance(1).getBulkStackStatuses(['tcp-stack']);
     expect(result['tcp-stack'].mainPort).toBe(8080);
+    // The runtime owner travels with the port so Open App can use it.
+    expect(result['tcp-stack'].mainPortService).toBe('app');
+  });
+
+  it('leaves mainPortService unset when the container has no compose service label', async () => {
+    mockDocker.listContainers.mockResolvedValue([withPorts('bare-stack', [{ PrivatePort: 80, PublicPort: 8080, Type: 'tcp' }])]);
+    mockDocker.getContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue({ State: { StartedAt: '2026-06-09T12:00:00.000Z' } }) });
+
+    const result = await DockerController.getInstance(1).getBulkStackStatuses(['bare-stack']);
+    expect(result['bare-stack'].mainPort).toBe(8080);
+    expect(result['bare-stack'].mainPortService).toBeUndefined();
   });
 });
 
@@ -2632,3 +2845,62 @@ describe('DockerController - missing stack directory', () => {
   });
 });
 
+
+// ── Managed volume prune and estimate read only the volume df section ─────
+
+describe('DockerController - managed volume prune and estimate', () => {
+  const volumes = [
+    { Name: 'idle', Labels: { 'com.docker.compose.project': 'my-stack' } },
+    { Name: 'busy', Labels: { 'com.docker.compose.project': 'my-stack' } },
+    { Name: 'unmeasured', Labels: { 'com.docker.compose.project': 'my-stack' } },
+    { Name: 'external', Labels: { 'com.docker.compose.project': 'other' } },
+  ];
+  const volumeSection = {
+    Volumes: [
+      { Name: 'idle', UsageData: { RefCount: 0, Size: 400 } },
+      { Name: 'busy', UsageData: { RefCount: 1, Size: 900 } },
+      { Name: 'external', UsageData: { RefCount: 0, Size: 50 } },
+      // 'unmeasured' is absent from df: its usage is unknown.
+    ],
+  };
+
+  beforeEach(() => {
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: volumes });
+    mockDfSections({ volume: volumeSection });
+  });
+
+  it('pruneManagedOnly removes only idle managed volumes and never calls the full df', async () => {
+    const removed: string[] = [];
+    mockDocker.getVolume.mockImplementation((name: string) => ({
+      remove: vi.fn().mockImplementation(async () => { removed.push(name); }),
+    }));
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneManagedOnly('volumes', ['my-stack']);
+
+    expect(removed).toEqual(['idle']);
+    expect(result.reclaimedBytes).toBe(400);
+    expect(mockDocker.df).not.toHaveBeenCalled();
+  });
+
+  it('estimateManagedReclaim sizes only idle managed volumes and never calls the full df', async () => {
+    const dc = DockerController.getInstance(1);
+    const estimate = await dc.estimateManagedReclaim('volumes', ['my-stack']);
+
+    expect(estimate.reclaimableBytes).toBe(400);
+    expect(mockDocker.df).not.toHaveBeenCalled();
+  });
+
+  it('fails visibly, removing nothing, when the volume usage cannot be read', async () => {
+    mockDocker.modem.dial.mockImplementation((_o: unknown, cb: (err: Error | null) => void) => cb(new Error('daemon busy')));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const remove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getVolume.mockReturnValue({ remove });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.pruneManagedOnly('volumes', ['my-stack'])).rejects.toThrow(/Volume usage is unavailable/);
+    await expect(dc.estimateManagedReclaim('volumes', ['my-stack'])).rejects.toThrow(/Volume usage is unavailable/);
+
+    expect(remove).not.toHaveBeenCalled();
+  });
+});

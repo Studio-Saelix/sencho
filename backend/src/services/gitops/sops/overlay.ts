@@ -7,8 +7,8 @@ import type { OverlayBinding } from './types';
 import { decryptSopsAgeDocument, SopsDecryptError } from './decode';
 import { isValidRelativeStackPath, isValidStackName } from '../../../utils/validation';
 import { NodeRegistry } from '../../NodeRegistry';
+import { GIT_SECRETS_ROOT_NAME, gitSecretsAreaBase } from '../managedPaths';
 
-const OVERLAY_ROOT = 'git-secrets';
 const OVERLAY_OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function assertSafeNodeId(nodeId: number): void {
@@ -52,7 +52,7 @@ export class GitOpsDecryptOverlay {
   }
 
   private rootDir(): string {
-    return path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), OVERLAY_ROOT);
+    return gitSecretsAreaBase();
   }
 
   private resolveOverlayDir(nodeId: number, stackName: string, operationId: string): string {
@@ -157,14 +157,21 @@ export class GitOpsDecryptOverlay {
     if (!metaResolved.startsWith(overlayResolved + path.sep)) {
       throw new Error('Overlay metadata path escapes the overlay directory');
     }
-    await fsPromises.writeFile(metaResolved, JSON.stringify({
+    const decryptedRelPaths: string[] = [];
+    for (const input of args.inputs) {
+      if (input.encryption !== 'sops-age' || !input.materializedPath) continue;
+      decryptedRelPaths.push(input.materializedPath.replace(/\\/g, '/'));
+    }
+    const meta: OverlayBinding & { decryptedRelPaths: string[] } = {
       applicationId: args.binding.applicationId,
       commitSha: args.binding.commitSha,
       generationId: args.binding.generationId,
       operationId: validatedOperationSegment(args.binding.operationId),
       stackName: validatedStackSegment(args.binding.stackName),
       nodeId: args.binding.nodeId,
-    } satisfies OverlayBinding), { mode: 0o600 });
+      decryptedRelPaths,
+    };
+    await fsPromises.writeFile(metaResolved, JSON.stringify(meta), { mode: 0o600 });
 
     try {
       for (const input of args.inputs) {
@@ -185,7 +192,11 @@ export class GitOpsDecryptOverlay {
           const identity = args.identityByRecipient.get(recipient);
           if (!identity) continue;
           try {
-            decrypted = await decryptSopsAgeDocument(ciphertext, identity);
+            decrypted = await decryptSopsAgeDocument(
+              ciphertext,
+              identity,
+              input.role === 'env' ? 'compose-env' : 'sops',
+            );
             break;
           } catch (err) {
             lastErr = err;
@@ -291,7 +302,7 @@ export class GitOpsDecryptOverlay {
 }
 
 export function scrubOverlayPaths(message: string, dataDir: string): string {
-  const overlayRoot = path.join(dataDir, OVERLAY_ROOT);
+  const overlayRoot = path.join(dataDir, GIT_SECRETS_ROOT_NAME);
   return message.split(overlayRoot).join('[git-secrets-overlay]');
 }
 

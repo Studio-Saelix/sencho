@@ -3,6 +3,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
+import { HealthGateService } from '../services/HealthGateService';
 import DockerController from '../services/DockerController';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
@@ -268,6 +269,19 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               async () => {
                 const dockerController = DockerController.getInstance(req.nodeId);
                 const containers = await dockerController.getContainersByStack(stackName);
+                // This route drives the Engine API itself instead of
+                // containerActionForStack, so it ends the gates itself: a stop
+                // runs containers against a 10s Docker timeout, and a gate poll
+                // landing in that window would record the deliberate stop as a
+                // failed update. Only when there is something to act on, so a
+                // stack with no containers does not cost a live gate.
+                if (containers.length > 0) {
+                  HealthGateService.getInstance().supersedeForContainerOp(
+                    req.nodeId,
+                    stackName,
+                    `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+                  );
+                }
                 if (action === 'stop') {
                   await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
                 } else {

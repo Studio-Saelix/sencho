@@ -19,6 +19,10 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
+import { GitOpsBindingService } from '../services/gitops/binding';
+import { commitBlueprintCreate } from '../services/gitops/blueprintProducers';
+import * as gitManagedMaterialization from '../services/gitops/gitManagedMaterialization';
+import * as gitManagedHandoff from '../services/gitops/gitManagedHandoff';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import { candidateContentFingerprint } from '../services/gitops/fingerprint';
 import { GitSourceService } from '../services/GitSourceService';
@@ -286,7 +290,7 @@ describe('SourceController automatic acceptance', () => {
         // rows alone cannot explain why nothing moved: the blocked arm must
         // log the reason the boundary returned.
         const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration')
-            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.' });
+            .mockResolvedValue({ status: 'blocked', reason: 'The live target no longer matches the accepted generation.', holdable: false });
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
         controller.start();
@@ -763,6 +767,729 @@ describe('SourceController automatic acceptance', () => {
         // policy verdict it does not have.
         expect(getApp('app-ev-held').accepted_generation_id).toBeNull();
         expect(GitOpsStore.getInstance().getGeneration('gen-ev-held')?.security_policy_evidence_json).toBeNull();
+    });
+
+    it('accepts an operator fetch on an automatic Git-managed Blueprint through the stored policy', async () => {
+        const stackName = 'fetch-auto-web';
+        stageCandidate('app-fetch-auto', stackName, 'gen-fetch-auto', 'automatic');
+        const blueprint = commitBlueprintCreate({
+            name: 'bp-fetch-auto',
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: 'app-fetch-auto',
+            actor: 'tester',
+        });
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'dispatched', reason: null });
+
+        const fetched = await controller.requestFetch('app-fetch-auto', 'ada');
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'started', note: null },
+        });
+        const row = getApp('app-fetch-auto');
+        expect(row.target_mode).toBe('blueprint');
+        expect(row.accepted_generation_id).toBe('gen-fetch-auto');
+        expect(GitOpsStore.getInstance().getApproval(row.source_acceptance_ref!)?.authority).toBe('configured_policy');
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({ status: 'absent' });
+        expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+            applicationId: 'app-fetch-auto',
+            generationId: 'gen-fetch-auto',
+            actor: 'system:source-controller',
+            trigger: 'manual',
+        }));
+    });
+
+    it('reports a held automatic pull without accepting it', async () => {
+        stageCandidate('app-fetch-held', 'fetch-held-web', 'gen-fetch-held', 'automatic');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run('https://github.com/example/fetch-held.git', 'app-fetch-held');
+        const blueprint = commitBlueprintCreate({
+            name: 'bp-fetch-held',
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: 'app-fetch-held',
+            actor: 'tester',
+        });
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'blocked', violations: [] });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+
+        const fetched = await controller.requestFetch('app-fetch-held', 'ada');
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: {
+                status: 'held',
+                note: 'The security policy did not allow this candidate, so it was not accepted.',
+            },
+        });
+        expect(getApp('app-fetch-held').accepted_generation_id).toBeNull();
+    });
+
+    it('reports an accepted pull whose rollout was held', async () => {
+        stageCandidate('app-fetch-rollout-held', 'fetch-rollout-held-web', 'gen-fetch-rollout-held', 'automatic');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run('https://github.com/example/fetch-rollout-held.git', 'app-fetch-rollout-held');
+        const blueprint = commitBlueprintCreate({
+            name: 'bp-fetch-rollout-held',
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: 'app-fetch-rollout-held',
+            actor: 'tester',
+        });
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({
+                status: 'blocked',
+                reason: 'a target has an unfinished rollback; finish it, then resume the rollout',
+            });
+
+        const fetched = await controller.requestFetch('app-fetch-rollout-held', 'ada');
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: {
+                status: 'accepted',
+                rollout: 'held',
+                note: 'a target has an unfinished rollback; finish it, then resume the rollout',
+            },
+        });
+        expect(getApp('app-fetch-rollout-held').accepted_generation_id).toBe('gen-fetch-rollout-held');
+    });
+
+    it('reports a paused rollout as accepted and not started', async () => {
+        stageCandidate('app-fetch-paused', 'fetch-paused-web', 'gen-fetch-paused', 'automatic');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run('https://github.com/example/fetch-paused.git', 'app-fetch-paused');
+        const blueprint = commitBlueprintCreate({
+            name: 'bp-fetch-paused',
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: 'app-fetch-paused',
+            actor: 'tester',
+        });
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'skipped', reason: 'the rollout is paused' });
+
+        const fetched = await controller.requestFetch('app-fetch-paused', 'ada');
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'not_started', note: 'the rollout is paused' },
+        });
+        expect(getApp('app-fetch-paused').accepted_generation_id).toBe('gen-fetch-paused');
+    });
+
+    /** An automatic Blueprint whose next pull can accept under the stored policy. */
+    function seedAutomaticPull(id: string, stackName: string, generationId: string): void {
+        stageCandidate(id, stackName, generationId, 'automatic');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run(`https://github.com/example/${stackName}.git`, id);
+        const blueprint = commitBlueprintCreate({
+            name: `bp-${id}`,
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: id,
+            actor: 'tester',
+        });
+    }
+
+    /** Pump the fake clock until the pull has reached `ready`, or fail. */
+    async function flushUntil(ready: () => boolean): Promise<void> {
+        for (let i = 0; i < 40 && !ready(); i++) {
+            await vi.advanceTimersByTimeAsync(0);
+        }
+        expect(ready()).toBe(true);
+    }
+
+    it('answers while preparation continues and does not run that work twice', async () => {
+        const id = 'app-bound-prepare';
+        seedAutomaticPull(id, 'bound-prepare-web', 'gen-bound-prepare');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare!: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void;
+        const prepareGate = new Promise<{ materialized: boolean; artifact: 'resolved'; note: null }>((resolve) => {
+            releasePrepare = resolve;
+        });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration')
+            .mockReturnValue(prepareGate);
+        const dispatch = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'skipped', reason: 'the artifact identity is not resolved yet' });
+        const accept = vi.spyOn(GitOpsTransitions.getInstance(), 'sourceAccepted');
+
+        const pending = controller.requestFetch(id, 'ada');
+        await flushUntil(() => prepare.mock.calls.length === 1);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            result: { outcome: 'candidate_already_fetched' },
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: 'preparation is still running; the rollout becomes authorizable when it completes',
+            },
+        });
+        expect(getApp(id).accepted_generation_id).toBe('gen-bound-prepare');
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const overlapped = await controller.requestFetch(id, 'ada');
+        expect(overlapped).toMatchObject({ status: 'refused', code: 'fetch_in_flight' });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const again = await controller.requestFetch(id, 'ada');
+        expect(again).toMatchObject({ status: 'settled', authority: { status: 'fetched_only' } });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(prepare).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers while dispatch continues and does not dispatch twice', async () => {
+        const id = 'app-bound-dispatch';
+        seedAutomaticPull(id, 'bound-dispatch-web', 'gen-bound-dispatch');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        let releaseDispatch!: (value: { status: 'dispatched'; reason: null }) => void;
+        const dispatchGate = new Promise<{ status: 'dispatched'; reason: null }>((resolve) => {
+            releaseDispatch = resolve;
+        });
+        const dispatch = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockReturnValue(dispatchGate);
+        const accept = vi.spyOn(GitOpsTransitions.getInstance(), 'sourceAccepted');
+
+        const pending = controller.requestFetch(id, 'ada');
+        await flushUntil(() => dispatch.mock.calls.length === 1);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            result: { outcome: 'candidate_already_fetched' },
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: 'the rollout is starting; watch the application for progress',
+            },
+        });
+        expect(getApp(id).accepted_generation_id).toBe('gen-bound-dispatch');
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const overlapped = await controller.requestFetch(id, 'ada');
+        expect(overlapped).toMatchObject({ status: 'refused', code: 'fetch_in_flight' });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        releaseDispatch({ status: 'dispatched', reason: null });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+
+        const again = await controller.requestFetch(id, 'ada');
+        expect(again).toMatchObject({ status: 'settled', authority: { status: 'fetched_only' } });
+        expect(accept).toHaveBeenCalledTimes(1);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    const refusalNote = 'the artifact identity cannot be resolved for this content: the accepted generation materializes 2 compose files, which this freeze cannot model';
+    const transientNote = 'the accepted generation could not be materialized yet; the next reconcile retries it';
+
+    async function pullPrepared(
+        id: string,
+        stackName: string,
+        generationId: string,
+        prepared: { materialized: boolean; artifact: 'resolved' | 'none' | 'refused'; note: string | null },
+        handoff: { status: 'skipped' | 'blocked' | 'dispatched'; reason: string | null },
+    ) {
+        seedAutomaticPull(id, stackName, generationId);
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue(prepared);
+        vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration').mockResolvedValue(handoff);
+        return controller.requestFetch(id, 'ada');
+    }
+
+    it('reports a permanent preparation refusal instead of the unresolved-artifact skip', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-refused',
+            'bound-refused-web',
+            'gen-bound-refused',
+            { materialized: true, artifact: 'refused', note: refusalNote },
+            { status: 'skipped', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'not_started', note: refusalNote },
+        });
+        expect(getApp('app-bound-refused').accepted_generation_id).toBe('gen-bound-refused');
+    });
+
+    it('reports a transient preparation failure instead of the unresolved-artifact skip', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-transient',
+            'bound-transient-web',
+            'gen-bound-transient',
+            { materialized: false, artifact: 'none', note: transientNote },
+            { status: 'skipped', reason: gitManagedHandoff.GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'not_started', note: transientNote },
+        });
+        expect(getApp('app-bound-transient').accepted_generation_id).toBe('gen-bound-transient');
+    });
+
+    it('keeps a distinct handoff reason beside a completed preparation note', async () => {
+        const fetched = await pullPrepared(
+            'app-bound-paused-note',
+            'bound-paused-note-web',
+            'gen-bound-paused-note',
+            { materialized: false, artifact: 'none', note: transientNote },
+            { status: 'skipped', reason: 'the rollout is paused' },
+        );
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: {
+                status: 'accepted',
+                rollout: 'not_started',
+                note: `${transientNote}. The rollout is paused`,
+            },
+        });
+    });
+});
+
+/**
+ * An operator pull on an automatic source confirms the placement and the
+ * rollout consequence before it runs, and the request carries both. These
+ * tests are the two halves of that guarantee: a confirmation that no longer
+ * describes the application is refused before the fetch and again before the
+ * acceptance, and a confirmation that still describes it changes nothing.
+ */
+describe('SourceController pull confirmation freshness', () => {
+    /** A Git-managed Blueprint with a staged candidate, which a pull can act on. */
+    function gitManagedBlueprint(
+        appId: string,
+        stackName: string,
+        generationId: string,
+        policy: 'manual' | 'automatic' = 'automatic',
+    ): number {
+        stageCandidate(appId, stackName, generationId, policy);
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET configured_repo_url = ? WHERE id = ?`,
+        ).run(`https://github.com/example/${stackName}.git`, appId);
+        const blueprint = commitBlueprintCreate({
+            name: `bp-${appId}`,
+            description: null,
+            compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+            selector: { type: 'nodes', ids: [1] },
+            drift_mode: 'suggest',
+            classification: 'stateless',
+            classification_reasons: [],
+            enabled: true,
+            created_by: 'tester',
+        }, () => [1]);
+        GitOpsBindingService.getInstance().convertInlineToGit({
+            blueprintId: blueprint.id,
+            applicationId: appId,
+            actor: 'tester',
+        });
+        return blueprint.id;
+    }
+
+    /** Record the placement approval an operator would have read. */
+    function approvePlacement(appId: string, approvalRef: string): void {
+        DatabaseService.getInstance().getDb().prepare(
+            'UPDATE gitops_applications SET placement_approval_ref = ? WHERE id = ?',
+        ).run(approvalRef, appId);
+    }
+
+    it('refuses a pull whose confirmation named a placement that has moved on', async () => {
+        gitManagedBlueprint('app-stale-entry', 'stale-entry-web', 'gen-stale-entry');
+        approvePlacement('app-stale-entry', 'place-reviewed');
+        const reconcile = spyOnReconcile();
+
+        const fetched = await controller.requestFetch('app-stale-entry', 'ada', {
+            placementApprovalRef: 'place-older',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({ status: 'refused', code: 'CONFIRMATION_STALE' });
+        expect(reconcile).not.toHaveBeenCalled();
+    });
+
+    it('refuses a pull whose confirmation promised a waiting rollout that now authorizes one', async () => {
+        gitManagedBlueprint('app-stale-policy', 'stale-policy-web', 'gen-stale-policy');
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE gitops_applications SET rollout_authorization_policy = 'automatic' WHERE id = ?`,
+        ).run('app-stale-policy');
+        const reconcile = spyOnReconcile();
+
+        const fetched = await controller.requestFetch('app-stale-policy', 'ada', {
+            placementApprovalRef: null,
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({ status: 'refused', code: 'CONFIRMATION_STALE' });
+        expect(reconcile).not.toHaveBeenCalled();
+    });
+
+    it('holds the candidate when the placement moved while the fetch was running', async () => {
+        gitManagedBlueprint('app-stale-settle', 'stale-settle-web', 'gen-stale-settle');
+        approvePlacement('app-stale-settle', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockImplementation(async () => {
+            // Another session approves a different placement while this fetch is
+            // still reading the remote.
+            approvePlacement('app-stale-settle', 'place-reapproved');
+            return { outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' };
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const fetched = await controller.requestFetch('app-stale-settle', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('approved placement changed') },
+        });
+        expect(getApp('app-stale-settle').accepted_generation_id).toBeNull();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('accepts a pull whose confirmation still describes the application', async () => {
+        gitManagedBlueprint('app-fresh', 'fresh-web', 'gen-fresh');
+        approvePlacement('app-fresh', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockResolvedValue({
+            materialized: true,
+            artifact: 'resolved',
+            note: null,
+        });
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration')
+            .mockResolvedValue({ status: 'dispatched', reason: null });
+
+        const fetched = await controller.requestFetch('app-fresh', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'accepted', rollout: 'started', note: null },
+        });
+        expect(getApp('app-fresh').accepted_generation_id).toBe('gen-fresh');
+        // The handoff reads the stored claim, not the request that has already
+        // ended. A placement that moves after this is caught from that record.
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(getApp('app-fresh'))).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+        });
+        expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+            applicationId: 'app-fresh',
+            generationId: 'gen-fresh',
+        }));
+    });
+
+    async function flushMicrotasks(): Promise<void> {
+        for (let i = 0; i < 20; i += 1) await vi.advanceTimersByTimeAsync(0);
+    }
+
+    function deferred(): { promise: Promise<void>; resolve: () => void } {
+        let resolve: () => void = () => {};
+        const promise = new Promise<void>((done) => {
+            resolve = done;
+        });
+        return { promise, resolve };
+    }
+
+    it('does not accept when rollout authorization is armed while the security check is running', async () => {
+        gitManagedBlueprint('app-stale-eval', 'stale-eval-web', 'gen-stale-eval');
+        approvePlacement('app-stale-eval', 'place-reviewed');
+        const gate = deferred();
+        let entered = false;
+        evaluateCandidatePolicy.mockImplementation(async () => {
+            entered = true;
+            await gate.promise;
+            return { status: 'allowed' };
+        });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration');
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const pending = controller.requestFetch('app-stale-eval', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(entered).toBe(true);
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-stale-eval',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-stale-eval', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        gate.resolve();
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('authorizes without an operator') },
+        });
+        expect(getApp('app-stale-eval').accepted_generation_id).toBeNull();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('does not accept when the placement is replaced while the candidate is checked again', async () => {
+        gitManagedBlueprint('app-stale-reval', 'stale-reval-web', 'gen-stale-reval');
+        approvePlacement('app-stale-reval', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        const gate = deferred();
+        let entered = false;
+        vi.spyOn(GitSourceService.getInstance(), 'revalidateSourceCandidateBeforeAccept').mockImplementation(async () => {
+            entered = true;
+            await gate.promise;
+            const generation = GitOpsStore.getInstance().getGeneration('gen-stale-reval');
+            if (!generation) throw new Error('generation missing');
+            return { status: 'reuse', generation };
+        });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        const prepare = vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration');
+        const handoff = vi.spyOn(gitManagedHandoff, 'dispatchPreparedGitManagedGeneration');
+
+        const pending = controller.requestFetch('app-stale-reval', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(entered).toBe(true);
+        approvePlacement('app-stale-reval', 'place-replaced');
+        gate.resolve();
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({
+            status: 'settled',
+            authority: { status: 'held', note: expect.stringContaining('approved placement changed') },
+        });
+        expect(getApp('app-stale-reval').accepted_generation_id).toBeNull();
+        expect(prepare).not.toHaveBeenCalled();
+        expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it('holds a confirmed waiting rollout after preparation outlasts the request', async () => {
+        gitManagedBlueprint('app-delay', 'delay-web', 'gen-delay');
+        approvePlacement('app-delay', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void = () => {};
+        let prepareEntered = false;
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(
+            () => new Promise((resolve) => {
+                prepareEntered = true;
+                releasePrepare = resolve;
+            }),
+        );
+        const dispatch = vi.spyOn(GitSourceService.getInstance(), 'dispatchAcceptedGeneration');
+
+        const pending = controller.requestFetch('app-delay', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        expect(prepareEntered).toBe(true);
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'accepted', rollout: 'not_started' } });
+        expect(getApp('app-delay').accepted_generation_id).toBe('gen-delay');
+        expect(getApp('app-delay').pause_at).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(getApp('app-delay'))).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: false },
+        });
+
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-delay',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-delay', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        SourceController.resetForTests();
+        GitOpsTransitions.resetForTests();
+        const handoff = await gitManagedHandoff.dispatchPreparedGitManagedGeneration({
+            applicationId: 'app-delay',
+            generationId: 'gen-delay',
+            actor: 'system:blueprint-reconciler',
+            trigger: 'retry',
+        });
+
+        expect(handoff.status).not.toBe('dispatched');
+        expect(dispatch).not.toHaveBeenCalled();
+        const held = getApp('app-delay');
+        expect(held.pause_reason).toContain('authorizing without an operator');
+        expect(held.rollout_authorization_ref).toBeNull();
+
+        GitOpsTransitions.getInstance().rolloutUnpaused('app-delay', null, {
+            operationId: 'resume-delay', actor: 'ada', trigger: 'manual', at: Date.now(),
+        });
+        const resumed = getApp('app-delay');
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(resumed)).toEqual({ status: 'absent' });
+        const afterResume = await gitManagedHandoff.dispatchPreparedGitManagedGeneration({
+            applicationId: 'app-delay',
+            generationId: 'gen-delay',
+            actor: 'system:blueprint-reconciler',
+            trigger: 'retry',
+        });
+        expect(afterResume.status).toBe('skipped');
+        expect(getApp('app-delay').pause_reason).toBeNull();
+        expect(dispatch).not.toHaveBeenCalled();
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await flushMicrotasks();
+    });
+
+    it('does not re-hold a rollout an operator already authorized while preparation is still running', async () => {
+        gitManagedBlueprint('app-released', 'released-web', 'gen-released');
+        approvePlacement('app-released', 'place-reviewed');
+        evaluateCandidatePolicy.mockResolvedValue({ status: 'allowed' });
+        spyOnReconcile().mockResolvedValue({ outcome: 'candidate_already_fetched', reason: 'ok', nextAction: 'none' });
+        let releasePrepare: (value: { materialized: boolean; artifact: 'resolved'; note: null }) => void = () => {};
+        vi.spyOn(gitManagedMaterialization, 'prepareAcceptedGitManagedGeneration').mockImplementation(
+            () => new Promise((resolve) => {
+                releasePrepare = resolve;
+            }),
+        );
+
+        const pending = controller.requestFetch('app-released', 'ada', {
+            placementApprovalRef: 'place-reviewed',
+            rolloutMayStart: false,
+        });
+        await flushMicrotasks();
+        // Authorize rewrites the stored claim before the bounded handoff runs.
+        // That handoff used to still be holding the request, whose promise was
+        // that the rollout would wait.
+        expect(GitOpsStore.getInstance().recordConfirmedPlacement('app-released', 'place-reviewed')).toBe(true);
+        GitOpsTransitions.getInstance().rolloutAuthorizationPolicyChanged({
+            applicationId: 'app-released',
+            policy: 'automatic',
+            envelope: { operationId: 'policy-released', actor: 'tester', trigger: 'manual', at: Date.now() },
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+        const fetched = await pending;
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'accepted' } });
+        const row = getApp('app-released');
+        expect(row.pause_at).toBeNull();
+        expect(row.pause_reason).toBeNull();
+        expect(GitOpsStore.getInstance().storedSourceConfirmation(row)).toEqual({
+            status: 'present',
+            confirmation: { placementApprovalRef: 'place-reviewed', rolloutMayStart: true },
+        });
+
+        releasePrepare({ materialized: true, artifact: 'resolved', note: null });
+        await flushMicrotasks();
+    });
+
+    it('leaves a manual pull unchanged, because it has nothing to confirm', async () => {
+        gitManagedBlueprint('app-manual-plain', 'manual-plain-web', 'gen-manual-plain', 'manual');
+        approvePlacement('app-manual-plain', 'place-reviewed');
+        const reconcile = spyOnReconcile().mockResolvedValue({ outcome: 'no_source_change', reason: 'ok', nextAction: 'none' });
+
+        const fetched = await controller.requestFetch('app-manual-plain', 'ada');
+
+        expect(fetched).toMatchObject({ status: 'settled', authority: { status: 'not_applicable' } });
+        expect(reconcile).toHaveBeenCalledTimes(1);
     });
 });
 

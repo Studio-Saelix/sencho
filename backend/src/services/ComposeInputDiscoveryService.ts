@@ -21,6 +21,7 @@ import fs from 'fs';
 import { createHash } from 'crypto';
 import { isHostAbsolutePath, isUrl, parseDeclaredInputs } from '../helpers/composeInputParse';
 import { isPathWithinBase } from '../utils/validation';
+import { COMPOSE_OVERRIDE_FILENAMES } from '../utils/composeFilenames';
 import { isLfsPointer } from './GitSourceService';
 import { loadDockerIgnore, type DockerIgnoreMatcher } from '../utils/dockerIgnoreMatch';
 import { PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
@@ -37,16 +38,10 @@ import type {
     RefusalInfo,
 } from '../types/gitProjectManifest';
 
-// Compose override filenames docker compose can auto-discover, in priority
-// order; mirrors FileSystemService.COMPOSE_OVERRIDE_FILENAMES. Only consulted
-// when the invocation passes a single explicit -f (explicit multi-file lists
+// COMPOSE_OVERRIDE_FILENAMES holds the override filenames docker compose can
+// auto-discover, in the order Compose itself resolves them. Only consulted when
+// the invocation passes a single explicit -f (explicit multi-file lists
 // suppress auto-discovery).
-const COMPOSE_OVERRIDE_FILENAMES = [
-    'compose.override.yaml',
-    'compose.override.yml',
-    'docker-compose.override.yaml',
-    'docker-compose.override.yml',
-];
 
 const LFS_POINTER_PREFIX_LEN = 48;
 
@@ -731,6 +726,7 @@ export class ComposeInputDiscoveryService {
                 inputs.push({
                     sourcePath: null,
                     materializedPath: null,
+                    ...(input.sourcePath !== null ? { hostSourcePath: input.sourcePath } : {}),
                     role: input.role,
                     dependencyKind: kind,
                     ownership: 'unmanaged',

@@ -1,7 +1,7 @@
 ---
 title: Verifying Published Images
 sidebarTitle: Verify images
-description: How to verify signatures, provenance, SBOMs, and CVE triage for Sencho Docker images.
+description: How to verify image signatures and signed attestations, read SLSA provenance, and scan with the published VEX document.
 ---
 
 Every Sencho **release** image is published to two registries with identical content: Docker Hub (`saelix/sencho`) and GitHub Container Registry (`ghcr.io/studio-saelix/sencho`). Release tags are signed and carry verifiable supply-chain artifacts on both registries. The `cosign verify` examples below use the Docker Hub path; substitute `ghcr.io/studio-saelix/sencho:<tag>` to verify the GHCR copy.
@@ -34,7 +34,7 @@ Every **release** tag is signed with cosign keyless signing via GitHub Actions O
 
 ```bash
 cosign verify saelix/sencho:<tag> \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -44,24 +44,28 @@ A successful verification prints the verified payload and exits 0. The Rekor tra
 cosign tree saelix/sencho:<tag>
 ```
 
-## Verify SLSA provenance
+## Inspect SLSA provenance
 
-BuildKit produces an SLSA v1 provenance attestation during every multi-arch build. Retrieve and verify it:
+Every multi-arch release build attaches an SLSA v1 provenance predicate to each published platform manifest. It is stored in the registry as an in-toto attestation rather than a cosign attestation, so read it with `docker buildx imagetools inspect`:
 
 ```bash
-cosign verify-attestation \
-  --type slsaprovenance \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
+docker buildx imagetools inspect saelix/sencho:<tag> --format '{{ json .Provenance }}' | jq
 ```
+
+The result is keyed by platform (`linux/amd64` and `linux/arm64`). Each entry holds an `SLSA` predicate with `buildDefinition` and `runDetails`, and no subject digest. The same command without a format lists the attestation manifests next to the platform manifest digest each one is attached to.
+
+A successful command prints that metadata for the reference you pass. It does not check signer identity, and it does not check the build claims. The signature check above is what authenticates the published index. This command resolves the reference on its own, so pass the verified index digest (`saelix/sencho@sha256:<digest>`) when you want the provenance for the image you already verified.
+
+<Note>
+This needs Docker CLI with the `buildx` plugin. The CycloneDX, SPDX and VEX attestations below are the cosign-signed ones.
+</Note>
 
 ## Retrieve the CycloneDX SBOM
 
 ```bash
 cosign verify-attestation \
   --type cyclonedx \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
@@ -73,7 +77,7 @@ Alternatively, download `sbom.cdx.json` directly from the GitHub Release assets 
 ```bash
 cosign verify-attestation \
   --type spdxjson \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```
@@ -87,7 +91,7 @@ The OpenVEX document explains Sencho's triage decisions for any CVEs that appear
 ```bash
 cosign verify-attestation \
   --type openvex \
-  --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+  --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   saelix/sencho:<tag> | jq -r '.payload' | base64 -d | jq
 ```

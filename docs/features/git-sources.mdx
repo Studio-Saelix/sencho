@@ -1,465 +1,259 @@
 ---
 title: Git Sources
-description: Link a stack to a Git repository and keep one or more compose files in sync via manual pulls or webhook triggers.
+description: Link a stack to a Git repository, choose how far Sencho goes after each fetch, and review a classified change plan before files change on disk.
 ---
 
-Git Sources turn any stack into a GitOps target. Point Sencho at a repository and ref (branch, tag, or commit SHA), choose one or more compose files to merge in order, pull updates on demand or from CI, and review a classified change plan before applying files to disk. Optional sibling `.env` sync keeps configuration consistent too.
+Git Sources turn a stack into a GitOps target. Point Sencho at a repository and ref (branch, tag, or commit SHA), choose one or more compose files to merge in order, pull updates on demand, on a schedule, or from a push event, and review a classified change plan before applying files to disk. Optional sibling `.env` sync keeps configuration consistent too.
 
 <Note>
   Git Sources are available on every tier, including Community.
 </Note>
 
-For exactly which transports, ref types, authentication methods, and Git hosts are supported today, with the evidence behind each, see [Git Transport Support](/features/git-transport-support).
+New to GitOps in Sencho? [GitOps overview](/features/gitops-overview) defines the source states, policies, and status words used here. To run one repository across several nodes, see [Git-managed Blueprints](/features/git-managed-blueprints).
 
 ## How it works
 
-1. Open a stack and click the **Git Source** button in the editor toolbar.
-2. Fill in the repository URL and ref, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add a token if the repo is private.
+1. Open a stack and click the **Git Source** button in the editor toolbar. From the [GitOps portfolio](/features/gitops-portfolio), **Connect a stack to Git** opens the same form as a new stack, and a row's menu opens an existing source over the portfolio.
+2. Fill in the repository URL and ref, then choose the compose files. Use **Browse** to pick them from the repository tree, or type a path and press Enter. Add credentials if the repository is private; see [Git hosts and authentication](/features/git-authentication).
 3. Click **Pull now** to fetch the latest commit. Sencho opens a classified change plan: adds, modifications, removals, and any local conflicts.
 4. Click **Apply** to write the incoming files to disk. Apply stays disabled while local file conflicts are present. A Compose invocation change (for example a `.env` file added or removed outside Git) is shown in the plan and does not disable Apply. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Tick **Deploy after apply** in the same dialog to redeploy in one step.
 
-Writes land in the stack's existing directory using the same storage Sencho uses for the in-browser editor.
+Writes land in the stack's existing directory, using the same storage as the in-browser editor.
 
 ## Anatomy of the sheet
 
 <Frame>
-  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, heading Git source, a toolbar of Update, Pull now, and Remove, and Status, Repository, and Manifest sections" />
+  <img src="/images/git-sources/panel.png" alt="Git Source sheet opened from the stack editor, with crumb Stack, stack name, Git source, a toolbar of Pull now and Detach, the Overview, Source, Automation, and Secrets tabs, and an Overview showing Review required with a Review update button and a path row of source, artifact, and runtime" />
 </Frame>
 
-Git Source opens as a right-side sheet from the stack editor toolbar. It is not a centered dialog. The chrome is the same sheet used elsewhere in Sencho: a crumb (`Stack › {name} › Git source`), the heading **Git source**, a one-line summary of the linked ref, a toolbar, body sections, and a freshness line in the footer.
+Git Source opens as a right-side sheet from the editor toolbar. It has a crumb (`Stack › {name} › Git source`, or `GitOps › {name} › Git source` when opened from the portfolio), a one-line summary of the linked ref, a toolbar, tabs, and a freshness line in the footer. A stack with no source yet has no tabs; the sheet opens on the form.
 
-The toolbar carries **Save** or **Update**, **Pull now** when a source is linked and not suspended, **Suspend** or **Resume** when that action is offered, and **Remove** when a source is linked. Nested pull/apply and detach confirmations stay as separate dialogs on top of the sheet.
+The toolbar offers **Pull now** when a source is linked and not suspended, **Detach** when a source is linked, **Save** for a stack with no source yet, and **Update** for a linked source only while something differs from what is stored. Confirmations open as separate dialogs on top of the sheet.
 
-When this Git source belongs to a Git-managed Blueprint, the sheet is read-only. **Save**, **Remove**, and **Pull now** are withheld here. Use **Detach Git** or **Retire to Direct** on that Blueprint to restore stack-owned editing. A live Direct source can **Adopt onto Blueprint**, which moves this source onto an Inline Blueprint with the same move semantics as Convert.
+A linked source groups the sheet into tabs:
 
-The body groups five sections:
+- **Overview.** The source's state with the commit it concerns, and the action that resolves it right there (**Review update**, **Retry**, or **Resume**, each when offered). A row beneath names each stage that applies, and **Evidence** opens the recorded authority and anything Sencho could not prove. **Open in GitOps portfolio** at the bottom jumps to the application's row. The header shows the last-applied commit (or **never applied**), the state, and the ref.
+- **Source.** The repository, ref, compose files, project directory, sibling `.env` sync, authentication, and custom CA as a summary, with the managed-project manifest summary below it. **Edit** opens the form, and **Cancel** puts it back. A live Direct source can **Adopt onto Blueprint** from here.
+- **Automation.** The apply behavior (changing it also offers **Update**), **Suspend** or **Resume**, and the provider hooks described in [Git webhooks](/features/git-webhooks).
+- **Secrets.** Age identities and the encrypted-source policy; see [Repository secrets](/features/git-secrets).
+- **Drift.** Only while the application has drift: each confirmed divergence, expected versus observed. See [GitOps drift](/features/gitops-drift-model).
 
-- **Status.** Faults, a pending-update card with **Review**, retry or suspended state with **Retry** when that action is offered, qualifications the projection could not prove, and the last-applied commit with the source state.
-- **Repository.** Repository URL, ref, the ordered compose-file picker, an optional project directory, optional sibling `.env` sync, authentication, and the apply behavior radio group.
-- **Provider hooks.** One endpoint per supported Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud). Shown when the stack owns a direct Git source; hidden while the source is read-only on a Git-managed Blueprint.
-- **Repository secrets.** Age identities for SOPS-encrypted env files and file-backed secrets, encrypted-source policy, and a readiness chip for whether this node can decrypt what the repository expects.
-- **Manifest.** The managed-project summary when a source is linked.
+When the source belongs to a Git-managed Blueprint, the sheet withholds **Save** and **Detach** and fetches through the Blueprint instead. See [Git-managed Blueprints](/features/git-managed-blueprints#convert-a-git-source).
 
-Polling interval lives in **Settings → Stacks**, not on this sheet. There is no per-source interval control; a source with no override inherits the node default.
-
-## Source state
-
-A commit SHA tells you which files Sencho wrote. It does not tell you whether that commit was accepted, whether something newer is waiting, or whether an operation was interrupted halfway. The **source state** answers those, in one short phrase that means the same thing everywhere it appears: the Git Source sheet, the Drift tab, the stack list, and the stack rows on the dashboard.
-
-These are the states you will see most often.
-
-| State | What it means |
-| --- | --- |
-| **Never reconciled** | No commit from this repository has been accepted yet. |
-| **Fetching** | Sencho is reading from the repository right now. |
-| **Accepted** | The fetched commit has been accepted as the current generation. |
-| **Pending update** | A fetched commit is ready to apply. |
-| **Review required** | A fetched commit is waiting for review before it can apply. |
-| **Pending update blocked** | The change plan has local conflicts. Apply stays disabled until they are resolved. |
-| **Reconcile required** | What was reconciled no longer matches the configuration in force. Pull again to rebuild the plan. |
-| **Applying** | A commit is being written to the stack directory. |
-| **Retry scheduled** | The last attempt failed and another is queued. |
-| **Suspended** | Reconciliation is paused until you resume. Polling, webhooks, automatic apply, and Pull now stay off for this source. |
-| **Source failed** | The last operation on this source failed. |
-| **Outcome unknown** | An operation was interrupted, so Sencho cannot confirm how it ended. |
-| **Recovering** | A recovery is running on this stack. |
-
-The last two matter most. Sencho reports an interrupted operation as unknown rather than guessing, so a stack whose pull was cut short by a restart says so instead of quietly reading as up to date.
-
-<Note>
-  Changing the repository, the ref, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token, deploy key, host-key trust, or the apply behavior leaves a staged commit alone, since neither changes what would be materialized.
-</Note>
-
-### When part of the state could not be proven
-
-The sheet sometimes lists one or more things it could not prove, at the top of the Status section. A managed manifest that does not identify this stack on this node from the repository configured now, an approval that could not be restored after a recovery, a record that has gone: each is reported as its own line.
-
-These are qualifications, not failures. The state above them is real, and the lines tell you which part of it to treat with less confidence. That is deliberate: a stack whose evidence is partly missing looks identical to one with complete evidence unless Sencho says otherwise, and the safer wrong answer is never the quiet one.
-
-## Executable identity
-
-**Source state** tells you whether a commit was accepted. **Executable identity** tells you whether Sencho can prove which container images that generation would run, without rewriting your Compose files.
-
-When a generation is accepted, Sencho resolves each service image reference against the target node platform. Registry tags become digest evidence. Multi-arch indexes record the platform-specific child digest for that node. Local `build:` services stay unverified across nodes because Sencho does not claim a portable exact digest for them.
-
-After deploy, Sencho inspects what is actually running on the node and compares that observation to the frozen expected artifact set. If a registry tag moved after acceptance, Sencho records stale artifact evidence without changing the expected set. If the running digest disagrees with the expected fingerprint, runtime state reports artifact drift while source state can still read as accepted.
-
-The Git Source sheet and the Drift tab show executable identity beside source and runtime so you can see configuration convergence separately from digest proof.
+Polling interval lives in **Settings → GitOps**. There is no per-source interval control.
 
 ## Create a stack from a Git repository
 
-Skip the "empty stack then link later" detour and point at a repo from the start. Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields you would on the Git Source sheet.
+Click **Create Stack** in the sidebar, switch to the **From Git** tab, and fill in the same fields the Git Source sheet uses.
 
 <Frame>
-  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, branch, compose path, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
+  <img src="/images/git-sources/create-from-git-tab.png" alt="New stack dialog with the From Git tab selected, showing stack name, repository URL, ref, an ordered compose files list with Browse, project directory, sibling .env toggle, authentication options, apply behavior radio group, and a Deploy after create checkbox" />
 </Frame>
 
-Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the Git source in one step. The last-applied commit SHA is seeded from the fetch so the first manual pull starts from a clean classified plan.
-
-Tick **Deploy after create** to run `docker compose up -d` immediately after the files land. If the deploy fails, the stack and Git source are kept on disk so you can fix the underlying issue (missing image, port conflict, host resources) and retry the deploy from the editor.
-
-### Failure modes on create
+Sencho fetches the compose files, validates the merged result with `docker compose config`, writes them to a fresh stack directory, and links the source in one step. The last-applied commit is seeded from the fetch, so the first pull starts from a clean plan. Tick **Deploy after create** to run `docker compose up -d` straight away.
 
 | Situation | What happens |
 |-----------|--------------|
-| Stack name already exists | Sencho returns **409** with "Stack already exists" and makes no changes on disk or in the database. Pick a different name or remove the existing stack. |
-| Repository unreachable or auth failed | Fetch fails before anything is created. The form stays open with an error toast describing the cause. |
-| Fetched compose fails validation | The stack directory is not created and no Git source row is inserted. The error toast shows the `docker compose config` message. |
-| Fetch + validate succeed but optional deploy fails | The stack and Git source are kept. The toast reads "Stack created, but deploy failed: ..." and you can retry the deploy from the editor. |
+| Stack name already exists | Sencho returns **409** with "Stack already exists" and changes nothing. Pick a different name or remove the existing stack. |
+| Repository unreachable or auth failed | The fetch fails before anything is created. The form stays open with an error describing the cause. |
+| Fetched compose fails validation | No stack directory and no Git source row are created. The error shows the `docker compose config` message. |
+| Fetch and validation succeed, optional deploy fails | The stack and source are kept. The toast reads "Stack created, but deploy failed: ..." and you retry the deploy from the editor. |
 
 ## Configure a source
 
 | Field | Description |
 |-------|-------------|
-| **Repository URL** | HTTPS (`https://github.com/your-org/your-repo.git`) or SSH (`git@github.com:your-org/your-repo.git`, or `ssh://git@host:port/path` when the server uses a nonstandard port) |
-| **Ref** | Branch, tag, or full commit SHA to track (e.g. `main`, `v1.0`, or a 40-character SHA) |
-| **Compose files** | One or more paths within the repo, merged in the listed order (e.g. `deploy/base.yaml` then `deploy/prod.yaml`). The first file is the primary. Reorder by dragging (or the up/down arrows on a phone) and remove with the **×** button. |
-| **Project directory** | Optional path within the repo passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Leave blank to use the stack root. |
-| **Also sync sibling `.env` file** | When enabled, also pulls the `.env` from the same directory as the primary compose file. The form shows the resolved path inline (e.g. `deploy/.env` for a primary at `deploy/compose.yaml`). |
-| **Authentication** | **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **SSH deploy key** for private SSH repos |
-| **Apply behavior** | See the three modes below |
+| **Repository URL** | HTTPS (`https://github.com/your-org/your-repo.git`) or SSH (`git@github.com:your-org/your-repo.git`, or `ssh://git@host:port/path` for a nonstandard port) |
+| **Ref** | Branch, tag, or full commit SHA to track (for example `main`, `v1.0`, or a 40-character SHA) |
+| **Compose files** | One or more paths in the repository, merged in the listed order. The first file is the primary. Reorder by dragging (or the arrows on a phone) and remove with **×**. |
+| **Project directory** | Optional path passed to `docker compose --project-directory`, so relative build contexts, bind mounts, and `env_file` references resolve from that base. Blank uses the stack root. |
+| **Also sync sibling `.env` file** | Also pulls the `.env` next to the primary compose file. The form shows the resolved path inline. |
+| **Authentication** | **Public (no auth)**, **Personal Access Token**, or **Deploy key (SSH)**. See [Git hosts and authentication](/features/git-authentication). |
+| **Apply behavior** | How far Sencho goes after a fetch. See below. |
 
-Private repository hosts on your LAN or VPN are supported. Sencho refuses repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses.
+Private hosts on your LAN or VPN are supported. Sencho refuses repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses.
 
-Saving runs a reachability check against the repository. If the URL is wrong, the token is invalid, the ref does not exist, or a file is missing, Sencho surfaces the error inline and nothing is persisted.
+Saving runs a reachability check. If the URL is wrong, the credentials are invalid, the ref does not exist, or a file is missing, Sencho shows the error inline and persists nothing.
+
+<Note>
+  Changing the repository, the ref, the compose files, the project directory, or the `.env` sync clears any staged commit, because the plan was built against the settings you just replaced. Pull again to rebuild it. The state moves to **Reconcile required** if a commit had already been accepted, and to **Never reconciled** if none ever was. Changing only the token, deploy key, host-key trust, or the apply behavior leaves a staged commit alone, since none of them changes what would be materialized.
+</Note>
 
 ### Multiple compose files
 
-Many projects split a stack into a base file plus environment overrides. List the files in the order you want them merged and Sencho deploys with `docker compose -f base.yaml -f prod.yaml ...`, applying each later file's values on top of the earlier ones, exactly as the Compose CLI does. The same ordered set is used for every action on the stack: deploy, update, restart, stop, and teardown.
+List the files in the order you want them merged and Sencho deploys with `docker compose -f base.yaml -f prod.yaml ...`, applying each later file on top of the earlier ones exactly as the Compose CLI does. The same ordered set is used for every action on the stack: deploy, update, restart, stop, and teardown.
 
-On disk, the primary file lands as the stack's `compose.yaml` and each additional file keeps its repository-relative path inside the stack directory, so you can still browse and edit them in the file explorer. A single-file source behaves exactly as before.
+On disk, the primary file lands as the stack's `compose.yaml` and each additional file keeps its repository-relative path inside the stack directory, so you can still browse and edit them in the file explorer.
 
-### Apply behavior modes
+### Apply behavior
 
-| Mode | What happens when a webhook fires |
-|------|-----------------------------------|
-| **Review only** | Sencho fetches and validates the incoming commit and marks the stack as having a pending update. You review the change plan and apply manually. |
-| **Auto-write files** | Sencho writes the new compose and env to disk automatically but does not redeploy. Use this when another process handles rollout. |
-| **Auto-deploy** | Sencho writes the files and immediately runs `docker compose up -d` so the stack picks up the new configuration. |
+| Mode | What Sencho does after a fetch |
+|------|-----------|
+| **Manual** | Nothing on its own. The source is not polled and never retries automatically. A pull you start, or a webhook delivery, still fetches the commit and stages the change plan, and nothing is written until you apply it. |
+| **Review only** | Fetches and validates the incoming commit and marks the stack as having a pending update. You review the change plan and apply. |
+| **Auto-write files** | Writes the new compose and env files to disk but does not redeploy. Use it when another process handles rollout. |
+| **Auto-deploy** | Writes the files and runs `docker compose up -d`. |
 
-Auto-deploy implies Auto-write: you cannot deploy automatically without also writing the new files first.
+Auto-deploy implies Auto-write. Whatever the mode, a **Deploy after apply** checkbox in the change plan lets you deploy on the spot.
 
-You can always override on the spot: when you click **Apply** in the change plan, a **Deploy after apply** checkbox lets you deploy regardless of the configured mode.
+**Manual** is the absence of the schedule, not a lighter review: the other three modes poll and retry on their own, and differ in who applies what they find. A manual source still answers when you ask. **Pull now** on a stack-owned source only fetches. **Suspend** pauses one source temporarily, webhooks included; **Manual** keeps it off the polling schedule until you change it back.
 
-**Review only** maps to review policy. **Auto-write files** and **Auto-deploy** map to automatic policy. Suspend is the operator stop; there is no fourth Manual radio on the sheet.
+Automatic modes carry one safety check. When the incoming commit withdraws or renames a service that persists data (named volumes or bind mounts), or Sencho cannot prove it does not, the change is held for review and the stack shows **stateful change blocked**. The hold clears when you accept the change explicitly, dismiss it, or a newer commit is staged. Nothing is written or redeployed while it is held.
 
-Automatic modes carry one built-in safety check: when the incoming commit withdraws or renames a service that persists data (named volumes or bind mounts), or when Sencho cannot prove it does not, the change is held for review instead of being accepted or applied, and the stack shows a **stateful change blocked** attention state. The hold clears when you accept the change explicitly, dismiss it, or a newer commit is staged. Nothing is written or redeployed while it is held, so withdrawing a stateful service is always a deliberate choice.
-
-Git Sources apply to stacks you link from the editor. Blueprint deployments do not evaluate a Git source.
+Git sources apply to stacks you link from the editor. An Inline Blueprint never evaluates a Git source; a Git-managed Blueprint takes its content from one.
 
 ## Polling
 
-Unattended fetches use a node-wide interval under **Settings → Stacks**. The control is **Poll Git sources**. The default is off (interval `0`). Turn it on to fetch linked sources on a schedule; sources still pull on demand, on webhook, and on retry when polling is off.
+Unattended fetches use one interval per node, set under **Settings → GitOps** in the **Git sources** section (labelled *this node*). It applies to the node you have selected, so each node in a fleet keeps its own.
 
-Linked sources with no override inherit this interval. There is no per-source interval knob on the Git Source sheet.
+| Control | What it does |
+|---|---|
+| **Poll Git sources** | Turns scheduled fetches on or off. Off by default. Turning it on starts at 5 minutes. |
+| **Poll interval** | Minutes between fetches, from 1 to 10080 (one week). Shown while polling is on. |
 
-Review-only sources still fetch on the schedule and stage a plan for review. Automatic sources (Auto-write or Auto-deploy) fetch and then follow the configured apply behavior.
+With polling off, sources still pull on demand, on a webhook, and on retry. Changing the setting reschedules every linked source that polls at once.
+
+Every linked source inherits the interval, and there is no per-source interval. **Manual** sources are never polled. **Review only** sources fetch on the schedule and stage a plan for review. **Auto-write files** and **Auto-deploy** sources fetch and then follow their apply behavior.
 
 ## Suspend, resume, and retry
 
-**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. Save stays available; resume before pulling again. An optional reason is stored with the suspension.
+**Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. **Suspend** and **Resume** are on the **Automation** tab, and **Resume** is also in the **Overview** while the source is suspended. An optional reason is stored with the suspension. **Resume** re-evaluates the source immediately rather than waiting for the next poll.
 
-**Resume** clears the pause and re-evaluates the source immediately rather than waiting for the next poll.
-
-**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. Retry is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures (for example a missing ref) do not schedule an automatic retry; use **Retry** after you fix the cause.
+**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry, and neither does a **Manual** source; use **Retry** after you fix the cause.
 
 ## Pulling and reviewing changes
 
-Click **Pull now** on the Git Source sheet to fetch the latest commit on the configured branch, tag, or commit.
+Click **Pull now** to fetch the latest commit on the configured branch, tag, or commit.
 
 <Frame>
-  <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing classified file operations (add, modify, remove) with a Deploy after apply checkbox and an Apply button in the footer" />
+  <img src="/images/git-sources/diff-dialog.png" alt="GIT · CHANGE PLAN dialog for the demo-app stack, listing a modified compose.yaml and a count of unchanged files, with a Deploy after apply checkbox and Dismiss and Apply buttons in the footer" />
 </Frame>
 
 The change plan shows:
 
-- The `GIT · CHANGE PLAN` kicker and the short SHA of the incoming commit at the top.
+- The `GIT · CHANGE PLAN` kicker and the stack name.
 - One row per classified operation: add, modify, remove, rename, a Compose invocation change, or a local conflict. Unchanged files collapse to a count.
-- An **Incoming compose failed validation** banner when the incoming compose fails `docker compose config`. The Apply button stays disabled until validation passes.
-- A **Local conflicts block apply** banner when a managed file was edited or removed on disk, or an unmanaged file sits in the way. Apply stays disabled until those conflicts are resolved. Sencho does not overwrite them.
-- A **Live Compose invocation changed** banner when the Compose command line on disk no longer matches the last applied generation. Apply stays enabled. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk.
+- An **Incoming compose failed validation** banner when the incoming compose fails `docker compose config`. Apply stays disabled until validation passes.
+- A **Local conflicts block apply** banner when a managed file was edited or removed on disk, or an unmanaged file sits in the way. Sencho does not overwrite them.
+- A **Live Compose invocation changed** banner when the Compose command line on disk no longer matches the last applied generation. Apply stays enabled.
 
-High-sensitivity paths (secret-bearing files) appear as "secret-bearing managed path" rather than as a filename.
+Secret-bearing paths appear as "secret-bearing managed path" instead of a filename. Click **Dismiss** to discard a pending update without applying it.
 
 ### Pending updates
 
-When a webhook fires in **Review only** mode, the stack gets a pending GitBranch icon next to its row in the sidebar and a pulsing dot on the **Git Source** button in the editor. Clicking either re-fetches the commit and opens the change plan; the sheet also shows a pending-update card with a **Review** button.
-
-If the same stack also has an image update available, the image-update dot in the sidebar takes priority over the Git source icon, so only the update dot renders. The pending Git source is still surfaced inside the editor on the **Git Source** button.
+While a fetched commit is staged, whatever the apply behavior, the stack gets a Git branch icon in the sidebar and a pulsing dot on the **Git Source** button. Hovering the icon names the state, and clicking it opens the [GitOps portfolio](/features/gitops-portfolio) on that stack. The **Git Source** button opens the sheet, where **Review update** on the **Overview** re-fetches the commit and opens the change plan. **Review update** in the portfolio does the same from there. If the stack also has an image update, the image-update dot takes priority in the sidebar, and the pending source is still shown on the **Git Source** button.
 
 <Frame>
   <img src="/images/git-sources/sidebar-badge.png" alt="Sidebar stack list with a small GitBranch icon next to the demo-app entry indicating a pending Git source update" />
 </Frame>
 
-Click **Dismiss** in the change plan to discard a pending update without applying.
-
-## Provider webhooks (native)
-
-When your Git host can deliver push (and optionally pull request) events directly, register a **provider hook** on the Git Source sheet instead of calling Sencho from CI. Sencho exposes one ingest URL per stack and provider kind, verifies the host's signature or shared secret, and queues reconciliation through the same Git source pipeline as **Pull now** or a generic webhook.
-
-Provider hooks apply only to **direct** stack-owned sources. A source that is read-only because it lives on a Git-managed Blueprint cannot register an endpoint; detach or retire the Blueprint binding first.
-
-### Create an endpoint
-
-1. Open the stack's **Git Source** sheet and scroll to **Provider hooks**.
-2. Click **Add provider hook**, choose the Git host, and pick an **event scope**:
-   - **Configured ref only** (default): react to push events on the branch or tag named in **Ref**.
-   - **Configured ref and pull requests**: also accept pull request events from the same repository (useful when the ref tracks a long-lived branch and you want preview stacks from PR activity).
-3. Copy the **ingest URL** and **secret** from the one-time reveal. Sencho never shows the full secret again; use **Rotate secret** to issue a new one (the previous secret stays valid for 24 hours so you can update the Git host without a gap).
-4. In your Git host's repository settings, add a webhook pointing at the ingest URL and paste the secret using that host's expected field (GitHub: **Secret**; GitLab: **Secret token**; Gitea/Forgejo: **Secret**; Bitbucket Cloud: **Secret**).
-
-The ingest URL always includes the target node id and endpoint id:
-
-```
-POST /api/gitops/hooks/{nodeId}/{endpointId}
-```
-
-Use the public Sencho base URL your Git host can reach. On a fleet hub, the node id in the URL is the node that owns the stack (usually **Local** for the instance you manage stacks on). Ingest is served on the control instance even when the stack runs on a remote node; the hub forwards the payload to the owning instance over the node mesh.
-
-You can register at most one endpoint per provider per stack. A second create for the same provider returns **409**.
-
-### What happens on delivery
-
-Sencho authenticates every delivery with provider-specific headers, then applies policy before touching the repository:
-
-| Check | Outcome when it fails |
-| --- | --- |
-| Unknown endpoint, disabled endpoint, or bad signature | **404 Not found** (same response for every rejection so callers cannot probe ids) |
-| Malformed JSON or unsupported payload shape | **400 Bad request** |
-| Body larger than 1 MiB | **413 Payload too large** |
-| Repository in the event does not match the linked source URL | **202 Accepted**, delivery recorded as ignored (`source_mismatch`) |
-| Push ref does not match the configured ref | **202 Accepted**, ignored (`ref_policy`) |
-| Pull request event while scope is **Configured ref only** | **202 Accepted**, ignored (`ref_policy`) |
-| Ping or connectivity test from the host | **202 Accepted**, ignored (`ping`) |
-| Duplicate delivery id within the debounce window | **202 Accepted**, duplicate (same 10-second per-source debounce as generic webhooks) |
-
-When a delivery passes policy, Sencho queues `handleWebhookPull` for the stack. The configured **Apply behavior** then governs the outcome exactly as it does for **Pull now**, polling, or the generic **Git source sync** webhook action:
-
-- **Review only**: fetch, validate, diff, mark pending.
-- **Auto-write files**: fetch, validate, write to disk.
-- **Auto-deploy**: fetch, validate, write, deploy.
-
-Recent deliveries for each endpoint appear inline on the Git Source sheet (event type, ref, state, and outcome). Use **Test delivery** after saving the hook in your Git host to load the latest few results without waiting for a real push.
-
-### Provider signing reference
-
-| Provider | Header(s) Sencho verifies |
-| --- | --- |
-| **GitHub** | `X-Hub-Signature-256` (`sha256=` HMAC of the raw body) |
-| **GitLab** | `X-Gitlab-Token` (shared secret) |
-| **Gitea** | `X-Gitea-Signature` (hex HMAC-SHA256 of the raw body) |
-| **Forgejo** | `X-Forgejo-Signature`, or `X-Gitea-Signature` when Forgejo omits its own header |
-| **Bitbucket Cloud** | `X-Hub-Signature` (`sha256=` HMAC of the raw body) |
-
-Delivery ids are taken from the host's idempotency headers when present (`X-GitHub-Delivery`, `X-Gitea-Delivery`, `X-Forgejo-Delivery`, `Idempotency-Key`, `X-Request-UUID`, and others) so retries dedupe cleanly.
-
-Ingest is rate limited to 120 requests per minute per endpoint in production. Bursts above that return **429 Too many provider hook deliveries**.
-
-## Trigger from CI with a webhook
-
-When CI already orchestrates your pipeline, or your Git host cannot call Sencho directly, use Sencho's generic webhook system instead. Create a webhook under **Settings → Automation → Webhooks** targeting the stack with the **Git source sync** action. See [Webhooks](/features/webhooks) for signing and execution details.
-
-<Frame>
-  <img src="/images/git-sources/webhook-action.png" alt="New webhook form with Name, Stack and Action fields. The Action select is open, showing Deploy, Restart, Stop, Start, Pull and Update, and Git source sync as options, with Git source sync highlighted at the bottom" />
-</Frame>
-
-The webhook's behavior on trigger depends on the source's apply mode:
-
-- **Review only**: fetch, validate, diff, mark pending.
-- **Auto-write files**: fetch, validate, write to disk.
-- **Auto-deploy**: fetch, validate, write, deploy.
-
-The Git source sync action is only selectable on webhooks whose target stack already has a Git source configured. Webhook triggers for a single source are debounced on a 10-second window so a runaway pipeline cannot overwhelm Sencho (or your repository host's rate limits); the dashboard records the skipped trigger in the webhook's execution history.
-
-### GitHub Actions example
-
-```yaml
-- name: Sync compose via Sencho
-  run: |
-    BODY='{}'
-    SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.SENCHO_WEBHOOK_SECRET }}" | cut -d' ' -f2)
-    curl -X POST "${{ secrets.SENCHO_URL }}/api/webhooks/${{ secrets.SENCHO_WEBHOOK_ID }}/trigger" \
-      -H "Content-Type: application/json" \
-      -H "X-Webhook-Signature: sha256=$SIGNATURE" \
-      -d "$BODY"
-```
-
-See the [Webhooks](/features/webhooks) page for the full signing protocol.
-
-## Private repositories
-
-### HTTPS with a personal access token
-
-For private repositories over HTTPS, use a Personal Access Token scoped to read access on the target repo:
-
-- **GitHub**: a fine-grained PAT with **Contents: Read** permission on the repo, or a classic PAT with the `repo` scope.
-- **GitLab**: a project or group access token with the `read_repository` scope.
-- **Bitbucket**: an app password with **Repositories: Read**.
-
-Paste the token into the **Token** field and save. Sencho stores it encrypted at rest and never returns it in API responses or UI. When editing the source later, the token field shows a masked placeholder; leave it blank to keep the stored value, or type a new token to replace it. Switching the auth type back to **Public (no auth)** clears the stored token.
-
-The encryption boundary covers the pending update payload too: every pull caches the fetched compose and env content in the database so the change plan can reopen without a refetch, and that cached content is encrypted at rest in the same way as the token, since compose files routinely embed secrets via env interpolation.
-
-### SSH with a deploy key
-
-For private repositories over SSH, paste a read-only deploy key and confirm the server's host key before saving.
-
-1. Generate an ed25519 key pair on a trusted machine (`ssh-keygen -t ed25519 -f deploy-key -N ""`).
-2. Add the public key to the Git host as a deploy key with read access (GitHub: **Settings → Deploy keys** on the repository).
-3. In Sencho, set **Authentication** to **SSH deploy key**, paste the private key, then click **Fetch host key fingerprint**. Sencho probes the host with `ssh-keyscan`, shows the SHA256 fingerprint, and stores the matching `known_hosts` line.
-4. Save. Sencho stores the private key encrypted at rest and never returns it in API responses or UI.
-
-Sencho verifies the host key on every fetch (`StrictHostKeyChecking=yes` against the stored line). If the server key changes, pulls fail with a host-key error until you review the new fingerprint and update trust deliberately.
-
-Use an `ssh://` URL when the Git server listens on a nonstandard port (for example `ssh://git@git.example.com:2222/org/repo.git`). The familiar `git@host:org/repo.git` form assumes port 22.
-
-Switching authentication back to **Public (no auth)** or to a token clears the stored deploy key and host-key trust.
-
-### Private HTTPS with a custom CA
-
-Self-hosted Git servers often use TLS certificates signed by a private certificate authority. By default, Sencho trusts the system certificate store on the host running the fetch. When your git server uses a private CA, paste the CA certificate (PEM) in **Custom CA certificate** on the Git source form.
-
-Sencho combines your CA with the system trust anchors (it does not replace them), so public hosts such as GitHub continue to validate normally. The CA bundle is encrypted at rest and is never returned after save.
-
-Leave the field empty when the server uses a publicly trusted certificate.
-
-Removing a stored CA always saves, even if the server currently needs it to be reached: retiring a certificate you no longer trust should never be blocked by the unreachability that retiring it causes. If the server still needs a private CA afterward, the next pull reports a certificate trust error until you upload one again.
-
-### Redirects
-
-Some Git servers answer with a redirect, for example when a repository moves to a canonical path. Sencho follows a redirect that stays on the same server (same scheme, host, and port) and only changes the path, so a relocated repository keeps working without you editing the URL.
-
-A redirect that points at a different server is refused, and the pull reports that the host redirected elsewhere. Sencho does not contact that other server or send it your token. If a repository has genuinely moved to a new host, update the repository URL on the Git source to the new address.
-
 ## Local edits vs Git
 
 Sencho classifies every managed path against the last applied generation and the live disk.
 
-- Matching the last applied content: applying writes files Sencho itself last wrote.
-- Locally modified, missing, type-changed, or colliding unmanaged files: the plan is blocked. Resolve those files on disk (or commit them back to the repository), then pull again. Sencho will not overwrite them.
-- A local edit still blocks even when the live bytes already match the incoming commit. Classification compares disk to the last applied generation, not to the incoming files, so an uncommitted local edit is never treated as a clean Git apply.
-- Compose invocation drift (for example adding or removing a root `.env` outside Git): the plan shows the invocation change and stays applicable. Applying records the incoming invocation as the new baseline. Unmanaged files stay on disk. Webhook auto-apply still refuses until you review that plan.
+- **Matches the last applied content.** Applying writes files Sencho itself last wrote.
+- **Modified, missing, type-changed, or colliding unmanaged files.** The plan is blocked. Resolve them on disk, or commit them back to the repository, then pull again. A local edit blocks even when the live bytes already match the incoming commit, because classification compares disk to the last applied generation.
+- **Compose invocation drift** (for example a root `.env` added or removed outside Git). The plan shows the change and stays applicable, and applying records it as the new baseline. Webhook auto-apply still refuses until you review that plan.
 
-The in-browser editor and the Git Source sheet both write to the same files, so you can always fall back to editing locally. The next pull will flag the divergence rather than silently clobbering your edits.
+The in-browser editor and the Git Source sheet write the same files, so you can always fall back to editing locally. Pulls, applies, and create-from-git operations on one stack are serialized by a per-stack lock, so a webhook that fires mid-apply waits instead of racing it.
 
-Pulls, applies, and create-from-git operations on the same stack are serialized by a per-stack lock, so a webhook that fires in the middle of a manual apply waits for the apply to finish rather than racing it.
+## What a pull materializes
 
-## Repository secrets (SOPS and age)
+Every repository-local input the project needs is materialized: the ordered compose files, implicit `compose.override.*` files, recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, label files, and build contexts with `.dockerignore` semantics. The set is recorded in a versioned managed-project manifest, and each pull stages a candidate validated with the exact deployment invocation before anything on disk changes.
 
-Some teams store sensitive env files or file-backed secrets in Git as [SOPS](https://github.com/getsops/sops)-encrypted documents. Sencho keeps ciphertext in the repository and on disk. Decryption happens only in a short-lived overlay during candidate validation, Git apply, Git deploy, or rollback. A manual Deploy or image Update on a SOPS-managed stack is refused so Compose never reads ciphertext from the live stack directory.
+Inputs that cannot be reproduced safely fail the pull with a message naming the path and the reason: URL includes, Git LFS pointers, submodule contents, symbolic links, oversized build contexts, and `include` or `extends` declarations that point outside the repository or use dynamic `${VAR}` paths. Nothing is applied until the declaration is fixed. Absolute host paths, host bind mounts, external resources, and dynamic `${VAR}` data paths are recorded as unmanaged, never claimed as covered.
 
-Open **Git Source** on a linked stack and scroll to **Repository secrets**.
+The project is bounded by file count, total bytes, per-file size, path depth, and build-context size, each adjustable with a `GITSOURCE_*` variable (see [Configuration](/getting-started/configuration)). Crossing a bound refuses the pull with the counts so far. Which Git features are supported at all is listed in [Git transport support](/features/git-transport-support).
 
-- **Generate identity** or **Import identity** creates an age key pair on the node that owns this Git source. Sencho shows the public recipient (`age1…`) so you can add it to SOPS files in Git. Private key material never leaves the node and is never returned by the API.
-- **Encrypted source policy** defaults to allowing plaintext secret inputs. Switch to **Require SOPS encryption** when every managed secret-bearing input in the repository must be SOPS-encrypted with age.
-- **Readiness** reports whether this node holds the recipients required by the current candidate generation.
+## Failure, rollback, and detach
 
-Sencho accepts age (X25519) recipients only, in YAML SOPS documents (`sops.age`) and in dotenv or INI stores that flatten age recipients (`sops_age__list_*` keys). Documents that use PGP, cloud KMS, or other SOPS backends are refused with an unsupported-backend message. Encrypted compose files are not supported.
+If apply is interrupted, Sencho completes the accepted generation or restores the previous one. If files were edited during the interruption and match neither, Sencho preserves them and requires manual recovery.
 
-Back up both the Sencho data directory encryption key (`encryption.key`) and any age identities you generate here. Losing either makes ciphertext in Git unrecoverable on that node.
+Git apply captures a recovery generation before it promotes files. If promotion fails mid-flight, Sencho restores the prior files. If apply-with-deploy fails after promotion, the applied files stay on disk and the generation remains available for manual rollback; Sencho does not compensate the failed deploy automatically. Rollback restores the managed authored inventory, not named volumes or bind-mounted application data.
+
+**Detach** renders the effective compose model into a single `compose.yaml`, keeps the remaining materialized files, removes auto-discovered override files so the exported model is final, and removes Git tracking. Resolved environment values are baked into the exported file. If removal is interrupted, Sencho restores the original files.
+
+Some read-only views, such as the dependency graph, drift snapshot, and networking inspector, summarize the primary compose file, so a service declared only in an override may not appear there. Deploy, update, image-update checks, and mesh attachment use the full merged set.
+
+## Common setups
+
+| Goal | Apply behavior | What triggers a fetch |
+|---|---|---|
+| Keep a homelab stack on `main` with no clicks | **Auto-deploy** | [Polling](#polling) or a [provider hook](/features/git-webhooks) |
+| Review every change, then apply it | **Review only** | Polling or a provider hook, then **Review update** |
+| Let Sencho write the files while another tool restarts the stack | **Auto-write files** | Polling or a provider hook |
+| Change only when you decide | **Manual** | **Pull now** |
+
+## What Git Sources do not do
+
+- **They only read.** Sencho never commits or pushes. A file you edit in the editor stays local and shows as a local conflict on the next pull.
+- **One source links one stack on one node.** To run one repository on several nodes, use a [Git-managed Blueprint](/features/git-managed-blueprints).
+- **They do not delete what they do not manage.** Applying leaves unmanaged files on disk, and a rollback never touches named volumes or bind-mounted data.
+- **A commit SHA never moves.** A source whose ref is a full SHA changes only when you edit the ref.
+- **Not every Git feature is reproduced.** LFS pointers, submodule contents, symbolic links, and URL includes are refused; see [What a pull materializes](#what-a-pull-materializes).
 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Missing or rotated SOPS age key">
-    A Git apply, Git deploy, or rollback that needs SOPS decryption fails before Compose runs when this node does not hold a matching age identity. Open **Repository secrets**, confirm the readiness chip, and generate or import the key whose recipient appears in your SOPS files. After rotating a key, re-encrypt repository files with the new recipient before deleting the old identity. Rollback to a generation that still names a removed recipient stays blocked until you restore that identity or advance to a generation encrypted for a key you still hold. Manual Deploy and image Update stay blocked on SOPS-managed stacks; use Git apply instead.
-  </Accordion>
-
-  <Accordion title="Repository not found or not accessible">
-    Verify the URL is reachable from the Sencho host and ends with `.git`. GitHub returns a "not found" response for both genuinely missing repos and private repos you cannot read, so Sencho tailors the hint based on what you provided:
-
-    - **No token configured**: the repo might be private. Switch **Authentication** to **Personal Access Token** and paste a token with read access.
-    - **Token configured**: double-check the URL is correct and the token has read access to this specific repo. GitHub fine-grained PATs need **Contents: Read** on the target repo; classic PATs need the `repo` scope.
-  </Accordion>
-
-  <Accordion title="Authentication failed">
-    The Git host rejected the credentials you supplied. For HTTPS, the token may be missing, expired, or lack read access: generate a new token and replace the value in the **Token** field. For SSH, the deploy key may be wrong or not registered on the host: paste the matching private key or add the public key on the Git host. Sencho returns this as a 400 form error rather than a 401, so an upstream auth failure does not sign you out of the dashboard.
-  </Accordion>
-
   <Accordion title="Branch or tag not found">
-    The configured branch or tag is case-sensitive and must exist on the remote. Confirm it with `git ls-remote <url>` from a shell that has access. Sencho resolves the ref before fetching, so a typo or a ref that was never pushed surfaces here rather than as a generic failure. A full commit SHA never produces this error: it resolves to itself, so a SHA the host refuses to serve reports as a host-capability problem under "Commit not reachable on this host".
+    The configured branch or tag is case-sensitive and must exist on the remote. Confirm it with `git ls-remote <url>` from a shell that has access. A full commit SHA never produces this error: it resolves to itself, so a SHA the host refuses to serve reports as "Commit not reachable on this host".
   </Accordion>
 
   <Accordion title="Branch or tag deleted or force-pushed">
-    The configured ref previously resolved to a commit but no longer matches that history. The ref may have been deleted, renamed, superseded by a same-named tag, or force-pushed to a history the old commit is no longer part of. Point the source at a current branch, tag, or commit, or restore the ref upstream, then save again.
+    The ref previously resolved to a commit but no longer matches that history: it was deleted, renamed, superseded by a same-named tag, or force-pushed. Point the source at a current branch, tag, or commit, or restore the ref upstream, then save again.
   </Accordion>
 
   <Accordion title="Commit not reachable on this host">
-    The configured commit SHA is not one the Git host will serve. Hosts only fetch SHAs they advertise by default, so a commit that is not on any branch or tag tip, or one on a host that blocks unadvertised object fetch, returns this. Use a branch or tag, or a commit the host advertises.
+    Hosts only serve commit SHAs they advertise. A commit that is not on a branch or tag tip, or a host that blocks unadvertised object fetch, returns this. Use a branch or tag, or a commit the host advertises.
   </Accordion>
 
   <Accordion title="File not found">
-    Each compose path is relative to the repository root and must point at the file, not its parent directory. Every file in the list must exist on the tracked branch; if any is missing, the save or pull fails and names the path. If a file was moved, update its path on the sheet and save.
+    Each compose path is relative to the repository root and must point at a file, not its parent directory. Every file in the list must exist on the tracked ref; if one is missing, the save or pull fails and names the path. If a file moved, update its path and save.
   </Accordion>
 
   <Accordion title="Compose validation failed">
-    Sencho runs `docker compose config` against the incoming content before letting you apply. The error banner shows the exact message. Common causes: unresolved `${VAR}` interpolation (commit a `.env` file next to the compose file and enable sibling `.env` sync), invalid `include:` paths, or schema issues introduced by a recent compose change. Validation has a 10-second budget; an unusually large compose with many services may need to be split.
+    Sencho runs `docker compose config` against the incoming content before letting you apply. Common causes: unresolved `${VAR}` interpolation (commit a `.env` next to the compose file and enable sibling `.env` sync), invalid `include:` paths, or schema issues from a recent change. When the candidate includes a decrypted secret file, the banner shows a fixed message instead of the Compose diagnostic. Validation has a 10-second budget, so an unusually large compose may need splitting.
   </Accordion>
 
   <Accordion title="Local conflicts block apply">
-    A managed file was edited or removed on disk, or an unmanaged file sits on a path the incoming commit wants to add. Sencho will not overwrite those files. Restore or relocate the local copy, or commit the local change back to the repository so the next pull is clean, then pull again.
+    A managed file was edited or removed on disk, or an unmanaged file sits on a path the incoming commit wants to add. Restore or relocate the local copy, or commit the change back to the repository, then pull again.
   </Accordion>
 
   <Accordion title="Live Compose invocation changed">
-    The Compose command line on disk no longer matches the last applied generation, most often because a root `.env` file was added or removed outside Git. This is not a file conflict: Apply stays enabled. Applying records the incoming invocation as the new baseline and leaves unmanaged files on disk. Webhook auto-apply will not write until you review that plan in the dashboard.
-  </Accordion>
-
-  <Accordion title="Webhook skipped (rate limited)">
-    Sencho debounces rapid-fire triggers on a 10-second window per source. Wait at least 10 seconds and retry, or consolidate multiple CI triggers into a single call at the end of your pipeline. Skipped triggers appear in the webhook's execution history.
-  </Accordion>
-
-  <Accordion title="Network timeout">
-    The clone did not finish in time. Fetches run with a 30-second timeout to keep a slow or unreachable host from hanging the Git Source sheet. Check that the Sencho host can reach the repository host (proxies, firewalls, DNS) and try again. If the repository is genuinely large, pin a smaller compose subpath or mirror it somewhere closer to the Sencho host.
-  </Accordion>
-
-  <Accordion title="Repository too large">
-    A clone is capped on the on-disk size of its temporary workspace (100 MB by default), and individual compose/env files are capped on read. A compose repository is normally tiny, so hitting either usually means the tracked branch carries large binaries. Point the source at a repository or branch that holds just your compose and `.env` files. If a large repository is unavoidable, an operator can raise the workspace ceiling with the `GITSOURCE_MAX_CLONE_BYTES` environment variable.
+    The Compose command line on disk no longer matches the last applied generation, most often because a root `.env` was added or removed outside Git. This is not a file conflict: Apply stays enabled, and applying records the incoming invocation as the new baseline. Webhook auto-apply will not write until you review that plan.
   </Accordion>
 
   <Accordion title="Pending commit has changed since this pull was fetched">
-    You opened a change plan, then a webhook fired and replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the sheet to load the latest pending commit; the **Review** button will fetch the newer one.
+    You opened a change plan, then a webhook replaced the pending commit before you clicked **Apply**. Close the dialog and reopen the sheet; **Review** fetches the newer commit.
   </Accordion>
 
   <Accordion title="Applied but deploy failed">
-    The incoming compose file was written to disk successfully, but the subsequent `docker compose up -d` did not complete. The toast message includes the underlying reason (for example, an image pull failure or a port conflict). The stack is already on the new content, so you can retry the deploy directly from the editor's **Deploy** button without re-pulling. Fix the root cause first (image availability, host resources, network config) and redeploy.
+    The files were written, but `docker compose up -d` did not complete. The toast names the reason, such as an image pull failure or a port conflict. The stack is already on the new content, so fix the cause and redeploy from the editor's **Deploy** button without re-pulling.
+  </Accordion>
+
+  <Accordion title="Network timeout">
+    The clone did not finish within 30 seconds. Check that the Sencho host can reach the repository host (proxies, firewalls, DNS) and try again. For a genuinely large repository, pin a smaller compose subpath or mirror it closer to the host.
+  </Accordion>
+
+  <Accordion title="Repository too large">
+    A clone is capped on the size of its temporary workspace (100 MB by default), and individual compose and env files are capped on read. Hitting either usually means the branch carries large binaries. Point the source at a repository or branch that holds only your compose and `.env` files, or have an operator raise the ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
   </Accordion>
 
   <Accordion title="Stack contents look wrong or appear empty">
-    If the compose file in your repository is tracked via Git LFS, Sencho will refuse the link and surface an LFS error rather than write a pointer stub as real content. Commit the plain compose file (and any synced `.env`) without LFS, or replace the LFS pointer in-place, then retry.
+    If a compose file is tracked via Git LFS, Sencho refuses the link and reports an LFS error rather than write a pointer stub as real content. Commit the plain file, or replace the LFS pointer in place, then retry.
   </Accordion>
 
   <Accordion title="A build context or volume points at an empty folder">
-    Repositories that use Git submodules do not have their submodule contents cloned during a Git Source fetch. Sencho surfaces a warning when `.gitmodules` is present, and refuses inputs and build contexts that reference submodule contents with an actionable message. Inline the referenced files into the main repository or flatten the submodule so the paths resolve at deploy time.
+    Git submodule contents are not cloned. Sencho warns when `.gitmodules` is present and refuses inputs and build contexts that reference submodule contents. Inline the files into the main repository or flatten the submodule.
   </Accordion>
 
   <Accordion title="An additional file named compose.yaml is rejected">
-    The first file in the list is always written to the stack's root `compose.yaml`. To avoid clobbering it, an additional file whose repository path is also `compose.yaml` is rejected. Rename it in the repository, or move it to the top of the list to make it the primary.
+    The first file in the list is always written to the stack's root `compose.yaml`, so an additional file with that repository path is rejected. Rename it in the repository, or move it to the top of the list to make it the primary.
   </Accordion>
 
-  <Accordion title="A relative build context or extends target is missing with multiple files">
-    Git Sources materializes the complete project, including recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, and build contexts. If a referenced file is still missing, the pull refused it and the refusal message names the path and the reason (out-of-bound path, Git LFS pointer, submodule, symlink, or a size cap). Fix the declaration in the repository and pull again.
-  </Accordion>
-
-  <Accordion title="SSH host key verification failed">
-    The server's SSH host key no longer matches the fingerprint you accepted. This can mean a MITM risk or an intentional key rotation on the host. Click **Fetch host key fingerprint** again, compare the SHA256 value out of band with your operator, and save only if you intend to trust the new key.
-  </Accordion>
-
-  <Accordion title="Only unsupported URL schemes">
-    Git Sources accept `https://` URLs and SSH URLs (`git@host:org/repo.git` or `ssh://git@host:port/path`). Other schemes are rejected at save time.
+  <Accordion title="A relative build context or extends target is missing">
+    The pull materializes the complete project, including recursive `include:` and `extends.file` dependencies. If a referenced file is still missing, the pull refused it and the message names the path and the reason (out-of-bound path, Git LFS pointer, submodule, symlink, or a size cap). Fix the declaration and pull again.
   </Accordion>
 </AccordionGroup>
 
-## Known limitations
-
-- **Git-managed Blueprint binding.** Convert or Adopt moves a live Direct source onto a Blueprint. That stack's Git Source sheet is then read-only until you Detach Git or Retire to Direct on the Blueprint. Git-managed Blueprints bind and show a blocked rollout state; they do not deploy from the stored snapshot. Fleet place for those Blueprints waits on registry preflight before rollout authorization. See [Blueprints](/features/blueprint-model).
-- **HTTPS and SSH.** HTTPS uses tokens; SSH uses deploy keys with strict host-key verification. Custom URL schemes are not supported.
-- **No Git LFS.** Compose and env files stored via LFS are rejected. Commit plain files instead.
-- **No submodules.** Submodule contents are not fetched. Inputs and build contexts that reference submodule contents are refused with an actionable message; a warning is shown when `.gitmodules` is present.
-- **Refs, not arbitrary commits.** Sources follow a branch head, a tag, or a pinned commit SHA. Each pull resolves the configured ref to the exact commit it currently points at and pins that SHA, so apply always materializes the reviewed revision. A commit SHA not advertised by the Git host is refused.
-- **Clone size cap.** A clone is bounded on the on-disk size of its temporary workspace (and each compose/env file is capped on read), so very large repositories are rejected. Operators can adjust the workspace ceiling with `GITSOURCE_MAX_CLONE_BYTES`.
-- **Complete project materialization.** Every repository-local input the project needs is materialized: the ordered compose files, implicit `compose.override.*` files, recursive `include:` and `extends.file` dependencies, service env files, file-backed configs and secrets, label files, and build contexts with `.dockerignore` semantics. The materialized set is recorded in a versioned managed-project manifest, and each pull stages a candidate that is validated with the exact deployment invocation before anything on disk changes. If apply is interrupted, Sencho completes the accepted generation or restores the previous generation. If files were edited during the interruption and no longer match either generation, Sencho preserves them and requires manual recovery instead of overwriting them.
-- **Unsupported inputs are refused, not guessed.** Inputs that cannot be safely reproduced fail the pull with an actionable message: URL includes, Git LFS pointers, submodule contents, symbolic links, build contexts that exceed the size bounds, and include or extends declarations that point outside the repository or use dynamic `\${VAR}` paths (their contents cannot be enumerated). Nothing is applied until the declaration is fixed. Absolute host paths, host bind mounts, external resources, and dynamic `\${VAR}` data paths are never claimed as covered: they resolve at deploy time from the environment or the node, and the manifest records them as unmanaged.
-- **Materialization bounds.** The materialized project is bounded by file count, total bytes, per-file size, path depth, and build-context size, each adjustable with a `GITSOURCE_*` variable (see configuration). Crossing a bound refuses the pull with the counts so far rather than producing a partial project.
-- **Detach and export.** Removing a Git source renders the effective compose model into a single `compose.yaml`, keeps the remaining materialized files, removes auto-discovered override files so the exported model is final, and removes Git tracking. Resolved environment values are baked into the exported file. If removal is interrupted before it completes, Sencho restores the original files automatically.
-- **Rollback scope.** Rollback of a Git-managed stack restores the managed authored inventory captured in the recovery generation (the same contract as deploy and update: ordered compose files, overrides, include/extends, and discoverable env/label/config/secret inputs, plus held prior image IDs where available). Named volumes and bind-mounted application data are not restored. Git apply captures a generation before promote. If promote fails mid-flight, Sencho restores the prior files. If apply-with-deploy fails after promote, the applied files stay on disk and the generation remains available for manual rollback (partial success); Sencho does not auto-compensate the deploy failure after apply.
-- **Some read-only views read the primary file.** The dependency graph, drift snapshot, and networking inspector summarize the primary compose file, so a service declared only in an override may not appear in those views. Deploy, update, image-update checks, and mesh attachment use the full merged set.
+Authentication, host key, webhook, and SOPS problems are covered on [Git hosts and authentication](/features/git-authentication#troubleshooting), [Git webhooks](/features/git-webhooks#troubleshooting), and [Repository secrets](/features/git-secrets#troubleshooting).

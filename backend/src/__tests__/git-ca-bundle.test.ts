@@ -67,6 +67,43 @@ describe('classifyGitFailure TLS and redirect nuance', () => {
         expect(result.message).toContain('private CA');
     });
 
+    it('maps a TLS backend that reports an untrusted signer to private-CA guidance', () => {
+        const result = classifyGitFailure({
+            transportFailure: true,
+            reason: 'exit',
+            host: '127.0.0.1',
+            hasToken: false,
+            stderr: "fatal: unable to access 'https://127.0.0.1:44557/app.git/': SSL certificate verification failed: certificate signer not trusted. (CAfile: /tmp/git/combined-ca.pem CRLfile: none)",
+        });
+        expect(result.code).toBe('GIT_ERROR');
+        expect(result.message).toContain('TLS certificate error reaching');
+        expect(result.message).toContain('private CA');
+    });
+
+    it('keeps the specific message when the same backend reports an expired certificate', () => {
+        const result = classifyGitFailure({
+            transportFailure: true,
+            reason: 'exit',
+            host: 'git.example.com',
+            hasToken: false,
+            stderr: 'SSL certificate verification failed: certificate has expired',
+        });
+        expect(result.message).toContain('expired');
+        expect(result.message).not.toContain('private CA');
+    });
+
+    it('leaves a certificate failure that is not about trust to the generic message', () => {
+        const result = classifyGitFailure({
+            transportFailure: true,
+            reason: 'exit',
+            host: 'git.example.com',
+            hasToken: false,
+            stderr: 'fatal: unable to access \'https://git.example.com/app.git/\': SSL certificate verification failed: certificate uses insecure algorithm. (CAfile: /etc/ssl/certs/ca-certificates.crt CRLfile: none)',
+        });
+        expect(result.message).not.toContain('private CA');
+        expect(result.message).toContain('insecure algorithm');
+    });
+
     it('maps redirect-scope and redirect stderr to credential-scope guidance', () => {
         const scoped = classifyGitFailure({
             transportFailure: true,

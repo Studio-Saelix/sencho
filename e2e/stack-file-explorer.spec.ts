@@ -519,7 +519,9 @@ test.describe('Stack file explorer: UI lifecycle', () => {
     // Right-click near the right edge, well past the filename text: the whole
     // row is the trigger, so the Sencho menu (not the native one) must open.
     await row.click({ button: 'right', position: { x: box.width - 6, y: box.height / 2 } });
-    await expect(page.getByText('Rename')).toBeVisible({ timeout: 5_000 });
+    // Match the menu item by role: an earlier test leaves a file named
+    // lifecycle-rename-dst.txt in the tree, which a bare text match also hits.
+    await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible({ timeout: 5_000 });
   });
 
   test('a long filename overflows the pane horizontally instead of being clipped', async ({ page }) => {

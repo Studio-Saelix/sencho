@@ -304,6 +304,8 @@ server {
 ```
 </CodeGroup>
 
+Set `SENCHO_TRUSTED_PROXY_CIDRS` on each instance to the address of the proxy in front of it, or Sencho ignores the forwarded scheme and client address. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup).
+
 Then use the HTTPS URL when adding the remote node:
 
 ```

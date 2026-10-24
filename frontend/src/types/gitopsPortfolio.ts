@@ -14,13 +14,7 @@ import type { GitOpsRevisionProjection } from '@/types/gitops';
 /** Per-application attention reason, as classified server-side. */
 export type GitOpsAttentionReason = string;
 
-export type GitOpsPortfolioPosture =
-  | 'failed'
-  | 'attention'
-  | 'in_progress'
-  | 'converged'
-  | 'converged_qualified'
-  | 'unknown';
+export type GitOpsPortfolioPosture = string;
 
 export interface GitOpsPortfolioRepository {
   configuredRepoUrl: string;
@@ -37,7 +31,7 @@ export interface GitOpsPortfolioTargetSummary {
   health: string;
   connectivity: string;
   tombstoned: boolean;
-  evidence: 'fresh' | 'stale' | 'unknown';
+  evidence: string;
 }
 
 export interface GitOpsPortfolioRow {

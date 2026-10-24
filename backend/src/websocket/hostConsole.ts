@@ -8,6 +8,7 @@ import type { UserRole } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as reject } from './reject';
 import { isConsoleSessionScope } from '../helpers/consoleSession';
+import { resolveUpgradeClientIp } from '../helpers/clientIp';
 
 interface HostConsoleContext {
   nodeId: number;
@@ -69,12 +70,10 @@ export function handleHostConsoleWs(
     stack: stackParam || '(root)',
   });
 
-  // Client IP for the audit trail. Express's req.ip is unavailable on a raw
-  // upgrade socket, so take the first x-forwarded-for hop and fall back to the
-  // socket address.
-  const forwarded = req.headers['x-forwarded-for'];
-  const xff = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '';
-  const ipAddress = xff || req.socket.remoteAddress || '';
+  // Client IP for the audit trail, resolved with the same trusted-proxy rule
+  // the HTTP path uses. A forwarded header is only the client's address when
+  // the direct peer is a proxy we trust.
+  const ipAddress = resolveUpgradeClientIp(req);
 
   const hostConsoleWss = new WebSocketServer({ noServer: true });
   hostConsoleWss.handleUpgrade(req, socket, head, (ws) => {

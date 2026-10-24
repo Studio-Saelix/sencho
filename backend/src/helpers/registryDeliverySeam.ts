@@ -4,6 +4,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import {
   RegistryService,
   normalizeImageHost,
+  dockerConfigKeyForHost,
 } from '../services/RegistryService';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
@@ -79,6 +80,7 @@ function encodeAuth(username: string, password: string): { auth: string } {
  * Execute the registry delivery seam: claim prepared sources when present,
  * re-hash source inputs, re-verify the attestation, burn jti_t, check notAfter,
  * and merge target-local with delivered credentials (target available always wins).
+ * Returns Docker config `auths` keyed as the Docker CLI reads them.
  */
 export async function resolveRegistryAuthAtSeam(
   input: RegistryDeliverySeamInput,
@@ -282,7 +284,15 @@ export async function resolveRegistryAuthAtSeam(
     merged[normalized] = encodeAuth(entry.username, entry.password);
   }
 
-  return { auths: merged, prepId };
+  // `merged` is keyed by normalized host for delivery bookkeeping (precedence
+  // and declared-host matching). Remap at the boundary to the keys Docker
+  // actually reads from config `auths`.
+  const auths: Record<string, { auth: string }> = {};
+  for (const [host, entry] of Object.entries(merged)) {
+    auths[dockerConfigKeyForHost(host)] = entry;
+  }
+
+  return { auths, prepId };
 }
 
 export type { JwtPayload };

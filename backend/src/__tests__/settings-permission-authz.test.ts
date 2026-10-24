@@ -141,6 +141,36 @@ describe('PATCH /api/settings permission buckets', () => {
     expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 
+  it('rejects a node admin setting the GitOps history window', async () => {
+    // The window deletes rows. A node admin holds node:manage and does not hold
+    // system:settings, so this write must be refused.
+    const before = DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days;
+    const patch = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({ gitops_history_retention_days: 14 });
+    expect(patch.status).toBe(403);
+    expect(patch.body.code).toBe('PERMISSION_DENIED');
+
+    const post = await request(app)
+      .post('/api/settings')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({ key: 'gitops_history_retention_days', value: '14' });
+    expect(post.status).toBe(403);
+    expect(post.body.code).toBe('PERMISSION_DENIED');
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe(before);
+  });
+
+  it('lets an admin set the GitOps history window', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ gitops_history_retention_days: 14 });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('14');
+    DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+  });
+
   it('honors node-scoped node-admin grants for node:manage writes', async () => {
     const db = DatabaseService.getInstance();
     const defaultNodeId = db.getDefaultNode()!.id!;

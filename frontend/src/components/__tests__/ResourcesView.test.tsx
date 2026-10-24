@@ -1,13 +1,18 @@
 /**
- * Coverage for ResourcesView hardening.
+ * Coverage for ResourcesView.
  *
  * Locks correctness fixes that manual smoke testing cannot reliably catch:
- *  - M-1: a slow resource fetch for a previously-active node must not overwrite
- *    the newly-selected node's data (node-switch generation guard).
- *  - M-2: a failed prune must surface the server error, never a false success.
- *  - Reclaim banner: "Review & prune" reclaims every advertised category and a
- *    partial failure reports a warning, never a false success; dismiss snoozes
- *    the banner until the reclaimable total grows past the dismissed snapshot.
+ *  - a slow resource fetch for a previously-active node must not overwrite the
+ *    newly-selected node's data (node-switch generation guard).
+ *  - a failed prune must surface the server error, never a false success.
+ *  - Load behaviour: the tables render without waiting on the disk-usage
+ *    call, a refresh after an action keeps the rows on screen, and a failed
+ *    inventory load reads as an error with a Retry, never as "No images found."
+ *  - The masthead answers one question (what a reclaim frees, or Tidy), and
+ *    Reclaim reclaims every advertised category with a partial failure
+ *    reported as a warning, never a false success.
+ *  - Prune verbs open an itemized preview with a scope switch, and are
+ *    admin-only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -28,14 +33,16 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 const licenseState = { isPaid: true };
 vi.mock('@/context/LicenseContext', () => ({ useLicense: () => licenseState }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true, can: () => true }) }));
+const authState = { isAdmin: true };
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: authState.isAdmin, can: () => true }) }));
 
 const nodesState: { activeNode: { id: number } | null } = { activeNode: { id: 1 } };
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => nodesState }));
 
+const trivyState = { available: false };
 vi.mock('@/hooks/useTrivyStatus', () => ({
   useTrivyStatus: () => ({
-    status: { available: false, version: null, source: 'none', autoUpdate: false, busy: false },
+    status: { available: trivyState.available, version: null, source: 'none', autoUpdate: false, busy: false },
     updateCheck: null,
     refresh: vi.fn(),
     refreshUpdateCheck: vi.fn(),
@@ -44,20 +51,17 @@ vi.mock('@/hooks/useTrivyStatus', () => ({
 
 // Heavy or portal-bound children are not under test; stub them to keep the
 // render tree light and deterministic.
-vi.mock('../VulnerabilityScanSheet', () => ({ VulnerabilityScanSheet: () => null }));
-// Testable stub: surfaces visibility (testid) and the two callbacks so the
-// snooze and reclaim-all flows can be driven without the real banner styling.
-// Mirrors the real component's bytes<=0 guard.
-vi.mock('../resources/ReclaimHero', () => ({
-  ReclaimHero: ({ bytes, onReview, onDismiss }: { bytes: number; onReview: () => void; onDismiss: () => void }) =>
-    bytes <= 0 ? null : (
-      <div data-testid="reclaim-hero">
-        <button onClick={onReview}>Review &amp; prune</button>
-        <button onClick={onDismiss}>Dismiss hero</button>
-      </div>
-    ),
+// Exposes the rescan callback so the force/scanner arguments the view picks can be asserted.
+vi.mock('../VulnerabilityScanSheet', () => ({
+  VulnerabilityScanSheet: ({ onRescan }: { onRescan?: (imageRef: string) => void }) =>
+    onRescan ? <button onClick={() => onRescan('old:v1')}>rescan-stub</button> : null,
 }));
-vi.mock('../resources/FootprintTreemap', () => ({ FootprintTreemap: () => null }));
+const scanMock = { scanImage: vi.fn(), cancelScan: vi.fn() };
+vi.mock('@/hooks/useImageScan', () => ({
+  useImageScan: () => ({ scanningRef: null, scanImage: scanMock.scanImage, cancelScan: scanMock.cancelScan }),
+}));
+const mobileState = { value: false };
+vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => mobileState.value }));
 vi.mock('../resources/ImageDetailsSheet', () => ({ ImageDetailsSheet: () => null }));
 vi.mock('../resources/VolumeBrowserSheet', () => ({ VolumeBrowserSheet: () => null }));
 vi.mock('../NetworkTopologyView', () => ({ default: () => null }));
@@ -68,6 +72,7 @@ vi.mock('../NodeManager', () => ({ SENCHO_NAVIGATE_EVENT: 'sencho-navigate' }));
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import ResourcesView from '../ResourcesView';
+import { formatBytes } from '@/lib/utils';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 
@@ -96,10 +101,15 @@ beforeEach(() => {
   mockedFetch.mockReset();
   licenseState.isPaid = true;
   nodesState.activeNode = { id: 1 };
+  authState.isAdmin = true;
+  trivyState.available = false;
+  mobileState.value = false;
+  scanMock.scanImage.mockReset();
+  scanMock.cancelScan.mockReset();
   localStorage.clear();
 });
 
-// Reclaimable usage shape with a non-zero total so the banner is shown.
+// Reclaimable usage shape with a non-zero total so the masthead offers Reclaim.
 function reclaimableUsage(images: number, volumes: number) {
   return {
     reclaimableImages: images,
@@ -206,6 +216,184 @@ describe('ResourcesView', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it('renders the image table while the disk-usage request is still pending', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [image('fast:latest')], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('fast:latest')).toBeInTheDocument();
+  });
+
+  it('keeps the rows on screen while a post-prune refresh is in flight', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('keep:me')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('keep:me')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The refresh is still pending: the row stays and no skeleton replaces it.
+    expect(screen.getByText('keep:me')).toBeInTheDocument();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('keep:me')).not.toBeInTheDocument());
+  });
+
+  it('shows an error with Retry when the inventory fails to load, not an empty table', async () => {
+    let attempt = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        attempt += 1;
+        return Promise.resolve(attempt === 1
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ images: [image('back:again')], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.queryByText('No images found.')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('back:again')).toBeInTheDocument();
+  });
+
+  it('says the disk usage is unknown, with a Retry, when it fails to load, and reloads only usage', async () => {
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'slow' }, { ok: false, status: 500 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+    const resourcesCallsBefore = mockedFetch.mock.calls.filter(([u]) => u === '/system/resources').length;
+
+    await user.click(screen.getByRole('button', { name: 'Retry disk usage' }));
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+    expect(mockedFetch.mock.calls.filter(([u]) => u === '/system/resources')).toHaveLength(resourcesCallsBefore);
+  });
+
+  it('keeps the rows and warns when a background refresh fails, without a Retry row', async () => {
+    let resourcesCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        return Promise.resolve(resourcesCalls === 1
+          ? jsonResponse({ images: [image('still:here')], volumes: [], networks: [] })
+          : jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    expect(screen.getByText('still:here')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+  });
+
+  it('drops the previous node usage when a node switch loads, and ignores its late usage response', async () => {
+    const dfResolvers: Array<(r: Response) => void> = [];
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        return new Promise<Response>((resolve) => dfResolvers.push(resolve));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const { rerender } = render(<ResourcesView />);
+    await waitFor(() => expect(dfResolvers).toHaveLength(1));
+
+    nodesState.activeNode = { id: 2 };
+    rerender(<ResourcesView />);
+    await waitFor(() => expect(dfResolvers).toHaveLength(2));
+
+    // Node 1's slow answer arrives after the switch and must not render.
+    dfResolvers[0](jsonResponse(reclaimableUsage(777_000_000, 0)));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.getByText('Measuring disk')).toBeInTheDocument();
+    expect(screen.queryByText(/reclaimable/)).not.toBeInTheDocument();
+
+    dfResolvers[1](jsonResponse(reclaimableUsage(5_000_000, 0)));
+    expect(await screen.findByText(`${formatBytes(5_000_000)} reclaimable`)).toBeInTheDocument();
+  });
+
+  it('says the disk usage is unknown when the usage request throws, and Retry recovers', async () => {
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return dfCalls === 1 ? Promise.reject(new Error('network down')) : Promise.resolve(jsonResponse(reclaimableUsage(0, 0)));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry disk usage' }));
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+  });
+
   it('fetches a prune plan before enabling confirm, then sends the fingerprint', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {
@@ -224,7 +412,7 @@ describe('ResourcesView', () => {
     render(<ResourcesView />);
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
 
-    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
       '/system/prune/plan',
       expect.objectContaining({ method: 'POST' }),
@@ -270,7 +458,7 @@ describe('ResourcesView', () => {
     const user = userEvent.setup();
     render(<ResourcesView />);
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
-    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
 
     const extraRef = await screen.findByText('ghcr.io/example/very-long-app-name:latest');
     expect(extraRef).toHaveClass('break-all');
@@ -296,7 +484,7 @@ describe('ResourcesView', () => {
     render(<ResourcesView />);
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
 
-    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(screen.getByText(/old:v1/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /Prune/ }));
 
@@ -304,7 +492,7 @@ describe('ResourcesView', () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 
-  it('reports partial failure from "Review & prune" without a false success', async () => {
+  it('reports a total request failure from Reclaim without a false success', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {
         return Promise.resolve(jsonResponse(reclaimPlan()));
@@ -314,14 +502,13 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
     const user = userEvent.setup();
     render(<ResourcesView />);
 
-    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
     await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
@@ -345,13 +532,12 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
     await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
@@ -370,13 +556,12 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
     await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
@@ -397,119 +582,18 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
     await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     const msg = (toast.success as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(msg).toMatch(/Freed/);
-  });
-
-  it('snoozes the banner on dismiss and brings it back when more space is reclaimable', async () => {
-    let usage = reclaimableUsage(1000, 500); // 1500 B total
-    mockedFetch.mockImplementation((url: string) => {
-      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(usage));
-      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
-      return Promise.resolve(jsonResponse({}));
-    });
-
-    const user = userEvent.setup();
-    const { rerender } = render(<ResourcesView />);
-    await screen.findByTestId('reclaim-hero');
-
-    // Dismiss snapshots the current total; the banner hides.
-    await user.click(screen.getByRole('button', { name: /Dismiss hero/ }));
-    await waitFor(() => expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument());
-
-    // A larger reclaimable total on the same node pushes past the snapshot, so
-    // the banner returns. Same node id keeps the snapshot; the new activeNode
-    // object reference triggers a refetch.
-    usage = reclaimableUsage(8000, 2000); // 10000 B total
-    nodesState.activeNode = { id: 1 };
-    rerender(<ResourcesView />);
-    await screen.findByTestId('reclaim-hero');
-  });
-
-  it('keeps the banner hidden after dismiss when the reclaimable total does not grow', async () => {
-    mockedFetch.mockImplementation((url: string) => {
-      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
-      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
-      return Promise.resolve(jsonResponse({}));
-    });
-
-    const user = userEvent.setup();
-    const { rerender } = render(<ResourcesView />);
-    await screen.findByTestId('reclaim-hero');
-
-    await user.click(screen.getByRole('button', { name: /Dismiss hero/ }));
-    await waitFor(() => expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument());
-
-    // A stable residue (the same total on the same node) must stay dismissed
-    // across a refetch, not re-nag. Force a refetch via a new activeNode ref.
-    const dfCalls = () => mockedFetch.mock.calls.filter(([u]) => u === '/system/docker-df').length;
-    const before = dfCalls();
-    nodesState.activeNode = { id: 1 };
-    rerender(<ResourcesView />);
-    await waitFor(() => expect(dfCalls()).toBeGreaterThan(before));
-    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
-  });
-
-  it('hides the banner on a node switch when /settings fails, instead of inheriting the previous node opt-in', async () => {
-    // Both responses key off the active node, so the switch cannot desync them:
-    // node A opts in and serves its own image, node B fails /settings.
-    mockedFetch.mockImplementation((url: string) => {
-      const isNodeA = nodesState.activeNode?.id === 1;
-      if (url === '/settings') {
-        return isNodeA
-          ? Promise.resolve(jsonResponse({ reclaim_hero: '1' }))
-          : Promise.resolve(jsonResponse({}, { ok: false, status: 500 }));
-      }
-      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
-      if (url === '/system/resources') {
-        return Promise.resolve(jsonResponse({
-          images: [image(isNodeA ? 'node-a-img:latest' : 'node-b-img:latest')],
-          volumes: [],
-          networks: [],
-        }));
-      }
-      return Promise.resolve(jsonResponse({}));
-    });
-
-    // Node A has the banner turned on; once loaded it is visible.
-    const { rerender } = render(<ResourcesView />);
-    await screen.findByText('node-a-img:latest');
-    await screen.findByTestId('reclaim-hero');
-
-    // Switch to node B with a failing /settings: the banner must hide (fail
-    // closed), not carry over node A's enabled state.
-    nodesState.activeNode = { id: 2 };
-    rerender(<ResourcesView />);
-    await screen.findByText('node-b-img:latest');
-    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
-  });
-
-  it('keeps the banner hidden when the setting is explicitly off, even with reclaimable space', async () => {
-    mockedFetch.mockImplementation((url: string) => {
-      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
-      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('off-img:latest')], volumes: [], networks: [] }));
-      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '0' }));
-      return Promise.resolve(jsonResponse({}));
-    });
-
-    // Wait on rendered data, not the request: /settings lands in the same batch,
-    // so a visible image proves the setting was applied before this assertion.
-    render(<ResourcesView />);
-    await screen.findByText('off-img:latest');
-    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
 
   it('badges a rollback-protected image without changing its managed/unused status', async () => {
@@ -548,5 +632,291 @@ describe('ResourcesView', () => {
     // State badge and the Current filter pill both render this label.
     expect(screen.getAllByText('Current').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByRole('button', { name: /release rollback protection/i })).toBeInTheDocument();
+  });
+
+  describe('masthead and prune verbs', () => {
+    function mockNode(overrides: Record<string, unknown> = {}, executeBody: object = { success: true, reclaimedBytes: 1000, outcomes: [] }) {
+      mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('old:v1')], volumes: [], networks: [] }));
+        if (url === '/system/prune/plan' && opts?.method === 'POST') {
+          const body = JSON.parse(String(opts.body));
+          const items = body.target === 'networks'
+            ? [{ target: 'networks', id: 'n1', name: 'old_net', managed: true, reason: 'Network has no attached containers', network: {} }]
+            : body.target === 'containers'
+              ? [{ target: 'containers', id: 'c1', name: 'old_ctr', managed: true, reason: 'Container is exited and no longer running' }]
+              : undefined;
+          return Promise.resolve(jsonResponse(samplePrunePlan({
+            scope: body.scope,
+            targets: body.targets ?? [body.target],
+            fingerprint: `fp-${body.scope}-${body.target ?? 'multi'}`,
+            ...(items ? { items, reclaimableBytes: 0 } : {}),
+          })));
+        }
+        if (url === '/system/prune/system' && opts?.method === 'POST') {
+          return Promise.resolve(jsonResponse(executeBody));
+        }
+        if (overrides[url]) return Promise.resolve(jsonResponse(overrides[url]));
+        return Promise.resolve(jsonResponse({}));
+      });
+    }
+
+    function planBodies() {
+      return mockedFetch.mock.calls
+        .filter(([u, o]) => u === '/system/prune/plan' && (o as RequestInit)?.method === 'POST')
+        .map(([, o]) => JSON.parse(String((o as RequestInit).body)));
+    }
+
+    it('answers with what a reclaim frees, and says Tidy when nothing is reclaimable', async () => {
+      mockNode();
+      const { unmount } = render(<ResourcesView />);
+      expect(await screen.findByText(`${formatBytes(1500)} reclaimable`)).toBeInTheDocument();
+      expect(screen.getByText('1 unused image · 1 dangling volume')).toBeInTheDocument();
+      unmount();
+
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(0, 0)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        return Promise.resolve(jsonResponse({}));
+      });
+      render(<ResourcesView />);
+      expect(await screen.findByText('Tidy')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Reclaim' })).not.toBeInTheDocument();
+    });
+
+    it('opens the prune preview at the managed scope and re-plans when the scope switches to all Docker', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+
+      await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+      await waitFor(() => expect(planBodies()).toEqual([{ target: 'images', scope: 'managed' }]));
+
+      await user.click(await screen.findByRole('radio', { name: 'All Docker' }));
+      await waitFor(() => expect(planBodies()).toEqual([
+        { target: 'images', scope: 'managed' },
+        { target: 'images', scope: 'all' },
+      ]));
+
+      await user.click(await screen.findByRole('button', { name: /^Prune/ }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalled());
+      const execute = mockedFetch.mock.calls.find(([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST');
+      const body = JSON.parse(String((execute![1] as RequestInit).body));
+      expect(body).toMatchObject({ target: 'images', scope: 'all', planFingerprint: 'fp-all-images' });
+    });
+
+    it('does not re-plan when the already-active scope is clicked again', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+
+      await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+      await waitFor(() => expect(planBodies()).toHaveLength(1));
+      await user.click(await screen.findByRole('radio', { name: 'Sencho-managed' }));
+      await user.click(screen.getByRole('radio', { name: 'Sencho-managed' }));
+
+      expect(planBodies()).toHaveLength(1);
+      expect(await screen.findByRole('button', { name: /^Prune/ })).toBeEnabled();
+    });
+
+    it('offers networks in the overflow and opens their preview at the managed scope', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+
+      await user.click(screen.getByRole('button', { name: 'More cleanup actions' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Prune unused networks' }));
+      await waitFor(() => expect(planBodies()).toEqual([{ target: 'networks', scope: 'managed' }]));
+      expect((await screen.findAllByText('Prune Sencho-managed networks')).length).toBeGreaterThan(0);
+      expect(await screen.findByText(/old_net/)).toBeInTheDocument();
+    });
+
+    it('opens the volumes preview from the Volumes tab', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /volumes/i }));
+      await user.click(await screen.findByRole('button', { name: 'Prune unused' }));
+      await waitFor(() => expect(planBodies()).toEqual([{ target: 'volumes', scope: 'managed' }]));
+    });
+
+    it('offers stopped containers in the overflow and opens their preview at the managed scope', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+
+      await user.click(screen.getByRole('button', { name: 'More cleanup actions' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Prune stopped containers' }));
+      await waitFor(() => expect(planBodies()).toEqual([{ target: 'containers', scope: 'managed' }]));
+      expect((await screen.findAllByText('Prune Sencho-managed containers')).length).toBeGreaterThan(0);
+      expect(await screen.findByText(/old_ctr/)).toBeInTheDocument();
+    });
+
+    it('requests the whole-node plan for Reclaim and sends that plan to the executor', async () => {
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
+      await waitFor(() => expect(planBodies()).toEqual([{ targets: ['volumes', 'containers', 'images'], scope: 'all' }]));
+
+      await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalled());
+      const execute = mockedFetch.mock.calls.find(([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST');
+      expect(JSON.parse(String((execute![1] as RequestInit).body))).toMatchObject({
+        targets: ['volumes', 'containers', 'images'],
+        scope: 'all',
+        planFingerprint: 'fp-all-multi',
+      });
+    });
+
+    it('warns, without a success toast, when Reclaim removes some items and fails others', async () => {
+      mockNode({}, {
+        success: true,
+        reclaimedBytes: 500,
+        outcomes: [
+          { id: 'v1', target: 'volumes', status: 'failed', error: 'volume busy' },
+          { id: 'img1', target: 'images', status: 'removed' },
+        ],
+      });
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
+      await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+      await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(expect.stringContaining('Some items could not be pruned.')));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('reports an error when Reclaim fails every item even though the request succeeded', async () => {
+      mockNode({}, { success: true, reclaimedBytes: 0, outcomes: [{ id: 'img1', target: 'images', status: 'failed', error: 'in use' }] });
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('button', { name: 'Reclaim' }));
+      await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
+
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to reclaim disk space.'));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.warning).not.toHaveBeenCalled();
+    });
+
+    it('scans with the right scanners and force flag from the row menu and from the rescan action', async () => {
+      trivyState.available = true;
+      mockNode();
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+
+      await user.click(screen.getByRole('button', { name: 'Scan old:v1' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Scan (vulnerabilities)' }));
+      expect(scanMock.scanImage).toHaveBeenLastCalledWith('old:v1', ['vuln'], { force: false });
+
+      await user.click(screen.getByRole('button', { name: 'Scan old:v1' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Full scan (vulnerabilities + secrets)' }));
+      expect(scanMock.scanImage).toHaveBeenLastCalledWith('old:v1', ['vuln', 'secret'], { force: false });
+
+      await user.click(screen.getByRole('button', { name: 'rescan-stub' }));
+      expect(scanMock.scanImage).toHaveBeenLastCalledWith('old:v1', undefined, { force: true });
+    });
+
+    it('stops following an in-flight scan when the node switches, not on a plain re-render', async () => {
+      mockNode();
+      const { rerender, unmount } = render(<ResourcesView />);
+      await screen.findByText('old:v1');
+      expect(scanMock.cancelScan).not.toHaveBeenCalled();
+
+      rerender(<ResourcesView />);
+      expect(scanMock.cancelScan).not.toHaveBeenCalled();
+
+      nodesState.activeNode = { id: 2 };
+      rerender(<ResourcesView />);
+      expect(scanMock.cancelScan).toHaveBeenCalledTimes(1);
+
+      unmount();
+      expect(scanMock.cancelScan).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps Reclaim and the cleanup menu reachable on a phone, behind the same admin gate', async () => {
+      mobileState.value = true;
+      mockNode();
+      const { unmount } = render(<ResourcesView />);
+      expect(await screen.findByText(`${formatBytes(1500)} reclaimable`)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Reclaim' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'More cleanup actions' })).toBeInTheDocument();
+      unmount();
+
+      authState.isAdmin = false;
+      render(<ResourcesView />);
+      expect(await screen.findByText(`${formatBytes(1500)} reclaimable`)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Reclaim' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'More cleanup actions' })).not.toBeInTheDocument();
+    });
+
+    it('hides every prune verb from a non-admin and keeps the masthead and the usage Retry', async () => {
+      authState.isAdmin = false;
+      mockNode();
+      render(<ResourcesView />);
+      expect(await screen.findByText(`${formatBytes(1500)} reclaimable`)).toBeInTheDocument();
+      await screen.findByText('old:v1');
+
+      expect(screen.queryByRole('button', { name: 'Reclaim' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'More cleanup actions' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Prune unused' })).not.toBeInTheDocument();
+    });
+
+    it('does not request /settings', async () => {
+      mockNode();
+      render(<ResourcesView />);
+      await screen.findByText('old:v1');
+      expect(mockedFetch.mock.calls.some(([u]) => u === '/settings')).toBe(false);
+    });
+
+    it('opens the Rollback tab from a stack-held image badge, and leaves a service-held badge static', async () => {
+      mockNode({});
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({
+            images: [
+              { ...image('held:stack'), managedStatus: 'unused', rollbackProtected: true, rollbackProtectionKind: 'stack' },
+              { ...image('held:service'), managedStatus: 'unused', rollbackProtected: true, rollbackProtectionKind: 'service' },
+            ],
+            volumes: [],
+            networks: [],
+          }));
+        }
+        if (url === '/system/rollback/generations') {
+          return Promise.resolve(jsonResponse([
+            { id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active', isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: true },
+          ]));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await screen.findByText('held:stack');
+      expect(screen.getAllByText('Rollback protected')).toHaveLength(2);
+      expect(screen.getAllByRole('button', { name: /rollback protected/i })).toHaveLength(1);
+
+      await user.click(screen.getByRole('button', { name: /rollback protected/i }));
+      expect(await screen.findByText('abc123456789')).toBeInTheDocument();
+    });
+
+    it('lists unmanaged containers under an External tab and selects them with checkboxes', async () => {
+      mockNode({
+        '/system/orphans': { 'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }] },
+      });
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /external/i }));
+
+      expect(await screen.findByText('legacy-app')).toBeInTheDocument();
+      await user.click(screen.getByRole('checkbox', { name: 'Select web' }));
+      expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
+    });
   });
 });

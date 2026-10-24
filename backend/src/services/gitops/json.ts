@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { canonicalPlatformLabel } from './platformNames';
 
 export class GitOpsJsonError extends Error {
   constructor(message: string) {
@@ -209,8 +210,23 @@ export type ArtifactServiceFailureClass =
   | 'credential_failure'
   | 'unsupported_registry'
   | 'platform_ambiguity'
+  | 'platform_unavailable'
   | 'digest_unavailable'
   | 'stale_resolution';
+
+/**
+ * Whether a value is one of the failure classes this contract defines.
+ *
+ * Exported so the consumers that validate untrusted evidence have one list rather
+ * than a copy each. There were two copies, and adding a class to one of them
+ * silently left the other rejecting it: the field itself stayed readable but the
+ * guard that checks a leaf payload or a revision projection would fail the whole
+ * record, degrading a fleet row to unknown evidence. A predicate that reads the
+ * same set the type is declared beside cannot drift from it.
+ */
+export function isArtifactServiceFailureClass(value: unknown): value is ArtifactServiceFailureClass {
+  return typeof value === 'string' && ARTIFACT_SERVICE_FAILURES.has(value as ArtifactServiceFailureClass);
+}
 
 export interface ArtifactPlatformVariant {
   platform: string;
@@ -241,6 +257,7 @@ const ARTIFACT_SERVICE_FAILURES = new Set<ArtifactServiceFailureClass>([
   'credential_failure',
   'unsupported_registry',
   'platform_ambiguity',
+  'platform_unavailable',
   'digest_unavailable',
   'stale_resolution',
 ]);
@@ -302,7 +319,24 @@ function decodePlatformVariants(value: unknown): ArtifactPlatformVariant[] | nul
       throw new GitOpsJsonError('platform variants must be sorted by platform');
     }
   }
-  return sorted;
+  // Labels are historical: a stored row written before the read translated
+  // docker-info spellings says linux/x86_64. Validation runs on the stored
+  // strings so a legacy row stays decodable, and the caller receives canonical
+  // labels, re-sorted because a translation can move a name across its
+  // neighbours (x86_64 sorts after arm64; amd64 sorts before it). Two stored
+  // spellings can collapse to one name, and the row would then be ambiguous,
+  // so the canonical labels carry the same uniqueness rule as the stored ones.
+  const canonical = variants
+    .map((variant) => ({ platform: canonicalPlatformLabel(variant.platform), digest: variant.digest }))
+    .sort((a, b) => a.platform.localeCompare(b.platform));
+  const canonicalSeen = new Set<string>();
+  for (const variant of canonical) {
+    if (canonicalSeen.has(variant.platform)) {
+      throw new GitOpsJsonError('platform variants must be unique by platform');
+    }
+    canonicalSeen.add(variant.platform);
+  }
+  return canonical;
 }
 
 function decodeLocalDigests(value: unknown): string[] | null {
@@ -380,10 +414,8 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
   if (value.producedImageId !== null && typeof value.producedImageId !== 'string') {
     throw new GitOpsJsonError('service artifact evidence producedImageId must be a string or null');
   }
-  if (value.failureClass !== null) {
-    if (typeof value.failureClass !== 'string' || !ARTIFACT_SERVICE_FAILURES.has(value.failureClass as ArtifactServiceFailureClass)) {
-      throw new GitOpsJsonError('service artifact evidence failureClass is invalid');
-    }
+  if (value.failureClass !== null && !isArtifactServiceFailureClass(value.failureClass)) {
+    throw new GitOpsJsonError('service artifact evidence failureClass is invalid');
   }
   if (value.resolvedAt !== null) {
     if (typeof value.resolvedAt !== 'number' || !Number.isFinite(value.resolvedAt)) {
@@ -394,7 +426,7 @@ function decodeServiceArtifactEvidence(value: unknown): ServiceArtifactEvidence 
     serviceName: value.serviceName,
     authoredRef: value.authoredRef,
     source: value.source as ArtifactServiceSource,
-    platform: value.platform,
+    platform: value.platform === null ? null : canonicalPlatformLabel(value.platform),
     indexDigest: value.indexDigest,
     platformDigest: value.platformDigest,
     platformVariants,
@@ -595,5 +627,89 @@ export function encodeObservedArtifactIdentity(value: ObservedArtifactIdentity):
   }
   const encoded = encodeGitOpsJson(payload);
   decodeObservedArtifactIdentity(encoded);
+  return encoded;
+}
+
+/**
+ * What Compose was actually invoked with, read back off the running project.
+ *
+ * Every path is relative to the stack directory and every project name is
+ * lowercased, so the value compares against an authored invocation that was
+ * built for the same stack without depending on where the compose directory is
+ * mounted. A node whose compose directory is mounted at a different absolute
+ * path is not drift, and a stack name written `Web` names the same Compose
+ * project as `web`.
+ *
+ * There is no `unknown` or `unavailable` variant on purpose. The absence of a
+ * row is what says the observation was never taken, which is also what a node
+ * that could not be reached leaves behind, and both are the same honest fact:
+ * Sencho has not looked. A discriminator here would force a synthesized value
+ * to be written to say nothing, and a synthesized value is exactly what the
+ * drift projection must never compare against.
+ */
+export interface ObservedInvocationIdentity {
+  composeFileOrder: string[];
+  projectName: string;
+  projectDirectory: string;
+  envFileOrder: string[];
+  observedAt: number;
+}
+
+function assertInvocationKeys(decoded: Record<string, unknown>, allowed: readonly string[]): void {
+  for (const key of Object.keys(decoded)) {
+    if (!allowed.includes(key)) {
+      throw new GitOpsJsonError('observed invocation has unknown keys');
+    }
+  }
+}
+
+function decodeInvocationPathList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new GitOpsJsonError(`observed invocation ${field} must be an array`);
+  }
+  return value.map((entry) => {
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new GitOpsJsonError(`observed invocation ${field} must hold non-empty strings`);
+    }
+    return entry;
+  });
+}
+
+export function decodeObservedInvocation(raw: string | null): ObservedInvocationIdentity | null {
+  if (raw === null) return null;
+  const decoded = decodeGitOpsJson(raw);
+  if (!isRecord(decoded)) {
+    throw new GitOpsJsonError('observed invocation must be an object');
+  }
+  assertInvocationKeys(decoded, [
+    'composeFileOrder', 'projectName', 'projectDirectory', 'envFileOrder', 'observedAt',
+  ]);
+  if (typeof decoded.projectName !== 'string' || decoded.projectName.length === 0) {
+    throw new GitOpsJsonError('observed invocation projectName must be a non-empty string');
+  }
+  if (typeof decoded.projectDirectory !== 'string' || decoded.projectDirectory.length === 0) {
+    throw new GitOpsJsonError('observed invocation projectDirectory must be a non-empty string');
+  }
+  if (typeof decoded.observedAt !== 'number' || !Number.isFinite(decoded.observedAt)) {
+    throw new GitOpsJsonError('observed invocation observedAt must be a finite number');
+  }
+  return {
+    composeFileOrder: decodeInvocationPathList(decoded.composeFileOrder, 'composeFileOrder'),
+    projectName: decoded.projectName,
+    projectDirectory: decoded.projectDirectory,
+    envFileOrder: decodeInvocationPathList(decoded.envFileOrder, 'envFileOrder'),
+    observedAt: decoded.observedAt,
+  };
+}
+
+export function encodeObservedInvocation(value: ObservedInvocationIdentity): string {
+  const encoded = encodeGitOpsJson({
+    composeFileOrder: value.composeFileOrder,
+    projectName: value.projectName,
+    projectDirectory: value.projectDirectory,
+    envFileOrder: value.envFileOrder,
+    observedAt: value.observedAt,
+  });
+  decodeObservedInvocation(encoded);
   return encoded;
 }

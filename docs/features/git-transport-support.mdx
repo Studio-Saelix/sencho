@@ -8,11 +8,11 @@ description: Which transports, reference types, authentication methods, and Git 
   Git Sources, and everything on this page, is available on every tier, including Community.
 </Note>
 
-This page states exactly what Git Sources supports today: which transports, reference types, authentication methods, TLS trust modes, and Git hosts, and what happens where a combination is not supported or not yet verified. For how to configure a Git source, see [Git Sources](/features/git-sources).
+This page states exactly what Git Sources supports today: which transports, reference types, authentication methods, TLS trust modes, and Git hosts, and what happens where a combination is not supported or not yet verified. For how to configure a Git source, see [Git Sources](/features/git-sources), and for credentials and certificate trust, [Git hosts and authentication](/features/git-authentication).
 
 Every "Supported" row here is backed by a test that runs on every change to Sencho, or by a dated pass against a real instance of that host. A row marked "Not yet verified" is not a claim of failure: it means that specific combination has not been exercised yet, so it is not advertised as working. Nothing on this page is inferred from a related combination that behaved correctly.
 
-<!-- GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) -->
+{/* GENERATED:BEGIN (run `npm run matrix:render` in backend/ to regenerate, do not edit by hand) */}
 
 ## Transports
 
@@ -42,11 +42,11 @@ Every "Supported" row here is backed by a test that runs on every change to Senc
 | Host | HTTPS | SSH | Branch | Tag | Commit SHA | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 | Generic (self-hosted or any Git server) | Supported | Supported | Supported | Supported | Supported | Automated, every change |
-| GitHub | Supported | Not yet verified | Supported | Not yet verified | Supported | Live, 2026-09-01 |
-| GitLab | Supported | Not yet verified | Supported | Supported | Supported | Live, 2026-09-01 |
-| Gitea | Supported | Supported | Supported | Supported | Supported | Live, 2026-09-01 |
-| Forgejo | Supported | Supported | Supported | Supported | Supported | Live, 2026-09-01 |
-| Bitbucket | Supported | Not yet verified | Supported | Not yet verified | Supported | Live, 2026-09-01 |
+| GitHub | Supported | Not yet verified | Supported | Not yet verified | Supported | Live, 2026-10-23 |
+| GitLab | Supported | Not yet verified | Supported | Supported | Supported | Live, 2026-10-23 |
+| Gitea | Supported | Supported | Supported | Supported | Supported | Live, 2026-10-23 |
+| Forgejo | Supported | Supported | Supported | Supported | Supported | Live, 2026-10-23 |
+| Bitbucket | Supported | Not yet verified | Supported | Not yet verified | Supported | Live, 2026-10-23 |
 
 ## TLS and certificate authorities
 
@@ -65,7 +65,7 @@ Every "Supported" row here is backed by a test that runs on every change to Senc
 - **Outbound target restrictions.** Repository targets that resolve to loopback, link-local, multicast, or selected special-use addresses are refused before any request is sent. Private hosts on an operator's own LAN or VPN are not affected by this restriction.
 - **Branch/tag name collisions.** A bare ref name resolves as a branch first, then as a tag. If an operator renames a branch and a tag of the same name later appears, the source silently starts resolving the tag instead. A ref name that is also a valid 40 or 64 character hex string resolves as a commit SHA before either lookup.
 
-<!-- GENERATED:END -->
+{/* GENERATED:END */}
 
 ## How these claims are verified
 
@@ -74,7 +74,7 @@ Two kinds of evidence back the rows above:
 - **Automated.** A real `git` client, talking to a real local test server over HTTPS or SSH, drives the exact same code path Sencho uses in production. These tests run on every change, so a regression here fails the build before it reaches a release.
 - **Live.** A dated pass against a real instance of the named host (a public GitHub, GitLab, Gitea, Forgejo, or Bitbucket repository, or a self-hosted instance under Sencho's control). This is repeated periodically, not on every change, so its date tells you how current the result is.
 
-A host that is not listed, or a combination marked "Not yet verified," most likely still works: Git Sources speaks the standard Git smart-HTTP and SSH protocols, not anything host-specific. It simply has not been exercised as its own row yet.
+A host that is not listed, or a combination marked "Not yet verified," is not a known failure. Git Sources speaks the standard Git smart-HTTP and SSH protocols, not anything host-specific, but only the rows above have been exercised, so only they are claimed. The procedure behind the live passes is in `scripts/git-attestation/README.md` in the Sencho repository.
 
 <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
   Configure a repository, review pull previews, and read the field-by-field reference for every setting mentioned above.

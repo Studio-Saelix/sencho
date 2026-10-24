@@ -87,8 +87,14 @@ describe('useGitOpsPortfolio', () => {
     }
 
     expect(applicationIdFromSearch(window.location.search)).toBe('1:a');
-    // The search still applies to the list the operator returns to.
     expect(result.current.filters.q).toBe('web');
+
+    await act(async () => {
+      closeGitOpsApplication();
+      await new Promise<void>(resolve => window.addEventListener('popstate', () => resolve(), { once: true }));
+    });
+    await waitFor(() => expect(window.location.search).toBe('?q=web'));
+    expect(window.history.state).toMatchObject({ senchoIdx: 1 });
   });
 
   it('loads the portfolio on mount', async () => {

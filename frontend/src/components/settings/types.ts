@@ -15,7 +15,6 @@ export interface PatchableSettings {
     scan_history_per_image_limit?: string;
     prune_orphaned_scans?: '0' | '1';
     prune_on_update?: '0' | '1';
-    reclaim_hero?: '0' | '1';
     snapshot_documentation?: '0' | '1';
     health_gate_enabled?: '0' | '1';
     health_gate_window_seconds?: string;
@@ -23,6 +22,8 @@ export interface PatchableSettings {
     recovery_max_generations?: string;
     env_block_deploy_on_missing_required?: '0' | '1';
     auto_create_missing_external_networks?: '0' | '1';
+    gitops_artifact_retry_interval_mins?: string;
+    gitops_history_retention_days?: string;
     image_update_sidebar_indicators?: '0' | '1';
     notification_dispatch_retries?: string;
     session_sliding_refresh?: '0' | '1';
@@ -45,14 +46,15 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     scan_history_per_image_limit: '50',
     prune_orphaned_scans: '1',
     prune_on_update: '1',
-    reclaim_hero: '0',
     snapshot_documentation: '0',
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
     recovery_retention_days: '7',
-    recovery_max_generations: '0',
-    env_block_deploy_on_missing_required: '0',
+    recovery_max_generations: '1',
+    env_block_deploy_on_missing_required: '1',
     auto_create_missing_external_networks: '0',
+    gitops_artifact_retry_interval_mins: '5',
+    gitops_history_retention_days: '30',
     image_update_sidebar_indicators: '1',
     notification_dispatch_retries: '0',
     session_sliding_refresh: '1',
@@ -80,6 +82,7 @@ export type SectionId =
     | 'nodes'
     | 'app-store'
     | 'stacks'
+    | 'gitops'
     | 'notification-routing'
     | 'notification-suppression'
     | 'recovery'

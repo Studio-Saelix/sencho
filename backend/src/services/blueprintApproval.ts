@@ -23,6 +23,7 @@ export type PreviewAction =
     | 'in_flight_correct'
     | 'in_flight_withdraw'
     | 'skip_cordoned'
+    | 'skip_withdrawn'
     | 'blocked_name_conflict';
 
 export type ActionKind = 'executor' | 'informational';
@@ -57,6 +58,7 @@ const INFORMATIONAL = new Set<PreviewAction>([
     'in_flight_correct',
     'in_flight_withdraw',
     'skip_cordoned',
+    'skip_withdrawn',
     'blocked_name_conflict',
 ]);
 

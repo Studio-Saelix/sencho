@@ -50,11 +50,12 @@ vi.mock('@aws-sdk/client-ecr', () => {
 let tmpDir: string;
 let RegistryService: typeof import('../services/RegistryService').RegistryService;
 let normalizeRegistryUrl: typeof import('../services/RegistryService').normalizeRegistryUrl;
+let dockerConfigKeyForHost: typeof import('../services/RegistryService').dockerConfigKeyForHost;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
-  ({ RegistryService, normalizeRegistryUrl } = await import('../services/RegistryService'));
+  ({ RegistryService, normalizeRegistryUrl, dockerConfigKeyForHost } = await import('../services/RegistryService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
 });
 
@@ -132,6 +133,24 @@ describe('normalizeRegistryUrl', () => {
   });
 });
 
+// ── dockerConfigKeyForHost ─────────────────────────────────────────────
+
+describe('dockerConfigKeyForHost', () => {
+  it('maps Docker Hub aliases to the legacy v1 auths key', () => {
+    expect(dockerConfigKeyForHost('index.docker.io')).toBe('https://index.docker.io/v1/');
+    expect(dockerConfigKeyForHost('docker.io')).toBe('https://index.docker.io/v1/');
+    expect(dockerConfigKeyForHost('registry-1.docker.io')).toBe('https://index.docker.io/v1/');
+    expect(dockerConfigKeyForHost('DOCKER.IO')).toBe('https://index.docker.io/v1/');
+    expect(dockerConfigKeyForHost('')).toBe('https://index.docker.io/v1/');
+  });
+
+  it('passes non-Hub hosts through in normalized form', () => {
+    expect(dockerConfigKeyForHost('ghcr.io')).toBe('ghcr.io');
+    expect(dockerConfigKeyForHost('GHCR.IO')).toBe('ghcr.io');
+    expect(dockerConfigKeyForHost('registry.local:5000')).toBe('registry.local:5000');
+  });
+});
+
 // ── CRUD + encrypt round-trip ──────────────────────────────────────────
 
 describe('RegistryService - CRUD', () => {
@@ -168,6 +187,23 @@ describe('RegistryService - CRUD', () => {
 
     const { config } = await svc.resolveDockerConfig();
     expect(config.auths['https://index.docker.io/v1/']).toBeDefined();
+  });
+
+  it('keys a single-host Docker Hub resolution under the legacy v1 auths key', async () => {
+    const svc = RegistryService.getInstance();
+    svc.create({
+      name: 'hub-single',
+      url: '',
+      type: 'dockerhub',
+      username: 'carol',
+      secret: 'singlepass',
+    });
+
+    const { config } = await svc.resolveDockerConfigForHost('index.docker.io');
+    expect(config.auths['https://index.docker.io/v1/']).toEqual({
+      auth: Buffer.from('carol:singlepass').toString('base64'),
+    });
+    expect(config.auths['index.docker.io']).toBeUndefined();
   });
 
   it('update with empty secret preserves the existing secret', async () => {

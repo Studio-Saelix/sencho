@@ -1,0 +1,38 @@
+name: PR Title
+
+# release-please builds the changelog and the version bump by parsing
+# conventional commit subjects off main. Squash-merges take the subject from the
+# PR title, so a title the parser cannot read silently drops the change from the
+# release notes. The local commit-msg hook does not cover this: it runs on the
+# PR branch and never on the squash that actually lands.
+#
+# Re-runs on `edited` so a title fixed after the push goes green without needing
+# a new commit.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    name: PR title is a Conventional Commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The title is passed through the environment, never interpolated into the
+      # shell script: a title is free text, and a value like $(...) spliced into
+      # the run block would execute before the script could reject it.
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-pr-title.mjs

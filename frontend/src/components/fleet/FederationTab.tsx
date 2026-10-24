@@ -156,7 +156,7 @@ export function FederationTab({ canManage, canManageNode }: FederationTabProps) 
                 <div className="p-4">
                     {blueprints.length === 0 ? (
                         <p className="text-sm text-muted-foreground">
-                            No blueprints yet. Create one in the Deployments tab to manage placement here.
+                            No blueprints yet. Create one in the Blueprints tab to manage placement here.
                         </p>
                     ) : (
                         <div className="overflow-x-auto">

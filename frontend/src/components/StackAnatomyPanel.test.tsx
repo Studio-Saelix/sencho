@@ -17,6 +17,7 @@ vi.mock('./stack/StackActivityTimeline', () => ({
 // active node is mutable so the footer-link tests can simulate a remote node.
 const { nodeState } = vi.hoisted(() => ({ nodeState: { activeNode: { id: 1 } as unknown } }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: nodeState.activeNode, hasCapability: () => false }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 import { apiFetch } from '@/lib/api';
 import StackAnatomyPanel from './StackAnatomyPanel';

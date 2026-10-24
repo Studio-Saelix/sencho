@@ -24,11 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN live in the `production` environment,
-    # not repo-wide secrets. Any future workflow that tries to push to Docker Hub
-    # without declaring this environment will fail to resolve the credentials,
-    # which is exactly the blast-radius reduction we want. Adding a required
-    # reviewer to the environment in repo settings also turns every release into
-    # a manual-approval gate without any workflow change.
+    # not repo-wide secrets. The environment allows only `v*` tag deployments, so
+    # no other ref can resolve the credentials. Required reviewers are
+    # intentionally unset: merging the Release PR is the only approval step.
     environment: production
     permissions:
       contents: write
@@ -197,7 +195,7 @@ jobs:
         # Signs every tag produced by metadata-action using the ambient GitHub
         # OIDC token. No private keys, no secrets. Users verify with:
         #   cosign verify saelix/sencho:<tag> \
-        #     --certificate-identity-regexp "https://github.com/studio-saelix/sencho/.*" \
+        #     --certificate-identity-regexp "https://github.com/Studio-Saelix/sencho/.*" \
         #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
         # Each ref is pinned to the immutable digest so signatures are bound to
         # the exact manifest, not the mutable tag pointer.
@@ -224,7 +222,7 @@ jobs:
         # syft scans the published manifest by digest for richer package
         # extraction than the BuildKit-native SBOM. Also installs syft into
         # PATH so the SPDX step below can reuse the OCI layer cache.
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.20.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.20.2
         with:
           image: saelix/sencho@${{ steps.build.outputs.digest }}
           format: cyclonedx-json

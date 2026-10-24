@@ -297,6 +297,29 @@ describe('buildDigestPinsFromArtifactSet', () => {
     expect(buildDigestPinsFromArtifactSet(exact.artifactSetId!, 'linux/s390x')).toBeNull();
   });
 
+  it('pins a stored set that recorded the pre-normalization docker-info spelling', () => {
+    // Rows written before the read translated docker-info spellings stored
+    // linux/x86_64; a host that now reports linux/amd64 must still find its
+    // approved child rather than failing the repair.
+    const { bp, node } = seedBlueprint();
+    const legacy = seedApp(bp, node, {
+      qualification: 'exact',
+      services: [registryService({
+        platform: 'linux/x86_64',
+        platformDigest: DIGEST_A,
+        platformVariants: [{ platform: 'linux/x86_64', digest: DIGEST_A }],
+      })],
+    });
+    expect(buildDigestPinsFromArtifactSet(legacy.artifactSetId!, 'linux/amd64')).toEqual({
+      web: `nginx@${DIGEST_A}`,
+    });
+    // A remote leaf that has not been upgraded yet still reports the raw
+    // spelling; repair must find the same child for that machine.
+    expect(buildDigestPinsFromArtifactSet(legacy.artifactSetId!, 'linux/x86_64')).toEqual({
+      web: `nginx@${DIGEST_A}`,
+    });
+  });
+
   it('returns null when the set is missing', () => {
     expect(buildDigestPinsFromArtifactSet('missing-set', 'linux/amd64')).toBeNull();
   });
@@ -429,7 +452,11 @@ describe('enforceDigestRepair', () => {
     }, 'deployAuthorizedMaterialization');
 
     const missing = await BlueprintService.getInstance().enforceDigestRepair(bp, node);
-    expect(missing).toEqual({ status: 'failed', error: 'no expected artifact set for digest repair' });
+    // A target with no acknowledged artifact set is a hold, not an attempt that
+    // failed: there is no identity to restore, so nothing was tried and nothing
+    // was touched.
+    expect(missing.status).toBe('repair_held');
+    expect(missing.holdReason).toBe('evidence_incomplete');
 
     const { bp: bp2, node: node2 } = seedBlueprint();
     const nonComparable = seedApp(bp2, node2, { qualification: 'unresolved' });

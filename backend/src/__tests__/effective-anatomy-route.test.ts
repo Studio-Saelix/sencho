@@ -10,6 +10,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { ComposeService } from '../services/ComposeService';
+import { DatabaseService, type StackGitSource } from '../services/DatabaseService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -68,6 +69,9 @@ describe('effective-anatomy route', () => {
     expect(res.body.volumes.web).toEqual([{ host: 'data', container: '/data' }]);
     expect(res.body.restart).toBe('always');
     expect(res.body.networks).toEqual(['backend', 'default']);
+    // A single-file stack has no other file that could shadow the label.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
   });
 
   it('surfaces a structural error and never raw stderr on render failure', async () => {
@@ -100,9 +104,239 @@ describe('effective-anatomy route', () => {
     expect(body).not.toContain(LABEL_SECRET);
   });
 
+  it('returns a validated service URL and still omits every other label value', async () => {
+    stubRender(JSON.stringify({
+      name: STACK,
+      services: {
+        web: {
+          labels: {
+            'sencho.service.url': 'https://app.example.com',
+            'x.secret': LABEL_SECRET,
+          },
+        },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrls).toEqual({ web: 'https://app.example.com' });
+    expect(JSON.stringify(res.body)).not.toContain(LABEL_SECRET);
+  });
+
+  it('marks a URL label set by another compose file as not editable here', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n');
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': 'not-a-url' } }, api: { labels: { 'sencho.service.url': 'https://api.example.com' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    // An invalid later label still shadows the main file; a service the override
+    // leaves alone stays editable. Either way the clear is refused: the override
+    // still supplies (web) or could supply (api is not in it) the label.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'other', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other', api: 'root' });
+  });
+
+  it('keeps services editable when the override leaves the label alone', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    restart: always\n');
+    stubRender(JSON.stringify({
+      services: { web: { restart: 'always' } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
+  });
+
+  it('audit F1: a later bare list label blocks the edit', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      - sencho.service.url\n');
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': '' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'other' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other' });
+  });
+
+  it('audit F01: an interpolated list-label key in the override refuses the edit and the clear', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n');
+    stubRender(JSON.stringify({
+      services: {
+        web: { labels: { 'sencho.service.url': 'https://later.example.com' } },
+        api: { image: 'nginx:latest' },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    // The service whose key the override could hide is refused; its sibling stays editable.
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown', api: 'root' });
+  });
+
+  it('audit F01: an interpolated list-label key in the open file refuses the set and the clear', async () => {
+    // The audit reproduction: the literal direct label is replaced in place by a
+    // set, the interpolated item survives after it, and Compose lets the later
+    // item win. Neither operation can be written from this file.
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'services:',
+      '  web:',
+      '    labels:',
+      '      - sencho.service.url=https://old.example.com',
+      '      - "${URL_LABEL}=https://winning.example.com"',
+      '  api:',
+      '    image: nginx:latest',
+      '',
+    ].join('\n'));
+    stubRender(JSON.stringify({
+      services: {
+        web: { labels: { 'sencho.service.url': 'https://winning.example.com' } },
+        api: { image: 'nginx:latest' },
+      },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown', api: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown', api: 'root' });
+  });
+
+  it('refuses editability when the override uses constructs whose labels cannot be traced', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'include:\n  - common.yaml\nservices:\n  web:\n    image: nginx\n');
+    stubRender(JSON.stringify({ services: { web: { image: 'nginx' } }, networks: {}, volumes: {} }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown' });
+  });
+
+  it('audit F2: an earlier Git chain file blocks the clear but not the set', async () => {
+    fs.writeFileSync(path.join(stackDir, 'base.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: https://base.example.com\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    labels:\n      sencho.service.url: https://root.example.com\n');
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['base.yaml', 'compose.yaml'], contextDir: null },
+    } as StackGitSource);
+    stubRender(JSON.stringify({
+      services: { web: { labels: { 'sencho.service.url': 'https://root.example.com' } } },
+      networks: {},
+      volumes: {},
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'other' });
+  });
+
+  it('refuses editability when COMPOSE_FILE changes the file discovery', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=compose.yaml:extra.yaml\n');
+    stubRender(JSON.stringify({ services: { web: { image: 'nginx' } }, networks: {}, volumes: {} }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrlEdit).toEqual({ web: 'unknown' });
+    expect(res.body.serviceUrlClear).toEqual({ web: 'unknown' });
+    fs.rmSync(path.join(stackDir, '.env'));
+  });
+
   it('rejects an unauthenticated request', async () => {
     const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`);
     expect(res.status).toBe(401);
+  });
+
+  it.skipIf(process.platform === 'win32')('renders the project a compose-root-contained sibling link selects', async () => {
+    const siblingName = 'effanat-sibling';
+    const sibling = path.join(path.dirname(stackDir), siblingName);
+    fs.rmSync(sibling, { recursive: true, force: true });
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(
+      path.join(sibling, 'compose.yaml'),
+      'services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      sencho.service.url: https://sibling.example/private\n',
+    );
+    fs.rmSync(path.join(stackDir, 'compose.yaml'));
+    fs.symlinkSync(`../${siblingName}/compose.yaml`, path.join(stackDir, 'compose.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: JSON.stringify({
+        services: {
+          other: {
+            labels: { 'sencho.service.url': 'https://sibling.example/private' },
+            ports: [{ target: 90, published: '9090', protocol: 'tcp' }],
+          },
+        },
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    try {
+      // The link stays inside the compose root, so this stack deploys the shared
+      // file and the dossier describes the same project. A link out of the
+      // compose directory is refused (see the sibling-override case below).
+      const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(render).toHaveBeenCalled();
+      expect(res.body.services).toEqual(['other']);
+    } finally {
+      fs.rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('renders the project a compose-root-contained sibling override selects', async () => {
+    const siblingName = 'effanat-override-sibling';
+    const sibling = path.join(path.dirname(stackDir), siblingName);
+    fs.rmSync(sibling, { recursive: true, force: true });
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(
+      path.join(sibling, 'compose.override.yaml'),
+      'services:\n  other:\n    ports:\n      - "9091:91"\n',
+    );
+    fs.symlinkSync(`../${siblingName}/compose.override.yaml`, path.join(stackDir, 'compose.override.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: JSON.stringify({
+        services: {
+          web: { image: 'nginx:latest' },
+          other: { ports: [{ target: 91, published: '9091', protocol: 'tcp' }] },
+        },
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    try {
+      const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(render).toHaveBeenCalled();
+      expect(res.body.services).toEqual(['web', 'other']);
+    } finally {
+      fs.rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a compose file that links out of the compose directory', async () => {
+    const outside = path.join(tmpDir, 'outside-compose.yaml');
+    fs.writeFileSync(outside, 'services:\n  outside:\n    ports:\n      - "9092:92"\n');
+    fs.rmSync(path.join(stackDir, 'compose.yaml'));
+    fs.symlinkSync(outside, path.join(stackDir, 'compose.yaml'));
+    const render = vi.spyOn(ComposeService.prototype, 'renderConfig');
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'The compose file links outside the stack directory. Use include: to share a file between stacks.' });
+    expect(render).not.toHaveBeenCalled();
   });
 
   it('returns 404 for a stack that does not exist', async () => {

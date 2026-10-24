@@ -519,17 +519,34 @@ export class SchedulerService {
         }
 
         let filtered = containers;
-        if (task.target_services) {
-            const serviceNames: string[] = JSON.parse(task.target_services);
-            filtered = serviceNames.flatMap(svc => filterContainersByComposeService(containers, svc));
+        const targetServices: string[] | null = task.target_services
+            ? JSON.parse(task.target_services)
+            : null;
+        if (targetServices) {
+            filtered = targetServices.flatMap(svc => filterContainersByComposeService(containers, svc));
             if (filtered.length === 0) {
-                throw new Error(`No containers found matching services [${serviceNames.join(', ')}] in stack "${task.target_id}"`);
+                throw new Error(`No containers found matching services [${targetServices.join(', ')}] in stack "${task.target_id}"`);
             }
         }
 
+        // This path drives the Engine API itself, so it ends the gates itself. A
+        // restart runs containers one at a time against a 10s Docker timeout, and
+        // a gate poll landing in that window would record the deliberate restart
+        // as a failed update. The remote branch goes through the stack restart
+        // route, which does the same. Scoped to every named service, not just the
+        // first: each one of them has its containers restarted below, so each
+        // one's own gate ends, and each is detached from a sibling's gate rather
+        // than left to fail on the restart the operator scheduled.
+        HealthGateService.getInstance().supersedeForContainerOp(
+            task.node_id,
+            task.target_id,
+            'the stack was restarted during the observation',
+            targetServices ?? undefined,
+        );
+
         await Promise.all(filtered.map(c => docker.restartContainer(c.Id)));
-        const servicesSuffix = task.target_services
-            ? ` (services: ${(JSON.parse(task.target_services) as string[]).join(', ')})`
+        const servicesSuffix = targetServices
+            ? ` (services: ${targetServices.join(', ')})`
             : '';
         return `Restarted ${filtered.length} container(s) in stack "${task.target_id}"${servicesSuffix}`;
     }

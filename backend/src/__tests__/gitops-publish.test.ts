@@ -24,19 +24,26 @@ import {
   drainGitOpsOutboxRow,
   gitOpsEventNotificationDedupeKey,
   repairGitOpsOutbox,
-  settledNotificationDedupeKey,
 } from '../services/gitops/outbox';
 import {
   GITOPS_EVENT_PAYLOAD_VERSION,
   decodeGitOpsEventPayload,
   decodeSettledAttemptPayload,
   encodeSettledAttemptPayload,
+  SETTLED_ATTEMPT_PAYLOAD_VERSION,
 } from '../services/gitops/attemptPayload';
 import {
   GITOPS_NOTIFICATION_META,
+  gitOpsAttemptNotificationKey,
   gitOpsPauseReason,
 } from '../services/gitops/notifications';
-import type { GitOpsApplicationRow } from '../services/gitops/types';
+import { isReconcileOutcome } from '../services/gitops/outcomes';
+import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
+import { projectApplication } from '../services/gitops/derive';
+import { postureOf } from '../services/gitops/portfolioAggregator';
+import { attentionReasons } from '../services/gitops/attention';
+import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import type { HistoryOutcome } from '../services/gitops/history';
 
 /**
  * The real module, with the enqueue entry point wrapped in a spy.
@@ -55,17 +62,89 @@ vi.mock('../services/gitops/publish', async (importOriginal) => {
 /** Let the publisher's own scheduling run. */
 const settle = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
 
+const testDb = () => DatabaseService.getInstance().getDb();
+
+/**
+ * One history row through the real insert path, which is where the outbox
+ * decision is made. Module scope rather than per-describe because the
+ * notification suites below need it too, and a second copy of the insert
+ * helper would be a second thing that can drift from the real shape.
+ */
+const writeHistory = (
+  operationId: string,
+  stage: Parameters<typeof insertHistory>[1]['stage'],
+  outcome: Parameters<typeof insertHistory>[1]['outcome'] = 'committed',
+  overrides: Partial<Parameters<typeof insertHistory>[1]> = {},
+): string | null => insertHistory(testDb(), {
+  application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
+  nodeId: 3,
+  dedupeTarget: 'app',
+  operationId,
+  stage,
+  outcome,
+  trigger: 'manual',
+  actor: 'operator-1',
+  before: {},
+  after: {},
+  at: 4242,
+  ...overrides,
+});
+
+/**
+ * A settled attempt for an explicit application, so two polls can share one.
+ */
+const writeSettledFor = (
+  applicationId: string,
+  operationId: string,
+  outcome: string,
+  candidateGenerationId: string | null,
+  candidate: Partial<Pick<GitOpsApplicationRow, 'candidate_plan_blocked' | 'review_block_reason'>> = {},
+): string => {
+  const id = insertHistory(testDb(), {
+    application: {
+      ...directApplicationFixture(applicationId, `stack-${applicationId}`),
+      candidate_generation_id: candidateGenerationId,
+      ...candidate,
+    },
+    nodeId: 3,
+    dedupeTarget: 'app',
+    operationId,
+    stage: 'source_reconcile_settled',
+    outcome: 'committed',
+    trigger: 'poll',
+    actor: 'system:source-controller',
+    before: {},
+    after: { outcome, reason: 'ok', nextAction: 'none' },
+    generationId: candidateGenerationId,
+    at: 4242,
+  });
+  if (!id) throw new Error('expected settled history insert');
+  return id;
+};
+
+/**
+ * One database for the whole file.
+ *
+ * `setupTestDb` re-points `process.env.DATA_DIR` at a fresh temp dir and then
+ * writes through the already-constructed `DatabaseService` singleton, so
+ * calling it a second time aims at a directory the singleton is not holding.
+ * Hoisted here so the notification suites below share the same store the
+ * transition announcements already wrote to.
+ */
+let fileTmpDir: string;
+
+beforeAll(async () => {
+  fileTmpDir = await setupTestDb();
+  GitOpsStore.resetForTests();
+  GitOpsTransitions.resetForTests();
+});
+
+afterAll(() => {
+  cleanupTestDb(fileTmpDir);
+});
+
 describe('gitops transition announcements', () => {
-  let tmpDir: string;
   let events: GitOpsInvalidateEvent[];
-
-  beforeAll(async () => {
-    tmpDir = await setupTestDb();
-  });
-
-  afterAll(() => {
-    cleanupTestDb(tmpDir);
-  });
 
   afterEach(() => {
     resetGitOpsPublicationsForTests();
@@ -80,25 +159,7 @@ describe('gitops transition announcements', () => {
 
   const db = () => DatabaseService.getInstance().getDb();
 
-  const write = (
-    operationId: string,
-    stage: Parameters<typeof insertHistory>[1]['stage'],
-    outcome: Parameters<typeof insertHistory>[1]['outcome'] = 'committed',
-    overrides: Partial<Parameters<typeof insertHistory>[1]> = {},
-  ): string | null => insertHistory(db(), {
-    application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
-    nodeId: 3,
-    dedupeTarget: 'app',
-    operationId,
-    stage,
-    outcome,
-    trigger: 'manual',
-    actor: 'operator-1',
-    before: {},
-    after: {},
-    at: 4242,
-    ...overrides,
-  });
+  const write = writeHistory;
 
   it('announces one event and one count per inserted row', async () => {
     listen();
@@ -206,7 +267,7 @@ describe('gitops transition announcements', () => {
       .toEqual(['applied', 'fetch_started', 'fetched']);
   });
 
-  const writeSettled = (operationId: string): string => {
+  const writeSettled = (operationId: string, outcome = 'pending_review'): string => {
     const id = insertHistory(db(), {
       application: directApplicationFixture(`app-${operationId}`, `stack-${operationId}`),
       nodeId: 3,
@@ -217,7 +278,7 @@ describe('gitops transition announcements', () => {
       trigger: 'poll',
       actor: 'system:source-controller',
       before: {},
-      after: { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' },
+      after: { outcome, reason: 'ok', nextAction: 'none' },
       at: 4242,
     });
     if (!id) throw new Error('expected settled history insert');
@@ -248,11 +309,12 @@ describe('gitops transition announcements', () => {
 
   it('drains a settled row once and a second repair is a no-op', async () => {
     const historyId = writeSettled('op-outbox-repair');
+    const key = gitOpsAttemptNotificationKey('op-outbox-repair');
     resetGitOpsPublicationsForTests();
     repairGitOpsOutbox();
     const first = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
-    ).get(`gitops:settled:${historyId}`) as { n: number };
+    ).get(key) as { n: number };
     expect(first.n).toBe(1);
     const drained = db().prepare(
       'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
@@ -261,12 +323,13 @@ describe('gitops transition announcements', () => {
     repairGitOpsOutbox();
     const second = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
-    ).get(`gitops:settled:${historyId}`) as { n: number };
+    ).get(key) as { n: number };
     expect(second.n).toBe(1);
   });
 
   it('does not insert a second notification when the unique key collides', () => {
     const historyId = writeSettled('op-outbox-dedupe');
+    const key = gitOpsAttemptNotificationKey('op-outbox-dedupe');
     resetGitOpsPublicationsForTests();
     DatabaseService.getInstance().addNotificationHistory(3, {
       level: 'info',
@@ -274,16 +337,16 @@ describe('gitops transition announcements', () => {
       message: 'pre-existing',
       timestamp: 1,
       gitops_operation_id: 'op-outbox-dedupe',
-      dedupe_key: settledNotificationDedupeKey(historyId),
+      dedupe_key: key,
     });
     drainGitOpsOutboxRow(db(), historyId);
     const count = db().prepare(
       'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
-    ).get(settledNotificationDedupeKey(historyId)) as { n: number };
+    ).get(key) as { n: number };
     expect(count.n).toBe(1);
     const note = db().prepare(
       'SELECT message FROM notification_history WHERE dedupe_key = ?',
-    ).get(settledNotificationDedupeKey(historyId)) as { message: string };
+    ).get(key) as { message: string };
     expect(note.message).toBe('pre-existing');
     const drained = db().prepare(
       'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
@@ -309,11 +372,13 @@ describe('gitops transition announcements', () => {
       trigger: 'poll',
       actor: 'system:source-controller',
       at: 4242,
+      candidateGenerationId: null,
+      candidateState: null,
     }), historyId);
     drainGitOpsOutboxRow(db(), historyId);
     const note = db().prepare(
       'SELECT message, category FROM notification_history WHERE dedupe_key = ?',
-    ).get(settledNotificationDedupeKey(historyId)) as { message: string; category: string };
+    ).get(gitOpsAttemptNotificationKey('op-outbox-payload')) as { message: string; category: string };
     expect(note.category).toBe('git_plan_blocked');
     expect(note.message).toContain('decoded-reason');
   });
@@ -568,6 +633,580 @@ describe('gitops transition announcements', () => {
   });
 });
 
+/**
+ * A notification must not contradict the posture the portfolio reports for the
+ * same application.
+ *
+ * These drive the real transition chain, because the contradiction the posture
+ * slice exists to prevent is only reachable through a transition that genuinely
+ * commits. Asserting the mapping in isolation would pass with the transition
+ * writing a different `after` record, which is the wiring that had never
+ * existed.
+ */
+describe('GitOps notifications agree with the canonical posture', () => {
+  afterEach(() => {
+    resetGitOpsPublicationsForTests();
+    GitOpsMetricsService.resetForTests();
+  });
+
+  const db = () => DatabaseService.getInstance().getDb();
+
+  const healthEnvelope = (operationId: string): EventEnvelope => ({
+    operationId, actor: 'tester', trigger: 'manual', at: 4242,
+  });
+
+  /**
+   * A deployed, accepted application whose health gate can therefore be given a
+   * verdict, which is the precondition for a recorded verdict at all.
+   */
+  const seedDeployed = (applicationId: string, stackName: string, generationId: string): void => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    tx.activateDirect({ application: directApplicationFixture(applicationId, stackName), nodeId: 1, envelope: healthEnvelope(`op-act-${applicationId}`) });
+    store.insertGeneration(healthGen(generationId, applicationId));
+    tx.fetchStarted(applicationId, healthEnvelope(`op-f-${applicationId}`));
+    tx.fetched(applicationId, 'abc123', healthEnvelope(`op-f-${applicationId}`));
+    tx.candidateReady(applicationId, generationId, false, healthEnvelope(`op-c-${applicationId}`));
+    tx.applied({
+      applicationId,
+      generationId,
+      artifactSetId: `art-${applicationId}`,
+      sourceAcceptanceId: `acc-${applicationId}`,
+      authority: 'operator',
+      envelope: healthEnvelope(`op-a-${applicationId}`),
+    });
+    tx.deployStarted(applicationId, 1, generationId, healthEnvelope(`op-d-${applicationId}`));
+    tx.deployBound(applicationId, 1, generationId, healthEnvelope(`op-d-${applicationId}`));
+  };
+
+  const notesFor = (operationId: string): Array<{ category: string; level: string; message: string }> =>
+    db().prepare(
+      'SELECT category, level, message FROM notification_history WHERE gitops_operation_id = ? ORDER BY timestamp ASC, id ASC',
+    ).all(operationId) as Array<{ category: string; level: string; message: string }>;
+
+  it('leaves a recorded health failure to the gate that already announced it', async () => {
+    // The only producer of a recorded GitOps health verdict is the health gate,
+    // and it writes `health_gate_failed` for the same event. A second entry here
+    // would tell an operator the same thing twice, so the GitOps outbox stays out
+    // of it. This pins that the posture's failure reason is covered by exactly one
+    // notification, and names where that notification comes from.
+    seedDeployed('app-health-single', 'health-single-web', 'gen-health-single');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-single',
+      nodeId: 1,
+      healthRunId: 'run-single',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-health-single',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-single'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    // The GitOps outbox wrote nothing for this transition.
+    const outboxRows = db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id IN (SELECT id FROM gitops_history WHERE operation_id = ?)',
+    ).get('op-health-single') as { n: number };
+    expect(outboxRows.n).toBe(0);
+    expect(notesFor('op-health-single')).toEqual([]);
+
+    // The projection still reports the failure, which is the fact the gate's own
+    // notification is about. A posture with no notification behind it is the gap
+    // this assertion guards: the gate covers it, and nothing else needs to.
+    const projection = projectApplication('app-health-single', false);
+    expect(attentionReasons(projection)).toContain('health_failed');
+    expect(postureOf(projection)).toBe('failed');
+  });
+
+  it('keeps the gate as the single notification for a failed health run', async () => {
+    // Counts entries rather than asserting one of them, so the assertion is
+    // about "exactly once" and not about which layer produced it.
+    seedDeployed('app-health-count', 'health-count-web', 'gen-health-count');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-count',
+      nodeId: 1,
+      healthRunId: 'run-count',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-health-count',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-count'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const fromGitOps = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+    ).get('op-health-count') as { n: number };
+    expect(fromGitOps.n).toBe(0);
+  });
+
+  it('does not report a passed verdict at all', async () => {
+    // A health check runs on every update, so a passing verdict must be silent.
+    seedDeployed('app-health-pass', 'health-pass-web', 'gen-health-pass');
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-pass',
+      nodeId: 1,
+      healthRunId: 'run-pass',
+      healthStatus: 'passed',
+      deployedGenerationId: 'gen-health-pass',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-pass'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    expect(notesFor('op-health-pass')).toEqual([]);
+  });
+
+  it('does not report a verdict that cannot be tied to the running stack', async () => {
+    seedDeployed('app-health-stale', 'health-stale-web', 'gen-health-stale');
+    // A verdict about a generation the target is not running proves nothing, so
+    // the transition records nothing the posture can report.
+    GitOpsTransitions.getInstance().healthFinalized({
+      applicationId: 'app-health-stale',
+      nodeId: 1,
+      healthRunId: 'run-stale',
+      healthStatus: 'failed',
+      deployedGenerationId: 'gen-not-deployed',
+      targetScope: 'stack',
+      envelope: healthEnvelope('op-health-stale'),
+    });
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    expect(notesFor('op-health-stale')).toEqual([]);
+    const projection = projectApplication('app-health-stale', false);
+    expect(attentionReasons(projection)).not.toContain('health_failed');
+  });
+
+  it('does not notify for an attempt that settled without proving anything', () => {
+    // `unknown` is what the reconcile vocabulary returns for a run still in
+    // flight, a source never reconciled, and an application no longer live. The
+    // portfolio reports each of those as in-progress or unknown, so a bell entry
+    // would be a surface reporting on evidence it does not have. The portfolio is
+    // where an unproven application is shown; the bell is not.
+    const historyId = writeHistory('op-unproven', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'unknown',
+        nextAction: 'none',
+        reason: 'A reconcile operation is currently in flight; no settled result yet.',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    // No outbox row was written, so there is nothing to drain into a bell entry.
+    const outbox = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null } | undefined;
+    expect(outbox).toBeUndefined();
+
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-unproven')) as { n: number };
+    expect(any.n).toBe(0);
+  });
+
+  it.each(['no_source_change', 'candidate_already_fetched', 'suspended', 'superseded', 'retry_scheduled'])(
+    'writes no bell entry for the steady outcome %s',
+    async (outcome) => {
+      // These are where a poll lands when nothing changed: still idle, still
+      // staged, still suspended, or superseded before acceptance. Notifying per
+      // settle repeated the same sentence every interval.
+      const historyId = writeHistory(`op-steady-${outcome}`, 'source_reconcile_settled', 'committed', {
+        after: { outcome, nextAction: 'none', reason: 'steady state' },
+      });
+      if (!historyId) throw new Error('expected settled history insert');
+      await settle();
+
+      const outbox = db().prepare(
+        'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id = ?',
+      ).get(historyId) as { n: number };
+      expect(outbox.n).toBe(0);
+      const any = db().prepare(
+        'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+      ).get(`op-steady-${outcome}`) as { n: number };
+      expect(any.n).toBe(0);
+    },
+  );
+
+  it('notifies a staged candidate once, and again when it is staged afresh', async () => {
+    // The per-poll case the steady-state rule cannot cover: a candidate under
+    // review settles `pending_review` on every interval, which is news about a
+    // state that has not changed. Keyed to the candidate, the poll that staged
+    // it is the one that announces it.
+    const applicationId = 'app-poll-candidate';
+    const generationA = 'gen-candidate-a';
+    writeSettledFor(applicationId, 'op-poll-1', 'pending_review', generationA);
+    await settle();
+    writeSettledFor(applicationId, 'op-poll-2', 'pending_review', generationA);
+    await settle();
+    let notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?)',
+    ).get('op-poll-1', 'op-poll-2') as { n: number };
+    expect(notes.n).toBe(1);
+
+    // The same commit staged again is a new candidate needing review, so it
+    // announces again. Keying on the commit instead of the candidate would
+    // keep this silent until the notification retention window pruned the old
+    // row, which is the trade this avoids.
+    writeSettledFor(applicationId, 'op-poll-3', 'pending_review', 'gen-candidate-b');
+    await settle();
+    notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?, ?)',
+    ).get('op-poll-1', 'op-poll-2', 'op-poll-3') as { n: number };
+    expect(notes.n).toBe(2);
+  });
+
+  it('notifies a plan-blocked candidate once, and again when it is staged afresh', async () => {
+    // The same per-poll case for a candidate a local conflict blocks: it
+    // settles `blocked` on every interval, so on the attempt key it announced
+    // once per poll for as long as the conflict stood.
+    const applicationId = 'app-poll-blocked';
+    const generationA = 'gen-blocked-a';
+    const blocked = { candidate_plan_blocked: 1 } as const;
+    writeSettledFor(applicationId, 'op-block-1', 'blocked', generationA, blocked);
+    await settle();
+    writeSettledFor(applicationId, 'op-block-2', 'blocked', generationA, blocked);
+    await settle();
+    let notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?)',
+    ).get('op-block-1', 'op-block-2') as { n: number };
+    expect(notes.n).toBe(1);
+
+    writeSettledFor(applicationId, 'op-block-3', 'blocked', 'gen-blocked-b', blocked);
+    await settle();
+    notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?, ?)',
+    ).get('op-block-1', 'op-block-2', 'op-block-3') as { n: number };
+    expect(notes.n).toBe(2);
+  });
+
+  it('announces a stateful hold on a candidate that already announced ready', async () => {
+    // An automatic source stages a candidate and announces it, then a safety
+    // hold turns that same candidate into one needing review. The settle for the
+    // hold is `pending_review` like the one before it, so without the hold as
+    // part of the candidate's identity it would collide with the ready entry and
+    // the operator would never learn the candidate stopped being automatic.
+    const applicationId = 'app-hold-candidate';
+    const generation = 'gen-held';
+    writeSettledFor(applicationId, 'op-hold-1', 'pending_review', generation);
+    await settle();
+    writeSettledFor(applicationId, 'op-hold-2', 'pending_review', generation, {
+      review_block_reason: 'stateful_withdrawal',
+    });
+    await settle();
+    const notes = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?)',
+    ).get('op-hold-1', 'op-hold-2') as { n: number };
+    expect(notes.n).toBe(2);
+
+    // And it announces once, not on every later poll of the held candidate.
+    writeSettledFor(applicationId, 'op-hold-3', 'pending_review', generation, {
+      review_block_reason: 'stateful_withdrawal',
+    });
+    await settle();
+    const afterRepeat = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id IN (?, ?, ?)',
+    ).get('op-hold-1', 'op-hold-2', 'op-hold-3') as { n: number };
+    expect(afterRepeat.n).toBe(2);
+  });
+
+  it('keeps a blocked attempt on its own key when a reviewable candidate is live', async () => {
+    // A dispatch refused while a candidate is waiting on review settles
+    // `blocked` too, but it is a refusal about that run, not a statement about
+    // the candidate. Keyed to the candidate it would be swallowed by the
+    // candidate's own first entry.
+    const applicationId = 'app-refusal-with-candidate';
+    writeSettledFor(applicationId, 'op-refusal-1', 'blocked', 'gen-reviewable');
+    await settle();
+    const onAttemptKey = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-refusal-1')) as { n: number };
+    expect(onAttemptKey.n).toBe(1);
+  });
+
+  it('writes one bell entry per attempt when a live write and its settle both announce', async () => {
+    // The live apply-failure write and the settle that confirms it classify the
+    // same failure differently by construction (a rolled-back apply writes
+    // `blocked` while its `applyFailed` settle carries `failed_previous_intact`).
+    // Keying per outcome family would let both through; keying per attempt does
+    // not, so one attempt reads as one entry whichever writer arrives first.
+    const operationId = 'op-one-entry';
+    const candidateGenerationId = 'gen-one-entry';
+    // The live write lands first, as it does on a real apply failure; the
+    // settle's drain then finds the key taken.
+    DatabaseService.getInstance().addNotificationHistory(3, {
+      level: 'warning',
+      category: 'git_apply_rolled_back',
+      message: 'Git apply rolled back',
+      timestamp: 1,
+      gitops_operation_id: operationId,
+      dedupe_key: gitOpsAttemptNotificationKey(operationId),
+    });
+    writeSettledFor('app-one-entry', operationId, 'failed_previous_intact', candidateGenerationId);
+    await settle();
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const rows = db().prepare(
+      'SELECT category FROM notification_history WHERE gitops_operation_id = ?',
+    ).all(operationId) as { category: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.category).toBe('git_apply_rolled_back');
+  });
+
+  it.each(['no_source_change', 'candidate_already_fetched', 'suspended', 'superseded', 'retry_scheduled'])(
+    'drains a pre-upgrade steady row for %s without notifying it',
+    (outcome) => {
+      // The repair arm reaches the same conclusion the current insert does for
+      // a row a build that predates the rule left behind.
+      const operationId = `op-stale-steady-${outcome}`;
+      const historyId = writeHistory(operationId, 'source_reconcile_settled', 'committed', {
+        after: { outcome, nextAction: 'none', reason: 'steady state' },
+      });
+      if (!historyId) throw new Error('expected settled history insert');
+      db().prepare(
+        `INSERT INTO gitops_settled_outbox (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+         VALUES (?, ?, ?, 4242, 4242, NULL)`,
+      ).run(historyId, encodeSettledAttemptPayload({
+        version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
+        settledHistoryId: historyId,
+        applicationId: `app-${operationId}`,
+        operationId,
+        stackName: `stack-${operationId}`,
+        nodeId: 3,
+        outcome,
+        nextAction: 'none',
+        reason: 'steady state',
+        trigger: 'poll',
+        actor: 'system:source-controller',
+        at: 4242,
+        candidateGenerationId: null,
+        candidateState: null,
+      }), SETTLED_ATTEMPT_PAYLOAD_VERSION);
+
+      resetGitOpsPublicationsForTests();
+      repairGitOpsOutbox();
+
+      const any = db().prepare(
+        'SELECT COUNT(*) AS n FROM notification_history WHERE gitops_operation_id = ?',
+      ).get(operationId) as { n: number };
+      expect(any.n).toBe(0);
+      const drained = db().prepare(
+        'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+      ).get(historyId) as { drained_at: number | null };
+      expect(drained.drained_at).not.toBeNull();
+    },
+  );
+
+  it('delivers a settled notification on the live drain, not only on boot repair', async () => {
+    // Everything else in this suite reaches the bell through
+    // `repairGitOpsOutbox`, which is the crash-repair path. This one asserts the
+    // ordinary path: the publisher's own `setImmediate` drain, with no repair
+    // call afterwards. A change that broke the live drain while leaving the
+    // repair path working would pass every other test here.
+    const historyId = writeHistory('op-live-drain', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'failed_previous_intact',
+        nextAction: 'retry',
+        reason: 'The fetch stage failed (transient).',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    await settle();
+
+    const note = db().prepare(
+      'SELECT category, level, message FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-live-drain')) as { category: string; level: string; message: string };
+    expect(note.category).toBe('git_pull_failed');
+    expect(note.level).toBe('error');
+    expect(note.message).toContain('The fetch stage failed');
+
+    // Drained on the live path too, so boot repair has nothing left to redo.
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+  });
+
+  it('writes no outbox row on the live path for an unproven attempt', async () => {
+    // The same path, the other arm: the decision is made by the live drain too,
+    // and a row that is inserted but never drained would be a silent leak rather
+    // than a missing notification.
+    const historyId = writeHistory('op-live-unproven', 'source_reconcile_settled', 'committed', {
+      after: { outcome: 'unknown', nextAction: 'none', reason: 'Reconcile in flight.' },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    await settle();
+
+    const outbox = db().prepare(
+      'SELECT COUNT(*) AS n FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { n: number };
+    expect(outbox.n).toBe(0);
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-live-unproven')) as { n: number };
+    expect(any.n).toBe(0);
+  });
+
+  it('drains a row that predates the candidate field without leaving it undrained', () => {
+    // A row written before the payload carried a candidate generation decodes
+    // to no candidate, so it drains under the attempt key. It still notifies
+    // (the outcome carries news), which is the one repeat entry an upgrade can
+    // produce for a candidate that was announced under the older commit-shaped
+    // key. Bounded to candidates under review at upgrade time and it heals on
+    // the next poll, so it is pinned here rather than engineered around.
+    const operationId = 'op-stale-no-candidate-field';
+    const historyId = writeHistory(operationId, 'source_reconcile_settled', 'committed', {
+      after: { outcome: 'pending_review', nextAction: 'review', reason: 'Awaiting review.' },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    // The current insert already wrote a row for this settled history; replace
+    // it with the shape an older build would have left behind.
+    db().prepare('DELETE FROM gitops_settled_outbox WHERE settled_history_id = ?').run(historyId);
+    const stalePayload = JSON.stringify({
+      version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
+      settledHistoryId: historyId,
+      applicationId: `app-${operationId}`,
+      operationId,
+      stackName: `stack-${operationId}`,
+      nodeId: 3,
+      outcome: 'pending_review',
+      nextAction: 'review',
+      reason: 'Awaiting review.',
+      trigger: 'poll',
+      actor: 'system:source-controller',
+      at: 4242,
+      commitSha: 'a'.repeat(40),
+    });
+    db().prepare(
+      `INSERT INTO gitops_settled_outbox (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+       VALUES (?, ?, ?, 4242, 4242, NULL)`,
+    ).run(historyId, stalePayload, SETTLED_ATTEMPT_PAYLOAD_VERSION);
+
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+    const note = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey(operationId)) as { n: number };
+    expect(note.n).toBe(1);
+  });
+
+  it('drains a pre-upgrade unproven row without notifying it', () => {
+    // Boot repair drains rows an earlier process inserted. A build that predates
+    // the suppression can leave an unproven row behind, and the repair must reach
+    // the same conclusion the current insert would, rather than announcing a
+    // failed pull the insert would refuse to write.
+    const historyId = writeHistory('op-stale-unproven', 'source_reconcile_settled', 'committed', {
+      after: { outcome: 'unknown', nextAction: 'none', reason: 'Reconcile in flight.' },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    const outbox = db().prepare(
+      'SELECT settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null } | undefined;
+    // Simulate the row an older build would have written, which the current
+    // insert no longer writes.
+    if (outbox === undefined) {
+      db().prepare(
+        `INSERT INTO gitops_settled_outbox (settled_history_id, payload_json, payload_version, created_at, updated_at, drained_at)
+         VALUES (?, ?, ?, 4242, 4242, NULL)`,
+      ).run(historyId, encodeSettledAttemptPayload({
+        version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
+        settledHistoryId: historyId,
+        applicationId: 'app-op-stale-unproven',
+        operationId: 'op-stale-unproven',
+        stackName: 'stack-op-stale-unproven',
+        nodeId: 3,
+        outcome: 'unknown',
+        nextAction: 'none',
+        reason: 'Reconcile in flight.',
+        trigger: 'manual',
+        actor: 'operator-1',
+        at: 4242,
+        candidateGenerationId: null,
+        candidateState: null,
+      }), SETTLED_ATTEMPT_PAYLOAD_VERSION);
+    }
+
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const any = db().prepare(
+      'SELECT COUNT(*) AS n FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-stale-unproven')) as { n: number };
+    expect(any.n).toBe(0);
+
+    // Drained, not left behind: the row is consumed and the silence is recorded.
+    const drained = db().prepare(
+      'SELECT drained_at FROM gitops_settled_outbox WHERE settled_history_id = ?',
+    ).get(historyId) as { drained_at: number | null };
+    expect(drained.drained_at).not.toBeNull();
+  });
+
+  it('still reports a genuinely failed attempt as a failure', () => {
+    const historyId = writeHistory('op-genuinely-failed', 'source_reconcile_settled', 'committed', {
+      after: {
+        outcome: 'failed_previous_intact',
+        nextAction: 'retry',
+        reason: 'The fetch stage failed (transient).',
+      },
+    });
+    if (!historyId) throw new Error('expected settled history insert');
+    resetGitOpsPublicationsForTests();
+    repairGitOpsOutbox();
+
+    const note = db().prepare(
+      'SELECT category, level FROM notification_history WHERE dedupe_key = ?',
+    ).get(gitOpsAttemptNotificationKey('op-genuinely-failed')) as { category: string; level: string };
+    expect(note.category).toBe('git_pull_failed');
+    expect(note.level).toBe('error');
+  });
+});
+
+function healthGen(id: string, applicationId: string): GitOpsGenerationRow {
+  return {
+    id,
+    application_id: applicationId,
+    commit_sha: 'abc123',
+    repo_url: 'https://github.com/example/repo.git',
+    resolved_ref_kind: 'branch',
+    configured_ref: 'main',
+    repo_identity_json: '{"host":"github.com","pathname":"/example/repo.git"}',
+    manifest_version: 0,
+    candidate_dir: `generations/candidate-${id}`,
+    applied_dir: `generations/applied-${id}-0`,
+    expected_invocation_json: '{"composeFileOrder":[],"projectName":null,"projectDirectory":null,"envFileOrder":[]}',
+    materialization_fingerprint: 'a'.repeat(64),
+    validation_ok: 1,
+    plan_blocked: 0,
+    change_plan_fingerprint: null,
+    operation_id: `op-${id}`,
+    trigger: 'manual',
+    actor: 'tester',
+    previous_generation_id: null,
+    redacted_limitations_json: '[]',
+    portable_manifest_json: null,
+    compose_inputs_json: null,
+    source_policy_evidence_json: null,
+    security_policy_evidence_json: null,
+    support_requirements_json: null,
+    compatibility_requirements_json: null,
+    secret_capability_json: null,
+    created_at: 1,
+  };
+}
+
 describe('GitOps notification mapping', () => {
   it('maps every notifiable stage to its exact category, level, and phrase', () => {
     expect(GITOPS_NOTIFICATION_META).toEqual({
@@ -581,6 +1220,9 @@ describe('GitOps notification mapping', () => {
       rollback_completed: { category: 'gitops_rollback_completed', level: 'info', phrase: 'rollback completed' },
       rollback_partial_failed: { category: 'gitops_rollback_partial_failed', level: 'error', phrase: 'rollback partially failed' },
       blueprint_state_review: { category: 'gitops_stateful_confirmation', level: 'warning', phrase: 'stateful deploy awaiting confirmation' },
+      health_rollout_policy_set: { category: 'gitops_health_rollout_policy_set', level: 'info', phrase: 'health rollout policy changed' },
+      placement_policy_changed: { category: 'gitops_placement_policy_changed', level: 'info', phrase: 'placement policy changed' },
+      rollout_authorization_policy_changed: { category: 'gitops_rollout_authorization_policy_changed', level: 'info', phrase: 'rollout authorization policy changed' },
     });
   });
 
@@ -652,5 +1294,59 @@ describe('GitOpsMetricsService', () => {
 
     const [entry] = metrics.snapshot();
     expect(Object.keys(entry).sort()).toEqual(['count', 'outcome', 'stage']);
+  });
+
+  /**
+   * The metrics surface cannot contradict the portfolio, because it has no
+   * vocabulary for a claim about an application.
+   *
+   * This is the whole reason no count from here can be read as "up to date" and
+   * disagree with a posture the portfolio reports as unsettled. It is a
+   * structural guarantee rather than a behaviour, so it is pinned from both
+   * sides: the outcome union carries no settled member, and two applications'
+   * transitions land in the same bucket because nothing in the key separates
+   * them.
+   */
+  describe('the application-identity-free keyspace', () => {
+    /**
+     * Every member of `HistoryOutcome`, restated here as a compile-time
+     * tripwire. The `Exclude` is the assertion that matters: a seventh value
+     * added to the history CHECK set leaves this list incomplete and fails the
+     * build, which is what a reviewer needs to see before a settled word can
+     * reach a counter. The `satisfies` alone would not, because it only checks
+     * that the listed values are allowed.
+     */
+    const EVERY_HISTORY_OUTCOME = [
+      'committed', 'failed', 'skipped', 'superseded', 'recovered', 'unknown',
+    ] as const satisfies readonly HistoryOutcome[];
+    type OutcomeNotListed = Exclude<HistoryOutcome, (typeof EVERY_HISTORY_OUTCOME)[number]>;
+    const _noUnlistedOutcome: OutcomeNotListed extends never ? true : never = true;
+    void _noUnlistedOutcome;
+
+    it('admits no outcome that names a settled application', () => {
+      // `outcomes.ts` has a `converged` member, and the portfolio has both
+      // `converged` and `converged_qualified` postures. Neither can reach a
+      // counter: `converged` is a `ReconcileOutcome`, a different union from
+      // the one `record` takes, and the postures never leave the aggregator.
+      const settledVocabulary = ['converged', 'converged_qualified', 'qualified', 'settled', 'up_to_date'];
+      for (const member of EVERY_HISTORY_OUTCOME) {
+        expect(settledVocabulary).not.toContain(member);
+      }
+      // The reconcile union really does hold the word, so the check above is
+      // excluding a live value rather than passing on a vocabulary that never
+      // had one.
+      expect(isReconcileOutcome('converged')).toBe(true);
+    });
+
+    it('aggregates two applications into one bucket, so no bucket is an application', () => {
+      const metrics = GitOpsMetricsService.getInstance();
+      metrics.record('health_finalized', 'failed');
+      metrics.record('health_finalized', 'failed');
+
+      // Two recorded health failures. Nothing here says how many applications
+      // that is, and a reader that wanted the number has to ask the portfolio,
+      // which is the only surface that can answer it.
+      expect(metrics.snapshot()).toEqual([{ stage: 'health_finalized', outcome: 'failed', count: 2 }]);
+    });
   });
 });

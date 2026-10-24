@@ -16,7 +16,10 @@ const DOCKER_UNREACHABLE: FailureClassification = {
  * CONTAINER_CRASHED) onto an operator-facing cause and next step.
  *
  * First match wins, so ordering is load-bearing:
- * - the CONTAINER_CRASHED and stall sentinels are exact, so they go first;
+ * - the rollback-coverage refusal goes first: its prefix is text Sencho writes
+ *   itself, and the cause it carries (a permission error reading the compose
+ *   file, a parse error) would otherwise classify as that cause alone;
+ * - the CONTAINER_CRASHED and stall sentinels are exact, so they go next;
  * - env_missing precedes compose_render_failed because a render failure caused
  *   by a missing variable should classify as the actionable cause;
  * - healthcheck_failed precedes dependency_unavailable because compose phrases
@@ -26,6 +29,12 @@ const DOCKER_UNREACHABLE: FailureClassification = {
  * with a different output shape; installs are out of scope here.
  */
 const RULES: ClassifierRule[] = [
+  {
+    reason: 'rollback_coverage_unavailable',
+    label: 'Rollback coverage unavailable',
+    suggestion: 'Fix the cause named in the message (for example case-colliding file names, a compose file that links outside the stack or cannot be read, or an unreadable Mesh setting), then retry.',
+    pattern: /rollback coverage is unavailable/i,
+  },
   {
     reason: 'container_exited',
     label: 'Container exited after start',
@@ -96,12 +105,6 @@ const RULES: ClassifierRule[] = [
     label: 'Mixed replica images',
     suggestion: 'Bring every replica of the service onto the same image, then retry.',
     pattern: /mixed replica images/i,
-  },
-  {
-    reason: 'rollback_coverage_unavailable',
-    label: 'Exact rollback coverage unavailable',
-    suggestion: 'Remove host-absolute include or extends paths, or capture from a project Sencho can enumerate completely, then retry.',
-    pattern: /cannot be captured for exact rollback|rollback coverage is unavailable/i,
   },
 ];
 

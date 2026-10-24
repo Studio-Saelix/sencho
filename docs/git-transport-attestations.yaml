@@ -34,10 +34,10 @@ schema: 'attestation-v1'
 
 attestations:
   # ===== Named hosts, public read-only (HTTPS, no auth) =====
-  - id: att-2026-09-01-github-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-github-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: github
     node_path: local
     transport: https
@@ -49,10 +49,10 @@ attestations:
     command: POST /api/git-sources/browse against the real Sencho instance; branch tip resolved and fetched
     result: success
 
-  - id: att-2026-09-01-github-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-github-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: github
     node_path: local
     transport: https
@@ -64,10 +64,10 @@ attestations:
     command: POST /api/git-sources/browse pinning the branch tip's own commit SHA
     result: success
 
-  - id: att-2026-09-01-gitlab-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitlab-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitlab
     node_path: local
     transport: https
@@ -79,10 +79,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-gitlab-tag
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitlab-tag
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitlab
     node_path: local
     transport: https
@@ -94,10 +94,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-gitlab-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitlab-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitlab
     node_path: local
     transport: https
@@ -109,10 +109,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-bitbucket-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-bitbucket-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: bitbucket
     node_path: local
     transport: https
@@ -124,10 +124,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-bitbucket-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-bitbucket-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: bitbucket
     node_path: local
     transport: https
@@ -140,10 +140,10 @@ attestations:
     result: success
 
   # ===== Self-hosted Gitea, own throwaway instance on the QA fleet =====
-  - id: att-2026-09-01-gitea-https-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-https-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -156,10 +156,10 @@ attestations:
     command: POST /api/git-sources/browse with a per-source CA bundle and a Personal Access Token
     result: success
 
-  - id: att-2026-09-01-gitea-https-tag
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-https-tag
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -172,10 +172,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-gitea-https-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-https-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -188,10 +188,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-gitea-ssh-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-ssh-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -204,10 +204,10 @@ attestations:
     command: POST /api/git-sources/browse with a read-only deploy key and the host key fetched via Sencho's own probe endpoint
     result: success
 
-  - id: att-2026-09-01-gitea-ssh-tag
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-ssh-tag
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -220,10 +220,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-gitea-ssh-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-gitea-ssh-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: gitea
     host_version: gitea/gitea:1.22
     node_path: local
@@ -237,10 +237,10 @@ attestations:
     result: success
 
   # ===== Self-hosted Forgejo, own throwaway instance on the QA fleet =====
-  - id: att-2026-09-01-forgejo-https-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-https-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -253,10 +253,10 @@ attestations:
     command: POST /api/git-sources/browse with a per-source CA bundle and a Personal Access Token
     result: success
 
-  - id: att-2026-09-01-forgejo-https-tag
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-https-tag
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -269,10 +269,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-forgejo-https-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-https-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -285,10 +285,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-forgejo-ssh-branch
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-ssh-branch
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -301,10 +301,10 @@ attestations:
     command: POST /api/git-sources/browse with a read-only deploy key and the host key fetched via Sencho's own probe endpoint
     result: success
 
-  - id: att-2026-09-01-forgejo-ssh-tag
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-ssh-tag
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -317,10 +317,10 @@ attestations:
     command: POST /api/git-sources/browse
     result: success
 
-  - id: att-2026-09-01-forgejo-ssh-sha
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-forgejo-ssh-sha
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: forgejo
     host_version: codeberg.org/forgejo/forgejo:7
     node_path: local
@@ -334,10 +334,10 @@ attestations:
     result: success
 
   # ===== Distribution: direct-proxy and Pilot node paths =====
-  - id: att-2026-09-01-github-direct-proxy
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-github-direct-proxy
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: github
     node_path: direct-proxy
     transport: https
@@ -349,10 +349,10 @@ attestations:
     command: POST /api/git-sources/browse with x-node-id targeting a remote proxy-mode fleet node
     result: success
 
-  - id: att-2026-09-01-github-pilot
-    date: '2026-09-01'
-    source_commit: 79b86ddcd4aefdd6941f098e35990ab397b13c72
-    sencho_image_digest: sha256:980531f85861e092b7eee8a5b6a840d3964ccc6db25c42517c0ac43fefe67e16
+  - id: att-2026-10-23-github-pilot
+    date: '2026-10-23'
+    source_commit: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
+    sencho_image_digest: sha256:919f5b7f718add6cd92305125b742e7f51c81a21c37741bf15336ddb931dfb81
     host: github
     node_path: pilot
     transport: https

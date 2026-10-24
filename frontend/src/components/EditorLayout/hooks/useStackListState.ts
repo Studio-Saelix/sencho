@@ -189,6 +189,7 @@ export function useStackListState() {
   const [searchQuery, setSearchQuery] = useState('');
   const [stackStatuses, setStackStatuses] = useState<StackStatus>({});
   const [stackPorts, setStackPorts] = useState<Record<string, number | undefined>>({});
+  const [stackPortServices, setStackPortServices] = useState<Record<string, string | undefined>>({});
   const [stackSelfFlags, setStackSelfFlags] = useState<Record<string, boolean>>({});
   const [stackCounts, setStackCounts] = useState<StackCounts>({});
   const [labels, setLabels] = useState<StackLabel[]>([]);
@@ -284,6 +285,7 @@ export function useStackListState() {
     // the first frame; this effect is the cleanup, not the guard.
     setStackStatuses({});
     setStackPorts({});
+    setStackPortServices({});
     setStackSelfFlags({});
     setStackCounts({});
     setHydrationEvidenceSync(null);
@@ -478,6 +480,7 @@ export function useStackListState() {
     const clearStatusMaps = (): void => {
       setStackStatuses({});
       setStackPorts({});
+      setStackPortServices({});
       setStackSelfFlags({});
       setStackCounts({});
     };
@@ -550,6 +553,7 @@ export function useStackListState() {
       if (stale()) { abortAttempt(attemptId); return fileList; }
       let bulkStatuses: Record<string, StackRowStatus> = {};
       let bulkPorts: Record<string, number | undefined> = {};
+      let bulkPortServices: Record<string, string | undefined> = {};
       let bulkSelf: Record<string, boolean> = {};
       let bulkCounts: StackCounts = {};
       let source: HydrationSource = 'bulk';
@@ -594,6 +598,7 @@ export function useStackListState() {
         const parsed = parseBulkStatusPayload(statusOutcome.body, fileList);
         bulkStatuses = parsed.statuses;
         bulkPorts = parsed.ports;
+        bulkPortServices = parsed.portServices;
         bulkSelf = parsed.self;
         bulkCounts = parsed.counts;
         coveredFileCount = parsed.coveredFileCount;
@@ -642,6 +647,11 @@ export function useStackListState() {
         const keys = Object.keys(bulkPorts);
         if (keys.length === Object.keys(prev).length && keys.every(k => prev[k] === bulkPorts[k])) return prev;
         return bulkPorts;
+      });
+      setStackPortServices(prev => {
+        const keys = Object.keys(bulkPortServices);
+        if (keys.length === Object.keys(prev).length && keys.every(k => prev[k] === bulkPortServices[k])) return prev;
+        return bulkPortServices;
       });
       setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
@@ -878,6 +888,7 @@ export function useStackListState() {
     searchQuery, setSearchQuery,
     stackStatuses, setStackStatuses,
     stackPorts, setStackPorts,
+    stackPortServices, setStackPortServices,
     stackSelfFlags,
     stackCounts,
     labels,

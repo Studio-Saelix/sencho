@@ -210,6 +210,8 @@ describe('pilot tunnel mid-disconnect cleanup (in-process integration)', () => {
         // the bridge has a live stream. Then kill the tunnel from the agent
         // side, simulating an agent crash.
         await tunnel.nextJsonFrame(); // http_req
+        // Age the registration stamp so only the close handler can refresh it.
+        DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() - 3_600_000 });
         tunnel.ws.terminate();
         await tunnel.closed;
 
@@ -227,6 +229,8 @@ describe('pilot tunnel mid-disconnect cleanup (in-process integration)', () => {
         // updateNodeStatus('offline') ran via the bridge.once('closed') hook.
         const dbNode = DatabaseService.getInstance().getNode(nodeId);
         expect(dbNode?.status).toBe('offline');
+        // The close stamps the last moment the tunnel was up.
+        expect(Date.now() - (dbNode?.pilot_last_seen ?? 0)).toBeLessThan(10_000);
     }, 10_000);
 
     it('closes a TCP stream cleanly when the tunnel dies with bytes outstanding', async () => {

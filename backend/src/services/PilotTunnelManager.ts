@@ -167,7 +167,7 @@ export class PilotTunnelManager extends EventEmitter {
                 this.bridges.delete(nodeId);
                 this.bridgeKinds.delete(nodeId);
                 this.tunnelConfidential.delete(nodeId);
-                DatabaseService.getInstance().updateNodeStatus(nodeId, 'offline');
+                this.markPilotDown(nodeId);
                 this.emit('tunnel-down', nodeId);
             }
         });
@@ -310,6 +310,22 @@ export class PilotTunnelManager extends EventEmitter {
     }
 
     /**
+     * Persist that a pilot tunnel is gone. `pilot_last_seen` is stamped with the
+     * close time, so the Fleet overview can tell a brief reconnect from a gone
+     * agent. A failed write is logged and never blocks `tunnel-down`: listeners
+     * (mesh, monitor) must hear the tunnel is down even if the DB is busy.
+     */
+    private markPilotDown(nodeId: number): void {
+        try {
+            const db = DatabaseService.getInstance();
+            db.updateNodeStatus(nodeId, 'offline');
+            db.updateNode(nodeId, { pilot_last_seen: Date.now() });
+        } catch (error) {
+            console.error(`[Pilot] Failed to persist tunnel-down for node ${nodeId}:`, error);
+        }
+    }
+
+    /**
      * Force-close a tunnel (e.g., on node deletion, enrollment regenerate).
      *
      * Mirrors the cleanup the bridge's natural `'closed'` event handler runs
@@ -326,7 +342,7 @@ export class PilotTunnelManager extends EventEmitter {
         this.bridges.delete(nodeId);
         this.bridgeKinds.delete(nodeId);
         if (kind === 'pilot') {
-            DatabaseService.getInstance().updateNodeStatus(nodeId, 'offline');
+            this.markPilotDown(nodeId);
             this.emit('tunnel-down', nodeId);
         } else if (kind === 'proxy') {
             this.emit('proxy-bridge-down', nodeId);

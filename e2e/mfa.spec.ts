@@ -10,11 +10,44 @@
  *      re-use the same backup code and confirm the second attempt fails.
  *   4. Disable 2FA to leave the dev DB in a clean state for the next run.
  *
- * If a previous run aborted mid-way, the test user may already have MFA on.
- * Run `node backend/dist/cli/resetMfa.js <username>` or wipe the dev DB first.
+ * Every worker starts and ends with MFA off (see resetMfaState), so the block
+ * is self-healing: if a test dies mid-chain, or the run is retried in a fresh
+ * worker, the next attempt re-enrols from a clean slate instead of inheriting
+ * a half-finished enrolment.
  */
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { test, expect, Page } from '@playwright/test';
 import { loginAs, totpNow, TEST_USERNAME, TEST_PASSWORD, isDashboard } from './helpers';
+
+/**
+ * Clear MFA for the shared E2E account straight in the database.
+ *
+ * The emergency CLI (backend/src/cli/resetMfa.ts) is the only way to do this
+ * without proving possession of a second factor, which is exactly the
+ * situation a half-finished test run leaves behind: no usable session and no
+ * unused backup codes. It deletes the enrolment, clears the replay blacklist,
+ * and bumps the token version.
+ */
+function resetMfaState(): void {
+  // The CLI resolves the database as DATA_DIR, else <cwd>/data, so it has to
+  // run from backend/ to reach the same file the dev server has open.
+  const backendDir = path.resolve(__dirname, '..', 'backend');
+  const cli = path.join(backendDir, 'dist', 'cli', 'resetMfa.js');
+  try {
+    execFileSync(process.execPath, [cli, TEST_USERNAME], { cwd: backendDir, stdio: 'pipe' });
+  } catch (err) {
+    const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? '';
+    // A missing account cannot have MFA enrolled, so there is nothing to clear.
+    if (stderr.includes('User not found')) return;
+    throw new Error(
+      `Could not reset MFA for "${TEST_USERNAME}" via ${cli}. ` +
+      'Build the backend first (`cd backend && npm run build`); without dist/cli/resetMfa.js ' +
+      'this suite cannot guarantee a clean starting state.\n' +
+      `${stderr || String(err)}`,
+    );
+  }
+}
 
 async function logout(page: Page) {
   await page.getByRole('button', { name: /profile/i }).click();
@@ -40,34 +73,22 @@ test.describe.serial('Two-factor authentication', () => {
   let secret = '';
   let backupCodes: string[] = [];
 
-  // Safety net: if any test above fails, Playwright skips the rest of the
-  // serial block, so the "disable 2FA" test never runs and the shared test
-  // user stays MFA-enabled in the dev DB. That wrecks every subsequent spec
-  // (nodes, stacks, screenshots) because their loginAs helper does not know
-  // about the challenge screen. afterAll always runs, so we clear MFA here
-  // via the API using whatever enrolment state we captured.
-  test.afterAll(async ({ request }) => {
-    if (!secret || backupCodes.length < 2) return;
-    try {
-      // Use backup codes for both steps: they are single-use and sidestep
-      // the TOTP replay blacklist, so we do not need to reason about which
-      // 30-second window we are currently in.
-      const loginBackup = backupCodes[backupCodes.length - 2];
-      const disableBackup = backupCodes[backupCodes.length - 1];
-      await request.post('/api/auth/login', {
-        data: { username: TEST_USERNAME, password: TEST_PASSWORD },
-      });
-      const loginRes = await request.post('/api/auth/login/mfa', {
-        data: { code: loginBackup, isBackupCode: true },
-      });
-      if (!loginRes.ok()) return;
-      await request.post('/api/auth/mfa/disable', {
-        data: { code: disableBackup, isBackupCode: true },
-      });
-    } catch {
-      // Best effort; if this fails the next full-suite run will need a
-      // manual DB wipe or CLI reset.
-    }
+  // Start from "MFA off" in every worker. A serial block is retried as a whole
+  // in a new worker process, so a retry that inherits an enrolment from the
+  // previous attempt cannot re-enrol: the start endpoint answers 409 and the
+  // whole block fails again. Resetting here is what makes a retry able to
+  // recover, and it also clears a half-finished enrolment left by an aborted
+  // run against a long-lived dev database.
+  test.beforeAll(() => {
+    resetMfaState();
+  });
+
+  // Unconditional cleanup. This must not depend on the enrolment state the
+  // block captured: a failing test destroys both the secret and the unused
+  // backup codes, which is what previously left MFA switched on and broke
+  // every spec that ran afterwards.
+  test.afterAll(() => {
+    resetMfaState();
   });
 
   test('enrol from Account settings captures secret and backup codes', async ({ page }) => {

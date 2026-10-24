@@ -26,6 +26,7 @@ const NAV_MODES = ['smart', 'compact'] as const;
 const NAV_ALIGNS = ['left', 'center'] as const;
 const SIDEBAR_MODES = ['fixed', 'resizable'] as const;
 const ANATOMY_MODES = ['fixed', 'resizable'] as const;
+const FLEET_TAB_LAYOUTS = ['flat', 'compact'] as const;
 
 // Desktop pane width bounds, in px. Defaults fill missing fields so
 // an older writer's 16-field document still parses (it is then stored
@@ -42,7 +43,7 @@ const QUICK_LINK_IDS = [
   'global-observability', 'auto-updates', 'scheduled-ops', 'host-console', 'audit-log',
 ] as const;
 
-// Headroom over the frontend's MAX_QUICK_LINKS (8) so a frontend cap increase
+// Headroom over the frontend's MAX_QUICK_LINKS (10) so a frontend cap increase
 // never turns a previously saved document into a 400 on write. Duplicates are
 // rejected here; the frontend sanitize dedupes.
 const QUICK_LINKS_MAX = 16;
@@ -72,6 +73,7 @@ const appearanceSchema = z.object({
   sidebarMode: z.enum(SIDEBAR_MODES).default('fixed'),
   sidebarWidth: z.number().int().min(SIDEBAR_WIDTH.min).max(SIDEBAR_WIDTH.max).default(256),
   anatomyMode: z.enum(ANATOMY_MODES).default('fixed'),
+  fleetTabLayout: z.enum(FLEET_TAB_LAYOUTS).default('flat'),
   anatomyWidth: z.number().int().min(ANATOMY_WIDTH.min).max(ANATOMY_WIDTH.max).default(640),
 }).strict();
 
