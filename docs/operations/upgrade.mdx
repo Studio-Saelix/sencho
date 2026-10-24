@@ -90,16 +90,18 @@ Check [GitHub Releases](https://github.com/studio-saelix/sencho/releases) for av
 
 ## Version policy
 
-Sencho follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`):
+Sencho has not reached 1.0 yet. Until then, a compatible change ships as the next patch of the current line, and a patch can carry a new feature. This is a deliberate departure from strict [Semantic Versioning](https://semver.org/), stated here so nothing about it is a surprise: a `0.N.x` release can add a screen, a setting, or an endpoint.
 
-| Change type | Version bump | Example |
-|-------------|-------------|---------|
-| Bug fixes, performance improvements | Patch | 0.38.0 → 0.38.1 |
-| New features | Minor | 0.38.x → 0.39.0 |
-| Breaking changes | Major | 0.x.y → 1.0.0 |
+| Change | Version | Example |
+|--------|---------|---------|
+| Fixes, performance and security improvements, and compatible new features | Next patch | 0.N.3 → 0.N.4 |
+| An announced compatibility change that cannot ship as a patch | Next minor | 0.N.x → 0.(N+1).0 |
+| General availability | 1.0.0 | 0.N.x → 1.0.0 |
 
 <Note>
-  While the version is below 1.0, minor releases (0.x.0) may occasionally include breaking changes. These are always documented in the release notes. Once Sencho reaches 1.0, breaking changes will only occur in major releases.
+  A release that changes compatibility says so in its release notes, with the upgrade and rollback steps. After 1.0, ordinary Semantic Versioning applies: new features arrive in minor releases, and breaking changes only in major releases.
 </Note>
+
+To receive features only when you choose, pin an exact version as described in [Pinning a specific version](#pinning-a-specific-version).
 
 Breaking changes are marked with `BREAKING CHANGE` in the [release notes](https://github.com/studio-saelix/sencho/releases). Subscribe to the repository's releases to be notified of new versions.

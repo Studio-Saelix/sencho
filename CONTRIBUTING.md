@@ -87,6 +87,8 @@ Sencho is pre-1.0. While the version is `0.98.x`, a compatible change ships as t
 
 A maintainer approves a version transition by applying the `version-transition-approved` label to the pull request. Without that label, the pull request fails the `Version transition is approved` check and cannot merge. After `1.0.0` these pre-1.0 rules stop applying on their own and ordinary semver resumes.
 
+The operator-facing version of this policy is in the [upgrade guide](https://docs.sencho.io/operations/upgrade#version-policy).
+
 Merging to `main` is the release decision: your change ships in the next patch. Keep unfinished work on its branch. If it has to land early, it must be off by default, with no migration and no change to any common path.
 
 An open, draft, or failing pull request never blocks a release. A release stops only for a confirmed severe problem that is already on `main`, and the remedy is to fix or revert it, not to hold the release.
