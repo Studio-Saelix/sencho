@@ -3577,10 +3577,15 @@ stmt.run('gitops_schema_version', '1');
         return rows as MeshStackRow[];
     }
 
-    public setMeshStackLastKnownServices(nodeId: number, stackName: string, servicesJson: string): void {
+    /**
+     * Rewrite a membership's saved services by row id. The id is the identity
+     * here: a refresh that started before an opt-out/opt-in cycle still holds
+     * the old row, and its delayed answer must not land in the replacement.
+     */
+    public setMeshStackLastKnownServices(id: number, servicesJson: string): void {
         if (isPilotMode()) return;
-        this.db.prepare('UPDATE mesh_stacks SET last_known_services = ? WHERE node_id = ? AND stack_name = ?')
-            .run(servicesJson, nodeId, stackName);
+        this.db.prepare('UPDATE mesh_stacks SET last_known_services = ? WHERE id = ?')
+            .run(servicesJson, id);
     }
 
     public isMeshStackEnabled(nodeId: number, stackName: string): boolean {

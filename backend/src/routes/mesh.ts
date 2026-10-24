@@ -124,6 +124,31 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
 });
 
 /**
+ * Returns the services the LOCAL compose file(s) declare for a stack. Central
+ * reads this while reconciling an alias refresh, so a service missing from a
+ * partial container inventory keeps its saved claims while the stack still
+ * declares it. Answers 503 when the declaration cannot be read, because
+ * "unknown" must not look like "declares nothing".
+ */
+meshRouter.get('/local-declared-services/:stackName', async (req: Request, res: Response): Promise<void> => {
+    if (!requirePaid(req, res)) return;
+    const stackName = req.params.stackName as string;
+    if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
+    if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+    try {
+        const declared = await MeshService.getInstance().getLocalDeclaredServiceNames(stackName);
+        if (declared === null) {
+            res.status(503).json({ error: 'Stack compose declaration is unreadable' });
+            return;
+        }
+        res.json({ declared });
+    } catch (err) {
+        console.warn('[mesh] /local-declared-services failed:', sanitizeForLog((err as Error).message));
+        res.status(500).json({ error: 'Failed to read local stack declaration' });
+    }
+});
+
+/**
  * Returns the LOCAL Sencho's compose stacks. Always queries this
  * instance's own filesystem regardless of `x-node-id`. Central calls this
  * endpoint against each remote node via the existing proxy chain

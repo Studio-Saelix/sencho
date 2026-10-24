@@ -116,7 +116,9 @@ describe('MeshService.optInStack', () => {
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
         db.insertMeshStack(localNodeId, 'busy-stack', 'setup');
-        db.setMeshStackLastKnownServices(localNodeId, 'busy-stack', JSON.stringify([{ service: 'db', ports: [5432] }]));
+        const busyRow = db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack');
+        if (!busyRow) throw new Error('missing mesh row for busy-stack');
+        db.setMeshStackLastKnownServices(busyRow.id, JSON.stringify([{ service: 'db', ports: [5432] }]));
         const before = db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack');
         vi.spyOn(svc, 'removeOverrideFromNode').mockRejectedValue(
             new Error('HTTP 500: another operation is already in progress'),

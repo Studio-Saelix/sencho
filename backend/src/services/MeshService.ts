@@ -134,22 +134,47 @@ export function parseLastKnownServices(raw: string | null | undefined): MeshStac
 }
 
 /**
- * Reconcile a live observation with the saved snapshot so a stopped service
- * keeps the ports it previously held. A running service's port list is
- * authoritative, so an empty one releases its ports. A stopped container
- * reports no bindings at all, which makes its empty list missing information
- * rather than a claim, so the saved ports carry forward. `running` is also
- * absent on snapshots and on responses from a peer that predates the field;
- * that unknown state keeps the saved ports instead of giving one away.
+ * Reconcile a live observation with the saved snapshot so a service that is
+ * stopped, or temporarily absent mid-teardown, keeps the ports it previously
+ * held. A running service's port list is authoritative, so an empty one
+ * releases its ports. A stopped container reports no bindings at all, which
+ * makes its empty list missing information rather than a claim, so its saved
+ * ports carry forward while the stack still declares it.
+ *
+ * A saved service that is absent from the observation entirely is ambiguous:
+ * Docker may have removed the container a moment before recreating it, so
+ * stating "not there" is not evidence that the stack stopped claiming the
+ * port. The claim is released only when `declared` is a known declaration
+ * that no longer names the service, which is what an authored removal looks
+ * like. The same holds for a stopped container whose service has left the
+ * compose file: it is an orphan, not a claim. `declared` is null when the
+ * declaration could not be read, including on a peer that does not report
+ * one, and that unknown state keeps the claim. `running` is likewise absent
+ * on snapshots and on responses from a peer that predates the field, and
+ * keeps the saved ports too.
  */
-function mergeStoppedServicePorts(live: MeshStackService[], lastKnown: MeshStackService[]): MeshStackService[] {
+function mergeObservedServices(
+    live: MeshStackService[],
+    lastKnown: MeshStackService[],
+    declared: ReadonlySet<string> | null,
+): MeshStackService[] {
     const known = new Map(lastKnown.map((svc) => [svc.service, svc.ports]));
-    return live.map((svc) => {
+    const observed = new Set(live.map((svc) => svc.service));
+    const merged = live.map((svc) => {
         if (svc.ports.length > 0 || svc.running === true) {
             return { service: svc.service, ports: svc.ports };
         }
+        if (declared !== null && !declared.has(svc.service)) {
+            return { service: svc.service, ports: [] };
+        }
         return { service: svc.service, ports: [...(known.get(svc.service) ?? [])] };
     });
+    for (const svc of lastKnown) {
+        if (observed.has(svc.service)) continue;
+        if (declared !== null && !declared.has(svc.service)) continue;
+        merged.push({ service: svc.service, ports: [...svc.ports] });
+    }
+    return merged;
 }
 
 /**
@@ -442,6 +467,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * is never handed out twice while its owner is offline.
      */
     private reservedPorts = new Map<number, MeshGlobalAlias>();
+    /**
+     * Counts refresh starts. A run that began earlier can finish later, and
+     * its observation is then older than one already applied, so it must not
+     * persist or publish anything. See `refreshAliasCache`.
+     */
+    private refreshGeneration = 0;
     // Populated on pilot nodes via the D-1 override push. Central's
     // db.listMeshStacks() is authoritative on central; pilots have no
     // mesh_stacks rows (C-3 design), so the push payload carries the alias
@@ -2337,6 +2368,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const next = new Map<string, MeshGlobalAlias>();
         const portMap = new Map<number, MeshGlobalAlias>();
         const stacks = db.listMeshStacks();
+        // A refresh that started earlier can finish later, and its answer then
+        // describes an older state of the world. Record the start order so a
+        // superseded run can be dropped before it persists or publishes.
+        const generation = ++this.refreshGeneration;
 
         // Inspect all stacks in parallel; each remote-node lookup involves an
         // HTTP fetch with its own 5 s AbortSignal. Sequential awaiting would
@@ -2356,30 +2391,52 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 const live = await this.inspectStackServices(row.node_id, row.stack_name, reach);
                 const { reachable } = reach;
                 const lastKnown = parseLastKnownServices(row.last_known_services);
-                // Docker reports no port bindings for a stopped container, so
-                // an empty port list on a stopped service is missing
-                // information, not a claim that it publishes nothing. Carry
-                // the saved ports forward instead of overwriting the snapshot
-                // with that absence.
-                const resolved = mergeStoppedServicePorts(live, lastKnown);
-                if (reachable && resolved.length > 0) {
-                    const serialized = JSON.stringify(resolved);
-                    if (serialized !== row.last_known_services) {
-                        try {
-                            db.setMeshStackLastKnownServices(row.node_id, row.stack_name, serialized);
-                        } catch (err) {
-                            console.warn('[MeshService] failed to persist last known mesh services:', sanitizeForLog((err as Error).message));
-                        }
-                    }
-                }
+                // Docker reports no port bindings for a stopped container, and
+                // a container that is mid-removal is absent from the inventory
+                // entirely. Neither is evidence that the stack no longer
+                // claims the port, so the saved claim carries forward unless
+                // the stack's Compose declaration no longer names the service.
+                // A fully stopped stack still has a declaration worth reading,
+                // and an exited container can outlive its service's removal.
+                // Read it whenever a saved claim cannot be settled from the
+                // observation alone, so a running stack with nothing to
+                // release pays no extra round trip.
+                const needsDeclaration = reachable && lastKnown.some((svc) => {
+                    if (svc.ports.length === 0) return false;
+                    const observed = live.find((candidate) => candidate.service === svc.service);
+                    return !observed || (observed.ports.length === 0 && observed.running !== true);
+                });
+                const declared = needsDeclaration
+                    ? await this.inspectDeclaredServices(row.node_id, row.stack_name)
+                    : null;
+                const resolved = mergeObservedServices(live, lastKnown, declared);
+                // Only an observation that reached the node rewrites the
+                // snapshot, and a stopped stack rewrites it only when the
+                // declaration was readable enough to reconcile.
+                const snapshot = reachable && (live.length > 0 || declared !== null)
+                    ? JSON.stringify(resolved)
+                    : null;
                 const services = reachable ? live : lastKnown;
-                const reservedServices = live.length > 0 ? resolved : lastKnown;
-                return { row, node, services, reservedServices };
+                return { row, node, services, reservedServices: resolved, snapshot };
             }),
         );
+        // Nothing below awaits, so a newer refresh either started before this
+        // block and wins, or starts after it and is ordered behind it. A
+        // superseded run leaves both the database and the caches untouched.
+        if (generation !== this.refreshGeneration) {
+            this.logDiag('alias cache refresh superseded', { stacks: stacks.length, ms: Date.now() - t0 });
+            return;
+        }
         for (const result of inspections) {
             if (result.status !== 'fulfilled' || !result.value) continue;
-            const { row, node, services, reservedServices } = result.value;
+            const { row, node, services, reservedServices, snapshot } = result.value;
+            if (snapshot !== null && snapshot !== row.last_known_services) {
+                try {
+                    db.setMeshStackLastKnownServices(row.id, snapshot);
+                } catch (err) {
+                    console.warn('[MeshService] failed to persist last known mesh services:', sanitizeForLog((err as Error).message));
+                }
+            }
             for (const svc of reservedServices) {
                 for (const port of svc.ports) {
                     if (reserved.has(port)) continue;
@@ -2534,6 +2591,112 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
         }
         return shapes;
+    }
+
+    /**
+     * Read the service names the stack's Compose file(s) declare on a node.
+     * Returns null when the declaration cannot be established: a missing or
+     * unreadable file, or one that does not parse. The alias refresh uses this
+     * to tell an authored removal from a container that is merely absent for a
+     * tick, so "unknown" must not read as "declares nothing".
+     */
+    private async readDeclaredServiceNames(stackName: string, nodeId: number): Promise<Set<string> | null> {
+        if (!isValidStackName(stackName)) return null;
+        const fsSvc = FileSystemService.getInstance(nodeId);
+        const baseDir = fsSvc.getBaseDir();
+        let relFiles: string[];
+        try {
+            relFiles = await this.resolveStackComposeFiles(fsSvc, stackName);
+            // Compose auto-loads the hand-authored override beside a
+            // single-file stack, so a service declared only there is part of
+            // the project and must count as declared. An explicit `-f` list
+            // (Git multi-file stacks) suppresses that discovery, but reading
+            // it anyway only risks keeping a claim, never releasing one.
+            if (relFiles.length === 1) {
+                const override = await fsSvc.getOverrideFilename(stackName);
+                if (override && !relFiles.includes(override)) relFiles = [...relFiles, override];
+            }
+        } catch (err) {
+            console.warn('[MeshService] readDeclaredServiceNames failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
+        if (relFiles.length === 0) return null;
+        const names = new Set<string>();
+        for (const relFile of relFiles) {
+            const composePath = path.join(baseDir, path.basename(stackName), relFile);
+            if (!isPathWithinBase(composePath, baseDir)) return null;
+            let parsed: { services?: Record<string, unknown>; include?: unknown } | null;
+            try {
+                parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true }) as {
+                    services?: Record<string, unknown>;
+                    include?: unknown;
+                } | null;
+            } catch {
+                return null;
+            }
+            // `include` pulls services in from other files this reader does
+            // not follow. The parsed map is then partial, and a partial
+            // declaration must not release anything.
+            if (parsed?.include !== undefined) return null;
+            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
+            if (!services) return null;
+            for (const name of Object.keys(services)) {
+                if (/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) names.add(name);
+            }
+        }
+        // A Compose stack declares at least one service. An empty union means
+        // no file contributed a readable services map, not that the stack
+        // stopped owning everything, so it is unknown rather than a release.
+        return names.size > 0 ? names : null;
+    }
+
+    /**
+     * Declared service names for a stack on THIS Sencho instance. Central
+     * reads this over the peer route while reconciling an alias refresh, so it
+     * asks the node that owns the compose file rather than guessing.
+     */
+    public async getLocalDeclaredServiceNames(stackName: string): Promise<string[] | null> {
+        const names = await this.readDeclaredServiceNames(stackName, NodeRegistry.getInstance().getDefaultNodeId());
+        return names ? Array.from(names) : null;
+    }
+
+    /**
+     * Ask the owning node which services a stack declares. Local nodes read
+     * the compose file directly; remote nodes use the same authenticated peer
+     * transport as the live inspection. Returns null when the node cannot
+     * answer, which the refresh treats as an unknown declaration and leaves
+     * the saved claims alone.
+     */
+    private async inspectDeclaredServices(nodeId: number, stackName: string): Promise<Set<string> | null> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return null;
+        if (node.type !== 'remote') return this.readDeclaredServiceNames(stackName, nodeId);
+        try {
+            const res = await this.proxyFetch(
+                nodeId,
+                'GET',
+                `/api/mesh/local-declared-services/${encodeURIComponent(stackName)}`,
+                undefined,
+                5_000,
+            );
+            if (!res.ok) {
+                console.error(`[MeshService] inspectDeclaredServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return null;
+            }
+            const body = await res.json() as { declared?: unknown };
+            if (!Array.isArray(body.declared) || !body.declared.every((name): name is string => typeof name === 'string')) {
+                console.error(`[MeshService] inspectDeclaredServices: malformed response from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return null;
+            }
+            return new Set(body.declared);
+        } catch (err) {
+            if (err instanceof MeshError && (err.code === 'no_target' || err.code === 'push_failed')) {
+                console.warn(`[MeshService] inspectDeclaredServices: unreachable node ${nodeId} (${sanitizeForLog(node.name)}): ${err.code}`);
+                return null;
+            }
+            console.error('[MeshService] inspectDeclaredServices failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
     }
 
     /**

@@ -8,6 +8,8 @@
  * answers apart at the route boundary.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import fsSync from 'fs';
+import path from 'path';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET, TEST_USERNAME } from './helpers/setupTestDb';
@@ -77,5 +79,45 @@ describe('GET /api/mesh/local-services/:stackName', () => {
 
         expect(res.status).toBe(200);
         expect(res.body.services).toEqual([{ service: 'db', ports: [], running: false }]);
+    });
+});
+
+/**
+ * Contract tests for GET /api/mesh/local-declared-services/:stackName.
+ *
+ * Central releases a saved port claim only when the owning node reports that
+ * the compose file no longer declares the service. An unreadable declaration
+ * is not a service removal, so it has to answer non-2xx rather than an empty
+ * list that would look like one.
+ */
+describe('GET /api/mesh/local-declared-services/:stackName', () => {
+    function writeComposeFile(stack: string): void {
+        const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(
+            path.join(dir, 'compose.yaml'),
+            'services:\n  db:\n    image: busybox:latest\n  web:\n    image: busybox:latest\n',
+            'utf8',
+        );
+    }
+
+    it('answers 200 with the declared service names', async () => {
+        writeComposeFile('declared-stack');
+
+        const res = await request(app)
+            .get('/api/mesh/local-declared-services/declared-stack')
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(200);
+        expect((res.body.declared as string[]).sort()).toEqual(['db', 'web']);
+    });
+
+    it('answers 503 when the compose declaration cannot be read', async () => {
+        const res = await request(app)
+            .get('/api/mesh/local-declared-services/no-such-stack')
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(503);
+        expect(res.body.error).toMatch(/declaration is unreadable/i);
     });
 });
