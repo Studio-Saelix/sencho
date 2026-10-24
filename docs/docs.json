@@ -245,6 +245,8 @@
             "pages": [
               "tutorials/create-and-approve-a-blueprint",
               "tutorials/connect-a-git-source",
+              "tutorials/roll-out-a-git-managed-blueprint",
+              "tutorials/work-the-gitops-portfolio",
               "tutorials/schedule-an-operation",
               "tutorials/configure-auto-update-policies",
               "tutorials/configure-auto-heal-policies",

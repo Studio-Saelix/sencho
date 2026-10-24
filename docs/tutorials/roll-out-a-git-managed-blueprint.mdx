@@ -1,0 +1,235 @@
+---
+title: Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One
+sidebarTitle: Roll out a Git-managed Blueprint
+description: Move a Blueprint's content into Git, approve each stage of a rollout, let a failing health check pause it, and roll the affected node back.
+---
+
+Say `storefront` is a small nginx web tier that runs on every node in your fleet, and its Compose file lives in a Git repository. A teammate pushes a commit that breaks the health check. You want that commit to reach one node, stop there, and be undone, instead of landing on all three at once.
+
+This tutorial does that on a **Git-managed Blueprint**. You convert a Blueprint onto a Git source and approve the first rollout. Then you set a health rollout policy, push a bad commit, watch the rollout pause, roll the node back, and ship the fix.
+
+This tutorial does not cover sources that fetch or apply on their own, the placement and rollout authorization policies that approve work without an operator, stateful Blueprints, replanning placement, or superseding a rollout. See [Git-managed Blueprints](/features/git-managed-blueprints) and the [GitOps overview](/features/gitops-overview) for those. To place a Blueprint that has no Git source, follow [Create and Approve a Blueprint](/tutorials/create-and-approve-a-blueprint) instead.
+
+## Prerequisites
+
+- The `admin` or `node-admin` role. Creating a Blueprint, converting it, and approving each stage of a rollout need stack create, edit, and deploy permissions, which both roles hold. A `deployer` can run a rollout that someone else approved but cannot accept source or approve placement. Available on every tier, including Community.
+- Three nodes: the hub (**Local**) plus two more, shown in the screenshots as `edge-01` and `edge-02`. Three nodes make the pause visible, because the last two stay untouched.
+- A Git repository that Sencho can reach over HTTPS or SSH, with this file committed at the root as `compose.yaml`:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:1.27-alpine
+      restart: unless-stopped
+      ports:
+        - "8088:80"
+      healthcheck:
+        test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
+        interval: 5s
+        timeout: 3s
+        retries: 3
+        start_period: 5s
+  ```
+
+  Host port `8088` must be free on every node.
+
+<Warning>
+  Every step below deploys to real nodes. Use nodes you can afford to break, not production hosts.
+</Warning>
+
+<Steps>
+  <Step title="Create the source stack from your repository">
+    Select **Create Stack** in the sidebar and open the **From Git** tab. Enter `storefront-git` as the **Stack Name**, your repository URL as the **Repository URL**, and `main` as the **Ref**. Leave `compose.yaml` as the compose file. Under **Authentication**, choose what your repository needs. For a private SSH repository, choose **Deploy key (SSH)**, select **Fetch host key fingerprint**, and paste the private key.
+
+    Leave **Apply behavior** on **Review only**, so every new commit waits for you to accept it. Leave **Deploy after create** unticked, because the Blueprint will place this stack, not the hub on its own. Name the stack differently from the Blueprint you create next. The Blueprint places a stack named after itself on every node it targets, including the hub.
+
+    <Frame caption="The From Git tab filled in for the source stack. The repository address and key are replaced for this screenshot.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/create-stack-from-git.png" alt="New stack dialog on the From Git tab with Stack Name storefront-git, a Repository URL, Ref main, compose.yaml as the primary compose file, Authentication set to Deploy key (SSH) with a host key fingerprint fetched, and Apply behavior set to Review only." />
+    </Frame>
+
+    Select **Create from Git**. A toast reads `Stack created from Git @` followed by the short commit ID, and `storefront-git` appears in the sidebar with no running containers.
+  </Step>
+  <Step title="Save an empty Blueprint as a draft">
+    Go to **Fleet → Blueprints** and select **New Blueprint**. Every Blueprint starts with its Compose content in Sencho, and you move that content into Git in the next step. Fill in:
+
+    - **Name**: `storefront`
+    - **Description**: `Acme storefront web tier`
+    - **Compose**: the same YAML as your repository's `compose.yaml`. Git replaces it once you convert, but the editor needs valid Compose to save.
+
+    Under **Targets**, choose **Specific nodes** and select every node. Under **Drift policy**, choose **Suggest**.
+
+    <Frame caption="The Blueprint editor with all three nodes targeted and Suggest selected.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/blueprint-draft-editor.png" alt="Blueprint editor dialog with Name storefront, Description Acme storefront web tier, the stateless Compose editor showing the nginx service, Specific nodes selected with Local, edge-01 and edge-02, and the Suggest drift policy selected." />
+    </Frame>
+
+    Select **Save as draft**, not **Review rollout**. A draft stores the Blueprint and deploys nothing. The detail sheet opens and reads **Not deployed**, with an **Inline** badge and a **Convert to Git** button beside it.
+
+    <Frame caption="The draft Blueprint. Nothing is deployed, and Convert to Git sits beside the Inline badge.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/draft-sheet-convert-to-git.png" alt="Blueprint detail sheet for storefront reading Not deployed, with Apply now, Edit, Disable and Delete actions, an Inline badge and a Convert to Git button." />
+    </Frame>
+  </Step>
+  <Step title="Convert the Blueprint to Git">
+    Select **Convert to Git**. In **Live Git source**, choose `storefront-git`. The dialog lists the live Git sources on the hub. One repository can back only one Git-managed Blueprint. The preview names the repository and ref and lists every target node as **Create**, **New placement**, **No Blueprint marker**. Nothing exists on those nodes yet, which is what you want.
+
+    <Frame caption="The conversion preview. Credentials stay with the Git source.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/convert-to-git-dialog.png" alt="Convert to Git-managed content dialog with the storefront-git source selected and a preview listing Local, edge-01 and edge-02 as Create, New placement, No Blueprint marker." />
+    </Frame>
+
+    Select **Convert**. A toast reads `Blueprint content is now Git-managed`. From now on the Compose content comes from the repository, and the editor is read-only.
+
+    The sheet now shows a **GitOps** section. The source already reads **Accepted**, because Sencho carries the source's current commit across as the first accepted generation. You do not accept it again. The next authority step is **Review and approve placement**, beside **Pull source**.
+
+    <Frame caption="The Git-managed Blueprint. Source is accepted, and placement review is the next step.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/placement-review-pending.png" alt="Git-managed Blueprint sheet showing Placement review pending, the stage row with Source accepted, Artifact qualified, Placement review pending and Rollout not executable, and Pull source beside a highlighted Review and approve placement button." />
+    </Frame>
+  </Step>
+  <Step title="Approve placement">
+    Select **Review and approve placement**. The **Confirm rollout: storefront** dialog lists every node Sencho would place the Blueprint on, with its reachability. Read the **Changes** list. It should show three creates, one per node, all marked safe.
+
+    <Frame caption="The placement preview. Approving this records the node list, and rollout authorization is a separate step.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/placement-preview.png" alt="Confirm rollout dialog for storefront reading Safe 3, Warnings 1, Blockers 0, with the GitOps authority block showing the accepted generation and a Changes list of create actions for Local, edge-01 and edge-02." />
+    </Frame>
+
+    The one warning, `no persistent volumes detected`, is informational for a stateless service. Select **Approve placement**. A toast reads `Placement approved`. Approving freezes this node list. If you later change the selector or the nodes, Sencho asks you to review placement again.
+  </Step>
+  <Step title="Authorize the first rollout">
+    The next authority step is **Authorize rollout**. The status block above it reads **Registry preflight blocked** with the reason `Registry readiness has not been evaluated yet`. That is expected. Authorizing evaluates registry readiness, so the banner clears when you act.
+
+    <Frame caption="Before the first authorization the status block reports that registry readiness has not been checked yet.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/authorize-rollout.png" alt="Git-managed Blueprint sheet showing Registry preflight blocked with the reason Registry readiness has not been evaluated yet, and a highlighted Authorize rollout button in the next authority step row." />
+    </Frame>
+
+    Select **Authorize rollout**. There is no confirmation dialog. Sencho checks registry readiness and records the authorization. Then it deploys the commit to the nodes one after another. The button reads **Authorizing…** while it works.
+
+    The sheet shows what it loaded when you opened it and does not refresh on its own. After about a minute, close the sheet and open it again. The **Deployments** table lists all three nodes as **Active**, and the stage row reads **Rollout configuration converged** and **Runtime synced and healthy**.
+
+    <Frame caption="The first rollout has reached every node and passed its health checks.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/rollout-converged.png" alt="Git-managed Blueprint sheet with the stage row reading Source accepted, Artifact qualified, Placement Blueprint bound, Rollout configuration converged and Runtime synced and healthy, and a Deployments table listing Local, edge-01 and edge-02 as Active." />
+    </Frame>
+  </Step>
+  <Step title="Choose what a failed health check does">
+    By default a rollout records each node's health and carries on to the next node whatever the result. Change that before you push anything risky. In **Rollout controls**, open the **⋯** menu, select **Health rollout policy**, choose **Pause**, and select **Set policy**. A toast reads `Health rollout policy updated`.
+
+    <Frame caption="With Pause selected, the rollout stops before the next node when one fails or its health cannot be confirmed.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/health-rollout-policy.png" alt="Health rollout policy dialog with the Pause option selected among Observe, Pause, Retry once, Stop and Rollback, and the text Stop before the next target when one fails or its health cannot be confirmed." />
+    </Frame>
+
+    The policy applies to the next rollout, not one already running. Under **Pause**, Sencho also waits for each node's health verdict before it starts the next node. See [Health rollout policy](/features/health-rollout-policy) for the other four modes.
+  </Step>
+  <Step title="Push a bad commit and accept it">
+    Push a commit to your repository that bumps the image and points the health check at a path nginx does not serve:
+
+    ```yaml
+    services:
+      web:
+        image: nginx:1.28-alpine
+        restart: unless-stopped
+        ports:
+          - "8088:80"
+        healthcheck:
+          test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/healthz"]
+          interval: 5s
+          timeout: 3s
+          retries: 3
+          start_period: 5s
+    ```
+
+    Back on the Blueprint sheet, select **Pull source**. A toast reads `Pulled` followed by the commit ID, and the status block changes to **Review required** with `A fetched commit is waiting for review before it can apply`. Pulling only fetches the commit. Nothing is deployed.
+
+    <Frame caption="The fetched commit waits for your review. Accept source is now the next step.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/new-commit-review-required.png" alt="Git-managed Blueprint sheet reading Review required with the fetched commit ID, the stage row showing Source review required, and a highlighted Accept source button beside Pull source." />
+    </Frame>
+
+    Select **Accept source**. The confirmation names the commit and the nodes the recorded placement approves, and says whether the rollout starts on its own.
+
+    <Frame caption="The accept confirmation. Placement stays approved, and the rollout waits for you.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/accept-source-confirm.png" alt="Accept source confirmation reading Accept followed by the commit ID. Placement is approved for Local, edge-01, edge-02. The rollout stays waiting for you." />
+    </Frame>
+
+    Confirm it. A toast reads `Source revision accepted. The rollout authorization policy requires an operator.` Your placement approval still holds, because a content change does not move the target set. Only **Authorize rollout** remains.
+  </Step>
+  <Step title="Authorize the rollout and watch it pause">
+    Select **Authorize rollout** again. Sencho deploys the commit to the first node, **Local**, and waits for its health check. The container never passes, because `/healthz` returns a 404. When the check fails, the rollout pauses by itself and `edge-01` and `edge-02` are never touched.
+
+    Close the sheet and open it again. The status block reads **Rollout paused** with `Held by the health rollout policy (health failed)`, and **Rollout controls** now offers **Resume rollout**. The **Deployments** table still lists every node as **Active**, because that table reports placement and not health.
+
+    <Frame caption="The rollout stopped after the first node. The other two still run the previous commit.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/rollout-paused-by-policy.png" alt="Git-managed Blueprint sheet reading Rollout paused, held by the health rollout policy because health failed, with a Resume rollout button in Rollout controls and a Deployments table listing Local, edge-01 and edge-02 as Active." />
+    </Frame>
+
+    <Tip>
+      You can also pause a rollout yourself. While it reads **Rollout queued**, **Rollout controls** offers **Pause rollout**, which asks for a **Reason** that Sencho shows beside the paused status. **Resume rollout** continues it.
+
+      <Frame caption="Pausing by hand. The reason you enter is saved with the rollout.">
+        <img src="/images/tutorials/roll-out-a-git-managed-blueprint/pause-rollout-dialog.png" alt="Pause the rollout dialog with the Reason field reading Waiting for the maintenance window." />
+      </Frame>
+    </Tip>
+  </Step>
+  <Step title="Roll back the node that changed">
+    Open **⋯** in **Rollout controls** and select **Roll back rollout**. **Generation to restore** is preselected with the generation that ran before the bad commit. It matches the **Accepted generation** you saw in the placement preview. Leave **Targets** on **All changed targets**. A node already running the selected generation is skipped, so only Local is restored.
+
+    <Frame caption="The rollback dialog. It restores the project files Sencho captured before the rollout, not application data.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/roll-back-rollout-dialog.png" alt="Roll back the rollout dialog with Generation to restore set to the earlier generation ID, Targets set to All changed targets, and a note that rollback restores the authored project and not application data." />
+    </Frame>
+
+    Select **Roll back**. Local's container is replaced from the project Sencho captured before the rollout and becomes healthy again. The notification bell records `GitOps rollback started` and `GitOps rollback completed` for the Blueprint.
+
+    Close and reopen the sheet. The runtime now reads **Rollout artifact drift**, with `A required rollout target holds a different image digest than the approved set`. That is accurate. The accepted commit is still the bad one, so Local no longer matches it. **Authorize rollout** is offered again.
+
+    <Frame caption="After the rollback the node is healthy, but the Blueprint still points at the bad commit.">
+      <img src="/images/tutorials/roll-out-a-git-managed-blueprint/after-rollback.png" alt="Git-managed Blueprint sheet showing Rollout paused, the runtime stage reading Rollout artifact drift, and both Pull source and Authorize rollout in the next authority step row." />
+    </Frame>
+
+    <Warning>
+      Do not select **Authorize rollout** here. It would deploy the same bad commit again. A rollback changes what the nodes run, not what Git says. Fix the repository first.
+    </Warning>
+  </Step>
+  <Step title="Ship the fix">
+    Push a commit that points the health check back at `/`. Select **Pull source**, then **Accept source**, confirm it, and select **Authorize rollout**.
+
+    The earlier hold still applies. A new commit does not clear a pause the health policy decided, so the status block still reads **Rollout paused**. You have reviewed the fix, so select **Resume rollout**.
+
+    The rollout now moves one node at a time. Local deploys and passes its health check, then `edge-01`, then `edge-02`. Each node takes about fifteen seconds to report. When the last one passes, the sheet reads **Rollout configuration converged**.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from three places, since one status word does not prove every node is running the fix.
+
+**The Evidence panel.** On the Blueprint sheet, open **Evidence** in the GitOps section. **Recorded authority** lists **Source accepted**, **Placement approved**, and **Rollout authorized**, each marked `recorded`. The stages below read **Rollout configuration converged** and **Runtime synced and healthy** for all three targets.
+
+<Frame caption="Evidence lists each authority step Sencho recorded and the settled stages.">
+  <img src="/images/tutorials/roll-out-a-git-managed-blueprint/evidence-recorded-authority.png" alt="Evidence panel on the Blueprint sheet showing Source accepted, Placement approved and Rollout authorized marked recorded, followed by the settled stages and the source, placement and rollout policies." />
+</Frame>
+
+**The GitOps application.** Select **Open in GitOps portfolio**, then open `storefront`. Each of the three target cards reads **Synced and healthy**, with `health passed` and the running image digest marked **matched** against the approved one. The headline can read **Unknown** for a while after a rollout while Sencho gathers evidence, so trust the target cards for each node.
+
+<Frame caption="One card per node, each with its own health verdict and digest comparison.">
+  <img src="/images/tutorials/roll-out-a-git-managed-blueprint/portfolio-target-cards.png" alt="GitOps application sheet for storefront with Identity, an application state block, and three target cards for Local, edge-01 and edge-02, each reading Synced and healthy with health passed and a matched digest." />
+</Frame>
+
+**The notification bell.** The history holds the whole sequence in order for this Blueprint, including `GitOps rollout paused`, `GitOps rollback started`, and `GitOps rollback completed`, so you can reconstruct what happened and in what order.
+
+## If something goes wrong
+
+The mistake most likely to cost you is authorizing straight after a rollback. The Blueprint still points at the commit that failed, and **Authorize rollout** deploys it again to the node you just restored. If you already did, the policy pauses the rollout once more, and you roll back a second time. Push a fix to the repository, pull it, accept it, and then authorize.
+
+A rollback stands as long as the Blueprint's drift policy is **Observe** or **Suggest**, as it is here. Under **Enforce**, Sencho re-applies the accepted commit on the next reconciliation.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Git-managed Blueprints" icon="git-branch" href="/features/git-managed-blueprints">
+    The full lifecycle: accept source, approve placement, authorize rollout, pause, roll back, detach, and the policies that decide each step.
+  </Card>
+  <Card title="Health rollout policy" icon="heart-pulse" href="/features/health-rollout-policy">
+    What each of the five modes does when a node's health check fails or cannot be confirmed.
+  </Card>
+  <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
+    Every Git-managed application on the hub, with its targets and an attention queue.
+  </Card>
+  <Card title="Deploy Compose Changes by Pulling From Git" icon="git-branch" href="/tutorials/connect-a-git-source">
+    The single-stack version of this flow, with no Blueprint and no fleet.
+  </Card>
+</CardGroup>
