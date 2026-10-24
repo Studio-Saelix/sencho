@@ -20,6 +20,18 @@ not in a public pull request.
 - [ ] Refactor, chore, or CI
 - [ ] Breaking change
 
+## Compatibility
+
+<!--
+Compatible changes ship as the next patch release. An incompatible answer means
+either a compatible revision or a maintainer-approved version transition.
+-->
+
+- [ ] Database changes are additive and forward-only: new columns or tables with defaults, no drop, rename, or type change
+- [ ] Rolling back to the previous release is safe with the data this change writes
+- [ ] A mixed-version fleet works: a new hub with an older node, and an older hub with a newer node
+- [ ] No API route, configuration key, or environment variable is removed or redefined
+
 ## Related issue
 
 <!-- `Closes #123` if this fixes an issue. Optional, but preferred. -->

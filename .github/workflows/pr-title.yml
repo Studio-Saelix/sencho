@@ -6,13 +6,22 @@ name: PR Title
 # release notes. The local commit-msg hook does not cover this: it runs on the
 # PR branch and never on the squash that actually lands.
 #
+# The second job keeps the version line on a patch bump. release-please reads a
+# breaking marker or a Release-As override as a version transition, and that is a
+# maintainer decision: the job fails until the pull request carries the
+# version-transition-approved label. The release PR is checked against its
+# proposed manifest instead: below 1.0.0 a minor step needs the same approval, a
+# major step needs it at every version, and from 1.0.0 a feature release passes
+# without it.
+#
 # Re-runs on `edited` so a title fixed after the push goes green without needing
-# a new commit.
+# a new commit, and on `labeled` and `unlabeled` so applying or removing the
+# approval is reflected without a push.
 
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -36,3 +45,34 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: node scripts/check-pr-title.mjs
+
+  version-transition:
+    name: Version transition is approved
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The base manifest and the commit range come from origin/main, which a
+      # checkout of the pull request does not guarantee on its own.
+      - name: Fetch the base branch
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      # Commit text is free text, so it is written to a file and never spliced
+      # into a command line.
+      - name: Write the commit messages
+        run: git log --format=%B%x00 origin/main..HEAD > "$RUNNER_TEMP/commits.txt"
+
+      # Title, body, author, head ref and the label state are passed through the
+      # environment for the same reason as the title check above.
+      - name: Check the version transition
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'version-transition-approved') }}
+          PR_COMMITS_FILE: ${{ runner.temp }}/commits.txt
+        run: node scripts/check-version-transition.mjs

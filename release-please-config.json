@@ -5,6 +5,7 @@
     ".": {
       "release-type": "node",
       "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         { "type": "generic", "path": "docs/openapi.yaml" }
