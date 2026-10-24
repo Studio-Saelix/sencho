@@ -1,7 +1,7 @@
 # Cross-compilation helper - provides xx-clang, xx-apk, etc.
 # Runs on the BUILD platform; its binaries are copied into build stages below.
 # Digest pinned to prevent silent base-image changes between scan and publish.
-FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:40fe21f44bb8cddf1eb1226db190d0a984118f62ee02a91b77d99448d28264a6 AS xx
 
 # Stage 1: Build Frontend
 # Runs on the BUILD platform (amd64) - frontend has no native modules so the
