@@ -24,6 +24,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import {
@@ -192,6 +193,23 @@ function parseRemoteStackServices(value: unknown): MeshStackService[] | null {
         services.push(svc);
     }
     return services;
+}
+
+/** A YAML mapping, as distinct from an array or a scalar. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * True for a Compose `services` value: a service name to definition mapping,
+ * where every definition is itself a mapping. Compose rejects a sequence or a
+ * scalar here, and the stack save route stores raw text, so such content can
+ * exist on disk. It says nothing about which services the stack still owns,
+ * so the declaration reader treats it as unknown rather than reading names
+ * off it.
+ */
+function isDeclaredServiceMap(value: unknown): value is Record<string, unknown> {
+    return isRecord(value) && Object.values(value).every(isRecord);
 }
 
 /**
@@ -2606,6 +2624,16 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const baseDir = fsSvc.getBaseDir();
         let relFiles: string[];
         try {
+            const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+            // An explicit `-f` list is what Compose loads for a Git multi-file
+            // stack, so COMPOSE_FILE does not change it. A discovered chain is
+            // replaced by COMPOSE_FILE, which this reader does not follow: the
+            // files it would read are not the project's files, so the
+            // declaration is unknown rather than partial. The effective-anatomy
+            // renderer treats the same condition as unverifiable.
+            if (!(spec && spec.files.length > 0) && await composeFileEnvVarSelectsLayers(stackName, nodeId)) {
+                return null;
+            }
             relFiles = await this.resolveStackComposeFiles(fsSvc, stackName);
             // Compose auto-loads the hand-authored override beside a
             // single-file stack, so a service declared only there is part of
@@ -2625,22 +2653,29 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         for (const relFile of relFiles) {
             const composePath = path.join(baseDir, path.basename(stackName), relFile);
             if (!isPathWithinBase(composePath, baseDir)) return null;
-            let parsed: { services?: Record<string, unknown>; include?: unknown } | null;
+            let parsed: unknown;
             try {
-                parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true }) as {
-                    services?: Record<string, unknown>;
-                    include?: unknown;
-                } | null;
+                parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true });
             } catch {
                 return null;
             }
+            // An empty layer contributes nothing; it is not a declaration that
+            // the stack stopped owning every service.
+            if (parsed === null || parsed === undefined) continue;
+            if (!isRecord(parsed)) return null;
             // `include` pulls services in from other files this reader does
             // not follow. The parsed map is then partial, and a partial
             // declaration must not release anything.
-            if (parsed?.include !== undefined) return null;
-            const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
-            if (!services) return null;
-            for (const name of Object.keys(services)) {
+            if (parsed.include !== undefined) return null;
+            // `services` is optional in an auxiliary layer. A file that only
+            // adjusts networks or volumes is valid, and it contributes no
+            // service names to the union.
+            const declaredServices = parsed.services;
+            if (declaredServices === undefined) continue;
+            // Anything else is not Compose content. Reading names off an array
+            // would treat its indexes as services and release real claims.
+            if (!isDeclaredServiceMap(declaredServices)) return null;
+            for (const name of Object.keys(declaredServices)) {
                 if (/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) names.add(name);
             }
         }

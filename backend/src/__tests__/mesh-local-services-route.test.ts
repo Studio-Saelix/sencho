@@ -120,4 +120,20 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
         expect(res.status).toBe(503);
         expect(res.body.error).toMatch(/declaration is unreadable/i);
     });
+
+    it('answers 503 when services is not a service mapping', async () => {
+        // An editor can save invalid content. Returning 200 with the array
+        // indexes would let central treat "0" as a service name and release a
+        // real reservation, so the route reports unknown instead.
+        const dir = path.join(process.env.COMPOSE_DIR as string, 'invalid-declared-stack');
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  - web\n', 'utf8');
+
+        const res = await request(app)
+            .get('/api/mesh/local-declared-services/invalid-declared-stack')
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(503);
+        expect(res.body.error).toMatch(/declaration is unreadable/i);
+    });
 });

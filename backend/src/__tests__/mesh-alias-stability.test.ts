@@ -618,6 +618,199 @@ describe('partial container removal keeps still-declared claims', () => {
 });
 
 /**
+ * The declaration read is the only evidence that releases a saved claim, so
+ * it has to be trustworthy. A saved compose file can hold anything an editor
+ * wrote, and a discovered chain is not the chain Compose loads when
+ * COMPOSE_FILE selects its own. None of those states says a service is gone.
+ */
+describe('declaration reconciliation trusts only readable compose content', () => {
+    function seedClaim(
+        stack: string,
+        services: Array<{ service: string; ports: number[] }>,
+    ): { id: number; name: string } {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, stack, 'tester');
+        seedLastKnown(localNode.id, stack, services);
+        return localNode;
+    }
+
+    function savedServices(nodeId: number, stack: string): Array<{ service: string; ports: number[] }> {
+        const row = DatabaseService.getInstance().listMeshStacks(nodeId).find((r) => r.stack_name === stack);
+        return parseLastKnownServices(row?.last_known_services);
+    }
+
+    /**
+     * A declaration saved as an array or a scalar is not Compose content, so
+     * it says nothing about which services the stack used to own. The saved
+     * claim stays, and a competing opt-in on its port is still refused.
+     */
+    async function expectInvalidDeclarationKeepsClaim(stack: string, contents: string): Promise<void> {
+        const localNode = seedClaim(stack, [{ service: 'db', ports: [5432] }]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeRawComposeFile(stack, contents);
+
+        await withLocalDocker(async () => []);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([{ service: 'db', ports: [5432] }]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+
+        await withLocalDocker(async (opts) => (
+            stackFromFilter(opts) === 'api' ? [container('taker', 'running', [5432])] : []
+        ));
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        await expect(svc.optInStack(localNode.id, 'api', 'tester'))
+            .rejects.toThrow(`port 5432 is already claimed by ${host}`);
+        expect(DatabaseService.getInstance().isMeshStackEnabled(localNode.id, 'api')).toBe(false);
+    }
+
+    it('keeps the saved claim when services is a sequence', async () => {
+        await expectInvalidDeclarationKeepsClaim('sequence-declaration-stack', 'services:\n  - web\n');
+    });
+
+    it('keeps the saved claim when a service definition is not a mapping', async () => {
+        await expectInvalidDeclarationKeepsClaim('scalar-service-stack', 'services:\n  web: busybox\n');
+    });
+
+    it('keeps the saved claim when the services value is a scalar', async () => {
+        await expectInvalidDeclarationKeepsClaim('scalar-services-stack', 'services: web\n');
+    });
+
+    it('keeps a saved claim when COMPOSE_FILE selects the file chain', async () => {
+        // compose.yaml declares web, db.yaml declares db, and .env points
+        // Compose at both. Reading only the discovered main file would think
+        // db was removed and free its port.
+        const stack = 'compose-file-chain-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        writeComposeFile(stack, ['db'], 'db.yaml');
+        writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:db.yaml\n', '.env');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('keeps a saved claim when the COMPOSE_FILE selection cannot be read', async () => {
+        // The selector refuses this .env, which means Compose's own discovery
+        // cannot be trusted either. Unknown keeps the claim.
+        const stack = 'compose-file-unknown-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        writeRawComposeFile(stack, 'COMPOSE_DISABLE_ENV_FILE=maybe\n', '.env');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('still reconciles a Git file list when COMPOSE_FILE is set', async () => {
+        // An explicit `-f` list is what Compose loads for a multi-file Git
+        // stack, so COMPOSE_FILE does not apply. The second file has to stay
+        // readable, and a service gone from every file still releases its port.
+        const stack = 'git-file-list-stack';
+        const db = DatabaseService.getInstance();
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'queue', ports: [6379] },
+            { service: 'web', ports: [8080] },
+        ]);
+        writeComposeFile(stack, ['web']);
+        writeComposeFile(stack, ['queue'], 'queue.yaml');
+        writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:queue.yaml\n', '.env');
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml', 'queue.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'queue', ports: [6379] },
+        ]);
+        const internals = svc as unknown as Internals;
+        expect(internals.reservedPorts.has(5432)).toBe(false);
+        expect(internals.reservedPorts.get(6379)?.serviceName).toBe('queue');
+    });
+
+    it.each([
+        ['networks-only', 'networks:\n  front:\n    driver: bridge\n'],
+        ['volumes-only', 'volumes:\n  data:\n'],
+    ])('releases an authored removal beside a %s auxiliary layer', async (_label, override) => {
+        // A valid auxiliary layer that only adjusts networks or volumes omits
+        // `services` on purpose. It contributes no names, and it must not turn
+        // the rest of the declaration into an unknown that keeps db forever.
+        const stack = 'auxiliary-layer-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        writeComposeFile(stack, ['web']);
+        writeRawComposeFile(stack, override, 'compose.override.yml');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([{ service: 'web', ports: [8080] }]);
+        const internals = svc as unknown as Internals;
+        expect(internals.reservedPorts.has(5432)).toBe(false);
+        expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
+    });
+
+    it('keeps all claims when one layer of the chain is malformed', async () => {
+        // The base file still declares web, but the override is invalid. A
+        // partial read of the chain cannot release the saved db claim.
+        const stack = 'malformed-layer-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        writeRawComposeFile(stack, 'services:\n  - db\n', 'compose.override.yml');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+});
+
+/**
  * Refreshes overlap: the 60 s timer, opt-in/opt-out, and the override-apply
  * paths all call `refreshAliasCache`. A run that started earlier can finish
  * later, and its answer must not overwrite newer durable state or publish an
