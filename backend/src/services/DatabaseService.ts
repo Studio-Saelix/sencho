@@ -3594,14 +3594,21 @@ stmt.run('gitops_schema_version', '1');
         return !!row;
     }
 
-    public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): void {
+    /**
+     * Insert a membership and return the new row id. The id is the membership's
+     * identity for saved-service updates, so an opt-in can seed the observation
+     * it already made before another refresh runs. Returns null on a pilot,
+     * where memberships live on central.
+     */
+    public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): number | null {
         if (isPilotMode()) {
             console.warn(`[DatabaseService] insertMeshStack ignored on pilot (node=${nodeId}, stack=${stackName})`);
-            return;
+            return null;
         }
-        this.db.prepare(
+        const info = this.db.prepare(
             'INSERT INTO mesh_stacks (node_id, stack_name, created_at, created_by) VALUES (?, ?, ?, ?)'
         ).run(nodeId, stackName, Date.now(), createdBy);
+        return Number(info.lastInsertRowid);
     }
 
     public deleteMeshStack(nodeId: number, stackName: string): void {

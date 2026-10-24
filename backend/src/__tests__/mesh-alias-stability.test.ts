@@ -8,6 +8,7 @@
  * unreachable nodes, and a stopped stack keeps its ports reserved.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'child_process';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
@@ -87,18 +88,40 @@ function seedLastKnown(
  * network shape.
  */
 function writeRawComposeFile(stack: string, contents: string, fileName = 'compose.yaml'): void {
+    writeRawComposeFileNow(stack, contents, fileName);
+    settleComposeFile(stack, fileName);
+}
+
+/**
+ * A file written moments ago may be the visible prefix of a save that is still
+ * in progress, so the declaration reader does not trust it as evidence of a
+ * service removal. Tests that model a completed save backdate the mtime, which
+ * is what a file at rest looks like on a live node.
+ */
+function settleComposeFile(stack: string, fileName = 'compose.yaml'): void {
+    const file = path.join(process.env.COMPOSE_DIR as string, stack, fileName);
+    const past = new Date(Date.now() - 60_000);
+    fsSync.utimesSync(file, past, past);
+}
+
+function writeRawComposeFileNow(stack: string, contents: string, fileName = 'compose.yaml'): void {
     const composeDir = process.env.COMPOSE_DIR as string;
     const dir = path.join(composeDir, stack);
     fsSync.mkdirSync(dir, { recursive: true });
     fsSync.writeFileSync(path.join(dir, fileName), contents, 'utf8');
 }
 
+function composeYaml(services: string[]): string {
+    return `services:\n${services.map((svc) => `  ${svc}:\n    image: busybox:latest`).join('\n')}\n`;
+}
+
 function writeComposeFile(stack: string, services: string[], fileName = 'compose.yaml'): void {
-    writeRawComposeFile(
-        stack,
-        `services:\n${services.map((svc) => `  ${svc}:\n    image: busybox:latest`).join('\n')}\n`,
-        fileName,
-    );
+    writeRawComposeFile(stack, composeYaml(services), fileName);
+}
+
+/** Model the visible prefix of an in-place save: valid, complete-looking, fresh. */
+function writeUnsettledComposeFile(stack: string, services: string[], fileName = 'compose.yaml'): void {
+    writeRawComposeFileNow(stack, composeYaml(services), fileName);
 }
 
 /**
@@ -661,6 +684,16 @@ describe('declaration reconciliation trusts only readable compose content', () =
         return parseLastKnownServices(row?.last_known_services);
     }
 
+    /** Snapshot order follows the saved list, so compare the set, not the order. */
+    function expectBothClaims(nodeId: number, stack: string): void {
+        const saved = savedServices(nodeId, stack);
+        expect(saved).toEqual(expect.arrayContaining([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]));
+        expect(saved).toHaveLength(2);
+    }
+
     /**
      * A declaration saved as an array or a scalar is not Compose content, so
      * it says nothing about which services the stack used to own. The saved
@@ -901,6 +934,181 @@ describe('declaration reconciliation trusts only readable compose content', () =
         ]);
         expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
     });
+
+    /**
+     * A save that has not finished still looks like a valid document on disk:
+     * an editor truncates the file and writes the new text, so a reader can
+     * catch a prefix that parses and simply omits the services not written
+     * yet. Treating that prefix as an authored removal would release the exact
+     * reservation this feature exists to keep, permanently.
+     */
+    it('keeps both saved claims while a save is still in progress', async () => {
+        const stack = 'interrupted-save-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web', 'db']);
+        await withLocalDocker(async () => []);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        // The visible prefix of the save: valid YAML that does not mention db.
+        writeUnsettledComposeFile(stack, ['web']);
+        await svc.refreshAliasCache();
+
+        expectBothClaims(localNode.id, stack);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+
+        await withLocalDocker(async (opts) => (
+            stackFromFilter(opts) === 'taker' ? [container('taker', 'running', [5432])] : []
+        ));
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        await expect(svc.optInStack(localNode.id, 'taker', 'tester'))
+            .rejects.toThrow(`port 5432 is already claimed by ${host}`);
+
+        // The save completes. The claim never left, so it is still there once
+        // the file has been at rest and the declaration reads normally again.
+        writeUnsettledComposeFile(stack, ['web', 'db']);
+        settleComposeFile(stack);
+        await withLocalDocker(async () => []);
+        await svc.refreshAliasCache();
+
+        expectBothClaims(localNode.id, stack);
+
+        // A later tick that cannot reach the node replays both hostnames and
+        // both reservations, because the snapshot was never reduced.
+        await withLocalDocker(() => Promise.reject(new Error('docker socket unavailable')));
+        await svc.refreshAliasCache();
+
+        expect((await svc.listAliases()).map((a) => a.host)).toEqual(expect.arrayContaining([
+            `web.${stack}.${localNode.name}.sencho`,
+            host,
+        ]));
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('keeps the saved claim when a discovered override links outside the compose root', async () => {
+        // The canonical compose guard refuses a link that leaves the compose
+        // root. The declaration reader must apply the same rule instead of
+        // following the link and reading its service names as evidence.
+        const stack = 'outside-override-link-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        const outside = path.join(tmpDir, 'outside');
+        fsSync.mkdirSync(outside, { recursive: true });
+        fsSync.writeFileSync(
+            path.join(outside, 'compose.override.yml'),
+            'services:\n  other:\n    image: busybox:latest\n',
+            'utf8',
+        );
+        const link = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.override.yml');
+        fsSync.symlinkSync(path.join(outside, 'compose.override.yml'), link);
+
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await expect(FileSystemService.getInstance(localNode.id).assertComposeFileReadable(stack))
+            .rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+
+        await withLocalDocker(async () => []);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expectBothClaims(localNode.id, stack);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('keeps the saved claim when an explicit Git file links outside the compose root', async () => {
+        const stack = 'git-outside-link-stack';
+        const db = DatabaseService.getInstance();
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        const outside = path.join(tmpDir, 'outside-git');
+        fsSync.mkdirSync(outside, { recursive: true });
+        fsSync.writeFileSync(
+            path.join(outside, 'extra.yaml'),
+            'services:\n  other:\n    image: busybox:latest\n',
+            'utf8',
+        );
+        const link = path.join(process.env.COMPOSE_DIR as string, stack, 'extra.yaml');
+        fsSync.symlinkSync(path.join(outside, 'extra.yaml'), link);
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml', 'extra.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+
+        await withLocalDocker(async () => []);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expectBothClaims(localNode.id, stack);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+        'treats a special file as unknown without stalling the refresh',
+        async () => {
+            // A FIFO named like the discovered override would make a blocking
+            // readFile wait for a writer that never comes, holding up every
+            // other membership's publication.
+            const stack = 'fifo-declaration-stack';
+            const db = DatabaseService.getInstance();
+            const localNode = seedClaim(stack, [
+                { service: 'db', ports: [5432] },
+                { service: 'web', ports: [8080] },
+            ]);
+            const host = `db.${stack}.${localNode.name}.sencho`;
+            const neighbourHost = `api.neighbour-stack.${localNode.name}.sencho`;
+            writeComposeFile(stack, ['web']);
+            const fifo = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.override.yml');
+            execFileSync('mkfifo', [fifo]);
+            db.insertMeshStack(localNode.id, 'neighbour-stack', 'tester');
+
+            await withLocalDocker(async (opts) => (
+                stackFromFilter(opts) === 'neighbour-stack' ? [container('api', 'running', [3000])] : []
+            ));
+            const svc = MeshService.getInstance();
+            const deadline = new Promise<'timeout'>((resolve) => {
+                setTimeout(() => resolve('timeout'), 3_000).unref();
+            });
+            await expect(Promise.race([svc.refreshAliasCache(), deadline])).resolves.not.toBe('timeout');
+
+            expectBothClaims(localNode.id, stack);
+            expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+            // The healthy membership still published on the same tick.
+            expect((await svc.listAliases()).map((a) => a.host)).toContain(neighbourHost);
+        },
+    );
+
+    it('still follows a discovered override that links inside the compose root', async () => {
+        // In-root links are the supported sharing shape: the canonical read
+        // guard accepts them, so the declaration reader must keep doing so.
+        const stack = 'in-root-link-stack';
+        seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        writeComposeFile(stack, ['web']);
+        const shared = path.join(process.env.COMPOSE_DIR as string, 'shared-overrides');
+        fsSync.mkdirSync(shared, { recursive: true });
+        fsSync.writeFileSync(path.join(shared, 'base.yml'), composeYaml(['db']), 'utf8');
+        const link = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.override.yml');
+        fsSync.symlinkSync(path.join(shared, 'base.yml'), link);
+        settleComposeFile(stack, 'compose.override.yml');
+
+        const svc = MeshService.getInstance();
+        expect((await svc.getLocalDeclaredServiceNames(stack))?.sort()).toEqual(['db', 'web']);
+    });
 });
 
 /**
@@ -1055,6 +1263,57 @@ describe('mesh opt-out recovery', () => {
         await svc.refreshAliasCache();
         expect((await svc.listAliases()).map((a) => a.host)).toContain(`db.local-pg.${localNode.name}.sencho`);
         expect((svc as unknown as Internals).reservedPorts.get(5432)?.stackName).toBe('local-pg');
+    });
+});
+
+/**
+ * Opt-in already holds a successful observation when it inserts the
+ * membership. The refresh that follows re-inspects, but the membership must
+ * not depend on that second look: a Docker failure or a stop in between would
+ * otherwise leave the row with no saved ports and no reservation, so the stack
+ * would be opted in without the stability guarantee the opt-in promised.
+ */
+describe('opt-in keeps its first observation', () => {
+    type OptInInternals = {
+        inspectStackServices: (nodeId: number, stack: string, reach?: { reachable: boolean }) => Promise<Observed[]>;
+        syncForwarderListeners: () => Promise<void>;
+        regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void>;
+        cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, actor: string) => void;
+        reservedPorts: Map<number, Alias>;
+    };
+
+    it('persists the ports the successful opt-in inspection returned', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        const stack = 'optin-first-observation';
+        writeComposeFile(stack, ['web']);
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as OptInInternals;
+        let inspections = 0;
+        vi.spyOn(internals, 'inspectStackServices').mockImplementation(async (_nodeId, _stack, reach) => {
+            inspections += 1;
+            if (inspections === 1) return [{ service: 'web', ports: [8080], running: true }];
+            if (reach) reach.reachable = false;
+            return [];
+        });
+        vi.spyOn(svc, 'pushOverrideToNode').mockResolvedValue(undefined);
+        vi.spyOn(internals, 'syncForwarderListeners').mockResolvedValue(undefined);
+        vi.spyOn(internals, 'regenerateOverridesAcrossFleet').mockResolvedValue(undefined);
+        vi.spyOn(internals, 'cascadeRecomposeAcrossFleet').mockImplementation(() => undefined);
+
+        await svc.optInStack(localNode.id, stack, 'tester');
+
+        expect(db.isMeshStackEnabled(localNode.id, stack)).toBe(true);
+        const row = db.listMeshStacks(localNode.id).find((r) => r.stack_name === stack);
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([{ service: 'web', ports: [8080] }]);
+        expect(internals.reservedPorts.get(8080)?.stackName).toBe(stack);
+
+        await svc.refreshAliasCache();
+
+        expect((await svc.listAliases()).map((a) => a.host))
+            .toContain(`web.${stack}.${localNode.name}.sencho`);
+        expect(internals.reservedPorts.get(8080)?.stackName).toBe(stack);
     });
 });
 

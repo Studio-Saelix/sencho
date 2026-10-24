@@ -7,7 +7,7 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { DatabaseService } from './DatabaseService';
-import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { isPathWithinBase, isValidRelativeStackPath, isValidStackName } from '../utils/validation';
 import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { isBinaryBuffer } from '../utils/binaryDetect';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -499,6 +499,31 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Publish a managed compose file as a whole. The target may be a link that
+   * stays inside the compose root (a stack sharing a main file or an
+   * override), so the link is resolved first and its target is replaced;
+   * renaming onto the link path would replace the link itself. A reader
+   * therefore sees the previous document or the new one, never a prefix, and a
+   * failed publication leaves the previous document intact. The existing
+   * mode is kept so a restrictive compose file does not widen on save.
+   */
+  private async publishManagedFile(safePath: string, content: string | Buffer): Promise<void> {
+    let target = safePath;
+    let mode: number | undefined;
+    try {
+      const stat = await fsPromises.stat(safePath);
+      mode = stat.mode & 0o777;
+      target = await fsPromises.realpath(safePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    await this.writeStackFileAtomic(target, content, {
+      createParent: false,
+      ...(mode === undefined ? {} : { mode }),
+    });
+  }
+
   async saveStackContent(stackName: string, content: string | Buffer): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
@@ -506,10 +531,11 @@ export class FileSystemService {
     await this.assertRealWithinStack(stackName, stackDir);
     await this.assertRealWithinStack(stackName, filePath);
     try {
-      // Buffer input is written byte-exact (the encoding option is ignored for
-      // Buffers); string input keeps the utf-8 write. Byte-exactness matters to
-      // the Git materializer, whose content hashes are computed over raw bytes.
-      await fsPromises.writeFile(filePath, content, 'utf-8');
+      // Buffer input is published byte-exact (the encoding option is ignored
+      // for Buffers); string input keeps the utf-8 write. Byte-exactness
+      // matters to the Git materializer, whose content hashes are computed
+      // over raw bytes.
+      await this.publishManagedFile(filePath, content);
     } catch (error) {
       console.error('Error writing file:', error);
       throw new Error(`Failed to save stack: ${stackName}`);
@@ -605,7 +631,7 @@ export class FileSystemService {
       }
     }
 
-    await fsPromises.writeFile(safePath, content, 'utf-8');
+    await this.publishManagedFile(safePath, content);
     const newStat = await fsPromises.stat(safePath);
     return { ok: true, mtimeMs: newStat.mtimeMs, filename };
   }
@@ -622,6 +648,60 @@ export class FileSystemService {
       const stat = await fh.stat();
       const content = await fh.readFile('utf-8');
       return { content, mtimeMs: stat.mtimeMs };
+    } finally {
+      await fh.close();
+    }
+  }
+
+  /**
+   * Read one layer of a stack's compose declaration: the resolved main file,
+   * an applied Git file, or the hand-authored override. The mesh declaration
+   * reader uses the returned names to decide whether a saved port claim is
+   * still owned, so this read has to be at least as strict as the canonical
+   * compose read.
+   *
+   * Containment is checked on the real target, so a link that stays inside the
+   * compose root is followed (the supported sharing shape) and one that leaves
+   * it is refused. The descriptor is opened non-blocking and its own type is
+   * authoritative, so a directory, FIFO, or socket named like a compose layer
+   * is refused instead of parking the caller on a read that waits for a writer.
+   * A file that changes while it is being read is refused too: a half-written
+   * save is not an authored declaration.
+   *
+   * Throws for every refusal, including `SYMLINK_ESCAPE`, `NOT_A_FILE`, and
+   * `COMPOSE_LAYER_UNSTABLE`. Callers that release a saved claim must treat any
+   * throw as unknown and keep the claim.
+   */
+  async readComposeLayer(stackName: string, relFile: string): Promise<{ content: string; mtimeMs: number }> {
+    if (relFile === '' || !isValidRelativeStackPath(relFile)) {
+      throw Object.assign(new Error('Invalid compose layer path'), { code: 'INVALID_PATH' });
+    }
+    const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
+    await this.assertRealWithinStack(stackName, stackDir);
+
+    // Canonical js/path-injection barrier inline with the open sink, mirroring
+    // the other compose reads in this file.
+    const baseResolved = path.resolve(this.baseDir);
+    const layerPath = path.resolve(baseResolved, stackName, relFile);
+    if (!layerPath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(layerPath);
+
+    const fh = await fsPromises.open(layerPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      const before = await fh.stat();
+      if (!before.isFile()) throw nonRegularComposeFileError(path.basename(layerPath));
+      const content = await fh.readFile('utf-8');
+      const after = await fh.stat();
+      if (after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+        throw Object.assign(
+          new Error('Compose layer changed while it was being read'),
+          { code: 'COMPOSE_LAYER_UNSTABLE' },
+        );
+      }
+      return { content, mtimeMs: after.mtimeMs };
     } finally {
       await fh.close();
     }
@@ -948,7 +1028,7 @@ export class FileSystemService {
     #   - "8080:80"
 `;
     try {
-      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), boilerplate, 'utf-8');
+      await this.publishManagedFile(path.join(stackDir, 'compose.yaml'), boilerplate);
     } catch (error) {
       console.error('Error creating stack:', error);
       throw new Error(`Failed to create stack: ${stackName}`);
@@ -2218,7 +2298,7 @@ export class FileSystemService {
   private async writeStackFileAtomic(
     safePath: string,
     data: string | Buffer | Readable,
-    opts: { exclusive?: boolean; mode?: number } = {},
+    opts: { exclusive?: boolean; mode?: number; createParent?: boolean } = {},
   ): Promise<void> {
     if (
       opts.mode !== undefined
@@ -2226,7 +2306,9 @@ export class FileSystemService {
     ) {
       throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
     }
-    await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
+    if (opts.createParent !== false) {
+      await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
+    }
     // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
     // can drop leading zeros which narrows entropy unpredictably.
     const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;

@@ -8,6 +8,7 @@
  * answers apart at the route boundary.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'child_process';
 import fsSync from 'fs';
 import path from 'path';
 import request from 'supertest';
@@ -94,11 +95,16 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
     function writeComposeFile(stack: string): void {
         const dir = path.join(process.env.COMPOSE_DIR as string, stack);
         fsSync.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, 'compose.yaml');
         fsSync.writeFileSync(
-            path.join(dir, 'compose.yaml'),
+            file,
             'services:\n  db:\n    image: busybox:latest\n  web:\n    image: busybox:latest\n',
             'utf8',
         );
+        // The declaration reader only trusts a layer that has been at rest, so
+        // a completed save is modelled with an older mtime.
+        const past = new Date(Date.now() - 60_000);
+        fsSync.utimesSync(file, past, past);
     }
 
     it('answers 200 with the declared service names', async () => {
@@ -135,5 +141,47 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
 
         expect(res.status).toBe(503);
         expect(res.body.error).toMatch(/declaration is unreadable/i);
+    });
+
+    it('answers 503 when a discovered override links outside the compose root', async () => {
+        // The same link is refused by the canonical compose read guard. Reading
+        // its service names as a declaration would release claims from a file
+        // the compose root does not own.
+        const stack = 'outside-link-declared-stack';
+        const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: busybox:latest\n', 'utf8');
+        const tmpDir = path.dirname(process.env.COMPOSE_DIR as string);
+        const outside = path.join(tmpDir, 'outside-declaration');
+        fsSync.mkdirSync(outside, { recursive: true });
+        const outsideOverride = path.join(outside, 'compose.override.yml');
+        fsSync.writeFileSync(outsideOverride, 'services:\n  other:\n    image: busybox:latest\n', 'utf8');
+        fsSync.symlinkSync(outsideOverride, path.join(dir, 'compose.override.yml'));
+
+        const res = await request(app)
+            .get(`/api/mesh/local-declared-services/${stack}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(503);
+        expect(res.body.error).toMatch(/declaration is unreadable/i);
+    });
+
+    it.skipIf(process.platform === 'win32')('answers 503 for a special file instead of blocking', async () => {
+        const stack = 'fifo-declared-stack';
+        const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: busybox:latest\n', 'utf8');
+        execFileSync('mkfifo', [path.join(dir, 'compose.override.yml')]);
+
+        const deadline = new Promise<'timeout'>((resolve) => {
+            setTimeout(() => resolve('timeout'), 3_000).unref();
+        });
+        const answered = request(app)
+            .get(`/api/mesh/local-declared-services/${stack}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .then((res) => res.status);
+
+        await expect(Promise.race([answered, deadline])).resolves.not.toBe('timeout');
+        expect(await answered).toBe(503);
     });
 });

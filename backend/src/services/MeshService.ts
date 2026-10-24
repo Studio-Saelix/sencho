@@ -34,6 +34,14 @@ import {
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
+/**
+ * A compose layer written moments ago may be the visible prefix of a save that
+ * is still in progress. The declaration is the only evidence that releases a
+ * saved port claim, so a layer that has not been at rest for this long is
+ * reported as unknown and the claim stays. Supported compose saves publish by
+ * rename, so this window covers writers Sencho does not control.
+ */
+const DECLARATION_SETTLE_MS = 5_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
@@ -1727,7 +1735,19 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         }
 
-        db.insertMeshStack(nodeId, stackName, actor);
+        const rowId = db.insertMeshStack(nodeId, stackName, actor);
+        // Seed the new membership from the observation opt-in already made.
+        // The refresh below re-inspects, but a Docker failure or a stop in
+        // between must not leave the membership with no saved ports and no
+        // reservation: the stack was accepted on the strength of that first
+        // observation, so it is the snapshot the replay and collision check
+        // need from the start.
+        if (rowId !== null) {
+            db.setMeshStackLastKnownServices(
+                rowId,
+                JSON.stringify(services.map(({ service, ports }) => ({ service, ports }))),
+            );
+        }
         try {
             await this.refreshAliasCache();
             await this.syncForwarderListeners();
@@ -2581,14 +2601,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const shapes: Record<string, MeshServiceNetworkShape> = {};
         try {
             const fsSvc = FileSystemService.getInstance(targetNodeId);
-            const baseDir = fsSvc.getBaseDir();
             for (const relFile of await this.resolveStackComposeFiles(fsSvc, stackName)) {
-                // The stack segment uses path.basename as defense-in-depth and
-                // the resolved path is re-checked against the base dir, so the
-                // form CodeQL's path-injection model recognizes stays at the
-                // read sink.
-                const composePath = path.join(baseDir, path.basename(stackName), relFile);
-                if (!isPathWithinBase(composePath, baseDir)) continue;
+                // Same containment, regular-file, and stability guard the
+                // declaration reader uses. One layer that cannot be read as a
+                // complete document is skipped rather than parsed as a partial
+                // service list.
                 let parsed: { services?: Record<string, unknown> } | null;
                 try {
                     // merge: true resolves YAML 1.1 merge keys (`<<: *anchor`).
@@ -2597,7 +2614,8 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     // `networks` through an anchor looks like it declares
                     // neither, so the override adds networks and extra_hosts
                     // to a service Compose refuses to start with them.
-                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true }) as { services?: Record<string, unknown> } | null;
+                    const layer = await fsSvc.readComposeLayer(stackName, relFile);
+                    parsed = YAML.parse(layer.content, { merge: true }) as { services?: Record<string, unknown> } | null;
                 } catch {
                     continue;
                 }
@@ -2628,15 +2646,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     /**
      * Read the service names the stack's Compose file(s) declare on a node.
-     * Returns null when the declaration cannot be established: a missing or
-     * unreadable file, or one that does not parse. The alias refresh uses this
-     * to tell an authored removal from a container that is merely absent for a
-     * tick, so "unknown" must not read as "declares nothing".
+     * Returns null when the declaration cannot be established: a missing,
+     * unreadable, unsafe, or still-changing file, or one that does not parse.
+     * The alias refresh uses this to tell an authored removal from a container
+     * that is merely absent for a tick, so "unknown" must not read as "declares
+     * nothing".
      */
     private async readDeclaredServiceNames(stackName: string, nodeId: number): Promise<Set<string> | null> {
         if (!isValidStackName(stackName)) return null;
         const fsSvc = FileSystemService.getInstance(nodeId);
-        const baseDir = fsSvc.getBaseDir();
         let relFiles: string[];
         try {
             const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
@@ -2667,14 +2685,29 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (relFiles.length === 0) return null;
         const names = new Set<string>();
         for (const relFile of relFiles) {
-            const composePath = path.join(baseDir, path.basename(stackName), relFile);
-            if (!isPathWithinBase(composePath, baseDir)) return null;
             let parsed: unknown;
             let content: string;
             try {
-                content = await fs.readFile(composePath, 'utf8');
+                // Every layer goes through the canonical containment and
+                // regular-file guard. A link out of the compose root, a special
+                // file, or a layer that changed mid-read is refused, and a
+                // refused layer keeps every saved claim.
+                const layer = await fsSvc.readComposeLayer(stackName, relFile);
+                // A save that started moments ago can expose a valid prefix
+                // that omits services not written yet. It is not authored
+                // evidence of a removal until it has been at rest.
+                if (Date.now() - layer.mtimeMs < DECLARATION_SETTLE_MS) {
+                    this.logDiag('compose declaration layer not settled', { stackName, relFile });
+                    return null;
+                }
+                content = layer.content;
                 parsed = YAML.parse(content, { merge: true });
-            } catch {
+            } catch (err) {
+                this.logDiag('compose declaration layer unreadable', {
+                    stackName,
+                    relFile,
+                    message: (err as Error).message,
+                });
                 return null;
             }
             // An empty or comment-only document is a valid no-op Compose
