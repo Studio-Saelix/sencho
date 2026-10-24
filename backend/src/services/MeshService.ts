@@ -201,6 +201,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * True for a compose file whose only content is whitespace, comments, or YAML
+ * document markers. Compose treats that as an empty layer. An explicit null
+ * scalar (`null`, `~`) also parses to null but is not a document Compose
+ * accepts, so the reader keeps the two apart.
+ */
+function isBlankComposeDocument(content: string): boolean {
+    for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed === '' || trimmed === '---' || trimmed === '...' || trimmed.startsWith('#')) continue;
+        return false;
+    }
+    return true;
+}
+
+/**
  * True for a Compose `services` value: a service name to definition mapping,
  * where every definition is itself a mapping. Compose rejects a sequence or a
  * scalar here, and the stack save route stores raw text, so such content can
@@ -2655,15 +2670,21 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             const composePath = path.join(baseDir, path.basename(stackName), relFile);
             if (!isPathWithinBase(composePath, baseDir)) return null;
             let parsed: unknown;
+            let content: string;
             try {
-                parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true });
+                content = await fs.readFile(composePath, 'utf8');
+                parsed = YAML.parse(content, { merge: true });
             } catch {
                 return null;
             }
-            // An empty document is a valid no-op Compose layer, so it
-            // contributes no names. Treating it as unknown would keep a removed
-            // service's port reserved whenever such a layer exists.
-            if (parsed === null || parsed === undefined) continue;
+            // An empty or comment-only document is a valid no-op Compose
+            // layer, so it contributes no names. An explicit null scalar
+            // (`null`, `~`) also parses to null but is not a document Compose
+            // accepts, so it stays unknown.
+            if (parsed === null || parsed === undefined) {
+                if (isBlankComposeDocument(content)) continue;
+                return null;
+            }
             if (!isRecord(parsed)) return null;
             // `include` pulls services in from other files this reader does
             // not follow. The parsed map is then partial, and a partial

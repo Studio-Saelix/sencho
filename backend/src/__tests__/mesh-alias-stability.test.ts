@@ -830,8 +830,11 @@ describe('declaration reconciliation trusts only readable compose content', () =
         expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(false);
     });
 
-    it('releases an authored removal beside an empty auxiliary layer', async () => {
-        // Compose accepts an empty file as a second layer, so it contributes
+    it.each([
+        ['an empty', ''],
+        ['a comment-only', '# nothing to add here\n'],
+    ])('releases an authored removal beside %s auxiliary layer', async (_label, contents) => {
+        // Compose accepts a blank file as a second layer, so it contributes
         // no names. It must not turn the rest of the declaration into an
         // unknown that keeps db reserved.
         const stack = 'empty-layer-stack';
@@ -840,7 +843,7 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, '', 'compose.override.yml');
+        writeRawComposeFile(stack, contents, 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -850,6 +853,30 @@ describe('declaration reconciliation trusts only readable compose content', () =
         const internals = svc as unknown as Internals;
         expect(internals.reservedPorts.has(5432)).toBe(false);
         expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
+    });
+
+    it('keeps all claims when a layer is an explicit null document', async () => {
+        // `null` and `~` parse to the same value as an empty file, but Compose
+        // rejects a null top-level document as a non-mapping. It is not a
+        // no-op layer, so it must not release a claim.
+        const stack = 'null-layer-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        writeComposeFile(stack, ['web']);
+        writeRawComposeFile(stack, 'null\n', 'compose.override.yml');
+
+        await withLocalDocker(async () => [container('web', 'running', [8080])]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        expect(savedServices(localNode.id, stack)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
     });
 
     it('keeps all claims when one layer of the chain is malformed', async () => {
