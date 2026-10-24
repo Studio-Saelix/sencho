@@ -8,6 +8,7 @@
  * unreachable nodes, and a stopped stack keeps its ports reserved.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'fs/promises';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { parseLastKnownServices } from '../services/MeshService';
 
@@ -60,6 +61,39 @@ beforeEach(() => {
 function mockInspect(impl: Inspect): void {
     const svc = MeshService.getInstance() as unknown as Internals;
     vi.spyOn(svc, 'inspectStackServices').mockImplementation(impl);
+}
+
+/**
+ * Dockerode container fixture. `State` is what separates a live service from
+ * one that only exists as an exited container; the real inspector reads it,
+ * so these tests must supply it rather than mock the inspector itself.
+ */
+function container(service: string, state: string, ports: number[] = []): {
+    State: string;
+    Labels: Record<string, string>;
+    Ports: Array<{ PrivatePort: number; Type: string }>;
+} {
+    return {
+        State: state,
+        Labels: { 'com.docker.compose.service': service },
+        Ports: ports.map((port) => ({ PrivatePort: port, Type: 'tcp' })),
+    };
+}
+
+type ListContainersOpts = { filters?: { label?: string[] } };
+
+function stackFromFilter(opts: ListContainersOpts): string {
+    const label = opts.filters?.label?.[0] ?? '';
+    return label.replace('com.docker.compose.project=', '');
+}
+
+async function withLocalDocker(
+    listContainers: (opts: ListContainersOpts) => Promise<unknown[]>,
+): Promise<void> {
+    const { default: DockerController } = await import('../services/DockerController');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        getDocker: () => ({ listContainers }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
 }
 
 describe('mesh alias stability', () => {
@@ -199,6 +233,181 @@ describe('mesh alias stability', () => {
         await svc.refreshAliasCache();
 
         expect((svc as unknown as Internals).reservedPorts.get(8080)?.host).toBe('web.first.edge.sencho');
+    });
+});
+
+/**
+ * Docker reports no port bindings for a stopped container. The inspector
+ * still sees the service name (it lists all containers), so an exited stack
+ * used to look like a successful observation with `ports: []`, which replaced
+ * the saved snapshot and released every reservation it held. These tests run
+ * the real inspector and assert the snapshot, reservations, and collision
+ * behaviour after a stop.
+ */
+describe('stopped services keep their saved ports', () => {
+    it('keeps the saved ports and reservation when the stack is only stopped containers', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        const host = `db.pg.${localNode.name}.sencho`;
+        db.insertMeshStack(localNode.id, 'pg', 'tester');
+        db.setMeshStackLastKnownServices(localNode.id, 'pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+
+        await withLocalDocker(async () => [container('db', 'exited')]);
+
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'pg');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([{ service: 'db', ports: [5432] }]);
+        // A stopped service publishes no aliases, but its port stays claimed.
+        expect((await svc.listAliases()).map((a) => a.host)).not.toContain(host);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('keeps a stopped service replayable on a later offline refresh', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        const host = `db.pg.${localNode.name}.sencho`;
+        db.insertMeshStack(localNode.id, 'pg', 'tester');
+        db.setMeshStackLastKnownServices(localNode.id, 'pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+
+        await withLocalDocker(async () => [container('db', 'exited')]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        await withLocalDocker(() => Promise.reject(new Error('docker socket unavailable')));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence the inspection warn */ });
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'pg');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([{ service: 'db', ports: [5432] }]);
+        expect((await svc.listAliases()).map((a) => a.host)).toContain(host);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+    });
+
+    it('keeps the stopped service ports during a partial stop', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, 'pg', 'tester');
+        db.setMeshStackLastKnownServices(localNode.id, 'pg', JSON.stringify([
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]));
+
+        await withLocalDocker(async () => [
+            container('db', 'exited'),
+            container('web', 'running', [8080]),
+        ]);
+
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'pg');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        const internals = svc as unknown as Internals;
+        expect(internals.reservedPorts.get(5432)?.serviceName).toBe('db');
+        expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
+        expect((await svc.listAliases()).map((a) => a.host)).toEqual([`web.pg.${localNode.name}.sencho`]);
+    });
+
+    it('rejects a competing opt-in on a port held by a stopped stack', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, 'pg', 'tester');
+        db.setMeshStackLastKnownServices(localNode.id, 'pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+
+        await withLocalDocker(async () => [container('db', 'exited')]);
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        await withLocalDocker(async (opts) => (
+            stackFromFilter(opts) === 'api'
+                ? [container('web', 'running', [5432])]
+                : [container('db', 'exited')]
+        ));
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+
+        await expect(svc.optInStack(localNode.id, 'api', 'tester'))
+            .rejects.toThrow(`port 5432 is already claimed by db.pg.${localNode.name}.sencho`);
+        expect(db.isMeshStackEnabled(localNode.id, 'api')).toBe(false);
+    });
+
+    it('releases a saved port when a running service no longer publishes it', async () => {
+        // The other side of the distinction: a live container's empty port
+        // list is an answer, not missing information, so the reservation goes.
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, 'pg', 'tester');
+        db.setMeshStackLastKnownServices(localNode.id, 'pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+
+        await withLocalDocker(async () => [container('db', 'running')]);
+
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'pg');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([{ service: 'db', ports: [] }]);
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(false);
+    });
+});
+
+/**
+ * A failed opt-out used to delete the record and reinsert it from scratch,
+ * losing the saved services, the actor, the creation time, and the row
+ * identity that orders contested-port ownership. Removal now happens first,
+ * so a failure leaves the record exactly as it was.
+ */
+describe('mesh opt-out recovery', () => {
+    it('preserves the complete record when remote override removal fails', async () => {
+        const db = DatabaseService.getInstance();
+        db.insertMeshStack(remoteNodeId, 'pg', 'original-actor');
+        db.setMeshStackLastKnownServices(remoteNodeId, 'pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+        const before = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'pg');
+        const svc = MeshService.getInstance();
+        vi.spyOn(svc, 'removeOverrideFromNode').mockRejectedValue(new Error('HTTP 500: node offline'));
+
+        await expect(svc.optOutStack(remoteNodeId, 'pg', 'other-actor')).rejects.toThrow('node offline');
+
+        expect(db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'pg')).toEqual(before);
+        // The record still holds what the refresh needs while the node is away.
+        mockInspect(async (_n, _s, reach) => {
+            if (reach) reach.reachable = false;
+            return [];
+        });
+        await svc.refreshAliasCache();
+        expect((await svc.listAliases()).map((a) => a.host)).toContain('db.pg.edge.sencho');
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.stackName).toBe('pg');
+    });
+
+    it('preserves the complete record when the local override unlink fails', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, 'local-pg', 'original-actor');
+        db.setMeshStackLastKnownServices(localNode.id, 'local-pg', JSON.stringify([{ service: 'db', ports: [5432] }]));
+        const before = db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'local-pg');
+        vi.spyOn(fs, 'unlink').mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+
+        await expect(MeshService.getInstance().removeLocalOverride('local-pg')).rejects.toThrow('permission denied');
+
+        expect(db.listMeshStacks(localNode.id).find((r) => r.stack_name === 'local-pg')).toEqual(before);
+        await withLocalDocker(() => Promise.reject(new Error('docker socket unavailable')));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence the inspection warn */ });
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        expect((await svc.listAliases()).map((a) => a.host)).toContain(`db.local-pg.${localNode.name}.sencho`);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.stackName).toBe('local-pg');
     });
 });
 

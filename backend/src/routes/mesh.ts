@@ -107,7 +107,15 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
     if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
     try {
-        const services = await MeshService.getInstance().inspectLocalStackServices(stackName);
+        const reach = { reachable: true };
+        const services = await MeshService.getInstance().inspectLocalStackServices(stackName, reach);
+        // Central uses this answer to decide whether to replay a stack's saved
+        // aliases. A Docker failure is not a stopped stack, so it must not
+        // look like a successful empty observation.
+        if (!reach.reachable) {
+            res.status(503).json({ error: 'Local Docker inspection failed' });
+            return;
+        }
         res.json({ services });
     } catch (err) {
         console.warn('[mesh] /local-services failed:', sanitizeForLog((err as Error).message));

@@ -111,11 +111,13 @@ describe('MeshService.optInStack', () => {
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 
-    it('restores opt-in authority when target override removal is rejected', async () => {
+    it('keeps the opt-in record when target override removal is rejected', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
         db.insertMeshStack(localNodeId, 'busy-stack', 'setup');
+        db.setMeshStackLastKnownServices(localNodeId, 'busy-stack', JSON.stringify([{ service: 'db', ports: [5432] }]));
+        const before = db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack');
         vi.spyOn(svc, 'removeOverrideFromNode').mockRejectedValue(
             new Error('HTTP 500: another operation is already in progress'),
         );
@@ -124,6 +126,9 @@ describe('MeshService.optInStack', () => {
             .rejects.toThrow('another operation is already in progress');
 
         expect(db.isMeshStackEnabled(localNodeId, 'busy-stack')).toBe(true);
+        // The failed removal must not re-create the row: the saved services,
+        // actor, creation time, and id all have to survive for the next refresh.
+        expect(db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack')).toEqual(before);
     });
 
     it('serializes concurrent opt-out requests for the same node', async () => {
