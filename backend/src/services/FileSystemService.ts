@@ -509,14 +509,22 @@ export class FileSystemService {
    * mode is kept so a restrictive compose file does not widen on save.
    */
   private async publishManagedFile(safePath: string, content: string | Buffer): Promise<void> {
-    let target = safePath;
+    // Canonical js/path-injection barrier inline with the sinks below. The
+    // callers have already contained this path, but static analysis only
+    // credits the path.resolve + startsWith form when it sits at the sink.
+    const baseResolved = path.resolve(this.baseDir);
+    const containedPath = path.resolve(baseResolved, safePath);
+    if (!containedPath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    let target = containedPath;
     let mode: number | undefined;
     let owner: { uid: number; gid: number } | undefined;
     try {
-      const stat = await fsPromises.stat(safePath);
+      const stat = await fsPromises.stat(containedPath);
       mode = stat.mode & 0o777;
       owner = { uid: stat.uid, gid: stat.gid };
-      target = await fsPromises.realpath(safePath);
+      target = await fsPromises.realpath(containedPath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
