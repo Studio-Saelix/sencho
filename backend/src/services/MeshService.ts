@@ -2660,10 +2660,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             } catch {
                 return null;
             }
-            // An empty document is what a file caught mid-rewrite looks like,
-            // so it is unknown rather than a declaration that the stack owns
-            // no services.
-            if (parsed === null || parsed === undefined) return null;
+            // An empty document is a valid no-op Compose layer, so it
+            // contributes no names. Treating it as unknown would keep a removed
+            // service's port reserved whenever such a layer exists.
+            if (parsed === null || parsed === undefined) continue;
             if (!isRecord(parsed)) return null;
             // `include` pulls services in from other files this reader does
             // not follow. The parsed map is then partial, and a partial

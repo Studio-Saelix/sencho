@@ -830,16 +830,15 @@ describe('declaration reconciliation trusts only readable compose content', () =
         expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(false);
     });
 
-    it('keeps all claims when a selected layer is empty', async () => {
-        // A file caught mid-rewrite can read as empty. An empty document is
-        // not evidence that the stack stopped declaring its services, so the
-        // declaration is unknown rather than a zero contribution.
+    it('releases an authored removal beside an empty auxiliary layer', async () => {
+        // Compose accepts an empty file as a second layer, so it contributes
+        // no names. It must not turn the rest of the declaration into an
+        // unknown that keeps db reserved.
         const stack = 'empty-layer-stack';
         const localNode = seedClaim(stack, [
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        const host = `db.${stack}.${localNode.name}.sencho`;
         writeComposeFile(stack, ['web']);
         writeRawComposeFile(stack, '', 'compose.override.yml');
 
@@ -847,11 +846,10 @@ describe('declaration reconciliation trusts only readable compose content', () =
         const svc = MeshService.getInstance();
         await svc.refreshAliasCache();
 
-        expect(savedServices(localNode.id, stack)).toEqual([
-            { service: 'web', ports: [8080] },
-            { service: 'db', ports: [5432] },
-        ]);
-        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+        expect(savedServices(localNode.id, stack)).toEqual([{ service: 'web', ports: [8080] }]);
+        const internals = svc as unknown as Internals;
+        expect(internals.reservedPorts.has(5432)).toBe(false);
+        expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
     });
 
     it('keeps all claims when one layer of the chain is malformed', async () => {
