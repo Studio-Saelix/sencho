@@ -955,8 +955,13 @@ describe('declaration reconciliation trusts only readable compose content', () =
         await svc.refreshAliasCache();
 
         // The visible prefix of the save: valid YAML that does not mention db.
+        // Freeze the clock around this read so the assertion measures the
+        // settle rule, not how fast the test host ran.
+        const frozenNow = Date.now();
+        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(frozenNow);
         writeUnsettledComposeFile(stack, ['web']);
         await svc.refreshAliasCache();
+        nowSpy.mockRestore();
 
         expectBothClaims(localNode.id, stack);
         expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
@@ -1197,10 +1202,12 @@ describe('overlapping refreshes', () => {
     it('still publishes the stacks that answered when one inspection throws', async () => {
         // Defensive: the production inspectors absorb their own failures, but
         // one unexpected throw must not take the whole tick and every other
-        // stack's snapshot down with it.
+        // stack's snapshot down with it. The throwing stack is a failed
+        // observation, so its saved snapshot is replayed instead of dropped.
         const db = DatabaseService.getInstance();
         db.insertMeshStack(remoteNodeId, 'answers', 'tester');
         db.insertMeshStack(remoteNodeId, 'throws', 'tester');
+        seedLastKnown(remoteNodeId, 'throws', [{ service: 'db', ports: [5432] }]);
         mockInspect(async (_n, stack) => {
             if (stack === 'throws') throw new Error('docker daemon unreachable');
             return [{ service: 'web', ports: [8080], running: true }];
@@ -1213,7 +1220,10 @@ describe('overlapping refreshes', () => {
         expect(parseLastKnownServices(answered?.last_known_services)).toEqual([{ service: 'web', ports: [8080] }]);
         expect((svc as unknown as Internals).reservedPorts.get(8080)?.stackName).toBe('answers');
         const thrown = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'throws');
-        expect(parseLastKnownServices(thrown?.last_known_services)).toEqual([]);
+        expect(parseLastKnownServices(thrown?.last_known_services)).toEqual([{ service: 'db', ports: [5432] }]);
+        expect((svc as unknown as Internals).reservedPorts.get(5432)?.stackName).toBe('throws');
+        expect((await svc.listAliases()).map((a) => a.host))
+            .toContain(`db.throws.edge.sencho`);
     });
 });
 
@@ -1314,6 +1324,26 @@ describe('opt-in keeps its first observation', () => {
         expect((await svc.listAliases()).map((a) => a.host))
             .toContain(`web.${stack}.${localNode.name}.sencho`);
         expect(internals.reservedPorts.get(8080)?.stackName).toBe(stack);
+    });
+
+    it('removes the membership when the first observation cannot be stored', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        const stack = 'optin-seed-failure';
+        writeComposeFile(stack, ['web']);
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as OptInInternals;
+        vi.spyOn(internals, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080], running: true }]);
+        vi.spyOn(db, 'setMeshStackLastKnownServices').mockImplementation(() => {
+            throw new Error('database unavailable');
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+        await expect(svc.optInStack(localNode.id, stack, 'tester')).rejects.toThrow('database unavailable');
+
+        expect(db.isMeshStackEnabled(localNode.id, stack)).toBe(false);
     });
 });
 

@@ -1154,6 +1154,27 @@ describe('MeshService.getDeclaredStackServices (BUG-1)', () => {
         expect(names).toEqual({});
     });
 
+    it.skipIf(process.platform === 'win32')('returns no shapes when one layer of the chain cannot be read', async () => {
+        // A partial union would rewrite the mesh override without the services
+        // that layer declares. Unknown keeps the existing override instead.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stack = 'partial-shapes-stack';
+        writeStackFile(stack, 'services:\n  web:\n    image: nginx\n');
+        const outside = path.join(process.env.COMPOSE_DIR as string, '..', 'outside-shapes');
+        fsSync.mkdirSync(outside, { recursive: true });
+        fsSync.writeFileSync(path.join(outside, 'extra.yaml'), 'services:\n  db:\n    image: busybox\n', 'utf8');
+        fsSync.symlinkSync(
+            path.join(outside, 'extra.yaml'),
+            path.join(process.env.COMPOSE_DIR as string, stack, 'extra.yaml'),
+        );
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml', 'extra.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+
+        expect(await svc.getDeclaredStackServices(stack)).toEqual({});
+    });
+
     it('reports each service network shape so the override keeps default and skips network_mode', async () => {
         const svc = MeshService.getInstance();
         writeStackFile('shaped-stack', [

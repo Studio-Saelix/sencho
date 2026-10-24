@@ -511,9 +511,11 @@ export class FileSystemService {
   private async publishManagedFile(safePath: string, content: string | Buffer): Promise<void> {
     let target = safePath;
     let mode: number | undefined;
+    let owner: { uid: number; gid: number } | undefined;
     try {
       const stat = await fsPromises.stat(safePath);
       mode = stat.mode & 0o777;
+      owner = { uid: stat.uid, gid: stat.gid };
       target = await fsPromises.realpath(safePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -521,6 +523,7 @@ export class FileSystemService {
     await this.writeStackFileAtomic(target, content, {
       createParent: false,
       ...(mode === undefined ? {} : { mode }),
+      ...(owner === undefined ? {} : { owner }),
     });
   }
 
@@ -689,7 +692,19 @@ export class FileSystemService {
     }
     await this.assertRealWithinBase(layerPath);
 
-    const fh = await fsPromises.open(layerPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    // Resolve the leaf first and refuse a leaf that is a link at open time.
+    // A link swapped between the containment check and the open would
+    // otherwise be followed to a file the compose root does not own.
+    const realLayerPath = await fsPromises.realpath(layerPath);
+    const realBase = path.resolve(await fsPromises.realpath(this.baseDir));
+    if (!realLayerPath.startsWith(realBase + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory via symlink'), { code: 'SYMLINK_ESCAPE' });
+    }
+
+    const fh = await fsPromises.open(
+      realLayerPath,
+      fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | (fsConstants.O_NOFOLLOW || 0),
+    );
     try {
       const before = await fh.stat();
       if (!before.isFile()) throw nonRegularComposeFileError(path.basename(layerPath));
@@ -2298,7 +2313,7 @@ export class FileSystemService {
   private async writeStackFileAtomic(
     safePath: string,
     data: string | Buffer | Readable,
-    opts: { exclusive?: boolean; mode?: number; createParent?: boolean } = {},
+    opts: { exclusive?: boolean; mode?: number; createParent?: boolean; owner?: { uid: number; gid: number } } = {},
   ): Promise<void> {
     if (
       opts.mode !== undefined
@@ -2338,6 +2353,18 @@ export class FileSystemService {
           await fh.sync();
         } finally {
           await fh.close();
+        }
+      }
+      if (opts.owner) {
+        // Keep the original owner when the process is allowed to set it (the
+        // common root-in-a-container case). A non-root process cannot hand a
+        // file to another user; the replacement stays owned by the process,
+        // which is the only outcome available to it.
+        try {
+          await fsPromises.chown(tmpPath, opts.owner.uid, opts.owner.gid);
+        } catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
         }
       }
       if (opts.exclusive) {

@@ -1736,19 +1736,20 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
 
         const rowId = db.insertMeshStack(nodeId, stackName, actor);
-        // Seed the new membership from the observation opt-in already made.
-        // The refresh below re-inspects, but a Docker failure or a stop in
-        // between must not leave the membership with no saved ports and no
-        // reservation: the stack was accepted on the strength of that first
-        // observation, so it is the snapshot the replay and collision check
-        // need from the start.
-        if (rowId !== null) {
-            db.setMeshStackLastKnownServices(
-                rowId,
-                JSON.stringify(services.map(({ service, ports }) => ({ service, ports }))),
-            );
-        }
         try {
+            // Seed the new membership from the observation opt-in already
+            // made. The refresh below re-inspects, but a Docker failure or a
+            // stop in between must not leave the membership with no saved
+            // ports and no reservation: the stack was accepted on the strength
+            // of that first observation, so it is the snapshot the replay and
+            // collision check need from the start. A failure to store it rolls
+            // the membership back like any other opt-in failure.
+            if (rowId !== null) {
+                db.setMeshStackLastKnownServices(
+                    rowId,
+                    JSON.stringify(services.map(({ service, ports }) => ({ service, ports }))),
+                );
+            }
             await this.refreshAliasCache();
             await this.syncForwarderListeners();
         } catch (error) {
@@ -2480,9 +2481,30 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             this.logDiag('alias cache refresh superseded', { stacks: stacks.length, ms: Date.now() - t0 });
             return;
         }
-        for (const result of inspections) {
-            if (result.status !== 'fulfilled' || !result.value) continue;
-            const { row, node, services, reservedServices, snapshot } = result.value;
+        for (let index = 0; index < inspections.length; index += 1) {
+            const result = inspections[index];
+            const row = stacks[index];
+            let node: NonNullable<ReturnType<typeof db.getNode>>;
+            let services: MeshStackService[];
+            let reservedServices: MeshStackService[];
+            let snapshot: string | null;
+            if (result.status === 'fulfilled' && result.value) {
+                ({ node, services, reservedServices, snapshot } = result.value);
+            } else {
+                // A rejected inspection is a failure to observe, exactly like an
+                // unreachable node. Replaying the saved snapshot keeps this
+                // stack's hostnames and reservations for the tick instead of
+                // dropping them because of one unexpected throw.
+                const savedNode = db.getNode(row.node_id);
+                if (!savedNode) continue;
+                node = savedNode;
+                console.warn(
+                    `[MeshService] alias refresh inspection failed for ${sanitizeForLog(row.stack_name)}; replaying saved services`,
+                );
+                services = parseLastKnownServices(row.last_known_services);
+                reservedServices = services;
+                snapshot = null;
+            }
             if (snapshot !== null && snapshot !== row.last_known_services) {
                 try {
                     db.setMeshStackLastKnownServices(row.id, snapshot);
@@ -2617,7 +2639,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     const layer = await fsSvc.readComposeLayer(stackName, relFile);
                     parsed = YAML.parse(layer.content, { merge: true }) as { services?: Record<string, unknown> } | null;
                 } catch {
-                    continue;
+                    // One unreadable layer makes the union partial, and a
+                    // partial shape map would rewrite the override without the
+                    // services that layer declares. Unknown is the documented
+                    // contract, and the caller keeps its existing override.
+                    return {};
                 }
                 const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
                 if (!services) continue;
