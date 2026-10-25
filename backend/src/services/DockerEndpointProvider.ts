@@ -42,7 +42,7 @@ type ListedContainer = {
   Id?: string;
   Names?: string[];
   Labels?: Record<string, string>;
-  NetworkSettings?: { Networks?: Record<string, { IPAddress?: string; NetworkID?: string } | null> };
+  NetworkSettings?: { Networks?: Record<string, { IPAddress?: string; GlobalIPv6Address?: string; NetworkID?: string } | null> };
   Mounts?: Array<{ Type?: string; Source?: string; Destination?: string }>;
 };
 
@@ -62,10 +62,32 @@ export function parseDockerEndpoint(raw: string | undefined): ParsedDockerEndpoi
   }
 }
 
+/**
+ * One spelling per IP address, so `fd00:0:0:0:0:0:0:5`, `FD00::5` and
+ * `::ffff:10.0.0.2` compare equal to what Docker reports. Anything that is not
+ * an IP address is returned unchanged.
+ */
+export function normalizeIpAddress(address: string): string {
+  const bare = address.trim().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  if (net.isIPv4(bare)) return bare;
+  if (!net.isIPv6(bare)) return address;
+  try {
+    const canonical = new URL(`http://[${bare}]`).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    // An IPv4-mapped address (::ffff:a.b.c.d) is the IPv4 address it wraps.
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
+    if (!mapped) return canonical;
+    const high = parseInt(mapped[1], 16);
+    const low = parseInt(mapped[2], 16);
+    return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  } catch {
+    return bare.toLowerCase();
+  }
+}
+
 async function resolveAddresses(host: string): Promise<string[]> {
-  if (net.isIP(host)) return [host];
+  if (net.isIP(host)) return [normalizeIpAddress(host)];
   const found = await dns.promises.lookup(host, { all: true });
-  return found.map(entry => entry.address);
+  return found.map(entry => normalizeIpAddress(entry.address));
 }
 
 const CACHE_TTL_MS = 15_000;
@@ -136,9 +158,8 @@ async function resolveUncached(endpoint: string | undefined): Promise<DockerEndp
   const match = containers.find(container => {
     if (typeof container.Id !== 'string' || self.isOwnContainer(container.Id)) return false;
     return Object.entries(container.NetworkSettings?.Networks ?? {}).some(([name, network]) =>
-      !!network?.IPAddress
-      && addresses.includes(network.IPAddress)
-      && (self.isOwnNetwork(name) || (!!network.NetworkID && self.isOwnNetwork(network.NetworkID))));
+      [network?.IPAddress, network?.GlobalIPv6Address].some(address => !!address && addresses.includes(normalizeIpAddress(address)))
+      && (self.isOwnNetwork(name) || (!!network?.NetworkID && self.isOwnNetwork(network?.NetworkID))));
   });
   if (!match || typeof match.Id !== 'string') {
     if (!warnedUnmatchedHost.has(parsed.host)) {

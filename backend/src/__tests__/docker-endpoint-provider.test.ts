@@ -120,6 +120,61 @@ describe('resolveDockerEndpointProvider', () => {
     expect(mockLookup).not.toHaveBeenCalled();
   });
 
+  describe('IPv6 endpoint addresses', () => {
+    const v6Proxy = (address: string, over: Record<string, unknown> = {}) => proxyContainer({
+      NetworkSettings: { Networks: { sencho_default: { IPAddress: '', GlobalIPv6Address: address, NetworkID: 'n1' } } },
+      ...over,
+    });
+
+    it('finds a provider reached through an AAAA-only host name', async () => {
+      mockLookup.mockResolvedValue([{ address: 'fd00::5', family: 6 }]);
+      mockListContainers.mockResolvedValue([v6Proxy('fd00::5')]);
+
+      expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+    });
+
+    it.each([
+      ['a literal', 'tcp://[fd00::5]:2375', 'fd00::5'],
+      ['an uncompressed literal', 'tcp://[fd00:0:0:0:0:0:0:5]:2375', 'fd00::5'],
+      ['an upper-case literal against a compressed address', 'tcp://[FD00::5]:2375', 'fd00::5'],
+      ['a compressed literal against an uncompressed address', 'tcp://[fd00::5]:2375', 'fd00:0000:0000:0000:0000:0000:0000:0005'],
+    ])('matches %s', async (_name, host, address) => {
+      process.env.DOCKER_HOST = host;
+      mockListContainers.mockResolvedValue([v6Proxy(address)]);
+
+      const result = await resolveDockerEndpointProvider();
+
+      expect(result.state).toBe('resolved');
+      expect(mockLookup).not.toHaveBeenCalled();
+    });
+
+    it('finds a dual-stack provider when resolution selects only the IPv6 address', async () => {
+      mockLookup.mockResolvedValue([{ address: 'fd00::5', family: 6 }]);
+      mockListContainers.mockResolvedValue([proxyContainer({
+        NetworkSettings: { Networks: { sencho_default: { IPAddress: '172.20.0.3', GlobalIPv6Address: 'fd00::5', NetworkID: 'n1' } } },
+      })]);
+
+      expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+    });
+
+    it('treats an IPv4-mapped literal as the IPv4 address', async () => {
+      process.env.DOCKER_HOST = 'tcp://[::ffff:172.20.0.3]:2375';
+
+      expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+    });
+
+    it('does not match an IPv6 address on a network Sencho is not attached to, or a different address', async () => {
+      mockLookup.mockResolvedValue([{ address: 'fd00::5', family: 6 }]);
+      mockListContainers.mockResolvedValue([v6Proxy('fd00::6')]);
+      expect((await resolveDockerEndpointProvider()).state).toBe('none');
+
+      resetDockerEndpointProviderCache();
+      stubSelf('resolved', ['some_other_network']);
+      mockListContainers.mockResolvedValue([v6Proxy('fd00::5')]);
+      expect((await resolveDockerEndpointProvider()).state).toBe('none');
+    });
+  });
+
   it('does not match an address that lives on a network Sencho is not attached to', async () => {
     stubSelf('resolved', ['some_other_network']);
 

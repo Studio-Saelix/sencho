@@ -5,15 +5,16 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockListContainers, mockResolveProvider, mockGetNode } = vi.hoisted(() => ({
+const { mockListContainers, mockGetContainer, mockResolveProvider, mockGetNode } = vi.hoisted(() => ({
   mockListContainers: vi.fn(),
+  mockGetContainer: vi.fn(),
   mockResolveProvider: vi.fn(),
   mockGetNode: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', () => ({
   default: {
-    getInstance: () => ({ getDocker: () => ({ listContainers: mockListContainers }) }),
+    getInstance: () => ({ getDocker: () => ({ listContainers: mockListContainers, getContainer: mockGetContainer }) }),
   },
 }));
 
@@ -104,10 +105,24 @@ function run(mutation: EndpointMutation, p: EndpointGuardProbes = probes(), stac
   return evaluateDockerEndpointGuard({ nodeId: 1, stackName, mutation, probes: p });
 }
 
+/**
+ * The namespace modes the running containers were created with, by container id
+ * (what `docker inspect` reports whatever the Compose file says now). A
+ * container not listed here runs in no shared namespace.
+ */
+const runtimeModes = new Map<string, { name?: string; modes: { NetworkMode?: string; PidMode?: string; IpcMode?: string } }>();
+
 const originalHostname = process.env.HOSTNAME;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  runtimeModes.clear();
+  mockGetContainer.mockImplementation((ref: string) => ({
+    inspect: async () => {
+      const found = [...runtimeModes].find(([id, entry]) => id === ref || id.startsWith(ref) || entry.name === ref);
+      return { Id: found?.[0] ?? ref, Name: found?.[1].name ? `/${found[1].name}` : undefined, HostConfig: found?.[1].modes ?? {} };
+    },
+  }));
   mockGetNode.mockReturnValue({ id: 1, type: 'local' });
   mockResolveProvider.mockResolvedValue({ state: 'none', reason: 'local socket' });
   mockListContainers.mockResolvedValue([senchoContainer, proxyContainer, webContainer]);
@@ -288,6 +303,53 @@ describe('the Docker socket proxy', () => {
 
     expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
     expect(refusal?.message).toContain('pull policy');
+  });
+
+  it('refuses a deploy of a proxy with pull_policy build, whose rebuild the hash and the local image id cannot see', async () => {
+    mockListContainers.mockResolvedValue([{ ...proxyContainer, ImageID: 'sha256:same' }, webContainer]);
+    const rendered = 'services:\n  socket-proxy:\n    image: proxy:latest\n    build: .\n    pull_policy: build\n';
+
+    const refusal = await run({ kind: 'up' }, probes({
+      renderConfig: vi.fn().mockResolvedValue(rendered),
+      localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }),
+    }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('pull policy');
+  });
+
+  it('refuses a deploy of a build-only proxy with pull_policy build, which has no image to compare', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
+    const rendered = 'services:\n  socket-proxy:\n    build: .\n    pull_policy: build\n';
+
+    const refusal = await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(rendered) }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+  });
+
+  it('refuses a deploy when a service the proxy is wired to would be rebuilt, which restarts the proxy', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer, container('d'.repeat(64), 'vpn')]);
+    const rendered = 'services:\n  socket-proxy:\n    network_mode: service:vpn\n  vpn:\n    build: .\n    pull_policy: build\n';
+
+    const refusal = await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(rendered) }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+  });
+
+  it('refuses a deploy of Sencho itself behind pull_policy build', async () => {
+    const rendered = 'services:\n  sencho:\n    build: .\n    pull_policy: build\n';
+
+    expect(await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(rendered) }))).toMatchObject({ reason: 'unresolved', service: 'sencho' });
+  });
+
+  it('lets a deploy through for a proxy that has a build section but the default pull policy, which builds only when the image is missing', async () => {
+    mockListContainers.mockResolvedValue([{ ...proxyContainer, ImageID: 'sha256:same' }, webContainer]);
+    const rendered = 'services:\n  socket-proxy:\n    image: proxy:latest\n    build: .\n';
+
+    expect(await run({ kind: 'up' }, probes({
+      renderConfig: vi.fn().mockResolvedValue(rendered),
+      localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }),
+    }))).toBeNull();
   });
 
   it('lets a deploy through for a proxy whose pull policy never pulls', async () => {
@@ -491,6 +553,93 @@ describe('the Docker socket proxy', () => {
     });
   });
 
+  describe('namespace owners read from the running containers, whatever the file says now', () => {
+    const VPN_ID = 'd'.repeat(64);
+    const vpn = container(VPN_ID, 'vpn');
+    const sibling = container('e'.repeat(64), 'sibling');
+    // The file no longer declares the namespace the proxy still runs in.
+    const edited = 'services:\n  socket-proxy:\n    command: run\n  vpn:\n    command: run\n  sibling:\n    command: run\n';
+    const editedProbes = (changed: string[] = []) => probes({
+      renderConfig: vi.fn().mockResolvedValue(edited),
+      configHash: vi.fn(async (service: string) => (changed.includes(service) ? 'hash-new' : 'hash-current')),
+    });
+    const withProxyIn = (mode: 'NetworkMode' | 'PidMode' | 'IpcMode', reference: string) => {
+      mockListContainers.mockResolvedValue([senchoContainer, proxyContainer, vpn, sibling]);
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      runtimeModes.set(PROXY_ID, { name: 'socket-proxy', modes: { [mode]: reference } });
+    };
+
+    it.each(['NetworkMode', 'PidMode', 'IpcMode'] as const)('keeps the %s owner protected after the reference is removed from the file', async (mode) => {
+      withProxyIn(mode, `container:${VPN_ID}`);
+
+      for (const mutation of [
+        { kind: 'service', service: 'vpn', restart: false },
+        { kind: 'service', service: 'vpn', restart: true },
+      ] as EndpointMutation[]) {
+        expect(await run(mutation, editedProbes())).toMatchObject({ reason: 'provider', service: 'vpn' });
+      }
+      expect(await run({ kind: 'up' }, editedProbes(['vpn']))).toMatchObject({ reason: 'provider', service: 'vpn' });
+      expect((await run({ kind: 'service', service: 'vpn' }, editedProbes()))?.message).toContain('"socket-proxy"');
+    });
+
+    it('keeps the owner protected for stack-wide stop and update when Sencho is not in the stack', async () => {
+      withProxyIn('NetworkMode', `container:${VPN_ID}`);
+      mockListContainers.mockResolvedValue([vpn, sibling]);
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy', 'edge'));
+
+      expect(await run({ kind: 'stop' }, editedProbes())).toMatchObject({ reason: 'provider', service: 'vpn' });
+      expect(await run({ kind: 'update' }, editedProbes())).toMatchObject({ reason: 'provider', service: 'vpn' });
+    });
+
+    it('matches an owner the proxy references by name', async () => {
+      withProxyIn('NetworkMode', 'container:vpn');
+
+      expect(await run({ kind: 'service', service: 'vpn', restart: true }, editedProbes())).toMatchObject({ reason: 'provider', service: 'vpn' });
+    });
+
+    it('leaves an unrelated sibling and a deploy that leaves the owner unchanged alone', async () => {
+      withProxyIn('NetworkMode', `container:${VPN_ID}`);
+
+      expect(await run({ kind: 'service', service: 'sibling', restart: true }, editedProbes())).toBeNull();
+      expect(await run({ kind: 'up' }, editedProbes(['sibling']))).toBeNull();
+    });
+
+    it('follows a chain of owners through the running containers', async () => {
+      withProxyIn('NetworkMode', `container:${VPN_ID}`);
+      runtimeModes.set(VPN_ID, { name: 'vpn', modes: { NetworkMode: `container:${'e'.repeat(64)}` } });
+
+      expect(await run({ kind: 'service', service: 'sibling', restart: true }, editedProbes())).toMatchObject({ reason: 'provider', service: 'sibling' });
+    });
+
+    it('protects the owner of Sencho\'s own namespace, and Sencho itself stays restartable', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, vpn]);
+      runtimeModes.set(SELF_ID, { name: 'sencho', modes: { PidMode: `container:${VPN_ID}` } });
+
+      expect(await run({ kind: 'service', service: 'vpn', restart: true }, editedProbes())).toMatchObject({ reason: 'sencho', service: 'vpn' });
+      expect(await run({ kind: 'service', service: 'sencho', restart: true }, editedProbes())).toBeNull();
+    });
+
+    it('protects an owner in this stack for a provider that lives in another project', async () => {
+      mockListContainers.mockResolvedValue([container(VPN_ID, 'vpn', { project: 'infra' })]);
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy', 'edge'));
+      runtimeModes.set(PROXY_ID, { name: 'socket-proxy', modes: { NetworkMode: `container:${VPN_ID}` } });
+
+      expect(await run({ kind: 'stop' }, editedProbes(), 'infra')).toMatchObject({ reason: 'provider', service: 'vpn' });
+    });
+
+    it('refuses as unresolved when the protected container cannot be inspected to read its namespaces', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, proxyContainer, vpn]);
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockGetContainer.mockImplementation(() => ({ inspect: async () => { throw new Error('inspect denied'); } }));
+
+      const refusal = await run({ kind: 'service', service: 'vpn', restart: true }, editedProbes());
+
+      expect(refusal).toMatchObject({ reason: 'unresolved' });
+      expect(refusal?.message).toContain('inspect denied');
+    });
+  });
+
   describe('a proxy whose configuration hash cannot be compared', () => {
     it.each([
       ['network_mode: service', 'socket-proxy:\n    network_mode: service:vpn'],
@@ -622,6 +771,41 @@ describe('io.sencho.infrastructure', () => {
     expect(refusal?.message).toContain('"yes"');
   });
 
+  describe('first deployment (no containers yet)', () => {
+    beforeEach(() => {
+      mockListContainers.mockResolvedValue([]);
+    });
+
+    it.each<EndpointMutation>([{ kind: 'up' }, { kind: 'update' }, { kind: 'service', service: 'web' }])(
+      'refuses an invalid label before %o runs',
+      async (mutation) => {
+        const render = vi.fn().mockResolvedValue(rendered('false'));
+
+        const refusal = await run(mutation, probes({ renderConfig: render }), 'blog');
+
+        expect(render).toHaveBeenCalled();
+        expect(refusal).toMatchObject({ reason: 'invalid_label', service: 'web' });
+      },
+    );
+
+    it('allows a label of "true" and an absent label', async () => {
+      expect(await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(rendered('true')) }), 'blog')).toBeNull();
+      expect(await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue('services:\n  web:\n    image: x\n') }), 'blog')).toBeNull();
+    });
+
+    it('does not hold a stop of a stack that was never deployed hostage to its file', async () => {
+      const render = vi.fn().mockResolvedValue(rendered('false'));
+
+      expect(await run({ kind: 'stop' }, probes({ renderConfig: render }), 'blog')).toBeNull();
+    });
+
+    it('does not turn a failed render into a refusal', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+      expect(await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockRejectedValue(new Error('render failed')) }), 'blog')).toBeNull();
+    });
+  });
+
   it('does not let a failed render turn into a refusal on its own', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     mockListContainers.mockResolvedValue([container(WEB_ID, 'web', { project: 'blog' })]);
@@ -722,10 +906,25 @@ describe('Sencho cannot identify itself', () => {
 });
 
 describe('Docker errors while listing the stack', () => {
-  it('lets the operation fail on its own when Docker is unreachable', async () => {
+  it('refuses when Docker is unreachable: the connection can recover before the mutation that follows', async () => {
     mockListContainers.mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED /var/run/docker.sock'), { code: 'ECONNREFUSED' }));
 
-    expect(await run({ kind: 'stop' })).toBeNull();
+    expect(await run({ kind: 'stop' })).toMatchObject({ reason: 'unresolved' });
+  });
+
+  it.each<EndpointMutation>([
+    { kind: 'up' }, { kind: 'update' }, { kind: 'stop' }, { kind: 'restart' }, { kind: 'service', service: 'socket-proxy' },
+  ])('refuses %o on a known provider after one failed read, though the next read would succeed', async (mutation) => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+    mockListContainers
+      .mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }))
+      .mockResolvedValue([proxyContainer, webContainer]);
+
+    expect(await run(mutation)).toMatchObject({ reason: 'unresolved' });
+    // The read recovers: a deploy that leaves the proxy unchanged goes through, anything else is refused as the provider it is.
+    const recovered = await run(mutation);
+    if (mutation.kind === 'up') expect(recovered).toBeNull();
+    else expect(recovered).toMatchObject({ reason: 'provider' });
   });
 
   it('refuses on any other listing failure, since nothing can be proved', async () => {
@@ -743,10 +942,10 @@ describe('connection errors while listing the stack', () => {
     ['ECONNREFUSED', Object.assign(new Error('connect ECONNREFUSED 10.0.0.2:2375'), { code: 'ECONNREFUSED' })],
     ['a missing docker.sock', Object.assign(new Error('connect ENOENT /var/run/docker.sock'), { code: 'ENOENT' })],
     ['an unreachable daemon', new Error('Cannot connect to the Docker daemon at tcp://socket-proxy:2375')],
-  ])('lets the operation fail on its own for %s', async (_name, error) => {
+  ])('refuses for %s, since the connection can recover before the mutation', async (_name, error) => {
     mockListContainers.mockRejectedValue(error);
 
-    expect(await run({ kind: 'stop' })).toBeNull();
+    expect(await run({ kind: 'stop' })).toMatchObject({ reason: 'unresolved' });
   });
 
   it.each([
@@ -955,11 +1154,39 @@ describe('evaluateDockerEndpointContainer', () => {
     expect(await evaluate(SELF_ID.slice(0, 12), 'stop')).toMatchObject({ reason: 'sencho' });
   });
 
-  it('lets the operation fail on its own for a missing container or an unreachable Docker, and refuses on other inspect errors', async () => {
+  it('lets the operation fail on its own for a missing container, and refuses on other inspect errors', async () => {
     expect(await evaluate('no-such', 'stop')).toBeNull();
-    expect(await evaluate(WEB_ID, 'stop', dockerFor(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })))).toBeNull();
     mockResolveProvider.mockResolvedValue({ state: 'unresolved', reason: 'dns' });
     expect(await evaluate(WEB_ID, 'stop', dockerFor(new Error('403 forbidden')))).toMatchObject({ reason: 'unresolved' });
+  });
+
+  describe.each([
+    ['ECONNREFUSED', Object.assign(new Error('connect ECONNREFUSED 10.0.0.2:2375'), { code: 'ECONNREFUSED' })],
+    ['a missing docker.sock', Object.assign(new Error('connect ENOENT /var/run/docker.sock'), { code: 'ENOENT' })],
+    ['an unreachable daemon', new Error('Cannot connect to the Docker daemon at tcp://socket-proxy:2375')],
+  ])('when Docker is unreachable (%s)', (_name, error) => {
+    it.each(['stop', 'restart'] as const)('refuses a %s of an ordinary container, since the connection can recover before the mutation', async (action) => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+      expect(await evaluate(WEB_ID, action, dockerFor(error))).toMatchObject({ reason: 'unresolved' });
+    });
+
+    it('keeps refusing what it already knows: the provider, and Sencho on a stop', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+      expect(await evaluate(PROXY_ID, 'stop', dockerFor(error))).toMatchObject({ reason: 'provider' });
+      expect(await evaluate('socket-proxy', 'restart', dockerFor(error))).toMatchObject({ reason: 'provider' });
+      expect(await evaluate(SELF_ID, 'stop', dockerFor(error))).toMatchObject({ reason: 'sencho' });
+    });
+  });
+
+  it('refuses a batch whole when one container cannot be checked, before any of them is touched', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+    const down = dockerFor(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+    const results: Array<unknown> = [];
+    for (const id of [WEB_ID, PROXY_ID]) results.push(await evaluate(id, 'stop', down));
+
+    expect(results.every(refusal => refusal !== null)).toBe(true);
   });
 });
 
