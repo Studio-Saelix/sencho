@@ -146,7 +146,8 @@ function serviceNamed(mode: unknown): string | null {
  * The services `service` is wired to. A namespace mode (`network_mode`, `pid`,
  * `ipc` set to `service:x`), `volumes_from`, `links`, and a `depends_on` entry
  * with `restart: true` all make Compose recreate or restart it when the other
- * service is recreated; a plain `depends_on` does not.
+ * service is recreated; a plain `depends_on` does not. `hashUnreliable` is set
+ * when the service resolves a `volumes_from` or `service:` namespace reference.
  */
 function wiringOf(service: RenderedServiceDocument | undefined): { linked: string[]; namespace: string[]; hashUnreliable: boolean } {
   const namespace = new Set<string>();
@@ -364,7 +365,8 @@ function sharesSenchoNetwork(
  * The services whose network, pid, or ipc namespace `services` run in,
  * transitively: stopping or recreating one of them takes the service down with
  * it. Services that merely share an owner with it, or run in its own namespace,
- * are not included: stopping those cannot stop it.
+ * are not included: stopping those cannot stop it. Each owner is mapped to the
+ * protected service it was reached from.
  */
 function namespaceOwners(services: Array<string | null>, rendered: Map<string, RenderedService>): Map<string, string> {
   const owners = new Map<string, string>();
@@ -425,6 +427,8 @@ async function ownRecreate(
  * decision, or that of anything it is wired to, because Compose recreates or
  * restarts a service when a service it links to, mounts volumes from, runs in
  * the namespace of, or lists in `depends_on` with `restart: true` is recreated.
+ * `unreliable` takes precedence over `unknown` so the refusal names the hash
+ * limitation; either way the operation is refused.
  */
 async function wouldRecreate(
   input: EndpointGuardInput,

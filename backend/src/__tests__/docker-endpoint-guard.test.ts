@@ -519,6 +519,7 @@ describe('the Docker socket proxy', () => {
       }));
 
       expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+      expect(refusal?.message).toContain('never equals the one Compose renders');
     });
 
     it('still reports a plain proxy with a different hash as recreated', async () => {
