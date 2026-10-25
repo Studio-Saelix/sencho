@@ -84,9 +84,9 @@ export interface PolicyEnforcementOptions {
     composeInvocation?: RollbackInvocationRecord | null;
     /**
      * Leave an audit row when the gate allows on evidence that was not a clean
-     * pass. Defaults to on. A read-only probe that asks "would this be allowed"
-     * (rollback eligibility, a read-only probe) sets it to false: it allowed
-     * nothing, and a row per poll would bury the rows for real operations.
+     * pass. Defaults to on. A read-only probe that asks "would this be allowed" and
+     * runs repeatedly (rollback eligibility) sets it to false: it allowed
+     * nothing, and a row per probe would bury the rows for real operations.
      */
     recordAllowedEvidence?: boolean;
     /**

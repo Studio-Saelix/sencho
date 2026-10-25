@@ -139,6 +139,49 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.queryByText(/could not be obtained/i)).not.toBeInTheDocument();
   });
 
+  it('does not offer the settings when a genuine match sits beside an evaluation failure', () => {
+    const mixed: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'redis:7', severity: 'CRITICAL', criticalCount: 2, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 11 },
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: Date.now(), reason: 'Policy evaluation failed: boom' },
+        ],
+        applications: [],
+      },
+    };
+    renderDialog(mixed);
+    expect(screen.getByText(/evidence that could not be checked/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+  });
+
+  it('does not offer the settings when the only applied rule allowed', () => {
+    const allowedPlusFailure: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'redis:7', collectedAt: Date.now(), reason: 'scan crashed' },
+        ],
+        applications: [{ source: 'vulnerability_scan', state: 'failed', target: 'redis:7', outcome: 'allow', rule: 'security_scan_failure=allow' }],
+      },
+    };
+    renderDialog(allowedPlusFailure);
+    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+  });
+
   it('explains both problems when one image is stale and its findings incomplete', () => {
     // Regression: the de-duplication keyed only on source:target, so the second
     // problem on the same image was silently dropped from the dialog.

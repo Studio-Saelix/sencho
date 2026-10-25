@@ -136,10 +136,11 @@ export function PolicyBlockDialog({
   // about the whole block and is false when any image matched on the merits.
   const genuineCount = violations.filter((v) => !v.error).length;
   const hasGenuineViolation = genuineCount > 0;
-  // A setting governs the outcome only when a rule was applied. An evaluation
-  // that threw after a completed scan has no rule, so pointing at the settings
-  // would send the operator to a control that changes nothing for this block.
-  const governedBySetting = (payload?.evidence?.applications?.length ?? 0) > 0;
+  // A setting governs the block only when a rule that refused was applied. An
+  // evaluation that threw after a completed scan has no rule, and a rule that
+  // allowed or warned did not stop anything, so pointing at the settings would
+  // send the operator to a control that changes nothing for this block.
+  const governedBySetting = (payload?.evidence?.applications ?? []).some((a) => a.outcome === 'block');
 
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
@@ -227,8 +228,12 @@ export function PolicyBlockDialog({
             </div>
             <p className="text-xs text-muted-foreground mt-1">
               {hasGenuineViolation
-                ? `This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained${governedBySetting ? ', and your settings say what to do in that case' : ''}.`
-                : `This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs was not available${governedBySetting ? ', and your settings say what to do in that case' : ''}.`}
+                ? governedBySetting
+                  ? 'This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.'
+                  : 'This deploy was also affected by evidence that could not be checked. Alongside the findings above, see the details below.'
+                : governedBySetting
+                  ? 'This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.'
+                  : 'This deploy was not stopped by a proven vulnerability. It was stopped because the images could not be evaluated.'}
             </p>
             <ul className="mt-2 space-y-1">
               {evidenceLines.map((line) => (
