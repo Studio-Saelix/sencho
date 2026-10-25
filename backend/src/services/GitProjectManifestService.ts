@@ -1169,7 +1169,7 @@ export class GitProjectManifestService {
         return FileSystemService.getInstance().publishDeclarationSet(
             stackName,
             () => this.restorePreviousGenerationFiles(stackName, opts),
-            (restored) => restored,
+            (restored) => (restored ? 'whole' : 'partial'),
         );
     }
 
@@ -1511,6 +1511,8 @@ export class GitProjectManifestService {
         return FileSystemService.getInstance().publishDeclarationSet(
             stackName,
             () => this.restoreDetachRecoveryFiles(stackName, repoUrl, branch, root),
+            // No marker means nothing was written.
+            (restored) => (restored ? 'whole' : 'untouched'),
         );
     }
 

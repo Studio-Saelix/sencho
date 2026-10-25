@@ -119,6 +119,15 @@ export interface DeclarationSetPublication {
   complete(): void;
   /** The layers may be a mixture. The declaration stays unknown until a later publication completes. */
   abandon(): void;
+  /** The operation wrote nothing. It leaves an earlier abandoned state as it found it. */
+  skip(): void;
+}
+
+export type DeclarationSetSettlement = 'whole' | 'partial' | 'untouched';
+
+function forgetAbandonedDeclarationSet(key: string): void {
+  const state = declarationSets.get(key);
+  if (state && state.open === 0) declarationSets.delete(key);
 }
 
 function openDeclarationSet(key: string): DeclarationSetPublication {
@@ -131,23 +140,24 @@ function openDeclarationSet(key: string): DeclarationSetPublication {
   live.open += 1;
   declarationSetClock += 1;
   let closed = false;
-  const close = (whole: boolean): void => {
+  const close = (settlement: DeclarationSetSettlement): void => {
     if (closed) return;
     closed = true;
     live.open -= 1;
     declarationSetClock += 1;
-    if (!whole) {
+    if (settlement === 'partial') {
       live.incomplete = true;
       live.tainted = true;
     }
     if (live.open === 0) {
-      if (!live.tainted) live.incomplete = false;
+      // Only a bracket that wrote something can make a mixture whole again.
+      if (settlement === 'whole' && !live.tainted) live.incomplete = false;
       live.tainted = false;
       // A whole set with no open bracket carries no information to keep.
-      if (!live.incomplete) declarationSets.delete(key);
+      if (!live.incomplete && declarationSets.get(key) === live) declarationSets.delete(key);
     }
   };
-  return { complete: () => close(true), abandon: () => close(false) };
+  return { complete: () => close('whole'), abandon: () => close('partial'), skip: () => close('untouched') };
 }
 
 /**
@@ -525,13 +535,14 @@ export class FileSystemService {
   }
 
   /**
-   * Run `write` as one declaration-set publication: whole when it resolves and
-   * `isWhole` (default: always) accepts the result, abandoned when it throws.
+   * Run `write` as one declaration-set publication. `settle` classifies the
+   * result: whole by default, partial when the writes may have left a mixture,
+   * untouched when nothing was written. A throw is partial.
    */
   async publishDeclarationSet<T>(
     stackName: string,
     write: () => Promise<T>,
-    isWhole: (result: T) => boolean = () => true,
+    settle: (result: T) => DeclarationSetSettlement = () => 'whole',
   ): Promise<T> {
     const publication = this.beginDeclarationSetPublication(stackName);
     let result: T;
@@ -541,8 +552,10 @@ export class FileSystemService {
       publication.abandon();
       throw err;
     }
-    if (isWhole(result)) publication.complete();
-    else publication.abandon();
+    const settlement = settle(result);
+    if (settlement === 'whole') publication.complete();
+    else if (settlement === 'partial') publication.abandon();
+    else publication.skip();
     return result;
   }
 
@@ -1282,6 +1295,9 @@ export class FileSystemService {
       console.error('Error deleting stack directory:', fsError.message);
       throw new Error(`Failed to delete stack directory: ${fsError.message}`);
     }
+    // A mixture of layers that no longer exists must not mark a stack created
+    // later under the same name as unknown.
+    forgetAbandonedDeclarationSet(stackDir);
   }
 
   getBaseDir(): string {
@@ -2561,14 +2577,27 @@ export class FileSystemService {
         if (opts.mode !== undefined) {
           await fh.chmod(opts.mode);
         } else if (handoverMode !== undefined) {
-          // The mode the replaced file already had. A filesystem that cannot
-          // set modes leaves the staging file owner-only, which is the narrower
-          // outcome, so only a refusal to set the mode is tolerated.
-          try {
-            await fh.chmod(handoverMode);
-          } catch (err: unknown) {
-            const code = (err as NodeJS.ErrnoException).code;
-            if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+          // The mode the replaced file already had, applied only once the
+          // intended owner holds the staging file: a process that could not
+          // hand the file over would otherwise publish group-readable bits for
+          // a group that is not the file's. A filesystem that cannot set modes
+          // leaves the staging file owner-only, which is the narrower outcome,
+          // so only a refusal to set the mode is tolerated, and it is logged.
+          const held = await fh.stat();
+          if (owner && held.uid === owner.uid && held.gid === owner.gid) {
+            try {
+              await fh.chmod(handoverMode);
+            } catch (err: unknown) {
+              const code = (err as NodeJS.ErrnoException).code;
+              if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+              console.warn(
+                `[FileSystemService] Could not restore mode ${handoverMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
+              );
+            }
+          } else {
+            console.warn(
+              `[FileSystemService] Could not hand ${sanitizeForLog(path.basename(safePath))} to its owner; the file stays owner-only`,
+            );
           }
         }
         await fh.sync();

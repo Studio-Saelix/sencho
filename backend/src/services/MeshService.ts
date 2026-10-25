@@ -2673,6 +2673,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private async readDeclaredServiceNames(stackName: string, nodeId: number): Promise<Set<string> | null> {
         if (!isValidStackName(stackName)) return null;
         const fsSvc = FileSystemService.getInstance(nodeId);
+        // Each layer is published on its own, so a Git apply or a rollback
+        // restore that is moving a service between layers shows a union that
+        // misses it until the last layer lands. The declaration is unknown
+        // while such an operation is open or was abandoned, and a read that an
+        // operation overlapped is discarded. The marker is taken before the
+        // file list is resolved: an operation that finished in between would
+        // otherwise pair the old list with the new files.
+        const setBefore = fsSvc.declarationSetEpoch(stackName);
+        if (setBefore === null) {
+            this.logDiag('compose declaration set is being rewritten', { stackName });
+            return null;
+        }
         let relFiles: string[];
         try {
             const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
@@ -2701,16 +2713,6 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             return null;
         }
         if (relFiles.length === 0) return null;
-        // Each layer is published on its own, so a Git apply or a rollback
-        // restore that is moving a service between layers shows a union that
-        // misses it until the last layer lands. The declaration is unknown
-        // while such an operation is open or was abandoned, and a read that an
-        // operation overlapped is discarded.
-        const setBefore = fsSvc.declarationSetEpoch(stackName);
-        if (setBefore === null) {
-            this.logDiag('compose declaration set is being rewritten', { stackName });
-            return null;
-        }
         const names = new Set<string>();
         for (const relFile of relFiles) {
             let parsed: unknown;
@@ -2767,13 +2769,13 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 if (/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) names.add(name);
             }
         }
-        // A Compose stack declares at least one service. An empty union means
-        // no file contributed a readable services map, not that the stack
-        // stopped owning everything, so it is unknown rather than a release.
         if (fsSvc.declarationSetEpoch(stackName) !== setBefore) {
             this.logDiag('compose declaration set changed while it was being read', { stackName });
             return null;
         }
+        // A Compose stack declares at least one service. An empty union means
+        // no file contributed a readable services map, not that the stack
+        // stopped owning everything, so it is unknown rather than a release.
         return names.size > 0 ? names : null;
     }
 

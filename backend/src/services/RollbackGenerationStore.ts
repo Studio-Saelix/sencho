@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'crypto';
 import { constants as fsConstants, promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
-import { FileSystemService } from './FileSystemService';
+import { FileSystemService, type DeclarationSetPublication } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
@@ -31,6 +31,22 @@ const GENERATION_JSON = 'generation.json';
 const FILES_DIR = 'files';
 const PRE_RESTORE_DIR = 'pre-restore';
 const RESTORE_INTENT_FILE = 'restore-intent.json';
+
+/**
+ * Declaration-set brackets of restore transactions that have rewritten the
+ * live files and not yet been committed or reverted, by node, stack, and
+ * generation. A restore is a transaction: the layers are rewritten first, and
+ * the Git side (the applied file list the mesh declaration reader follows)
+ * is restored only after compose and the health probe. Between the two, the
+ * files and the list disagree, so the declaration stays unknown until the
+ * transaction ends. In memory like the brackets themselves: after a restart
+ * nothing counts as published.
+ */
+const pendingRestoreBrackets = new Map<string, DeclarationSetPublication>();
+
+function restoreBracketKey(nodeId: number, stackName: string, generationId: string): string {
+  return `${nodeId}\0${stackName}\0${generationId}`;
+}
 const GIT_MANIFEST_SNAPSHOT = 'git-manifest.v1.json';
 const PRE_RESTORE_INDEX = 'index.json';
 const PRE_RESTORE_BLOBS = 'blobs';
@@ -540,10 +556,26 @@ export class RollbackGenerationStore {
       );
     }
 
-    await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
-    await this.restoreGitSideStateFromIntent(stackName, intent);
-    await fsPromises.rm(intentPath, { force: true });
+    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
+    try {
+      await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+      await this.restoreGitSideStateFromIntent(stackName, intent);
+      await fsPromises.rm(intentPath, { force: true });
+    } catch (e) {
+      this.settleRestoreBracket(bracketKey, false);
+      throw e;
+    }
+    this.settleRestoreBracket(bracketKey, true);
     return true;
+  }
+
+  /** End a restore transaction's bracket: whole when its files and Git side agree, unknown otherwise. */
+  private static settleRestoreBracket(key: string, whole: boolean): void {
+    const publication = pendingRestoreBrackets.get(key);
+    if (!publication) return;
+    pendingRestoreBrackets.delete(key);
+    if (whole) publication.complete();
+    else publication.abandon();
   }
 
   /**
@@ -567,6 +599,7 @@ export class RollbackGenerationStore {
     if (preRoot.startsWith(genResolved + path.sep)) {
       await fsPromises.rm(preRoot, { recursive: true, force: true });
     }
+    this.settleRestoreBracket(restoreBracketKey(nodeId, stackName, generationId), true);
   }
 
   /**
@@ -765,9 +798,11 @@ export class RollbackGenerationStore {
     await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
 
     // The restore rewrites several layers one at a time. The bracket keeps the
-    // mesh declaration reader from trusting the mixture; it is whole when the
-    // restore finishes, or when the revert below puts the preimage back.
-    const publication = fsSvc.beginDeclarationSetPublication(stackName);
+    // mesh declaration reader from trusting the mixture; it ends with the
+    // restore transaction, whole when it is committed or reverted.
+    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
+    const publication = pendingRestoreBrackets.get(bracketKey) ?? fsSvc.beginDeclarationSetPublication(stackName);
+    pendingRestoreBrackets.set(bracketKey, publication);
     try {
       for (const item of restores) {
         await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
@@ -810,18 +845,19 @@ export class RollbackGenerationStore {
         }
       }
 
-      publication.complete();
+      // The bracket stays open: the Git side still has to be restored, and
+      // commitRestoreTransaction or a revert ends the transaction.
       // Leave restore-intent.json + pre-restore/ until commitRestoreTransaction
       // so a later policy/compose failure can still revert the managed set.
       return manifest;
     } catch (e) {
       try {
         await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
-        publication.complete();
         await this.restoreGitSideStateFromIntent(stackName, intent);
         await fsPromises.rm(intentPath, { force: true });
+        this.settleRestoreBracket(bracketKey, true);
       } catch (revertErr) {
-        publication.abandon();
+        this.settleRestoreBracket(bracketKey, false);
         console.error(
           '[RollbackGenerationStore] Failed to revert interrupted restore:',
           (revertErr as Error).message,
@@ -1154,25 +1190,28 @@ export class RollbackGenerationStore {
     await FileSystemService.getInstance(nodeId).publishDeclarationSet(
       stackName,
       () => this.putBackPreRestoreSnapshot(nodeId, stackName, genResolved),
+      // Without a snapshot nothing was written.
+      (wrote) => (wrote ? 'whole' : 'untouched'),
     );
   }
 
+  /** Resolves true when the snapshot was applied, false when there was none to apply. */
   private static async putBackPreRestoreSnapshot(
     nodeId: number,
     stackName: string,
     genResolved: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
-    if (!preRoot.startsWith(genResolved + path.sep)) return;
+    if (!preRoot.startsWith(genResolved + path.sep)) return false;
     try {
       await fsPromises.access(preRoot);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw e;
     }
 
     const indexPath = path.resolve(preRoot, PRE_RESTORE_INDEX);
-    if (!indexPath.startsWith(preRoot + path.sep)) return;
+    if (!indexPath.startsWith(preRoot + path.sep)) return false;
 
     let index: PreRestoreIndex;
     try {
@@ -1277,6 +1316,7 @@ export class RollbackGenerationStore {
       await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
+    return true;
   }
 
   /**

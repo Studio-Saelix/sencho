@@ -157,7 +157,7 @@ describe('RollbackGenerationStore', () => {
       return { stackDir, generationId };
     }
 
-    it('is open while a restore rewrites the layers and whole once it finishes', async () => {
+    it('is open while a restore rewrites the layers and until the transaction is committed', async () => {
       const { FileSystemService } = await import('../services/FileSystemService');
       const stackName = 'bracket-restore';
       const { generationId } = await twoLayerGeneration(stackName);
@@ -176,6 +176,24 @@ describe('RollbackGenerationStore', () => {
       await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
 
       expect(seen).toEqual([null, null]);
+      // The Git side is restored after compose and the probe, so the files and
+      // the applied file list still disagree once the layers are written.
+      expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+
+      await RollbackGenerationStore.commitRestoreTransaction(NODE, stackName, generationId);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is whole again when a restored transaction is reverted by reconciliation', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-reconcile';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+      expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+
+      await expect(RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId)).resolves.toBe(true);
       expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
     });
 

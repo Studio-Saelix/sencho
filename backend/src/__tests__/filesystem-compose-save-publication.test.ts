@@ -325,3 +325,38 @@ describe('compose save publication', () => {
         });
     });
 });
+
+describe('declaration set publication', () => {
+    const fresh = (name: string) => FileSystemService.getInstance().declarationSetEpoch(name);
+
+    it('stays unknown after an abandoned operation until a later one that wrote completes', async () => {
+        const fsSvc = FileSystemService.getInstance();
+        const name = 'declaration-set-heal';
+        fsSvc.beginDeclarationSetPublication(name).abandon();
+        expect(fresh(name)).toBeNull();
+
+        await fsSvc.publishDeclarationSet(name, async () => 'nothing written', () => 'untouched');
+        expect(fresh(name)).toBeNull();
+
+        await fsSvc.publishDeclarationSet(name, async () => 'rewrote the layers');
+        expect(fresh(name)).not.toBeNull();
+    });
+
+    it('treats a write that reports a mixture as partial', async () => {
+        const fsSvc = FileSystemService.getInstance();
+        const name = 'declaration-set-partial';
+        await fsSvc.publishDeclarationSet(name, async () => false, (restored) => (restored ? 'whole' : 'partial'));
+        expect(fresh(name)).toBeNull();
+    });
+
+    it('does not carry an abandoned mixture over to a stack created under the same name', async () => {
+        const fsSvc = FileSystemService.getInstance();
+        const name = 'declaration-set-recreated';
+        fsSync.mkdirSync(path.join(process.env.COMPOSE_DIR as string, name), { recursive: true });
+        fsSvc.beginDeclarationSetPublication(name).abandon();
+        expect(fresh(name)).toBeNull();
+
+        await fsSvc.deleteStack(name);
+        expect(fresh(name)).not.toBeNull();
+    });
+});
