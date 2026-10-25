@@ -465,6 +465,23 @@ describe('the Docker socket proxy', () => {
       expect(await run({ kind: 'service', service: 'host-net', restart: true }, renderedProbes([], yaml))).toMatchObject({ reason: 'provider', service: 'host-net' });
     });
 
+    it('names, for each owner, the protected service that runs in it', async () => {
+      mockListContainers.mockResolvedValue([
+        senchoContainer,
+        container('b'.repeat(64), 'proxy-a', { labels: { 'io.sencho.infrastructure': 'true' } }),
+        container('c'.repeat(64), 'proxy-b', { labels: { 'io.sencho.infrastructure': 'true' } }),
+        container('d'.repeat(64), 'vpn-a'),
+        container('e'.repeat(64), 'vpn-b'),
+      ]);
+      const yaml = 'services:\n  proxy-a:\n    network_mode: service:vpn-a\n    labels:\n      io.sencho.infrastructure: "true"\n  proxy-b:\n    network_mode: service:vpn-b\n    labels:\n      io.sencho.infrastructure: "true"\n  vpn-a:\n    command: run\n  vpn-b:\n    command: run\n';
+
+      const refusal = await run({ kind: 'service', service: 'vpn-b', restart: true }, renderedProbes([], yaml));
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'vpn-b' });
+      expect(refusal?.message).toContain('"proxy-b"');
+      expect(refusal?.message).not.toContain('"proxy-a"');
+    });
+
     it('protects the owner of Sencho\'s own namespace, and a restart of it is not exempt like a restart of Sencho', async () => {
       mockListContainers.mockResolvedValue([senchoContainer, vpnContainer]);
       const yaml = 'services:\n  sencho:\n    network_mode: service:vpn\n  vpn:\n    command: run\n';
@@ -485,6 +502,20 @@ describe('the Docker socket proxy', () => {
       const refusal = await run({ kind: 'up' }, probes({
         renderConfig: vi.fn().mockResolvedValue(yaml),
         configHash: vi.fn(async (service: string) => (service === 'socket-proxy' ? 'rendered-hash' : 'hash-current')),
+      }));
+
+      expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+      expect(refusal?.message).toContain('never equals the one Compose renders');
+      expect(refusal?.message).not.toContain('did not report its configuration hash');
+    });
+
+    it('treats volumes_from naming a container the same way', async () => {
+      mockListContainers.mockResolvedValue([proxyContainer]);
+      const yaml = 'services:\n  socket-proxy:\n    volumes_from: ["container:data"]\n';
+
+      const refusal = await run({ kind: 'up' }, probes({
+        renderConfig: vi.fn().mockResolvedValue(yaml),
+        configHash: vi.fn().mockResolvedValue('rendered-hash'),
       }));
 
       expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
@@ -803,6 +834,17 @@ describe('evaluateDockerEndpointContainer', () => {
     }
   });
 
+  it('refuses to stop or restart the container whose namespace Sencho runs in', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+    specs[SELF_ID].hostConfig = { NetworkMode: `container:${WEB_ID}` };
+    try {
+      expect(await evaluate(WEB_ID, 'stop')).toMatchObject({ reason: 'sencho', service: 'web' });
+      expect(await evaluate(WEB_ID, 'restart')).toMatchObject({ reason: 'sencho', service: 'web' });
+    } finally {
+      delete specs[SELF_ID].hostConfig;
+    }
+  });
+
   it('matches the namespace owner by name, and finds a proxy that was recreated since it was resolved', async () => {
     mockResolveProvider.mockResolvedValue({
       state: 'resolved',
@@ -825,7 +867,10 @@ describe('evaluateDockerEndpointContainer', () => {
         : base.getContainer(ref),
     };
 
-    expect(await evaluate(WEB_ID, 'stop', docker)).toMatchObject({ reason: 'unresolved', service: 'web' });
+    const refusal = await evaluate(WEB_ID, 'stop', docker);
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'web' });
+    expect(refusal?.message).toContain('inspect denied');
   });
 
   it('leaves unrelated containers alone', async () => {
