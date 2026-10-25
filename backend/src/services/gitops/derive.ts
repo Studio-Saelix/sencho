@@ -141,7 +141,7 @@ export function deriveGitOpsRevision(
     .map((target) => deriveTarget(app, acceptedIntent, target, facts.healthDisabled, limitations, confirmationExpected));
   const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
-  const availableActions = deriveActions(app, source, placement, targets);
+  const availableActions = deriveActions(app, source, placement, targets, facts.targets);
   return {
     schemaVersion: 1,
     targetMode: app.target_mode,
@@ -2655,11 +2655,43 @@ function targetDeployLegal(app: GitOpsApplicationRow, target: GitOpsTargetProjec
   );
 }
 
+/**
+ * Whether an operator retry would resume at the deploy because the health gate
+ * judged the applied generation a failure.
+ *
+ * A failed verdict never sets the application's or the target's failure
+ * columns, because the deploy itself succeeded, so no source status offers
+ * `retry` for it. The retry still has somewhere to go: it resumes the deploy
+ * alone against the applied generation. This mirrors the evidence that
+ * decides that arm (the active Direct target applied exactly the accepted
+ * generation, carries no other failure, and the stack's latest stack-scoped
+ * health run is a `failed` verdict bound to it), plus the states in which
+ * retry defers to the real state instead of starting work. A
+ * service-scoped run, an observing or unknown run, or a run bound to another
+ * generation is not a failure claim about the applied generation.
+ */
+function healthFailedDeployRetryLegal(app: GitOpsApplicationRow, rawTargets: GitOpsTargetCurrentRow[]): boolean {
+  const generationId = app.accepted_generation_id;
+  const stackName = app.stack_name;
+  if (!generationId || !stackName) return false;
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return false;
+  if (app.recovery_phase !== null && app.recovery_phase !== 'complete') return false;
+  const store = GitOpsStore.getInstance();
+  if (!store.getGeneration(generationId)) return false;
+  return rawTargets.some((target) => {
+    if (target.target_status !== 'active') return false;
+    if (target.applied_generation_id !== generationId || target.failure_stage !== null) return false;
+    const run = store.getLatestStackHealthRun(target.node_id, stackName);
+    return run !== undefined && run.status === 'failed' && run.deployed_generation_id === generationId;
+  });
+}
+
 function deriveActions(
   app: GitOpsApplicationRow,
   source: SourceFacet,
   placement: PlacementFacet,
   targets: GitOpsTargetProjection[],
+  rawTargets: GitOpsTargetCurrentRow[],
 ): GitOpsAvailableAction[] {
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
@@ -2723,7 +2755,11 @@ function deriveActions(
       actions.add('resume');
     } else {
       actions.add('suspend');
-      if (source.status === 'source_failed' || source.status === 'source_retry_scheduled') {
+      if (
+        source.status === 'source_failed'
+        || source.status === 'source_retry_scheduled'
+        || healthFailedDeployRetryLegal(app, rawTargets)
+      ) {
         actions.add('retry');
       }
     }

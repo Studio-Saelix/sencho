@@ -109,6 +109,7 @@ import {
   plainSource,
   sourceIdentity,
   sourceRevision,
+  target,
 } from '@/__tests__/gitopsFixtures';
 import { ARTIFACT_STATE, SOURCE_STATE } from '@/lib/gitopsState';
 import type { GitOpsAvailableAction } from '@/types/gitops';
@@ -1051,6 +1052,18 @@ describe('GitSourcePanel controller controls', () => {
     expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
     openTab('Automation');
     expect(screen.getByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
+  });
+
+  it('shows Retry when the applied generation failed its health gate and no source status failed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      jsonRes(linkedWith(liveRevision({
+        availableActions: ['retry', 'suspend'],
+        facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
+        targets: [target({ runtime: { status: 'fully_deployed_health_pending' } })],
+      }))),
+    );
+    render(panel());
+    expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
   });
 
   it('hides Retry when the source-controller capability is missing', async () => {
