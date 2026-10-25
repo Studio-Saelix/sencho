@@ -34,3 +34,28 @@ export function allowedPolicyEvidence(
     if (!gate.bypassed && isCleanEvidenceDecision(evidence)) return {};
     return { policyEvidence: { policy: { id: policy.id, name: policy.name }, bypassed: gate.bypassed, evidence } };
 }
+
+/**
+ * Read the `policyEvidence` field off a remote node's success body, so a hub
+ * that drove the operation can pass the decision on to its own caller. The body
+ * crossed a network hop, so the shape is checked rather than cast: a node that
+ * sent something else is treated as having sent nothing.
+ */
+export function parseRemotePolicyEvidence(body: unknown): AllowedPolicyEvidence | undefined {
+    if (typeof body !== 'object' || body === null) return undefined;
+    const candidate = (body as { policyEvidence?: unknown }).policyEvidence;
+    if (typeof candidate !== 'object' || candidate === null) return undefined;
+    const { policy, bypassed, evidence } = candidate as Partial<Record<keyof AllowedPolicyEvidence, unknown>>;
+    if (typeof policy !== 'object' || policy === null) return undefined;
+    const { id, name } = policy as { id?: unknown; name?: unknown };
+    if (typeof id !== 'number' || typeof name !== 'string' || typeof bypassed !== 'boolean') return undefined;
+    if (typeof evidence !== 'object' || evidence === null) return undefined;
+    const decision = evidence as Partial<Record<keyof EvidenceGateDecision, unknown>>;
+    if (
+        typeof decision.outcome !== 'string'
+        || typeof decision.summary !== 'string'
+        || !Array.isArray(decision.records)
+        || !Array.isArray(decision.applications)
+    ) return undefined;
+    return { policy: { id, name }, bypassed, evidence: evidence as EvidenceGateDecision };
+}

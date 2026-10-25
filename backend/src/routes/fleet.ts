@@ -24,6 +24,7 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
+import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -2929,8 +2930,10 @@ async function applySnapshotStackFiles(
 
 // Redeploys a stack after its files are restored. The deploy policy gate stays
 // with the caller (local deploys gate centrally; remote deploys are gated by
-// the remote node), so this only performs the deploy itself.
-async function redeploySnapshotStack(node: Node, stackName: string): Promise<void> {
+// the remote node), so this only performs the deploy itself. A remote node's
+// gate decision rides back on its deploy response; it is returned so the hub's
+// own response can report it, as the local arm does from its central gate.
+async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
@@ -2944,7 +2947,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     if (!lock.ran) {
       throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
     }
-    return;
+    return {};
   }
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
@@ -2988,6 +2991,8 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (verification.source === 'hub_authority' && verification.status !== 'verified') {
     console.warn(`[FleetSnapshot] Redeploy completed; verification incomplete for "${stackName}" on node ${node.id}: ${verification.detail}`);
   }
+  const policyEvidence = parseRemotePolicyEvidence(payload);
+  return policyEvidence ? { policyEvidence } : {};
 }
 
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
@@ -3114,7 +3119,8 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
       if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
-      await redeploySnapshotStack(node, stackName);
+      const redeployResult = await redeploySnapshotStack(node, stackName);
+      if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
@@ -3248,7 +3254,8 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         let policyEvidence: AllowedPolicyEvidence | undefined;
         if (redeploy) {
           if (node.type === 'local') ({ policyEvidence } = await assertPolicyGateAllows(group.stackName, node.id, policyOptions));
-          await redeploySnapshotStack(node, group.stackName);
+          const remoteRedeploy = await redeploySnapshotStack(node, group.stackName);
+          policyEvidence ??= remoteRedeploy.policyEvidence;
           redeployed = true;
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError, ...(policyEvidence ? { policyEvidence } : {}) });

@@ -1646,6 +1646,44 @@ describe('POST /api/stacks/:stackName/git-source/apply policy evidence', () => {
     });
 });
 
+describe('POST /api/stacks/:stackName/git-source/retry policy evidence', () => {
+    const allowed = {
+        policy: { id: 3, name: 'prod-gate' },
+        bypassed: false,
+        evidence: { outcome: 'allow', records: [], applications: [], summary: 'x' },
+    };
+
+    it('carries the decision the retried deploy was allowed on, and nothing on a clean retry', async () => {
+        const result = { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' } as never;
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockImplementationOnce(async (_stack, opts) => {
+                opts.onAllowed?.(allowed as never);
+                return result;
+            })
+            .mockResolvedValueOnce(result);
+        try {
+            const withEvidence = await request(app)
+                .post('/api/stacks/existing-stack/git-source/retry')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({});
+            expect(withEvidence.status).toBe(200);
+            expect(withEvidence.body).toMatchObject({
+                outcome: 'no_source_change',
+                policyEvidence: { policy: { name: 'prod-gate' }, bypassed: false },
+            });
+
+            const clean = await request(app)
+                .post('/api/stacks/existing-stack/git-source/retry')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({});
+            expect(clean.status).toBe(200);
+            expect(clean.body).not.toHaveProperty('policyEvidence');
+        } finally {
+            retrySpy.mockRestore();
+        }
+    });
+});
+
 describe('POST /api/stacks/:stackName/git-source/pull permissions and actor', () => {
     it('denies pull without stack:edit', async () => {
         seedGitSource('existing-stack');

@@ -700,6 +700,51 @@ describe('an allowed decision keeps the evidence it was allowed on', () => {
         expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
     });
 
+    it('does not alert that an operation proceeded when the call is a probe', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'warn' });
+        const probe = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], {
+            bypass: false, actor: 'rollback-eligibility', recordAllowedEvidence: false,
+        });
+        expect(probe.ok).toBe(true);
+        expect(probe.evidence?.outcome).toBe('warn');
+        expect(notificationStub.dispatchAlert).not.toHaveBeenCalled();
+
+        // Control: the same call as a real operation does alert, so the silence
+        // above comes from the flag and not from the setting.
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(1);
+    });
+
+    describe('a pass that rests on suppressions', () => {
+        beforeEach(() => {
+            dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+            dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+            primeCleanScan({ total_vulnerabilities: 1, highest_severity: 'LOW' });
+            dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+            dbStub.getCveIntel.mockReturnValue(new Map([['CVE-2024-0001', { kev: true }]]));
+            dbStub.getCveSuppressions.mockReturnValue([{
+                id: 1, cve_id: 'CVE-2024-0001', pkg_name: null, image_pattern: null, reason: 'accepted',
+                created_by: 'admin', created_at: Date.now() - 1000, expires_at: null,
+                replicated_from_control: 0, status: 'accepted',
+            }]);
+        });
+
+        it('is recorded once for the operation that goes ahead', async () => {
+            const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+            expect(gate.ok).toBe(true);
+            expect(auditSummaries().filter((x) => x.startsWith('policy.suppression_pass'))).toHaveLength(1);
+        });
+
+        it('leaves no row when the call is a probe', async () => {
+            const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], {
+                bypass: false, actor: 'rollback-eligibility', recordAllowedEvidence: false,
+            });
+            expect(gate.ok).toBe(true);
+            expect(auditSummaries().filter((x) => x.startsWith('policy.suppression_pass'))).toHaveLength(0);
+        });
+    });
+
     it('does not write a deploy-shaped row for a candidate, which persists its own decision', async () => {
         trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
         dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow', security_candidate_unproven: 'allow' });

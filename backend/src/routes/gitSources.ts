@@ -1053,10 +1053,12 @@ stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, r
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
+    let policyEvidence: AllowedPolicyEvidence | undefined;
     const result = await GitSourceService.getInstance().retry(stackName, {
       actor: req.user?.username ?? 'unknown',
+      onAllowed: (allowed) => { policyEvidence = allowed; },
     });
-    res.json(result);
+    res.json(policyEvidence ? { ...result, policyEvidence } : result);
   } catch (error) {
     sendGitSourceError(res, error);
   }

@@ -15,7 +15,7 @@ import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController from '../services/DockerController';
-import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type ScanPolicy, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
 import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
 import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
@@ -36,7 +36,8 @@ import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyPreDeploy, type PolicyViolation } from '../services/PolicyEnforcement';
+import type { EvidenceGateDecision } from '../services/securityEvidence';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -78,7 +79,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -3079,9 +3080,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         const compCode = (compError as { code?: string }).code;
         const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
+          // A policy refusal carries the decision the block dialog renders; an
+          // integrity or held-image refusal does not, and stays a plain 409.
+          const block = compError as { violations?: PolicyViolation[]; policy?: ScanPolicy; evidence?: EvidenceGateDecision };
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...(block.violations ? policyBlockPayload(block.policy, block.violations, block.evidence) : {}),
             ...compFailureClass,
           });
           return;

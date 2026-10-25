@@ -215,23 +215,38 @@ export async function runPolicyGate(
   if (!gate.ok) {
     res.status(409).json({
       error: describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence),
-      policy: gate.policy && {
-        id: gate.policy.id,
-        name: gate.policy.name,
-        maxSeverity: gate.policy.max_severity,
-        blockOnSeverity: gate.policy.block_on_severity,
-        blockOnKev: gate.policy.block_on_kev,
-        blockOnFixable: gate.policy.block_on_fixable,
-      },
-      violations: gate.violations,
-      // Why the gate lacked the evidence it needed, and which configured rule
-      // turned that into the refusal. Without it the dialog can only say a scan
-      // did not complete, which reads the same as a proven violation.
-      ...(gate.evidence ? { evidence: gate.evidence } : {}),
+      ...policyBlockPayload(gate.policy, gate.violations, gate.evidence),
     });
     return false;
   }
   return true;
+}
+
+/**
+ * The part of a policy-block 409 body the block dialog reads. Shared by every
+ * route that refuses on a policy decision, so the dialog and its bypass button
+ * open the same way whichever operation was refused.
+ */
+export function policyBlockPayload(
+  policy: ScanPolicy | undefined,
+  violations: PolicyViolation[],
+  evidence?: EvidenceGateDecision,
+) {
+  return {
+    policy: policy && {
+      id: policy.id,
+      name: policy.name,
+      maxSeverity: policy.max_severity,
+      blockOnSeverity: policy.block_on_severity,
+      blockOnKev: policy.block_on_kev,
+      blockOnFixable: policy.block_on_fixable,
+    },
+    violations,
+    // Why the gate lacked the evidence it needed, and which configured rule
+    // turned that into the refusal. Without it the dialog can only say a scan
+    // did not complete, which reads the same as a proven violation.
+    ...(evidence ? { evidence } : {}),
+  };
 }
 
 // Scans running right now, keyed by node and stack. The attempt row is written

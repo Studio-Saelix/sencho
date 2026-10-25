@@ -1158,8 +1158,10 @@ export class StackUpdateRecoveryService {
 
     let filesRestored = false;
     try {
-      // Eligibility (integrity + held images + security posture) before mutation.
-      const integrityVerdict = await assessGenerationEligibility(row);
+      // Eligibility (integrity + held images) before mutation. The security
+      // posture is decided by the policy gate below, which carries the caller's
+      // bypass and reports the decision.
+      const integrityVerdict = await assessGenerationEligibility(row, { deferSecurityPosture: true });
       if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
@@ -1186,13 +1188,9 @@ export class StackUpdateRecoveryService {
         );
       }
 
-      const context = await resolveRestoreContext(row);
-      const restoredManifest = await context.restoreFromContext(transactionMeta);
-      filesRestored = true;
-
       // Evaluate current policy against the exact held images rollback will launch
-      // (opaque tags / image ids), not the restored authored moving tags.
-      const restoredInvocation = restoredManifest?.invocation ?? null;
+      // (opaque tags / image ids), not the restored authored moving tags. This runs
+      // before any file moves, so a refusal changes nothing.
       const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
@@ -1204,9 +1202,14 @@ export class StackUpdateRecoveryService {
       if (!gate.ok) {
         throw Object.assign(
           new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback', gate.evidence)),
-          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations, evidence: gate.evidence },
         );
       }
+
+      const context = await resolveRestoreContext(row);
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      filesRestored = true;
+      const restoredInvocation = restoredManifest?.invocation ?? null;
 
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');

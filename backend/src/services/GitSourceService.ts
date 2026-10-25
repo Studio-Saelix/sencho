@@ -4401,7 +4401,14 @@ export class GitSourceService {
      * The 'retry' trigger is recorded on the durable attempt for audit and
      * recovery on all three arms.
      */
-    public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+    public async retry(
+        stackName: string,
+        opts: {
+            actor: string;
+            /** Receives the policy decision when the deploy retry's gate allows on evidence that was not a clean pass. */
+            onAllowed?: (allowed: AllowedPolicyEvidence) => void;
+        },
+    ): Promise<ReconcileResult> {
         const app = this.liveSourceApplication(stackName);
         if (!app) return GitSourceService.noApplicationResult();
         // A source that is suspended, has an operation in flight, has an
@@ -4438,8 +4445,8 @@ export class GitSourceService {
             });
         }
         return dispatch.stage === 'promote'
-            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor)
-            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor);
+            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed)
+            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed);
     }
 
     /**
@@ -4455,6 +4462,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         let dispatch: DispatchResult;
         try {
@@ -4470,7 +4478,7 @@ export class GitSourceService {
             dispatch = await this.dispatchAcceptedGeneration(
                 buildAcceptedGeneration(generationRow),
                 GitSourceService.dispatchContextFor(application),
-                { trigger: 'retry', actor },
+                { trigger: 'retry', actor, onAllowed },
             );
         } catch (e) {
             // Nothing past this point throws once a reservation exists, so
@@ -4516,6 +4524,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const app = GitOpsStore.getInstance().getApplication(applicationId);
         if (!app?.stack_name) {
@@ -4541,7 +4550,7 @@ export class GitSourceService {
             stackName,
             'git_apply',
             actor,
-            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor),
+            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor, onAllowed),
             getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
@@ -4571,6 +4580,7 @@ export class GitSourceService {
         generationId: string,
         nodeId: number,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
@@ -4714,6 +4724,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(actor, {
                         bypass: false,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed,
                     }),
                 );
                 const autoDeploy = await (async () => {
@@ -5113,7 +5124,7 @@ export class GitSourceService {
     public async dispatchAcceptedGeneration(
         generation: AcceptedGeneration,
         context: DispatchContext,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
         if (!app) {
@@ -5163,7 +5174,7 @@ export class GitSourceService {
         generation: AcceptedGeneration,
         stackName: string,
         nodeId: number,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
@@ -5337,6 +5348,7 @@ export class GitSourceService {
                 legacyOwnedPaths: revalidation.legacyOwnedPaths,
                 deploy: deployRequested,
                 bypassPolicy: false,
+                onAllowed: opts.onAllowed,
                 started: { app: null, env: null, settled: true },
                 progress,
                 postPromote: () => this.recordGitOps(stackName, 'target binding', () => {

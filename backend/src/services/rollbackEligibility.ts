@@ -164,13 +164,22 @@ async function checkSecurityPostureBlocked(
 /** Best-effort eligibility for a recovery generation row. */
 export async function assessGenerationEligibility(
   row: StackUpdateRecoveryGenerationRow,
+  opts: {
+    /**
+     * Leave the security posture to the caller's own policy gate. The posture
+     * check here evaluates with no bypass and no way to report why it blocked,
+     * so a caller that holds the operator's bypass and renders the block must
+     * not let it veto first.
+     */
+    deferSecurityPosture?: boolean;
+  } = {},
 ): Promise<RollbackEligibilityVerdict> {
   const held = parseHeldImageState(row.services_json);
   // Malformed recovery state cannot be assessed safely; refuse restore.
   if (!held.ok) return 'prohibited';
   const generationIntegrityOk = await checkGenerationIntegrity(row);
   const heldImagesPresent = await checkHeldImagesPresent(row, held);
-  const securityPostureBlocked = await checkSecurityPostureBlocked(row, held);
+  const securityPostureBlocked = opts.deferSecurityPosture ? null : await checkSecurityPostureBlocked(row, held);
   return evaluateRollbackEligibility({
     generationIntegrityOk,
     heldImagesPresent,

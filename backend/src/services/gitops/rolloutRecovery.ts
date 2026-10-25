@@ -34,6 +34,7 @@ import {
   PROXY_TIER_HEADER,
 } from '../license-headers';
 import type { PolicyEnforcementOptions } from '../PolicyEnforcement';
+import { parseRemotePolicyEvidence, type AllowedPolicyEvidence } from '../allowedPolicyEvidence';
 import type { GitOpsApplicationRow, GitOpsTargetCurrentRow } from './types';
 import { GitOpsStore } from './store';
 import { decodeGitOpsRequiredTargetsJson } from './json';
@@ -49,10 +50,16 @@ export type RolloutRollbackTargetResult = {
   nodeId: number;
   status: 'restored' | 'failed';
   error?: string;
+  /** Set on a restore whose policy gate allowed on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 };
 
 export type RestoreTargetOutcome =
-  | { ok: true }
+  /**
+   * `policyEvidence` is present when the restore's policy gate allowed on
+   * evidence that was not a clean pass, so the rollback response can say so.
+   */
+  | { ok: true; policyEvidence?: AllowedPolicyEvidence }
   | {
       ok: false;
       code: string;
@@ -272,12 +279,17 @@ export function resolveRollbackTargets(
   return { ok: true, nodeIds: changed };
 }
 
-function policyOptions(actor: string | null, applicationId: string): PolicyEnforcementOptions {
+function policyOptions(
+  actor: string | null,
+  applicationId: string,
+  onAllowed: (allowed: AllowedPolicyEvidence) => void,
+): PolicyEnforcementOptions {
   return {
     bypass: false,
     actor: actor ?? 'system:gitops-rollback',
     auditMethod: 'POST',
     auditPath: `/api/gitops/applications/${applicationId}/rollout/rollback`,
+    onAllowed,
   };
 }
 
@@ -323,12 +335,13 @@ function restoreLocal(args: {
           error: 'The recovery point on this node restores a different generation than the one selected.',
         };
       }
+      let policyEvidence: AllowedPolicyEvidence | undefined;
       try {
         const compensation = await recovery.compensateWithCandidateOutcome(
           current.id,
           (overridePath, invocation, overlay) => ComposeService.getInstance(args.nodeId)
             .composeUpWithRecoveryOverride(args.stackName, overridePath, undefined, invocation, overlay),
-          policyOptions(args.actor, args.app.id),
+          policyOptions(args.actor, args.app.id, (allowed) => { policyEvidence = allowed; }),
         );
         if (!compensation.rolledBack) {
           return {
@@ -338,7 +351,7 @@ function restoreLocal(args: {
             failureClass: compensation.failureClass,
           };
         }
-        return { ok: true as const };
+        return { ok: true as const, ...(policyEvidence ? { policyEvidence } : {}) };
       } catch (error) {
         console.error(
         '[GitOps recovery] Local restore failed for %s:',
@@ -421,7 +434,8 @@ async function restoreRemote(args: {
           error: 'The node did not confirm restoring the requested application generation.',
         };
       }
-      return { ok: true };
+      const policyEvidence = parseRemotePolicyEvidence(body);
+      return policyEvidence ? { ok: true, policyEvidence } : { ok: true };
     }
     const code = typeof body?.code === 'string' && body.code.length > 0
       ? body.code

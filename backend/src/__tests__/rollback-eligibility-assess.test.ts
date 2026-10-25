@@ -111,4 +111,20 @@ describe('assessGenerationEligibility', () => {
       expect.objectContaining({ actor: 'rollback-eligibility', recordAllowedEvidence: false }),
     );
   });
+
+  it('leaves the security posture to the caller when it asks to defer it', async () => {
+    const { enforcePolicyForImageRefs } = await import('../services/PolicyEnforcement');
+    vi.mocked(enforcePolicyForImageRefs).mockResolvedValueOnce({ ok: false, bypassed: false, violations: [] });
+
+    // A blocking posture would prohibit a normal assessment; deferred, it is not consulted.
+    await expect(assessGenerationEligibility(baseRow(), { deferSecurityPosture: true })).resolves.toBe('unknown');
+    expect(enforcePolicyForImageRefs).not.toHaveBeenCalled();
+  });
+
+  it('still prohibits on integrity when the security posture is deferred', async () => {
+    const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+    vi.mocked(RollbackGenerationStore.verifyGenerationContent).mockResolvedValueOnce(false);
+
+    await expect(assessGenerationEligibility(baseRow(), { deferSecurityPosture: true })).resolves.toBe('prohibited');
+  });
 });

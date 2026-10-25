@@ -289,6 +289,32 @@ describe('restoreTargetToGeneration on a remote node', () => {
     expect(config.headers[PROXY_SCOPED_STACK_ACTIONS_HEADER]).toContain('stack:deploy');
   });
 
+  it('carries back the decision the node allowed the restore on', async () => {
+    const nodeId = insertNode('remote', 'https://remote.example.com:1852');
+    const app = remoteApp(nodeId);
+    const policyEvidence = {
+      policy: { id: 3, name: 'prod-gate' },
+      bypassed: false,
+      evidence: { outcome: 'allow', summary: 'scanner unavailable', records: [], applications: [] },
+    };
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 200,
+      data: { message: 'rolled back', gitopsGenerationId: 'gen-restore', policyEvidence },
+    });
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome).toEqual({ ok: true, policyEvidence });
+  });
+
   it('carries the node refusal code and message back', async () => {
     const nodeId = insertNode('remote', 'https://remote.example.com:1852');
     const app = remoteApp(nodeId);

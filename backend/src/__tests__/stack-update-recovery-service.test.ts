@@ -704,6 +704,7 @@ describe('StackUpdateRecoveryService', () => {
       bypassed: false,
       violations: [{ imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold', reasons: ['critical'] }] as never,
       policy: { name: 'block-crit' } as never,
+      evidence: { outcome: 'block', summary: 'scan failed', records: [], applications: [] } as never,
     });
 
     const genId = '11111111-1111-4111-8111-111111111111';
@@ -784,8 +785,16 @@ describe('StackUpdateRecoveryService', () => {
         async () => undefined,
         { bypass: false, actor: 'admin', onAllowed },
       ),
-    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED', failureClass: 'post_mutation' });
-    expect(restoreSpy).toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      code: 'ROLLBACK_PROHIBITED',
+      // The gate answers before any file moves, so the refusal moved nothing, and
+      // it carries the decision the block dialog renders.
+      failureClass: 'pre_mutation',
+      policy: { name: 'block-crit' },
+      violations: [expect.objectContaining({ imageRef: 'sencho-rb/aaaaaaaaaaaa/web:hold' })],
+      evidence: { outcome: 'block' },
+    });
+    expect(restoreSpy).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'restored_current' }));
     // The caller's in-request callback must survive the options being rebuilt
     // here, or a rollback through a recovery generation loses its decision.

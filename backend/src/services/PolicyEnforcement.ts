@@ -83,10 +83,12 @@ export interface PolicyEnforcementOptions {
      */
     composeInvocation?: RollbackInvocationRecord | null;
     /**
-     * Leave an audit row when the gate allows on evidence that was not a clean
-     * pass. Defaults to on. A read-only probe that asks "would this be allowed" and
-     * runs repeatedly (rollback eligibility) sets it to false: it allowed
-     * nothing, and a row per probe would bury the rows for real operations.
+     * Whether this call stands for an operation that goes ahead. Defaults to on.
+     * A read-only probe that asks "would this be allowed" and runs repeatedly
+     * (rollback readiness, a dry-run, a pre-check whose apply evaluates again)
+     * sets it to false: it allowed nothing, so it leaves no evidence audit row, no
+     * suppression-pass row, and no "proceeded on incomplete evidence" alert. A
+     * row or an alert per probe would bury the ones for real operations.
      */
     recordAllowedEvidence?: boolean;
     /**
@@ -785,7 +787,7 @@ async function evaluateImageRefs(
             // allow and warn both let the deploy through; warn additionally says
             // so out loud, which is the only thing distinguishing it from allow
             // at the call site. Neither is silent.
-            if (outcome === 'warn') {
+            if (outcome === 'warn' && opts.recordAllowedEvidence !== false) {
                 notifyEvidenceWarningOnce(
                     nodeId, stackName, 'security_scan_failure',
                     `the scan of ${imageRef} did not complete`,
@@ -913,7 +915,7 @@ async function evaluateImageRefs(
     const evidence = decideEvidenceGate(evidenceRecords, evidenceApplications);
 
     if (violations.length === 0) {
-        if (suppressionPasses.length > 0) {
+        if (suppressionPasses.length > 0 && opts.recordAllowedEvidence !== false) {
             recordSuppressionPassAudit(stackName, nodeId, policy, suppressionPasses, opts);
         }
         return { ok: true, bypassed: false, policy, violations: [], evidence };
