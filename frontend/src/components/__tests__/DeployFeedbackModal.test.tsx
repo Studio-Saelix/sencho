@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { DeployFeedbackProvider, useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { DeployFeedbackModal } from '../DeployFeedbackModal';
 
@@ -13,6 +13,7 @@ vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
   };
 });
 import { apiFetch } from '@/lib/api';
+import { DEPLOY_FEEDBACK_STYLE_KEY } from '@/hooks/use-deploy-feedback-style';
 import { requestServiceRestore } from '@/lib/serviceUpdate';
 
 // Lets a test simulate a mid-stream drop (onReady then onError) so the panel
@@ -84,6 +85,33 @@ async function renderStreaming() {
   });
 }
 
+// Streams with a controllable isMinimized prop and a probe exposing whether the
+// panel is still open. Returns the setter that flips the modal to minimized.
+async function renderMinimizable(): Promise<(v: boolean) => void> {
+  let setMinimized: (v: boolean) => void = () => {};
+  function PanelProbe() {
+    const { panelState } = useDeployFeedback();
+    return <span data-testid="panel-open">{String(panelState.isOpen)}</span>;
+  }
+  function Harness() {
+    const [minimized, setMin] = React.useState(false);
+    setMinimized = setMin;
+    return <DeployFeedbackModal isMinimized={minimized} onMinimize={() => setMin(true)} />;
+  }
+  await act(async () => {
+    render(
+      <DeployFeedbackProvider>
+        <Driver />
+        <PanelProbe />
+        <Harness />
+      </DeployFeedbackProvider>,
+    );
+    await vi.advanceTimersByTimeAsync(60);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+  return (v) => setMinimized(v);
+}
+
 type GateStatus = 'observing' | 'passed' | 'failed' | 'unknown';
 
 function routeGateApi(responses: Array<{
@@ -113,6 +141,7 @@ describe('DeployFeedbackModal health gate', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'modal');
     resolveRun = null;
     ctl.drop = false;
     ctl.lastNodeId = undefined;
@@ -358,12 +387,43 @@ describe('DeployFeedbackModal health gate', () => {
     // briefly under fake timers, so assert on the reset, not the unmount).
     expect(screen.queryByText('Succeeded')).toBeNull();
   });
+
+  it('auto-closes a minimized modal even when it was hovered at the moment of minimizing', async () => {
+    const setMinimized = await renderMinimizable();
+    // The pointer is over the dialog when Minimize is clicked, and Radix then
+    // unmounts the content, so no mouseleave ever arrives.
+    fireEvent.mouseEnter(screen.getByTestId('deploy-feedback-modal'));
+    await act(async () => { setMinimized(true); });
+    await act(async () => {
+      resolveRun?.({ ok: true, healthGateId: null });
+      await runOuter;
+    });
+    expect(screen.getByTestId('panel-open')).toHaveTextContent('true');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.getByTestId('panel-open')).toHaveTextContent('false');
+  });
+
+  it('resumes the countdown when a hover cancelled it and the modal is then minimized', async () => {
+    const setMinimized = await renderMinimizable();
+    await act(async () => {
+      resolveRun?.({ ok: true, healthGateId: null });
+      await runOuter;
+    });
+    // Succeeded and counting down; hovering the dialog cancels the countdown.
+    fireEvent.mouseEnter(screen.getByTestId('deploy-feedback-modal'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByTestId('panel-open')).toHaveTextContent('true');
+    await act(async () => { setMinimized(true); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.getByTestId('panel-open')).toHaveTextContent('false');
+  });
 });
 
 describe('DeployFeedbackModal stalled-output warning', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     localStorage.clear();
+    localStorage.setItem(DEPLOY_FEEDBACK_STYLE_KEY, 'modal');
     resolveRun = null;
     ctl.drop = false;
   });

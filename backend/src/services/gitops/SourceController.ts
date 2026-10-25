@@ -1,9 +1,13 @@
 import { randomUUID } from 'crypto';
 import { GitOpsStore } from './store';
-import { GitOpsTransitions } from './transitions';
+import { GitOpsTransitionError, GitOpsTransitions } from './transitions';
 import { GitSourceService } from '../GitSourceService';
 import { buildAcceptedGeneration } from './handoff';
+import { dispatchPreparedGitManagedGeneration } from './gitManagedHandoff';
+import { runBoundedGitManagedPostAccept } from './boundedPostAccept';
+import { CONFIRMATION_STALE, driftSentence, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
 import { checkStatefulWithdrawal, holdForStatefulReview, readStagedGeneration } from './statefulGuard';
+import { prepareAcceptedGitManagedGeneration } from './gitManagedMaterialization';
 import { DatabaseService } from '../DatabaseService';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from './types';
 import { classifyFailure, nextRetryAt, isGitSourceErrorCode, effectivePollIntervalSecs } from './backoff';
@@ -12,7 +16,7 @@ import { buildSystemPolicyGateOptions } from '../../helpers/policyGate';
 import { newGitOpsId } from './directApplication';
 import { NodeRegistry } from '../NodeRegistry';
 import { extractImagesFromCompose } from '../ImageUpdateService';
-import type { ReconcileOutcome } from './outcomes';
+import type { ReconcileOutcome, ReconcileResult } from './outcomes';
 import type { ReconcileTrigger } from './triggers';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
 
@@ -23,6 +27,122 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
     'pending_review',
     'superseded',
 ]);
+
+/**
+ * Whether the row is waiting on a recovery: a restore in flight, or a hold
+ * that success evidence retires.
+ *
+ * Both clear without an operator touching the source, so the poll cadence has
+ * to outlive them. A settled `complete` receipt has nothing outstanding, and
+ * an interrupted fetch or apply (`source_unknown`) waits on the operator
+ * rather than on recovery, so neither is a recovery wait.
+ */
+function recoveryWaitHolds(app: GitOpsApplicationRow): boolean {
+    return app.recovery_phase === 'restoring'
+        || app.recovery_phase === 'compensating'
+        || app.recovery_phase === 'failed'
+        || app.failure_stage === 'recovery';
+}
+
+export type OperatorFetchRefusalCode =
+    | 'not_git_managed'
+    | 'no_source_identity'
+    | 'suspended'
+    | 'applying'
+    | 'fetch_in_flight'
+    | 'recovery'
+    | typeof CONFIRMATION_STALE;
+
+/**
+ * What settlement did after a fetch, so a caller can tell a staged commit
+ * from an acceptance, a started rollout, or a hold. `started` means the
+ * rollout was handed off, not that it finished.
+ */
+export type FetchAuthorityReport =
+    | { status: 'not_applicable' }
+    | { status: 'fetched_only' }
+    | { status: 'held'; note: string }
+    | { status: 'accepted'; rollout: 'started' | 'held' | 'not_started'; note: string | null };
+
+export type OperatorFetchResult =
+    | { status: 'refused'; code: OperatorFetchRefusalCode; error: string }
+    | {
+        status: 'settled';
+        result: ReconcileResult;
+        candidateGenerationId: string | null;
+        authority: FetchAuthorityReport;
+    };
+
+const NO_AUTHORITY: FetchAuthorityReport = { status: 'not_applicable' };
+
+/** Set when an operator pull still has preparation or dispatch running after it answers. */
+interface PostAcceptFollow {
+    pending: Promise<void> | null;
+}
+
+/**
+ * What one operator pull carries past its own request.
+ *
+ * `follow` exists only for a pull, which holds its in-flight slot until the
+ * work behind the answer settles; the poll omits it and waits instead.
+ * `confirmation` exists only where an operator confirmed something, and the
+ * poll omits it because a cadence has no confirmation to bind.
+ */
+interface OperatorFollowUp {
+    follow: PostAcceptFollow;
+    confirmation: SourceConfirmation | null;
+}
+
+function refuseFetch(code: OperatorFetchRefusalCode, error: string): OperatorFetchResult {
+    return { status: 'refused', code, error };
+}
+
+/** Prefer a sentence already written for an operator. Internal phrases stay in the log. */
+function operatorHoldNote(reason: string): string {
+    return reason.startsWith('The ') ? reason : 'The candidate was not accepted.';
+}
+
+/**
+ * Row-level reasons an operator pull must not start. A missing application,
+ * a non-Blueprint row, and a Blueprint that is not active or creating all
+ * refuse the same way: this entry point does not fetch Direct sources,
+ * which keep their own pull route.
+ */
+function operatorFetchBlock(
+    app: GitOpsApplicationRow | undefined,
+    inFlight: boolean,
+): OperatorFetchResult | { app: GitOpsApplicationRow; stackName: string } {
+    if (!app || app.target_mode !== 'blueprint' || (app.lifecycle_status !== 'active' && app.lifecycle_status !== 'creating')) {
+        return refuseFetch('not_git_managed', 'Pull source applies to a Git-managed Blueprint.');
+    }
+    const stackName = app.configured_source_stack_name ?? app.stack_name;
+    if (!stackName) {
+        return refuseFetch('no_source_identity', 'This Blueprint has no Git source to pull.');
+    }
+    if (app.suspended_at) {
+        return refuseFetch('suspended', 'This source is suspended. Resume it before pulling.');
+    }
+    if (app.active_operation_stage === 'apply_started') {
+        return refuseFetch('applying', 'A fetch cannot start while a candidate is being applied.');
+    }
+    // A fetch may replace the candidate. Apply recovery is eligible only while
+    // the interrupted generation is still that candidate, so the pull waits.
+    // An interrupted fetch stays pullable: the next fetch clears it.
+    if (
+        app.interruption_stage === 'apply_started'
+        && app.interruption_generation_id !== null
+        && app.interruption_generation_id === app.candidate_generation_id
+    ) {
+        return refuseFetch('applying', 'A fetch cannot start while an interrupted apply is still unresolved.');
+    }
+    if (inFlight || app.active_operation_stage === 'fetch_started') {
+        return refuseFetch('fetch_in_flight', 'A fetch is already running for this source.');
+    }
+    if (recoveryWaitHolds(app)) {
+        return refuseFetch('recovery', 'A fetch cannot start while this source is recovering.');
+    }
+    return { app, stackName };
+}
 
 /**
  * Background driver for unattended GitOps reconciliation: polls sources on
@@ -39,7 +159,9 @@ const SUCCESS_SHAPED_OUTCOMES: ReadonlySet<ReconcileOutcome> = new Set<Reconcile
  * shared dispatch boundary (GitSourceService.dispatchAcceptedGeneration),
  * which revalidates the live target under the stack lock before promoting.
  * Review-policy sources stage candidates for a human; manual
- * sources never join the unattended cadence.
+ * sources never join the unattended cadence. An operator pull of a
+ * Git-managed Blueprint goes through requestFetch, which uses this same
+ * settle path and still leaves a manual source off the cadence.
  *
  * Stage-aware retry lives in GitSourceService.retry(): an operator retry
  * at a source-stage failure re-issues a fetch, an accepted generation
@@ -322,6 +444,71 @@ export class SourceController {
         }
     }
 
+    /**
+     * Operator pull for a Git-managed Blueprint. Stages a candidate through
+     * the same reconcile fetch a poll uses, then settles with the same
+     * post-fetch rules. Manual sources stay off the cadence and are not
+     * accepted here. Automatic sources are accepted by the stored policy,
+     * the same as a poll. A fetch already in this process, a row already
+     * in fetch_started, or an interrupted apply that still names the
+     * current candidate is refused before reconcile runs. An interrupted
+     * fetch stays eligible: the next fetch clears that interruption.
+     *
+     * `confirmation` is what the operator confirmed about the placement and
+     * the rollout, and only an automatic source sends one, because only an
+     * automatic source can accept from this request. It is checked here so a
+     * confirmation that is already stale never costs a fetch, again after the
+     * reconcile, where it guards the acceptance, and once more in the handoff,
+     * where it guards the dispatch. The poll sends none: a cadence is
+     * configured, not confirmed.
+     *
+     * After acceptance commits, preparation and dispatch are answered within
+     * a short deadline. Work still running is reported as continuing, not as
+     * a failed pull, and this application stays in flight until it finishes.
+     */
+    public async requestFetch(
+        applicationId: string,
+        actor: string,
+        confirmation?: SourceConfirmation,
+    ): Promise<OperatorFetchResult> {
+        const store = GitOpsStore.getInstance();
+        const blocked = operatorFetchBlock(store.getApplication(applicationId), this.inFlight.has(applicationId));
+        if ('status' in blocked) return blocked;
+        const { app, stackName } = blocked;
+        if (confirmation) {
+            const drift = sourceConfirmationDrift(app, confirmation);
+            if (drift) return refuseFetch(CONFIRMATION_STALE, driftSentence(drift));
+        }
+        this.inFlight.add(app.id);
+        const followUp: OperatorFollowUp = { follow: { pending: null }, confirmation: confirmation ?? null };
+        try {
+            const result = await GitSourceService.getInstance().reconcile({
+                intent: 'fetch',
+                applicationId: app.id,
+                stackName,
+                trigger: 'manual',
+                actor,
+            });
+            const fresh = store.getApplication(app.id);
+            const authority = fresh
+                ? await this.settleAfterReconcile(fresh, stackName, result, 'manual', followUp)
+                : NO_AUTHORITY;
+            return {
+                status: 'settled',
+                result,
+                candidateGenerationId: store.getApplication(app.id)?.candidate_generation_id ?? null,
+                authority,
+            };
+        } finally {
+            const pending = followUp.follow.pending;
+            if (pending) {
+                void pending.finally(() => this.releaseAndDrainWake(app.id));
+            } else {
+                this.releaseAndDrainWake(app.id);
+            }
+        }
+    }
+
     private async evaluate(app: GitOpsApplicationRow, triggerOverride?: ReconcileTrigger): Promise<void> {
         const stackName = app.stack_name ?? app.configured_source_stack_name;
         if (!stackName) {
@@ -358,23 +545,53 @@ export class SourceController {
             // applies to classified failures the row records as evidence.
             return;
         }
-        // Re-read the row: reconcile mutated it through its own transitions,
-        // and the scheduling/acceptance decisions below must act on what is
-        // durable now, not on the pre-tick snapshot.
         const fresh = GitOpsStore.getInstance().getApplication(app.id);
         if (!fresh) return;
+        await this.settleAfterReconcile(fresh, stackName, result, trigger);
+    }
+
+    /**
+     * What a finished fetch does to the cadence and to an automatic policy.
+     * Shared by the poll and by an operator pull so the two cannot disagree
+     * about which outcome re-arms, retries, or accepts. Manual sources are
+     * declined inside the cursor helpers: a pull must not enroll them.
+     *
+     * `followUp` is set only by an operator pull. The poll omits it and waits
+     * for preparation and dispatch, because no request is held open and no
+     * operator confirmation is riding along.
+     */
+    private async settleAfterReconcile(
+        fresh: GitOpsApplicationRow,
+        stackName: string,
+        result: ReconcileResult,
+        trigger: ReconcileTrigger,
+        followUp?: OperatorFollowUp,
+    ): Promise<FetchAuthorityReport> {
         if (result.outcome === 'failed_previous_intact' || result.outcome === 'retry_scheduled') {
             this.maybeScheduleRetry(fresh);
-        } else if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
+            return NO_AUTHORITY;
+        }
+        if (SUCCESS_SHAPED_OUTCOMES.has(result.outcome)) {
             this.maybeScheduleNextPoll(fresh);
             // Automatic acceptance only runs for a success-shaped outcome. A
             // conflict-blocked candidate settles into 'blocked', so it never
             // reaches acceptance from here; the boundary itself additionally
-            // refuses a durable blocked candidate below
+            // refuses a durable blocked candidate
             // (requireAcceptableCandidate guards against an outcome that
             // misreports the row's state).
-            await this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger);
+            return this.maybeAcceptAutomaticCandidate(fresh, stackName, trigger, followUp);
         }
+        if (result.outcome === 'recovery_required' && recoveryWaitHolds(fresh)) {
+            // A recovery wait is not terminal: the hold clears through success
+            // evidence (an acknowledgement or a bind) that never touches the
+            // source. The fetch that just ran consumed the poll cursor, so
+            // without re-arming here the source would drop out of the cadence
+            // and stay idle after the recovery settles. Automatic acceptance
+            // stays gated on success-shaped outcomes, so the hold still
+            // withholds progression.
+            this.maybeScheduleNextPoll(fresh);
+        }
+        return NO_AUTHORITY;
     }
 
     /**
@@ -385,6 +602,7 @@ export class SourceController {
      * failure the operator must resolve.
      */
     private maybeScheduleRetry(app: GitOpsApplicationRow): void {
+        if (app.source_policy === 'manual') return;
         const code = app.failure_class;
         if (!code || app.failure_stage !== 'fetch') return;
         if (!isGitSourceErrorCode(code)) return;
@@ -403,11 +621,12 @@ export class SourceController {
     }
 
     /**
-     * Re-arm the poll cursor after a successful evaluation, so the source
-     * sleeps on its configured cadence instead of being re-polled every tick.
-     * Manual sources and polling-disabled configurations never re-arm, so
-     * after the fetch consumed the old cursor the row drops out of the due
-     * set until a config change (or a manual pull) arms it again.
+     * Re-arm the poll cursor after an evaluation that leaves the source
+     * eligible, so the source sleeps on its configured cadence instead of
+     * being re-polled every tick. Manual sources and polling-disabled
+     * configurations never re-arm, so after the fetch consumed the old cursor
+     * the row drops out of the due set until a config change (or a manual
+     * pull) arms it again.
      */
     private maybeScheduleNextPoll(app: GitOpsApplicationRow): void {
         if (app.source_policy === 'manual') return;
@@ -431,24 +650,46 @@ export class SourceController {
      * unprovable candidate holds for a human. On the evidence side, a
      * present-but-unreadable `.env` or an unreadable compose file holds
      * (compose-only interpolation happens only when `.env` is absent).
+     *
+     * An operator confirmation is re-read against this row before the
+     * acceptance, because the reconcile above it is the window in which the
+     * placement or the rollout policy the confirmation named could have
+     * changed. A stale confirmation holds the candidate rather than accepting
+     * on a destination the operator did not agree to.
      */
     private async maybeAcceptAutomaticCandidate(
         app: GitOpsApplicationRow,
         stackName: string,
         trigger: ReconcileTrigger,
-    ): Promise<void> {
-        if (app.source_policy !== 'automatic') return;
+        followUp?: OperatorFollowUp,
+    ): Promise<FetchAuthorityReport> {
+        if (app.source_policy !== 'automatic') return NO_AUTHORITY;
+        if (followUp?.confirmation) {
+            const drift = sourceConfirmationDrift(app, followUp.confirmation);
+            if (drift) {
+                console.warn(
+                    `[SourceController] automatic pull held for ${sanitizeForLog(app.id)}: the operator confirmation no longer describes this application`,
+                );
+                return { status: 'held', note: driftSentence(drift) };
+            }
+        }
+        if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) {
+            return { status: 'fetched_only' };
+        }
         // A source that already fell back to review under a safety refusal
         // waits for the operator: re-evaluating every tick would repeat the
         // refusal without changing anything. The reason field, not the plain
         // review flag, is the marker: a review-policy candidate later switched
         // to automatic has no refusal to honor and must evaluate normally.
-        if (app.review_block_reason !== null) return;
-        if (!app.candidate_generation_id || app.accepted_generation_id === app.candidate_generation_id) return;
+        if (app.review_block_reason !== null) {
+            return { status: 'held', note: 'A previous safety check is still waiting for an operator.' };
+        }
         const generation = GitOpsStore.getInstance().getGeneration(app.candidate_generation_id);
-        if (!generation) return;
+        if (!generation) return { status: 'held', note: 'The candidate generation is not available.' };
         const imageRefs = this.candidateImageRefs(stackName, app, generation);
-        if (imageRefs === null) return;
+        if (imageRefs === null) {
+            return { status: 'held', note: 'The candidate could not be read, so it was not accepted.' };
+        }
         let evaluation;
         try {
             evaluation = await evaluateCandidatePolicy(
@@ -462,7 +703,7 @@ export class SourceController {
                 `[SourceController] policy evaluation failed for ${sanitizeForLog(app.id)}:`,
                 e instanceof Error ? e.message : String(e),
             );
-            return;
+            return { status: 'held', note: 'The security policy could not be evaluated, so the candidate was not accepted.' };
         }
         if (evaluation.status !== 'allowed') {
             // Fail closed and log the policy verdict: the retained `candidate_ready`
@@ -472,7 +713,7 @@ export class SourceController {
             console.warn(
                 `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: policy verdict ${evaluation.status}`,
             );
-            return;
+            return { status: 'held', note: 'The security policy did not allow this candidate, so it was not accepted.' };
         }
         let acceptGeneration: GitOpsGenerationRow;
         try {
@@ -487,12 +728,12 @@ export class SourceController {
                 console.warn(
                     `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${sanitizeForLog(revalidated.reason)}`,
                 );
-                return;
+                return { status: 'held', note: operatorHoldNote(revalidated.reason) };
             }
             acceptGeneration = revalidated.generation;
         } catch (e) {
             this.warnSkipped(app.id, 'source revalidation failed', e);
-            return;
+            return { status: 'held', note: 'The candidate could not be checked again, so it was not accepted.' };
         }
         // Stateful safety: this acceptance route has no human in the loop, so
         // it must prove the candidate does not withdraw or rename a stateful
@@ -513,7 +754,12 @@ export class SourceController {
             console.warn(
                 `[SourceController] automatic candidate held for ${sanitizeForLog(app.id)}: ${detail}; an operator must accept explicitly${unrecorded}`,
             );
-            return;
+            return {
+                status: 'held',
+                note: withdrawal.status === 'withdrawn'
+                    ? 'The candidate changes stateful services, so an operator must accept it.'
+                    : 'A stateful change could not be ruled out, so an operator must accept it.',
+            };
         }
         try {
             GitOpsTransitions.getInstance().sourceAccepted({
@@ -522,19 +768,80 @@ export class SourceController {
                 artifactSetId: newGitOpsId(),
                 sourceAcceptanceId: newGitOpsId(),
                 authority: 'configured_policy',
+                // The operator's confirmation, recorded whole so a later re-drive
+                // still has the placement and the rollout promise. Omitted when
+                // the pull was not confirmed.
+                ...(followUp?.confirmation ? { confirmation: followUp.confirmation } : {}),
                 envelope: { operationId: randomUUID(), actor: 'system:source-controller', trigger, at: Date.now() },
             });
         } catch (e) {
+            if (e instanceof GitOpsTransitionError && e.code === CONFIRMATION_STALE) {
+                console.warn(
+                    `[SourceController] automatic pull held for ${sanitizeForLog(app.id)}: the operator confirmation no longer describes this application`,
+                );
+                return { status: 'held', note: e.message };
+            }
             this.warnSkipped(app.id, 'automatic acceptance failed', e);
-            return;
+            return { status: 'held', note: 'The candidate was not accepted.' };
         }
-        // The acceptance cleared the candidate pointer; hand the accepted
-        // generation to the shared dispatch boundary, which revalidates the
-        // live target under the stack lock and promotes the generation's own
-        // staged candidate (the deploy choice is read from the source row
-        // there, under the lock). A reserved dispatch never throws: refusals
-        // come back as blocked outcomes. The try/catch stays for the
-        // pre-reservation entry guards (store reads on a failing database).
+        // A Git-managed Blueprint needs its accepted generation materialized and
+        // its artifact set resolved before the dispatch boundary can authorize
+        // the rollout: the dispatch reads the applied materialization and the
+        // preflight refuses an unresolved artifact set. Both steps are
+        // idempotent and the reconciler retries them, so a failure here is
+        // reported and the dispatch below still runs (and refuses truthfully).
+        if (app.target_mode === 'blueprint' && followUp) {
+            const settled = await runBoundedGitManagedPostAccept({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            followUp.follow.pending = settled.pending;
+            return { status: 'accepted', rollout: settled.rollout, note: settled.authorityNote };
+        }
+        if (app.target_mode === 'blueprint') {
+            const prepared = await prepareAcceptedGitManagedGeneration({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            if (prepared.note) {
+                console.warn(
+                    `[SourceController] Git-managed preparation incomplete for ${sanitizeForLog(app.id)}: ${sanitizeForLog(prepared.note)}`,
+                );
+            }
+        }
+        if (app.target_mode === 'blueprint') {
+            // The one handoff applies the same policy, enabled, pause, and
+            // suspension gates every other path uses. A durable refusal is held
+            // by the handoff and logged there; a skipped gate is a deliberate
+            // withholding and needs no log here.
+            const handoff = await dispatchPreparedGitManagedGeneration({
+                applicationId: app.id,
+                generationId: acceptGeneration.id,
+                actor: 'system:source-controller',
+                trigger,
+            });
+            if (handoff.status === 'dispatched') {
+                return { status: 'accepted', rollout: 'started', note: null };
+            }
+            if (handoff.status === 'blocked') {
+                // The acceptance stands while the apply is refused, so the row
+                // alone cannot explain why nothing moved: log the reason.
+                console.warn(
+                    `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(handoff.reason ?? 'unknown')}`,
+                );
+                return { status: 'accepted', rollout: 'held', note: handoff.reason ?? 'The rollout did not start.' };
+            }
+            return { status: 'accepted', rollout: 'not_started', note: handoff.reason };
+        }
+        // Direct: the shared dispatch boundary promotes the generation through
+        // completeGitApply, under the stack lock. A reserved dispatch never
+        // throws: refusals come back as blocked outcomes. The try/catch stays
+        // for the pre-reservation entry guards (store reads on a failing
+        // database).
         try {
             const dispatch = await GitSourceService.getInstance().dispatchAcceptedGeneration(
                 buildAcceptedGeneration(acceptGeneration),
@@ -542,12 +849,14 @@ export class SourceController {
                 { trigger, actor: 'system:source-controller' },
             );
             if (dispatch.status === 'blocked') {
-                // The acceptance stands while the apply is refused, so the
-                // row alone cannot explain why nothing moved: log the reason.
+                // The acceptance stands while the apply is refused, so the row
+                // alone cannot explain why nothing moved: log the reason.
                 console.warn(
                     `[SourceController] automatic dispatch blocked for ${sanitizeForLog(app.id)}: ${sanitizeForLog(dispatch.reason)}`,
                 );
+                return { status: 'accepted', rollout: 'held', note: dispatch.reason };
             }
+            return { status: 'accepted', rollout: 'started', note: null };
         } catch (e) {
             // Reaching here means nothing was reserved, so no durable row
             // exists and the next tick will not retry (the acceptance cleared
@@ -559,6 +868,7 @@ export class SourceController {
                 `[SourceController] automatic dispatch failed for ${sanitizeForLog(app.id)} before reserving an attempt. The generation remains accepted and will not auto-apply; dispatch it manually:`,
                 redactSensitiveText(e instanceof Error ? e.stack ?? e.message : String(e)),
             );
+            return { status: 'accepted', rollout: 'held', note: 'The rollout did not start.' };
         }
     }
 

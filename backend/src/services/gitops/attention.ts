@@ -43,6 +43,7 @@ export type GitOpsAttentionReason =
   | 'rollout_paused'
   | 'rollout_partial'
   | 'rollout_completion_unknown'
+  | 'rollout_stale_acknowledgement'
   | 'rollback_failed'
   | 'target_stale'
   | 'target_unreachable'
@@ -81,6 +82,7 @@ export const ATTENTION_TONE: Readonly<Record<GitOpsAttentionReason, 'failure' | 
   rollout_paused: 'pending',
   rollout_partial: 'failure',
   rollout_completion_unknown: 'failure',
+  rollout_stale_acknowledgement: 'pending',
   rollback_failed: 'failure',
   target_stale: 'pending',
   target_unreachable: 'failure',
@@ -227,6 +229,14 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       case 'acknowledged_completion_unknown':
         reasons.add('rollout_completion_unknown');
         break;
+      // A node that acknowledged something the application has since left.
+      // Its own reason rather than `rollout_completion_unknown`, because the
+      // operator action is the opposite: not "find out what happened", but
+      // "roll the newer intent out here". Pending tone, since the newer rollout
+      // resolves it and nothing has gone wrong.
+      case 'stale_acknowledgement':
+        reasons.add('rollout_stale_acknowledgement');
+        break;
       case 'retry_scheduled':
         reasons.add('source_retry_scheduled');
         break;
@@ -250,7 +260,22 @@ export function attentionReasons(projection: GitOpsRevisionProjection): GitOpsAt
       default:
         break;
     }
-    if (target.health.status === 'failed') reasons.add('health_failed');
+    // Work already under way on the generation this failure is about is
+    // producing the verdict that will replace it, so the target reads as work in
+    // progress rather than as a failure waiting on an operator. The facet still
+    // reports `failed`, which stays true: the last verdict really did fail, and
+    // its promotion really was withdrawn. Nothing is added in place of the
+    // reason, because any reason at all would read as `attention` rather than
+    // `in_progress`, and progress is the honest answer while a redeploy runs.
+    //
+    // A target that reached this hub from an older remote instance carries no
+    // flag at all, which is falsy here, so its failure keeps being reported.
+    // That is the whole of the mixed-version story at this line; what stops a
+    // peer from suppressing a failure with a malformed value is the shape check
+    // in `isTargetRecord`, which accepts only an absent field or a boolean.
+    if (target.health.status === 'failed' && !target.healthFailureSuperseded) {
+      reasons.add('health_failed');
+    }
   }
 
   // Confirmed drift is itself a reason. The classes (source, runtime, placement,

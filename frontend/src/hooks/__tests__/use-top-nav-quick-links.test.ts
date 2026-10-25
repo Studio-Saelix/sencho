@@ -19,6 +19,8 @@ const maxedPins: ActiveView[] = [
   'templates',
   'global-observability',
   'auto-updates',
+  'scheduled-ops',
+  'host-console',
 ];
 
 describe('useTopNavQuickLinks', () => {
@@ -63,7 +65,7 @@ describe('useTopNavQuickLinks', () => {
     expect(result.current.persistedIds).toEqual([]);
   });
 
-  it('sanitizes unknown, ineligible, and duplicate IDs and caps at eight', () => {
+  it('sanitizes unknown, ineligible, and duplicate IDs and caps at the quick-link limit', () => {
     expect(
       sanitizeQuickLinkIds([
         'dashboard',
@@ -78,9 +80,11 @@ describe('useTopNavQuickLinks', () => {
         'global-observability',
         'auto-updates',
         'scheduled-ops',
+        'host-console',
+        'audit-log',
       ]),
     ).toEqual(maxedPins);
-    expect(sanitizeQuickLinkIds([...maxedPins, 'scheduled-ops']).length).toBe(MAX_QUICK_LINKS);
+    expect(sanitizeQuickLinkIds([...maxedPins, 'audit-log']).length).toBe(MAX_QUICK_LINKS);
   });
 
   it('reset writes the given defaultEligibleIds, not the raw recommended list', () => {
@@ -142,10 +146,15 @@ describe('useTopNavQuickLinks', () => {
     expect(result.current.persistedIds).toEqual(['dashboard', 'fleet', 'resources']);
   });
 
-  it('add refuses beyond the persisted max of eight', () => {
+  it('add accepts the ninth and tenth pins and refuses an eleventh', () => {
     const { result } = renderHook(() => useTopNavQuickLinks());
-    act(() => result.current.setPersistedIds(maxedPins));
-    act(() => result.current.addQuickLink('scheduled-ops'));
+    act(() => result.current.setPersistedIds(maxedPins.slice(0, 8)));
+    act(() => {
+      result.current.addQuickLink('scheduled-ops');
+      result.current.addQuickLink('host-console');
+    });
+    expect(result.current.persistedIds).toEqual(maxedPins);
+    act(() => result.current.addQuickLink('audit-log'));
     expect(result.current.persistedIds).toEqual(maxedPins);
   });
 

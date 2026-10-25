@@ -22,6 +22,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { applyAutomaticPlacement } from '../services/gitops/automaticPlacement';
+import { projectApplication } from '../services/gitops/derive';
 import { stackManagedRoot } from '../services/gitops/directApplication';
 import { emptyTargetRow } from '../services/gitops/store';
 import { decodeApprovalPolicySnapshot } from '../services/gitops/policyComposition';
@@ -125,8 +126,19 @@ function generation(id: string, applicationId: string, candidateDir: string, app
   };
 }
 
+/**
+ * A monotonic blueprint id for seeded applications.
+ *
+ * The id was derived from the random application id's digits, which collided
+ * with a row seeded earlier in the file often enough to trip the unique active
+ * blueprint index, reddening the suite about once in a full run. Rows are only
+ * ever inserted through this helper, so a counter cannot collide.
+ */
+let nextApplicationBlueprintId = 7000;
+
 function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicationRow {
   const id = overrides.id ?? `app-${randomUUID().slice(0, 8)}`;
+  nextApplicationBlueprintId += 1;
   return {
     id,
     lifecycle_key: `blueprint:${id}`,
@@ -134,7 +146,7 @@ function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicatio
     target_mode: 'blueprint',
     stack_name: null,
     configured_source_stack_name: `src-${id}`,
-    blueprint_id: Number(id.replace(/\D/g, '').slice(0, 6)) + 7000,
+    blueprint_id: overrides.blueprint_id ?? nextApplicationBlueprintId,
     configured_repo_url: `https://example.invalid/${id}.git`,
     repo_identity_json: '{"host":"example.invalid","pathname":"/x.git"}',
     configured_ref: 'main',
@@ -169,6 +181,7 @@ function application(overrides: Partial<GitOpsApplicationRow>): GitOpsApplicatio
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'review',
     placement_policy: 'bounded_auto',
@@ -284,6 +297,37 @@ function seed(opts: {
   store.insertGeneration(generation(generationId, app.id, dirs.candidateDir, dirs.appliedDir));
   void opts.cordoned;
   return app;
+}
+
+/**
+ * The pre-decomposition approval marker, which names no target set and no intent.
+ *
+ * Two things about it matter to the decision: it proves the placement was
+ * approved once, so a multi-node change is not read as a first placement, and
+ * it gives `pinDrivenPlacement` no intent to anchor on.
+ */
+function insertLegacyCombinedApproval(store: GitOpsStore, applicationId: string, id: string): void {
+  store.insertApproval({
+    id,
+    kind: 'legacy_combined',
+    authority: 'legacy_combined',
+    authoritative: 0,
+    application_id: applicationId,
+    generation_id: null,
+    intent_revision_id: null,
+    artifact_set_id: null,
+    rollout_candidate_id: null,
+    rollout_generation_id: null,
+    source_acceptance_ref: null,
+    placement_approval_ref: null,
+    required_targets_json: null,
+    preflight_fingerprint: null,
+    fingerprint: null,
+    blast_json: null,
+    policy_provenance_json: null,
+    actor: null,
+    created_at: 1,
+  } as never);
 }
 
 beforeAll(async () => {
@@ -461,11 +505,13 @@ describe('a bounded_auto application reaches an approval', () => {
 
     // The withdrawn node must read as reachable: a removal is judged by the
     // observation of the workload that ran there, and a node with no observation
-    // is unknown, which is its own refusal.
+    // is unknown, which is its own refusal. The stored connectivity column is
+    // seeded to null and no producer writes it, so the fixture records the same
+    // evidence a deploy leaves behind.
     store.upsertTarget({
       ...emptyTargetRow(app.id, withdrawn, 1),
       target_status: 'active',
-      connectivity: 'reachable',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
     });
     // Neither node is cordoned, and the Blueprint itself now asks for one of them.
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
@@ -497,6 +543,199 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.hasPlacementApprovalFor(app.id, 'intent-wd', 'cand-wd')).toBe(true);
   });
 
+  it('carries an earlier unlanded placement forward when a lower node id is withdrawn', () => {
+    // The finding this pins. The reconciler executes one approval per tick, so
+    // an addition that has been approved but not yet landed is carried into the
+    // next approval's blast. That blast is written places-then-removals, while
+    // the approval's own decode requires the node ids to be strictly
+    // increasing. Adding a higher id while withdrawing a lower one left the
+    // write refused as "blast_json must be strictly increasing by nodeId",
+    // which `approvalFailureReason` recorded as `conflicting_operation`: the
+    // operator was told an operation was in flight when none was, the plan read
+    // `reapproval_required`, and nothing executed.
+    const leave = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const keep = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const added = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [leave, keep], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    // An operator's baseline over both nodes, so there is something to withdraw
+    // from and something the added node joins.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'place-both-n1',
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: leave, outcome: 'place' as const },
+        { nodeId: keep, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [leave, keep],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-n1-base', actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: 'rgen-n1',
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    // The withdrawn node must read as reachable: a removal is judged by the
+    // observation of the workload that ran there, and a node with none is
+    // unknown, which is its own refusal.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, leave, 1),
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+
+    // First the addition. The approval it writes is never executed here, which
+    // is the window: the fleet has not landed it, so the next approval carries
+    // it forward and the blast names a placed node alongside the withdrawal.
+    const first = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...first, id: 'intent-n1-add', operation_id: 'op-n1-add' },
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-add',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-add',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([leave, keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: 'op-n1-add',
+      } as never,
+      envelope: { operationId: 'op-n1-add', actor: 'tester', trigger: 'test', at: 2 },
+    });
+    expect(
+      applyAutomaticPlacement(app.id, { operationId: 'op-n1-add-2', actor: null, trigger: 'test', at: 3 }),
+    ).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+
+    // Then the withdrawal of the lower node id, with the added node still
+    // unlanded. Both are in the blast, and it has to be canonical.
+    const second = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...second, id: 'intent-n1-remove', operation_id: 'op-n1-remove' },
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: 'cand-n1-remove',
+        application_id: app.id,
+        intent_revision_id: 'intent-n1-remove',
+        required_targets_json: encodeGitOpsRequiredTargetsJson([keep, added]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 4,
+        operation_id: 'op-n1-remove',
+      } as never,
+      envelope: { operationId: 'op-n1-remove', actor: 'tester', trigger: 'test', at: 4 },
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-n1-remove-2', actor: null, trigger: 'test', at: 5 });
+    expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+    expect(store.hasPlacementApprovalFor(app.id, 'intent-n1-remove', 'cand-n1-remove')).toBe(true);
+    // Nothing was declining anything, so nothing was recorded as a refusal. A
+    // refusal row here is the lie the finding is about.
+    expect(store.getApplication(app.id)!.placement_policy_refusal_reason).toBeNull();
+  });
+
+  it.each([
+    ['nothing observed', undefined, 'unknown_connectivity', 'none', 'online'],
+    ['an unreadable observation', '{not json', 'malformed_evidence', 'corrupt', 'online'],
+    ['an offline node', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'stale_node', 'offline', 'offline'],
+    ['no registry row', JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }), 'unknown_connectivity', 'unregistered', 'missing'],
+  ] as const)('refuses a withdrawal that left %s', (_label, observation, reason, suffix, registry) => {
+    // The other direction of the same reader. An observation that is absent
+    // proves nothing about the node, and one that cannot be decoded is a data
+    // fault. Both refuse, and the reasons stay apart so neither sends the
+    // operator to check the wrong thing. A node the registry does not have as
+    // online refuses first: a withdrawal must not be approved against a node
+    // the same evidence cannot reach for an addition. A node the registry does
+    // not have at all refuses the same way, and is pinned apart from the
+    // unreadable-observation case so a guard that blamed a data fault for a node
+    // it simply cannot see would fail here.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const withdrawn = addNode(`n-${randomUUID().slice(0, 6)}`);
+    if (registry === 'offline') {
+      DatabaseService.getInstance().getDb()
+        .prepare('UPDATE nodes SET status = ? WHERE id = ?')
+        .run('offline', withdrawn);
+    }
+    const app = seed({ nodeIds: [kept, withdrawn], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: `place-both-unobserved-${suffix}`,
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: withdrawn, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, withdrawn],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: `op-unobserved-base-${suffix}`, actor: 'tester', trigger: 'test', at: 1 },
+      rolloutGenerationId: `rgen-unobserved-${suffix}`,
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+    // A target row exists and is active. What it left behind is the only thing
+    // that can prove the node answered.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, withdrawn, 1),
+      target_status: 'active',
+      ...(observation === undefined ? {} : { observed_artifact_identity_json: observation }),
+    });
+
+    const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+    GitOpsTransitions.getInstance().intentRevised({
+      applicationId: app.id,
+      intent: { ...previous, id: `intent-unobserved-${suffix}`, operation_id: `op-unobserved-2-${suffix}` },
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+    GitOpsTransitions.getInstance().rolloutCandidateOpened({
+      applicationId: app.id,
+      candidate: {
+        id: `cand-unobserved-${suffix}`,
+        application_id: app.id,
+        intent_revision_id: `intent-unobserved-${suffix}`,
+        required_targets_json: encodeGitOpsRequiredTargetsJson([kept]),
+        compose_content_sha256: 'a'.repeat(64),
+        accepted_generation_id: null,
+        artifact_set_id: null,
+        authoritative: 1,
+        provenance: 'roster_change',
+        created_at: 2,
+        operation_id: `op-unobserved-2-${suffix}`,
+      } as never,
+      envelope: { operationId: `op-unobserved-2-${suffix}`, actor: 'tester', trigger: 'test', at: 2 },
+    });
+
+    // The registry row is gone while its target row survives: what the registry
+    // can say about the node is nothing, so the refusal is unknown reachability
+    // rather than a fault in the evidence a deploy left behind.
+    if (registry === 'missing') {
+      DatabaseService.getInstance().getDb().prepare('DELETE FROM nodes WHERE id = ?').run(withdrawn);
+    }
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: `op-unobserved-3-${suffix}`, actor: null, trigger: 'test', at: 3 });
+    expect(outcome).toEqual({ status: 'operator_review', reason });
+  });
+
   it('does not read a migrated application as a first placement', () => {
     // The migration that carries a forward approval records a pre-decomposition
     // row, which names no target set. With no decomposed approval to read, the
@@ -510,29 +749,13 @@ describe('a bounded_auto application reaches an approval', () => {
     const store = GitOpsStore.getInstance();
 
     // The carried-forward row, with no placement_approval beside it.
-    store.insertApproval({
-      id: 'legacy-combined',
-      kind: 'legacy_combined',
-      authority: 'legacy_combined',
-      authoritative: 0,
-      application_id: app.id,
-      generation_id: null,
-      intent_revision_id: null,
-      artifact_set_id: null,
-      rollout_candidate_id: null,
-      rollout_generation_id: null,
-      source_acceptance_ref: null,
-      placement_approval_ref: null,
-      required_targets_json: null,
-      preflight_fingerprint: null,
-      fingerprint: null,
-      blast_json: null,
-      policy_provenance_json: null,
-      actor: null,
-      created_at: 1,
-    } as never);
+    insertLegacyCombinedApproval(store, app.id, 'legacy-combined');
     for (const nodeId of [kept, alsoKept, withdrawn]) {
-      store.upsertTarget({ ...emptyTargetRow(app.id, nodeId, 1), target_status: 'active', connectivity: 'reachable' });
+      store.upsertTarget({
+        ...emptyTargetRow(app.id, nodeId, 1),
+        target_status: 'active',
+        observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+      });
     }
 
     const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
@@ -563,6 +786,83 @@ describe('a bounded_auto application reaches an approval', () => {
     // as a first placement.
     const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-narrow-2', actor: null, trigger: 'test', at: 3 });
     expect(outcome).toEqual({ status: 'auto_approved', reason: 'stateless_removal' });
+  });
+
+  it('runs the automatic path again once an operator confirms a cleared pin', () => {
+    // The widening in the pin chain is a wait, not a lockout. An application
+    // with no decomposed approval has no record of any confirmation, so an
+    // unconfirmed pin keeps every later change with the operator; Confirm Apply
+    // mints the approval the decision anchors on from, and the next change is
+    // judged against that instead of against the whole history.
+    const kept = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const freed = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const later = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [kept], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    // A is live, so the baseline the decision reads is {A} and every change
+    // below is a single stateless addition rather than a first placement.
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, kept, 1),
+      target_status: 'active',
+      observed_artifact_identity_json: JSON.stringify({ kind: 'exact', identity: 'sha256:served', observedAt: 1 }),
+    });
+    insertLegacyCombinedApproval(store, app.id, `legacy-combined-${app.id}`);
+
+    const revise = (id: string, pinnedNodeId: number | null, nodeIds: number[], at: number) => {
+      const previous = store.getIntentRevision(store.getApplication(app.id)!.intent_revision_id!)!;
+      GitOpsTransitions.getInstance().intentRevised({
+        applicationId: app.id,
+        intent: { ...previous, id, pinned_node_id: pinnedNodeId, operation_id: `op-${id}` },
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+      GitOpsTransitions.getInstance().rolloutCandidateOpened({
+        applicationId: app.id,
+        candidate: {
+          id: `cand-${id}`,
+          application_id: app.id,
+          intent_revision_id: id,
+          required_targets_json: encodeGitOpsRequiredTargetsJson(nodeIds),
+          compose_content_sha256: 'a'.repeat(64),
+          accepted_generation_id: null,
+          artifact_set_id: null,
+          authoritative: 1,
+          provenance: 'roster_change',
+          created_at: at,
+          operation_id: `op-${id}`,
+        } as never,
+        envelope: { operationId: `op-${id}`, actor: 'tester', trigger: 'test', at },
+      });
+    };
+
+    // The pin and then the clear: the clear is an unconfirmed pin change, so it
+    // waits, even though the node set it freed is one stateless addition.
+    revise('intent-pin', kept, [kept], 2);
+    revise('intent-clear', null, [kept, freed], 3);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-clear', actor: null, trigger: 'test', at: 4 }))
+      .toEqual({ status: 'operator_review', reason: 'pin_driven_placement' });
+
+    // Confirm Apply for the placement the operator is being shown.
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: 'operator-confirms-clear',
+      intentRevisionId: 'intent-clear',
+      blastJson: encodeGitOpsApprovedTargetEffectJson([
+        { nodeId: kept, outcome: 'place' as const },
+        { nodeId: freed, outcome: 'place' as const },
+      ]),
+      requiredNodeIds: [kept, freed],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-confirm', actor: 'tester', trigger: 'test', at: 5 },
+      rolloutGenerationId: 'gen-confirm',
+      candidateId: 'cand-intent-clear',
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    revise('intent-later', null, [kept, freed, later], 6);
+    expect(applyAutomaticPlacement(app.id, { operationId: 'op-later', actor: null, trigger: 'test', at: 7 }))
+      .toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
   });
 
   it('reads an application with no approval at all as never having been placed', () => {
@@ -703,6 +1003,33 @@ describe('a bounded_auto application reaches an approval', () => {
     expect(store.getApplication(app.id)!.placement_approval_ref).toBeNull();
   });
 
+  it('refuses an addition while one of its targets is awaiting a health verdict', () => {
+    // The half of the same window the stage cannot see. The apply lands and the
+    // ack clears the stage, so a health-gated rollout spends the rest of its
+    // observation window acked-but-unsettled: no stage, and a health run the
+    // fleet is still waiting on. Approving here supersedes a rollout that has
+    // not finished, which is what stops a gated rollout part-way across a fleet.
+    //
+    // The pointer is the evidence, so the pointer is what the fixture sets. The
+    // run behind it is what the startup reconciliation reads back, and that path
+    // is covered against real reservations in the rollout suite.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const other = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId, other], compose: 'services:\n  web:\n    image: nginx:1.25\n' });
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...emptyTargetRow(app.id, other, 1),
+      target_status: 'active',
+      latest_stage: 'blueprint_ack_recorded',
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+
+    const outcome = applyAutomaticPlacement(app.id, { operationId: 'op-awaiting-verdict', actor: null, trigger: 'test', at: 1 });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'conflicting_operation' });
+    expect(store.getApplication(app.id)!.placement_approval_ref).toBeNull();
+    expect(store.getApplication(app.id)!.placement_policy_refusal_reason).toBe('conflicting_operation');
+  });
+
   it('records no reason when it approves, so nothing is left to explain', () => {
     // The opposite direction. A reason left on an approved application would be
     // read as the explanation for whatever review comes next.
@@ -795,5 +1122,138 @@ describe('a bounded_auto application reaches an approval', () => {
     // No generation means no content-derived evidence, and missing evidence is
     // never read as the stateless answer that approves.
     expect(outcome).toEqual({ status: 'operator_review', reason: 'unknown_workload' });
+  });
+
+  it('does not authorize a first automatic placement after a confirmation that none was approved', async () => {
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId], accepted: false });
+    const store = GitOpsStore.getInstance();
+    const generation = store.listGenerationsForApplication(app.id)[0];
+    const envelope = { operationId: `op-${app.id}`, actor: 'tester', trigger: 'manual' as const, at: Date.now() };
+    GitOpsTransitions.getInstance().candidateReady(app.id, generation.id, false, envelope);
+    GitOpsTransitions.getInstance().sourceAccepted({
+      applicationId: app.id,
+      generationId: generation.id,
+      artifactSetId: `art-${generation.id}`,
+      sourceAcceptanceId: `sa-${generation.id}`,
+      authority: 'operator',
+      confirmation: { placementApprovalRef: null, rolloutMayStart: true },
+      envelope,
+    });
+
+    const placed = applyAutomaticPlacement(app.id, {
+      ...envelope, operationId: `place-${app.id}`, trigger: 'placement_policy',
+    });
+    expect(placed).toEqual({ status: 'auto_approved', reason: 'stateless_addition' });
+
+    const { dispatchPreparedGitManagedGeneration } = await import('../services/gitops/gitManagedHandoff');
+    const handoff = await dispatchPreparedGitManagedGeneration({
+      applicationId: app.id,
+      generationId: generation.id,
+      actor: 'system:blueprint-reconciler',
+      trigger: 'retry',
+    });
+
+    const live = store.getApplication(app.id)!;
+    expect(live.placement_approval_ref).toBeTruthy();
+    expect(live.rollout_authorization_ref).toBeNull();
+    expect(live.pause_reason).toContain('approved placement changed');
+    expect(handoff.status).not.toBe('dispatched');
+    expect(store.storedSourceConfirmation(live)).toEqual({
+      status: 'present',
+      confirmation: { placementApprovalRef: null, rolloutMayStart: true },
+    });
+  });
+});
+
+describe('a refusal recorded for an operation that has since finished', () => {
+  it('keeps the recorded reason and the time it was recorded, on the real projection', () => {
+    // The finding this pins. A reason is written once, when the policy runs, and
+    // is cleared only when an operator approves, edits the policy, or a later
+    // change re-decides. A decision runs only when a placement change is pending,
+    // so a refusal recorded because an operation was in flight outlives that
+    // operation and nothing corrects it on its own. The projection therefore
+    // reports a conflict that had already ended, and the operator arriving after
+    // a deploy is told the system is withholding a placement over a conflict
+    // that is over.
+    //
+    // The record is kept, and the projection carries the moment it was made, so
+    // the reason reads as what the policy found then rather than as a claim about
+    // now. Re-deciding here instead would need a trigger that does not exist, and
+    // would make an automatic approval land at a moment the operator is not
+    // watching, which is a larger claim than the evidence supports.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId] });
+    const store = GitOpsStore.getInstance();
+
+    // An operation genuinely in flight, through the transition that starts one.
+    GitOpsTransitions.getInstance().fetchStarted(app.id, {
+      operationId: 'op-inflight-refusal', actor: 'tester', trigger: 'test', at: 3_000,
+    });
+    const outcome = applyAutomaticPlacement(app.id, {
+      operationId: 'op-decide', actor: null, trigger: 'test', at: 4_000,
+    });
+    expect(outcome).toEqual({ status: 'operator_review', reason: 'conflicting_operation' });
+    expect(store.getApplication(app.id)!.placement_policy_refused_at).toBe(4_000);
+
+    // The operation finishes, and nothing else changes: no new candidate, no
+    // policy edit, no approval. `fetched` is the terminal that releases the
+    // in-flight stage.
+    GitOpsTransitions.getInstance().fetched(
+      app.id,
+      'c'.repeat(40),
+      { operationId: 'op-inflight-refusal', actor: 'tester', trigger: 'test', at: 5_000 },
+    );
+    const settled = store.getApplication(app.id)!;
+    expect(settled.active_operation_stage).toBeNull();
+    expect(settled.placement_policy_refusal_reason).toBe('conflicting_operation');
+    expect(settled.placement_policy_refused_at).toBe(4_000);
+    // Nothing re-decided, so nothing approved either. The review is still the
+    // operator's to take, which is the direction a stale reason has to stay in.
+    expect(settled.placement_approval_ref).toBeNull();
+
+    // What the operator is shown. The decline is still reported, carrying the
+    // moment it was recorded rather than asserting it of the present.
+    const projection = projectApplication(app.id, false);
+    const entry = projection.authorityPolicies.find((p) => p.domain === 'placement');
+    expect(entry).toMatchObject({
+      decision: 'policy_declined',
+      reason: 'conflicting_operation',
+      decidedAt: 4_000,
+    });
+    // Not the current time, which is what would make it read as a live claim.
+    expect(entry!.decidedAt).not.toBe(5_000);
+  });
+
+  it('reports a settled application as awaiting an operator, with no reason', () => {
+    // The other arm of the same question. A reason left on an application whose
+    // review has closed would be read as the explanation for whatever comes next.
+    const nodeId = addNode(`n-${randomUUID().slice(0, 6)}`);
+    const app = seed({ nodeIds: [nodeId] });
+    const store = GitOpsStore.getInstance();
+    GitOpsTransitions.getInstance().placementPolicyRefused({
+      applicationId: app.id,
+      reason: 'cordon_override',
+      at: 6_000,
+    });
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId: app.id,
+      approvalId: `${app.id}-placement`,
+      intentRevisionId: store.getApplication(app.id)!.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId, outcome: 'place' as const }]),
+      requiredNodeIds: [nodeId],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: 'op-approve', actor: 'tester', trigger: 'test', at: 7_000 },
+      rolloutGenerationId: `${app.id}-gen`,
+      candidateId: store.getApplication(app.id)!.rollout_candidate_id!,
+      authority: 'operator',
+      policyProvenanceJson: null,
+    });
+
+    const entry = projectApplication(app.id, false).authorityPolicies
+      .find((p) => p.domain === 'placement');
+    expect(entry).toMatchObject({ decision: 'operator_authorized', reason: null });
+    expect(entry!.decidedAt).toBe(7_000);
   });
 });

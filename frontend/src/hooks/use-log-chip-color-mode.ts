@@ -6,11 +6,11 @@ export const LOG_CHIP_COLOR_KEY = 'sencho.log-chip-color-mode';
 export type LogChipColorMode = 'unified' | 'per-service';
 
 function readStored(): LogChipColorMode {
-    if (typeof window === 'undefined') return 'unified';
+    if (typeof window === 'undefined') return 'per-service';
     try {
-        return window.localStorage.getItem(LOG_CHIP_COLOR_KEY) === 'per-service' ? 'per-service' : 'unified';
+        return window.localStorage.getItem(LOG_CHIP_COLOR_KEY) === 'unified' ? 'unified' : 'per-service';
     } catch {
-        return 'unified';
+        return 'per-service';
     }
 }
 
@@ -48,7 +48,7 @@ export function useLogChipColorMode(): [LogChipColorMode, (next: LogChipColorMod
     useEffect(() => {
         function onStorage(event: StorageEvent) {
             if (event.key !== LOG_CHIP_COLOR_KEY) return;
-            setModeState(event.newValue === 'per-service' ? 'per-service' : 'unified');
+            setModeState(event.newValue === 'unified' ? 'unified' : 'per-service');
         }
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);

@@ -90,14 +90,16 @@ Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you 
 
 The Stack Dossier carries a **Rollback readiness** section that answers one question honestly: if this update goes wrong, what can a rollback actually restore? It reports an overall state of Ready, Partial, or Not ready, built from:
 
-- **Recovery generation**: whether a current generation exists for exact restore. Atomic deploy, full-stack update, Git apply, and on-demand or scheduled stack backup capture one.
-- **Managed inputs**: whether the managed authored inventory (ordered compose files, overrides, include/extends, and discoverable env/label/config/secret inputs) is covered exactly.
+- **Recovery generation**: whether a current generation exists, and whether a restore from it is exact, partial because it does not hold every input, or unknown because its content cannot be read. Atomic deploy, full-stack update, Git apply, and on-demand or scheduled stack backup capture one.
+- **Managed inputs**: whether the managed authored inventory (ordered compose files, overrides, include/extends, and discoverable env/label/config/secret inputs) is covered. Files outside the stack folder, paths that contain a variable, and env files Compose loads for interpolation that the generation does not manage (a file named by `COMPOSE_ENV_FILES`, for example) cannot be held in a recovery generation. They show as a warning that lists them, and a rollback uses their current content. When the current recovery generation recorded what it left out, this row describes what that generation holds, not the live project, so editing the compose file afterwards does not hide it. The row also says when the next capture would be refused. When the generation recorded nothing, the row says so and lists only what the live project would leave out. With no generation yet, it describes the live project.
 - **Previous compose file** / **Previous env file**: compose and env coverage disclosures (driven by the current generation when one exists).
 - **Previous image tag**: the known rollback target. When a generation holds prior image IDs, restore can retarget moving tags and supported local builds to those exact images; when no prior ID was captured, restoring files alone may leave a moving tag on a newer digest.
 - **Last successful deploy**: whether recent activity shows a configuration that deployed successfully.
 - **Healthchecks**: whether a rollback can be verified beyond run state.
 - **Rollback eligibility**: whether policy allows restore for the current generation (integrity and held-image posture).
 - **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included; a rollback restores the managed authored inventory (and held images where available), and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
+
+The overall state never reads **Ready** while managed-input coverage is partial or unknown, so the headline always agrees with the rows beneath it. A generation that leaves inputs out, or that recorded no coverage at all, holds the overall state at **Partial** even when compose files, env coverage and the previous image are all otherwise ready.
 
 ## Automatic rollback images
 
@@ -117,12 +119,12 @@ Because these images are deliberately held, deleting one directly (by id, includ
 
 Two settings under **Settings > Infrastructure > Stacks > Deploy Guardrails** control the automatic cleanup:
 
-- **Superseded rollback retention** sets how many days a superseded generation is kept before its image is cleaned up. The current generation is unaffected by this window; it stays protected until it is superseded or manually released. Default 7 days.
-- **Maximum retained rollback generations per stack** caps how many generations a stack keeps at once, current generation included, so the oldest superseded generations beyond the cap are cleaned up ahead of the retention window. 0 (default) leaves the count unlimited and relies on the retention window alone.
+- **Superseded rollback retention** sets how many days a superseded generation is kept before its image is cleaned up. It only applies when the generation cap below allows more than one. The current generation is unaffected by this window; it stays protected until it is superseded or manually released. Default 7 days.
+- **Maximum retained rollback generations per stack** caps how many generations a stack keeps at once, current generation included, so the oldest superseded generations beyond the cap are cleaned up ahead of the retention window. The default is 1; set it to 0 to leave the count unlimited and rely on the retention window alone.
 
 ## Classified failures
 
-When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, an invalid compose file, mixed replica images that cannot be captured exactly, or a project whose include/extends paths cannot be captured for exact rollback. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
+When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, an invalid compose file, mixed replica images that cannot be captured exactly, or **Rollback coverage unavailable**, a stack whose recovery generation cannot be captured, for example because two managed files differ only by letter case (each cause and its fix is listed under [Atomic Deployments troubleshooting](/features/atomic-deployments#troubleshooting)). The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
 
 ## Troubleshooting
 

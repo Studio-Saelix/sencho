@@ -120,6 +120,16 @@ export function normalizeImageHost(host: string): string {
     return lower;
 }
 
+/**
+ * Docker config.json `auths` key for an image host. The Docker CLI matches
+ * Docker Hub credentials only under the legacy v1 URL; every other registry
+ * keeps its bare hostname.
+ */
+export function dockerConfigKeyForHost(host: string): string {
+    const normalized = normalizeImageHost(host);
+    return normalized === 'index.docker.io' ? DOCKER_HUB_AUTHS_KEY : normalized;
+}
+
 // ─── HTTP helper (one-hop redirect) ──────────────────────────────────────────
 
 function httpGet(
@@ -407,11 +417,10 @@ export class RegistryService {
             return { config: { auths: {} }, warnings: [] };
         }
 
-        const normalized = normalizeImageHost(registryHost);
         return {
             config: {
                 auths: {
-                    [normalized]: {
+                    [dockerConfigKeyForHost(registryHost)]: {
                         auth: Buffer.from(`${detailed.auth.username}:${detailed.auth.password}`).toString('base64'),
                     },
                 },

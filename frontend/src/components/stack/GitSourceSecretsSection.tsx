@@ -39,6 +39,8 @@ interface GitSourceSecretsSectionProps {
   canEdit: boolean;
   linked: boolean;
   disabled?: boolean;
+  /** Node the requests target; omitted means the active node. */
+  nodeId?: number | null;
 }
 
 function impactSummary(impact: SopsIdentityImpact[]): string {
@@ -55,6 +57,7 @@ export function GitSourceSecretsSection({
   canEdit,
   linked,
   disabled = false,
+  nodeId,
 }: GitSourceSecretsSectionProps) {
   const [loading, setLoading] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -72,7 +75,7 @@ export function GitSourceSecretsSection({
     }
     setLoading(true);
     try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities`);
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities`, { nodeId });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         toast.error(typeof err?.error === 'string' ? err.error : 'Could not load repository secrets');
@@ -85,7 +88,7 @@ export function GitSourceSecretsSection({
     } finally {
       setLoading(false);
     }
-  }, [linked, stackName]);
+  }, [linked, stackName, nodeId]);
 
   useEffect(() => {
     void load();
@@ -94,6 +97,7 @@ export function GitSourceSecretsSection({
   const generateIdentity = async () => {
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify({}),
       });
@@ -114,6 +118,7 @@ export function GitSourceSecretsSection({
     if (!trimmed) return;
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities/import`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify({ identity: trimmed }),
       });
@@ -134,6 +139,7 @@ export function GitSourceSecretsSection({
     setSavingPolicy(true);
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/encrypted-source-policy`, {
+        nodeId,
         method: 'PUT',
         body: JSON.stringify({ encrypted_source_policy: policy }),
       });
@@ -166,7 +172,7 @@ export function GitSourceSecretsSection({
     try {
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities/${encodeURIComponent(rotateTarget.id)}/rotate`,
-        { method: 'POST', body: JSON.stringify({}) },
+        { nodeId, method: 'POST', body: JSON.stringify({}) },
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -188,7 +194,7 @@ export function GitSourceSecretsSection({
     try {
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities/${encodeURIComponent(identity.id)}`,
-        { method: 'DELETE', body: JSON.stringify({}) },
+        { nodeId, method: 'DELETE', body: JSON.stringify({}) },
       );
       if (res.status === 409) {
         const body = (await res.json()) as { impact?: SopsIdentityImpact[] };
@@ -217,6 +223,7 @@ export function GitSourceSecretsSection({
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/sops-identities/${encodeURIComponent(deleteTarget.id)}`,
         {
+          nodeId,
           method: 'DELETE',
           body: JSON.stringify({ acknowledge_destructive: true }),
         },

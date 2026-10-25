@@ -19,13 +19,16 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
   REGISTRY_DELIVERY_BODY_FIELD,
+  REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES,
   REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
 } from './registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from './registryOpClassifier';
 import { buildRegistryDiscoverPayload } from './registryDeliveryDiscoverPayload';
 import { fingerprintOf, parseSealingKeyBase64 } from './registryEnvelopeSeal';
+import { isGitSourceErrorCode, gitSourceStatus } from '../utils/gitSourceHttp';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
+import type { GitSourceErrorCode } from '../services/GitSourceService';
 
 export const REGISTRY_DELIVERY_ABORTED = 'REGISTRY_DELIVERY_ABORTED';
 const REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL = 'REGISTRY_DELIVERY_TRANSPORT_NOT_CONFIDENTIAL';
@@ -60,8 +63,16 @@ export const REGISTRY_DELIVERY_REFUSAL_CODES: ReadonlySet<string> = new Set([
 export function registryDeliveryRefusal(err: unknown): { code: string; status: number } | null {
   if (!(err instanceof Error)) return null;
   const code = (err as { code?: unknown }).code;
-  if (typeof code !== 'string' || !REGISTRY_DELIVERY_REFUSAL_CODES.has(code)) return null;
+  if (typeof code !== 'string') return null;
   const status = Number((err as { status?: unknown }).status);
+  if (!REGISTRY_DELIVERY_REFUSAL_CODES.has(code)) {
+    // A hop-1 discover can surface a classified git failure. Accept it only
+    // when the accompanying status is the one that code maps to, which is
+    // what the delivery path produces; a local git error reaches catch sites
+    // without that status pair and stays rejected, and a hostile target
+    // cannot move a git code onto a status it never maps to.
+    if (!isGitSourceErrorCode(code) || status !== gitSourceStatus(code)) return null;
+  }
   return { code, status: Number.isFinite(status) ? status : 409 };
 }
 
@@ -250,7 +261,7 @@ async function callTargetDiscover(
     ...safeAxiosTransport(target.trustedLoopback),
     headers: { Authorization: `Bearer ${target.apiToken}` },
     timeout: 30_000,
-    maxBodyLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
+    maxBodyLength: REGISTRY_DELIVERY_DISCOVER_BODY_LIMIT_BYTES,
     maxContentLength: REGISTRY_DELIVERY_FIELD_LIMIT_BYTES,
     signal: abortSignal,
     validateStatus: () => true,
@@ -260,7 +271,18 @@ async function callTargetDiscover(
     const message = typeof res.data?.error === 'string'
       ? res.data.error
       : 'Registry delivery discovery failed on target';
-    throw Object.assign(new Error(message), { status: res.status });
+    const failure: Error & { status: number; gitCode?: GitSourceErrorCode } = Object.assign(
+      new Error(message),
+      { status: res.status },
+    );
+    // 4xx and 504 are the statuses the target's git classifier produces. Carry
+    // the classified code when the body names one, so the hub does not have to
+    // re-derive it. Every other 5xx stays generic, so a broken target cannot
+    // relabel a server error as a git refusal.
+    if ((res.status < 500 || res.status === 504) && isGitSourceErrorCode(res.data?.code)) {
+      failure.gitCode = res.data.code;
+    }
+    throw failure;
   }
   return parseDiscoverResponse(res.data);
 }
@@ -489,6 +511,34 @@ export async function augmentJsonBodyForRegistryDelivery(
       '[registryDeliveryOutbound] hop-1 failed:',
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
+    const gitCode = (error as { gitCode?: unknown }).gitCode;
+    if (isGitSourceErrorCode(gitCode)) {
+      // The target classified the failure with the same code the direct route
+      // returns. Carry the code and its message through so callers and logs
+      // can tell rejected credentials from a missing ref or a timeout. The
+      // status is re-derived from the code rather than trusted from the
+      // response, because git auth failures must never reach the client as a
+      // 401 (the frontend treats that as an expired session), and no other
+      // classified git status may be spoofed. Only a 4xx or 504 response can
+      // reach this branch, every other 5xx stays generic.
+      return {
+        ok: false,
+        status: gitSourceStatus(gitCode),
+        code: gitCode,
+        error: getErrorMessage(error, 'Registry delivery failed'),
+      };
+    }
+    if (status === 401) {
+      // A target that rejects the node credential answers 401, and the
+      // frontend treats a 401 as an expired hub session and signs the operator
+      // out. Surface it as an upstream failure with a hub-owned message.
+      return {
+        ok: false,
+        status: 502,
+        code: REGISTRY_DELIVERY_FAILED,
+        error: 'Target node authentication failed. Check the node token.',
+      };
+    }
     return {
       ok: false,
       status,

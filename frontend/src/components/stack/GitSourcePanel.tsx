@@ -1,26 +1,34 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Loader2, Trash2, RefreshCw, Save, Pause, Play, GitBranch } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { Trash2, RefreshCw, Save, Pause, Play, GitBranch, Pencil } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import { Skeleton } from '@/components/ui/skeleton';
-import { SystemSheet, SheetSection, type SystemSheetAction } from '@/components/ui/system-sheet';
+import { SystemSheet, SheetSection, type SystemSheetAction, type SystemSheetTab } from '@/components/ui/system-sheet';
 import { apiFetch } from '@/lib/api';
+import { runSourceControllerAction } from '@/lib/gitSourceControllerAction';
 import { isSupportedGitRepoUrl, UNSUPPORTED_GIT_REPO_URL_MESSAGE } from '@/lib/gitRepoUrl';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
+import GitOpsSourceActions from '@/components/gitops/GitOpsSourceActions';
+import { claimedBlueprintAuthorityId } from '@/lib/gitopsAuthorityApi';
+import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import { toast } from '@/components/ui/toast-store';
 import { GitSourceDiffDialog, type PullResult, type PublicPendingPlan } from './GitSourceDiffDialog';
-import { GitSourceFields, type ApplyMode } from './GitSourceFields';
+import { GitSourceFields, type ApplyMode, type GitSourceFieldsPart } from './GitSourceFields';
+import { GitSourceSummary } from './GitSourceSummary';
+import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
 import { GitSourceSecretsSection } from './GitSourceSecretsSection';
 import { GitManifestSummary, type ManifestSummary } from './GitManifestSummary';
 import type { GitBrowseResult } from './GitComposeFilePicker';
 import { AdoptBlueprintDialog } from '@/components/blueprints/AdoptBlueprintDialog';
-import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import GitOpsStateCard from '@/components/gitops/GitOpsStateCard';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
+import { buildGitOpsStatus } from '@/lib/gitopsStatus';
+import { BusyButton } from '@/components/ui/busy-button';
 import { GitProviderHooksCard } from './GitProviderHooksCard';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta, type LiveSourceFacet } from '@/lib/gitopsState';
+import { SOURCE_STATE_LOOKUP, absentFault, liveSourceFacet, type LiveSourceFacet } from '@/lib/gitopsState';
 import { GITOPS_SOURCE_CONTROLLER_CAPABILITY } from '@/lib/capabilities';
 import type {
   GitOpsAvailableAction,
@@ -65,6 +73,8 @@ export interface GitSource {
 type GitSourceRead = GitSource & GitOpsRevisionCarrier;
 type GitSourceUnlinked = { linked: false } & GitOpsRevisionCarrier;
 
+type GitSourceTab = 'overview' | 'source' | 'automation' | 'secrets' | 'drift';
+
 interface GitSourcePanelProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -74,6 +84,14 @@ interface GitSourcePanelProps {
   /** Called after any change that may affect the sidebar pending-badge. */
   onSourceChanged?: () => void;
   canDeploy?: boolean;
+  /** Node the panel reads and writes; omitted means the active node. */
+  nodeId?: number | null;
+  /** Breadcrumb override for hosts outside the stack view. */
+  crumb?: string[];
+  /** Hide the link back to the GitOps workplace when the panel is already hosted there. */
+  showPortfolioLink?: boolean;
+  /** Pull the waiting update and open its diff once the sheet has loaded, when one is waiting. */
+  autoReview?: boolean;
 }
 
 /**
@@ -91,6 +109,10 @@ function deriveApplyMode(source: GitSource | null, pendingMode: ApplyMode | null
   if (source.source_policy === 'review') return 'review';
   if (!source.auto_apply_on_webhook) return 'review';
   return source.auto_deploy_on_apply ? 'auto-deploy' : 'auto-write';
+}
+
+function storedComposePaths(source: GitSource): string[] {
+  return source.compose_paths?.length ? source.compose_paths : [source.compose_path];
 }
 
 /** The commit the pending banner announces, or null when there is nothing to announce. */
@@ -123,14 +145,6 @@ function derivePendingCommit(
   return { status: 'candidate_ready', sha: flatPendingSha };
 }
 
-function formatRetryWait(retryAt: number): string {
-  const ms = retryAt - Date.now();
-  if (ms <= 0) return 'Retry due';
-  const secs = Math.ceil(ms / 1000);
-  if (secs < 60) return `Retry in ${secs}s`;
-  return `Retry in ${Math.ceil(secs / 60)}m`;
-}
-
 export function GitSourcePanel({
   open,
   onOpenChange,
@@ -138,8 +152,14 @@ export function GitSourcePanel({
   canEdit,
   canDeploy = canEdit,
   onSourceChanged,
+  nodeId,
+  crumb,
+  showPortfolioLink = true,
+  autoReview = false,
 }: GitSourcePanelProps) {
   const [loading, setLoading] = useState(true);
+  // A failed open is not "no source": it needs its own state so the sheet can say it could not read.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [pulling, setPulling] = useState(false);
@@ -176,17 +196,28 @@ export function GitSourcePanel({
   const [resuming, setResuming] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [adoptOpen, setAdoptOpen] = useState(false);
+  const [tab, setTab] = useState<GitSourceTab>('overview');
+  // The Source tab reads as a summary until the operator chooses to edit it.
+  const [editing, setEditing] = useState(false);
 
   const { runWithLog } = useDeployFeedback();
-  const { activeNode, hasCapability } = useNodes();
+  const { activeNode, hasCapability, nodeMeta, nodes } = useNodes();
+  const { can } = useAuth();
+  const sourceNodeId = nodes.find((node) => node.is_default)?.id ?? null;
+  // The node this panel acts on: an explicit host node, else the active one.
+  const panelNodeId = nodeId !== undefined ? nodeId : activeNode?.id ?? null;
+  // An explicit node answers from its own meta, optimistic while unknown,
+  // exactly as hasCapability does for the active node.
+  const nodeHasCapability = (cap: typeof GITOPS_SOURCE_CONTROLLER_CAPABILITY): boolean => {
+    if (nodeId === undefined || nodeId === null) return hasCapability(cap);
+    const meta = nodeMeta.get(nodeId);
+    return meta ? meta.capabilities.includes(cap) : true;
+  };
   const applyMode = deriveApplyMode(source, applyModeOverride);
 
   const sourceFacet = liveSourceFacet(revision);
-  const artifactFacet = liveArtifactFacet(revision);
-  const placementFacet = livePlacementFacet(revision);
-  const rolloutFacet = liveRolloutFacet(revision);
-  const approvals = revision && revision.targetMode !== 'not_applicable' ? revision.approvals : null;
-  const artifactIdentity = artifactFacet?.expected?.identity ?? null;
+  // Whatever the revision has to say (a Blueprint-claimed source has no source stage but still has placement, rollout, and caveats).
+  const statusModel = buildGitOpsStatus(revision);
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
@@ -207,60 +238,103 @@ export function GitSourcePanel({
     setApplyModeOverride(null);
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // The form mirrors the stored source; secrets are never read back, so they start empty.
+  const fillForm = useCallback((data: GitSource) => {
+    setRepoUrl(data.repo_url);
+    setBranch(data.branch);
+    setComposePaths(storedComposePaths(data));
+    setContextDir(data.context_dir ?? '');
+    setSyncEnv(data.sync_env);
+    setAuthType(data.auth_type);
+    setToken('');
+    setDeployKey('');
+    setCaBundle('');
+    setRemoveCaBundle(false);
+    setSshKnownHostsEntry('');
+    setSshHostKeyFingerprint('');
+    setApplyModeOverride(null);
+  }, []);
+
+  // Only the latest request may touch state, so a slow answer for the stack the
+  // sheet just left cannot overwrite the one it is now showing.
+  const loadSeq = useRef(0);
+  const loadedForOpen = useRef(false);
+
+  /**
+   * Read the source and its status.
+   *
+   * `open` is a fresh look: it shows the skeleton, refills the form, and on
+   * failure clears everything and says so, because the panel is reused across
+   * stacks and a source left behind would sit under another stack's header.
+   * `save` and `refresh` follow a write the server already accepted: they keep
+   * what is on screen on failure instead of turning a linked stack into an empty
+   * form, and `refresh` leaves unsaved edits alone, so a pull or a suspend does
+   * not throw away a change the operator is still making.
+   */
+  const load = useCallback(async (mode: 'open' | 'save' | 'refresh' = 'open') => {
+    const seq = ++loadSeq.current;
+    const current = () => seq === loadSeq.current;
+    const fresh = mode === 'open';
+    if (fresh) {
+      setLoading(true);
+      setLoadError(null);
+      loadedForOpen.current = false;
+    }
+    const fail = (message: string) => {
+      if (!fresh) {
+        toast.error('Could not refresh the sheet. Reopen it to see the current state.');
+        return;
+      }
+      resetToUnlinked();
+      setRevision(null);
+      setLoadError(message);
+      toast.error(message);
+    };
     try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`);
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, { nodeId });
+      if (!current()) return;
       if (res.ok) {
         const data: GitSourceRead | GitSourceUnlinked = await res.json();
+        if (!current()) return;
         setRevision(data.gitopsRevision);
         // An existing stack with no Git source attached answers 200 { linked: false }.
         if ('linked' in data) {
           resetToUnlinked();
         } else {
           setSource(data);
-          setRepoUrl(data.repo_url);
-          setBranch(data.branch);
-          setComposePaths(data.compose_paths?.length ? data.compose_paths : [data.compose_path]);
-          setContextDir(data.context_dir ?? '');
-          setSyncEnv(data.sync_env);
-          setAuthType(data.auth_type);
-          setToken('');
-          setDeployKey('');
-          setCaBundle('');
-          setRemoveCaBundle(false);
-          setSshKnownHostsEntry('');
-          setSshHostKeyFingerprint('');
-          setApplyModeOverride(null);
+          if (mode !== 'refresh') fillForm(data);
         }
       } else if (res.status === 404) {
         resetToUnlinked();
         setRevision(null);
       } else if (res.status === 403) {
-        setSource(null);
-        setRevision(null);
-        toast.error('You do not have permission to view this stack\'s Git source.');
+        fail('You do not have permission to view this stack\'s Git source.');
       } else {
-        setRevision(null);
         const err = await res.json().catch(() => ({}));
-        toast.error(err?.error || 'Failed to load Git source.');
+        if (!current()) return;
+        fail(err?.error || 'Failed to load Git source.');
       }
     } catch (e) {
-      // Clear alongside the other failure branches: the panel is reused across
-      // stacks, so a revision left behind would render one stack's state under
-      // another stack's header.
-      setRevision(null);
-      toast.error((e as Error)?.message || 'Network error.');
+      if (!current()) return;
+      fail((e as Error)?.message || 'Network error.');
     } finally {
-      setLoading(false);
+      if (current() && fresh) {
+        loadedForOpen.current = true;
+        setLoading(false);
+      }
     }
-  }, [stackName, resetToUnlinked]);
+  }, [stackName, nodeId, resetToUnlinked, fillForm]);
 
   useEffect(() => {
     if (open) {
-      void load();
+      setTab('overview');
+      setEditing(false);
+      // Drop whatever the sheet held for another stack or an earlier visit before reading afresh.
+      resetToUnlinked();
+      setRevision(null);
+      void load('open');
     }
-  }, [open, load]);
+  }, [open, load, resetToUnlinked]);
 
   const buildSaveBody = useCallback(() => {
     const autoApply = applyMode === 'auto-write' || applyMode === 'auto-deploy';
@@ -307,6 +381,7 @@ export function GitSourcePanel({
 
   const persistGitSource = useCallback(async (body: Record<string, unknown>, successMessage: string) => {
     const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
+      nodeId,
       method: 'PUT',
       body: JSON.stringify(body),
     });
@@ -324,9 +399,9 @@ export function GitSourcePanel({
     setApplyModeOverride(null);
     toast.success(successMessage);
     onSourceChanged?.();
-    await load();
+    await load('save');
     return true;
-  }, [load, onSourceChanged, stackName]);
+  }, [load, onSourceChanged, stackName, nodeId]);
 
   const save = async () => {
     if (!repoUrl.trim() || !branch.trim() || composePaths.length === 0) {
@@ -341,7 +416,7 @@ export function GitSourcePanel({
     setSaving(true);
     const loadingId = toast.loading('Verifying repository access...');
     try {
-      await persistGitSource(buildSaveBody(), 'Git source saved.');
+      if (await persistGitSource(buildSaveBody(), 'Git source saved.')) setEditing(false);
     } catch (e) {
       toast.error((e as Error)?.message || 'Network error.');
     } finally {
@@ -368,6 +443,7 @@ export function GitSourcePanel({
       }
       if (caBundle !== '') body.ca_bundle = caBundle;
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/browse`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify(body),
       });
@@ -390,16 +466,19 @@ export function GitSourcePanel({
     setDeleting(true);
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source`, {
+        nodeId,
         method: 'DELETE',
       });
       if (res.ok) {
         toast.success('Git source removed.');
-        setSource(null);
         // Detaching is a stronger invalidation than a save: the projection now
         // describes a source that is gone, and the pending card is derived from
         // the revision alone, so leaving it would advertise a waiting commit on
-        // a stack Git no longer manages.
+        // a stack Git no longer manages. The form goes too, so the removed
+        // source's URL is not left prefilled in the empty form.
+        resetToUnlinked();
         setRevision(null);
+        setEditing(false);
         onSourceChanged?.();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -415,9 +494,9 @@ export function GitSourcePanel({
   const pullNow = async () => {
     if (!source) return;
     setPulling(true);
-    const loadingId = toast.loading('Fetching from Git...');
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/pull`, {
+        nodeId,
         method: 'POST',
       });
       if (res.ok) {
@@ -435,7 +514,6 @@ export function GitSourcePanel({
     } catch (e) {
       toast.error((e as Error)?.message || 'Network error.');
     } finally {
-      toast.dismiss(loadingId);
       setPulling(false);
     }
   };
@@ -445,7 +523,7 @@ export function GitSourcePanel({
     const loadingId = toast.loading(deploy ? 'Applying and deploying...' : 'Applying changes...');
     // Snapshot the node once so the apply (and any deploy it triggers) stays
     // bound to it even if the active node changes while the operation runs.
-    const opNodeId = activeNode?.id ?? null;
+    const opNodeId = panelNodeId;
     try {
       const runApply = async (started: Promise<void>) => {
         if (deploy) await started;
@@ -465,7 +543,7 @@ export function GitSourcePanel({
           }
           setDiffOpen(false);
           setPull(null);
-          await load();
+          await load('refresh');
           onSourceChanged?.();
           return { ok: true };
         } else {
@@ -504,13 +582,14 @@ export function GitSourcePanel({
   const dismissPending = async () => {
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/dismiss-pending`, {
+        nodeId,
         method: 'POST',
       });
       if (res.ok) {
         toast.success('Pending update dismissed.');
         setDiffOpen(false);
         setPull(null);
-        await load();
+        await load('refresh');
         onSourceChanged?.();
       } else {
         const err = await res.json().catch(() => ({}));
@@ -525,30 +604,10 @@ export function GitSourcePanel({
     action: 'suspend' | 'resume' | 'retry',
     body?: Record<string, unknown>,
   ): Promise<boolean> => {
-    try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/${action}`, {
-        method: 'POST',
-        body: JSON.stringify(body ?? {}),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({})) as { error?: string };
-        toast.error(err.error || `Could not ${action} this Git source.`);
-        return false;
-      }
-      toast.success(
-        action === 'suspend'
-          ? 'Reconciliation suspended.'
-          : action === 'resume'
-            ? 'Reconciliation resumed.'
-            : 'Retry started.',
-      );
-      onSourceChanged?.();
-      await load();
-      return true;
-    } catch (e) {
-      toast.error((e as Error)?.message || 'Network error.');
-      return false;
-    }
+    if (!(await runSourceControllerAction(stackName, nodeId, action, body))) return false;
+    onSourceChanged?.();
+    await load('refresh');
+    return true;
   };
 
   const suspendSource = async () => {
@@ -583,9 +642,8 @@ export function GitSourcePanel({
     }
   };
 
-  const sha7 = source?.last_applied_commit_sha?.slice(0, 7)
-    ?? source?.pending_commit_sha?.slice(0, 7)
-    ?? null;
+  // The header names what is applied. A commit that is only waiting is the status's to announce.
+  const sha7 = source?.last_applied_commit_sha?.slice(0, 7) ?? 'never applied';
   const stateLabel = sourceFacet
     ? (SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status)
     : null;
@@ -602,7 +660,7 @@ export function GitSourcePanel({
     revision && revision.targetMode !== 'not_applicable' ? revision.availableActions : [];
   const offersController = (action: GitOpsAvailableAction): boolean => (
     canEdit
-    && hasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY)
+    && nodeHasCapability(GITOPS_SOURCE_CONTROLLER_CAPABILITY)
     && availableActions.includes(action)
   );
   const offerSuspend = offersController('suspend');
@@ -617,40 +675,405 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
+  // The one verb the status offers: retry when the controller is holding the source back and allows it, else review the waiting commit.
+  let statusAction: ReactNode;
+  if (showControllerCard && offerRetry) {
+    statusAction = (
+      <BusyButton
+        size="sm"
+        variant="outline"
+        className="h-7"
+        pending={retrying}
+        busyLabel="Retrying"
+        onClick={() => { void retrySource(); }}
+      >
+        Retry
+      </BusyButton>
+    );
+  } else if (showControllerCard && offerResume && sourceFacet?.status === 'source_suspended') {
+    statusAction = (
+      <BusyButton
+        size="sm"
+        variant="outline"
+        className="h-7"
+        pending={resuming}
+        busyLabel="Resuming"
+        onClick={() => { void resumeSource(); }}
+      >
+        Resume
+      </BusyButton>
+    );
+  } else if (showPendingReview) {
+    statusAction = (
+      <BusyButton
+        size="sm"
+        variant="outline"
+        className="h-7"
+        pending={pulling}
+        busyLabel="Reviewing"
+        onClick={() => { void pullNow(); }}
+      >
+        Review update
+      </BusyButton>
+    );
+  }
 
-  const secondaryActions: SystemSheetAction[] = [];
-  if (!claimedByBlueprint) {
-    if (source && sourceFacet?.status !== 'source_suspended') {
-      secondaryActions.push({
+  // "Review update" from outside the sheet: do what its button would, once per opening.
+  const autoReviewed = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      autoReviewed.current = false;
+      return;
+    }
+    // loadedForOpen: the state read for THIS opening, never what a reopened sheet still held.
+    if (!autoReview || loading || !loadedForOpen.current || autoReviewed.current || !showPendingReview) return;
+    autoReviewed.current = true;
+    void pullNow();
+    // pullNow is a fresh closure each render; the ref makes this run once per opening.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoReview, open, loading, showPendingReview]);
+
+  const toolbarLive = !loading && loadError === null;
+  const offerPull = toolbarLive && !claimedByBlueprint && source !== null && sourceFacet?.status !== 'source_suspended';
+  const secondaryActions: SystemSheetAction[] | undefined = offerPull
+    ? [{
         label: pulling ? 'Pulling' : 'Pull now',
         onClick: () => { void pullNow(); },
-        disabled: pulling || saving,
-        icon: pulling ? Loader2 : RefreshCw,
-      });
-    }
-    if (offerSuspend) {
-      secondaryActions.push({
-        label: suspending ? 'Suspending' : 'Suspend',
-        onClick: () => setSuspendConfirmOpen(true),
-        disabled: suspending || saving,
-        icon: Pause,
-      });
-    } else if (offerResume) {
-      secondaryActions.push({
-        label: resuming ? 'Resuming' : 'Resume',
-        onClick: () => { void resumeSource(); },
-        disabled: resuming || saving,
-        icon: Play,
-      });
-    }
+        disabled: saving,
+        pending: pulling,
+        icon: RefreshCw,
+      }]
+    : undefined;
+  // Adoption always runs on the hub, so a panel hosted for another node's stack
+  // must not offer it: the call would land on the hub's same-named stack.
+  const adoptReachable = nodeId === undefined || nodes.some(n => n.id === nodeId && n.type === 'local');
+  const canAdopt = canEdit && canDeploy && adoptReachable && source !== null && revision?.targetMode === 'direct';
+
+  // Unsaved changes anywhere in the form, on either tab that edits it.
+  const dirty = source !== null && (
+    repoUrl.trim() !== source.repo_url
+    || branch.trim() !== source.branch
+    || composePaths.join('\n') !== storedComposePaths(source).join('\n')
+    || contextDir.trim() !== (source.context_dir ?? '')
+    || syncEnv !== source.sync_env
+    || authType !== source.auth_type
+    || token !== '' || deployKey !== '' || caBundle !== '' || removeCaBundle
+    || sshKnownHostsEntry !== '' || sshHostKeyFingerprint !== ''
+    || applyMode !== deriveApplyMode(source, null)
+  );
+  const cancelEdit = () => {
+    // Cancel backs out of the connection edit only; an apply behavior chosen on
+    // the Automation tab is a separate unsaved change and stays.
+    const chosenMode = applyModeOverride;
+    if (source) fillForm(source);
+    setApplyModeOverride(chosenMode);
+    setEditing(false);
+  };
+
+  const driftItems = revision && revision.targetMode !== 'not_applicable' ? revision.drift : [];
+  const tabs: SystemSheetTab[] | undefined = source
+    ? [
+        { id: 'overview', label: 'Overview' },
+        { id: 'source', label: 'Source' },
+        { id: 'automation', label: 'Automation' },
+        { id: 'secrets', label: 'Secrets' },
+        ...(driftItems.length > 0 ? [{ id: 'drift', label: 'Drift', count: driftItems.length }] : []),
+      ]
+    : undefined;
+  // A drift tab that has gone (the drift cleared while it was open) falls back to the overview.
+  const activeTab: GitSourceTab = tab === 'drift' && driftItems.length === 0 ? 'overview' : tab;
+
+  const renderFields = (part: GitSourceFieldsPart) => (
+    <GitSourceFields
+      variant="edit"
+      part={part}
+      stackName={stackName}
+      disabled={!canEdit || saving}
+      repoUrl={repoUrl}
+      branch={branch}
+      composePaths={composePaths}
+      contextDir={contextDir}
+      syncEnv={syncEnv}
+      authType={authType}
+      token={token}
+      deployKey={deployKey}
+      caBundle={caBundle}
+      removeCaBundle={removeCaBundle}
+      sshKnownHostsEntry={sshKnownHostsEntry}
+      sshHostKeyFingerprint={sshHostKeyFingerprint}
+      hasStoredToken={source?.has_token ?? false}
+      hasStoredDeployKey={source?.has_deploy_key ?? false}
+      hasStoredCaBundle={source?.has_ca_bundle ?? false}
+      storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
+      applyMode={applyMode}
+      onRepoUrlChange={setRepoUrl}
+      onBranchChange={setBranch}
+      onComposePathsChange={setComposePaths}
+      onContextDirChange={setContextDir}
+      onSyncEnvChange={setSyncEnv}
+      onAuthTypeChange={setAuthType}
+      onTokenChange={setToken}
+      onDeployKeyChange={setDeployKey}
+      onCaBundleChange={(value) => {
+        setCaBundle(value);
+        if (removeCaBundle) setRemoveCaBundle(false);
+      }}
+      onRemoveCaBundle={() => setRemoveCaBundle(true)}
+      onSshKnownHostsEntryChange={setSshKnownHostsEntry}
+      onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
+      onApplyModeChange={setApplyModeOverride}
+      onBrowse={browseRepo}
+      nodeId={nodeId}
+    />
+  );
+
+  const ownerNode = panelNodeId == null ? null : nodes.find((node) => node.id === panelNodeId) ?? null;
+  const claimedAuthorityId = revision ? claimedBlueprintAuthorityId(revision, ownerNode) : null;
+  const claimedAutomatic = revision?.targetMode === 'blueprint'
+    && policyReadFor(revision.authorityPolicies, 'source')?.configured === 'automatic';
+  const renderClaimedSourceActions = (): ReactNode => (
+    claimedAuthorityId && revision ? (
+      <GitOpsSourceActions
+        applicationId={claimedAuthorityId}
+        projection={revision}
+        can={can}
+        sourceNodeId={sourceNodeId}
+        onChanged={() => {
+          void load('refresh');
+          onSourceChanged?.();
+        }}
+      />
+    ) : null
+  );
+  const overviewSourceActions = renderClaimedSourceActions();
+  if (overviewSourceActions) {
+    statusAction = statusAction ? (
+      <div className="flex flex-wrap items-center gap-2">
+        {statusAction}
+        {overviewSourceActions}
+      </div>
+    ) : overviewSourceActions;
   }
-  if (canEdit && canDeploy && source && revision?.targetMode === 'direct') {
-    secondaryActions.push({
-      label: 'Adopt onto Blueprint',
-      onClick: () => setAdoptOpen(true),
-      disabled: saving,
-      icon: GitBranch,
-    });
+  const noticeSourceActions = renderClaimedSourceActions();
+  const claimedNotice = (
+    <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
+      <p className="text-xs text-stat-subtitle leading-relaxed">
+        This Git source belongs to a Git-managed Blueprint. Save and Detach stay on that Blueprint.
+        {' '}
+        {claimedAuthorityId
+          ? claimedAutomatic
+            ? 'Pull source fetches the next commit into it. This source accepts a new commit on its own, so Pull source asks before it fetches.'
+            : 'Pull source fetches the next commit into it.'
+          : 'Pull source for this Blueprint stays on the node that owns it.'}
+      </p>
+      {noticeSourceActions && (
+        <div className="flex flex-wrap items-center gap-2">
+          {noticeSourceActions}
+        </div>
+      )}
+    </div>
+  );
+
+  const overviewTab = (
+    <div className="space-y-3">
+      {statusModel && (
+        <GitOpsStatus
+          revision={revision}
+          focus={statusAction ? 'source' : undefined}
+          action={statusAction}
+        />
+      )}
+      {!statusModel && showPendingReview && pending && (
+        // No projection answered but a commit is waiting: the flat pointer is all there is.
+        <GitOpsStateCard
+          data-testid="git-pending"
+          stateKey={pending.status}
+          state={SOURCE_STATE_LOOKUP[pending.status]}
+          action={statusAction}
+        >
+          {pending.sha && (
+            <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
+              Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
+            </div>
+          )}
+        </GitOpsStateCard>
+      )}
+      {showPortfolioLink && source && panelNodeId !== null && (
+        // The portfolio view of this one application, next to every
+        // other GitOps application and its attention queue.
+        <Button
+          variant="link"
+          size="sm"
+          className="h-auto p-0 text-xs"
+          onClick={() => {
+            onOpenChange(false);
+            openGitOpsWorkplace({ nodeId: panelNodeId, stack: stackName });
+          }}
+        >
+          Open in GitOps portfolio
+        </Button>
+      )}
+    </div>
+  );
+
+  let sourceConfiguration: ReactNode;
+  if (claimedByBlueprint) {
+    sourceConfiguration = claimedNotice;
+  } else if (editing) {
+    sourceConfiguration = (
+      <div className="space-y-4">
+        {renderFields('connection')}
+        <Button variant="ghost" size="sm" onClick={cancelEdit} disabled={saving}>
+          Cancel
+        </Button>
+      </div>
+    );
+  } else {
+    sourceConfiguration = (
+      <div className="space-y-3">
+        {source && <GitSourceSummary source={source} />}
+        <div className="flex flex-wrap items-center gap-2">
+          {canMutateSource && (
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setEditing(true)}>
+              <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
+              Edit
+            </Button>
+          )}
+          {canAdopt && (
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={saving} onClick={() => setAdoptOpen(true)}>
+              <GitBranch className="h-3.5 w-3.5" strokeWidth={1.5} />
+              Adopt onto Blueprint
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const sourceTab = (
+    <>
+      <SheetSection title="Configuration">{sourceConfiguration}</SheetSection>
+      {source && (
+        <SheetSection title="Manifest">
+          <GitManifestSummary
+            stackName={stackName}
+            nodeId={nodeId}
+            summary={
+              source.manifest ??
+              (source.manifest_state
+                ? {
+                    state: source.manifest_state,
+                    manifestVersion: 0,
+                    resolvedCommitSha: null,
+                    managedCount: 0,
+                    unmanagedCount: 0,
+                    refusedCount: 0,
+                    refused: [],
+                    hasBuildContexts: false,
+                    generatedAt: null,
+                  }
+                : null)
+            }
+          />
+        </SheetSection>
+      )}
+    </>
+  );
+
+  const automationTab = (
+    <>
+      <SheetSection title="Apply behavior">
+        {claimedByBlueprint ? claimedNotice : renderFields('apply')}
+      </SheetSection>
+      {!claimedByBlueprint && (offerSuspend || offerResume) && (
+        <SheetSection title="Reconciliation">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-stat-subtitle">
+              {offerResume
+                ? 'Suspended: polling, webhooks, and automatic apply are stopped until you resume.'
+                : 'Active: Sencho polls this source and acts on webhooks according to the apply behavior.'}
+            </p>
+            {offerSuspend ? (
+              <Button variant="outline" size="sm" className="gap-1.5" disabled={suspending || saving} onClick={() => setSuspendConfirmOpen(true)}>
+                <Pause className="h-3.5 w-3.5" strokeWidth={1.5} />
+                {suspending ? 'Suspending' : 'Suspend'}
+              </Button>
+            ) : (
+              <BusyButton variant="outline" size="sm" pending={resuming} busyLabel="Resuming" disabled={saving} onClick={() => { void resumeSource(); }}>
+                <Play className="h-3.5 w-3.5" strokeWidth={1.5} />
+                Resume
+              </BusyButton>
+            )}
+          </div>
+        </SheetSection>
+      )}
+      <SheetSection title="Provider hooks">
+        <GitProviderHooksCard stackName={stackName} canEdit={canEdit} nodeId={nodeId} />
+      </SheetSection>
+    </>
+  );
+
+  const secretsTab = (
+    <SheetSection title="Repository secrets">
+      <GitSourceSecretsSection
+        stackName={stackName}
+        canEdit={canMutateSource}
+        linked
+        disabled={saving || loading}
+        nodeId={nodeId}
+      />
+    </SheetSection>
+  );
+
+  const driftTab = (
+    <SheetSection title="Drift">
+      <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
+        {driftItems.map((d, i) => <GitOpsDriftRow key={`${d.class}-${d.owner}-${i}`} item={d} />)}
+      </div>
+    </SheetSection>
+  );
+
+  const tabBodies: Record<GitSourceTab, ReactNode> = {
+    overview: overviewTab,
+    source: sourceTab,
+    automation: automationTab,
+    secrets: secretsTab,
+    drift: driftTab,
+  };
+
+  let sheetBody: ReactNode;
+  if (loading) {
+    sheetBody = (
+      <div className="space-y-3">
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+      </div>
+    );
+  } else if (loadError !== null) {
+    sheetBody = (
+      <div
+        role="alert"
+        data-testid="git-source-load-error"
+        className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3"
+      >
+        <p className="font-mono text-[11px] text-destructive">{loadError}</p>
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { void load('open'); }}>
+          <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.5} />
+          Retry
+        </Button>
+      </div>
+    );
+  } else if (source) {
+    sheetBody = tabBodies[activeTab];
+  } else {
+    sheetBody = (
+      <>
+        {statusModel && overviewTab}
+        <SheetSection title="Repository">{claimedByBlueprint ? claimedNotice : renderFields('all')}</SheetSection>
+      </>
+    );
   }
 
   return (
@@ -658,264 +1081,32 @@ export function GitSourcePanel({
       <SystemSheet
         open={open}
         onOpenChange={onOpenChange}
-        crumb={['Stack', stackName, 'Git source']}
+        crumb={crumb ?? ['Stack', stackName, 'Git source']}
         name="Git source"
         meta={sheetMeta}
         size="lg"
-        primaryAction={canMutateSource ? {
+        // A linked source offers Update only when something differs from what is stored. The
+        // toolbar is inert while the sheet is reading or could not read, so nothing acts on a
+        // source that is not the one on screen.
+        primaryAction={toolbarLive && canMutateSource && (!source || dirty) ? {
           label: saving ? (source ? 'Updating' : 'Saving') : (source ? 'Update' : 'Save'),
           onClick: () => { void save(); },
-          disabled: saving,
-          icon: saving ? Loader2 : Save,
+          pending: saving,
+          icon: Save,
         } : undefined}
-        secondaryActions={secondaryActions.length > 0 ? secondaryActions : undefined}
-        destructiveAction={canMutateSource && source ? {
-          label: 'Remove',
+        secondaryActions={secondaryActions}
+        destructiveAction={toolbarLive && canMutateSource && source ? {
+          label: 'Detach',
           onClick: () => setRemoveConfirmOpen(true),
           disabled: deleting || saving,
           icon: Trash2,
         } : undefined}
+        tabs={tabs}
+        activeTab={source ? activeTab : undefined}
+        onTabChange={id => setTab(id as GitSourceTab)}
         footerContext={footerContext}
       >
-        {loading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-9 w-full" />
-            <Skeleton className="h-9 w-full" />
-          </div>
-        ) : (
-          <>
-            <SheetSection title="Status">
-              {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
-
-              <GitOpsApprovalChips approvals={approvals} placement={placementFacet} rollout={rolloutFacet} />
-
-              {showPendingReview && pending && (
-                <GitOpsStateCard
-                  data-testid="git-pending"
-                  stateKey={pending.status}
-                  state={SOURCE_STATE_LOOKUP[pending.status]}
-                  action={(
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7"
-                      onClick={() => pullNow()}
-                      disabled={pulling}
-                    >
-                      Review
-                    </Button>
-                  )}
-                >
-                  {pending.sha && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      Commit <span className="tabular-nums text-foreground/80">{pending.sha.slice(0, 7)}</span>
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              {artifactFacet && (
-                <GitOpsStateCard
-                  data-testid="git-artifact-state"
-                  stateKey={artifactFacet.status}
-                  state={ARTIFACT_STATE_LOOKUP[artifactFacet.status]}
-                >
-                  {artifactIdentity && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle break-all max-md:text-[10px]">
-                      {artifactIdentity.slice(0, 19)}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              {placementFacet && (
-                <GitOpsStateCard
-                  data-testid="git-placement-state"
-                  stateKey={placementFacet.status}
-                  state={placementStateMeta(placementFacet)}
-                />
-              )}
-
-              {rolloutFacet && (
-                <GitOpsStateCard
-                  data-testid="git-rollout-state"
-                  stateKey={rolloutFacet.status}
-                  state={ROLLOUT_STATE_LOOKUP[rolloutFacet.status]}
-                >
-                  {rolloutFacet.status === 'rollout_paused' && rolloutFacet.pauseReason && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {rolloutFacet.pauseReason}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              {showControllerCard && sourceFacet && (
-                <GitOpsStateCard
-                  data-testid="git-controller-state"
-                  stateKey={sourceFacet.status}
-                  state={SOURCE_STATE_LOOKUP[sourceFacet.status]}
-                  action={offerRetry ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7"
-                      onClick={() => { void retrySource(); }}
-                      disabled={retrying}
-                    >
-                      {retrying ? 'Retrying' : 'Retry'}
-                    </Button>
-                  ) : undefined}
-                >
-                  {sourceFacet.status === 'source_failed' && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {sourceFacet.failureClass}
-                      {sourceFacet.retryAt ? ` · ${formatRetryWait(sourceFacet.retryAt)}` : ''}
-                    </div>
-                  )}
-                  {sourceFacet.status === 'source_retry_scheduled' && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {formatRetryWait(sourceFacet.retryAt)}
-                    </div>
-                  )}
-                  {sourceFacet.status === 'source_suspended' && sourceFacet.suspendedReason && (
-                    <div className="mt-1 font-mono text-[11px] text-stat-subtitle">
-                      {sourceFacet.suspendedReason}
-                    </div>
-                  )}
-                </GitOpsStateCard>
-              )}
-
-              <GitOpsCaveats revision={revision} />
-
-              {source && activeNode && (
-                // The portfolio view of this one application, next to every
-                // other GitOps application and its attention queue.
-                <Button
-                  variant="link"
-                  size="sm"
-                  className="h-auto p-0 text-xs"
-                  onClick={() => {
-                    onOpenChange(false);
-                    openGitOpsWorkplace({ nodeId: activeNode.id, stack: stackName });
-                  }}
-                >
-                  Open in GitOps portfolio
-                </Button>
-              )}
-
-              {source && (
-                <div className="text-[11px] text-stat-subtitle space-y-0.5">
-                  <div className="flex justify-between gap-2">
-                    <span>Last applied commit</span>
-                    <span className="font-mono tabular-nums">
-                      {source.last_applied_commit_sha ? source.last_applied_commit_sha.slice(0, 7) : 'never'}
-                    </span>
-                  </div>
-                  {sourceFacet && (
-                    <div className="flex justify-between gap-2">
-                      <span>Source state</span>
-                      <span data-testid="git-source-state">{SOURCE_STATE_LOOKUP[sourceFacet.status]?.label ?? sourceFacet.status}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </SheetSection>
-
-            <SheetSection title="Repository">
-              {claimedByBlueprint ? (
-                <div className="space-y-2 rounded-lg border border-card-border bg-card p-3" data-testid="git-source-claimed">
-                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-icon">Bound to a Blueprint</p>
-                  <p className="text-xs text-stat-subtitle leading-relaxed">
-                    This Git source belongs to a Git-managed Blueprint. Save, Remove, and Pull now are blocked here. Use Detach Git on that Blueprint to restore stack-owned editing.
-                  </p>
-                </div>
-              ) : (
-              <GitSourceFields
-                variant="edit"
-                stackName={stackName}
-                disabled={!canEdit || saving}
-                repoUrl={repoUrl}
-                branch={branch}
-                composePaths={composePaths}
-                contextDir={contextDir}
-                syncEnv={syncEnv}
-                authType={authType}
-                token={token}
-                deployKey={deployKey}
-                caBundle={caBundle}
-                removeCaBundle={removeCaBundle}
-                sshKnownHostsEntry={sshKnownHostsEntry}
-                sshHostKeyFingerprint={sshHostKeyFingerprint}
-                hasStoredToken={source?.has_token ?? false}
-                hasStoredDeployKey={source?.has_deploy_key ?? false}
-                hasStoredCaBundle={source?.has_ca_bundle ?? false}
-                storedHostKeyFingerprint={source?.ssh_host_key_fingerprint ?? null}
-                applyMode={applyMode}
-                onRepoUrlChange={setRepoUrl}
-                onBranchChange={setBranch}
-                onComposePathsChange={setComposePaths}
-                onContextDirChange={setContextDir}
-                onSyncEnvChange={setSyncEnv}
-                onAuthTypeChange={setAuthType}
-                onTokenChange={setToken}
-                onDeployKeyChange={setDeployKey}
-                onCaBundleChange={(value) => {
-                    setCaBundle(value);
-                    if (removeCaBundle) setRemoveCaBundle(false);
-                }}
-                onRemoveCaBundle={() => setRemoveCaBundle(true)}
-                onSshKnownHostsEntryChange={setSshKnownHostsEntry}
-                onSshHostKeyFingerprintChange={setSshHostKeyFingerprint}
-                onApplyModeChange={setApplyModeOverride}
-                onBrowse={browseRepo}
-              />
-              )}
-            </SheetSection>
-
-            {source && (
-              <SheetSection title="Provider hooks">
-                <GitProviderHooksCard stackName={stackName} canEdit={canEdit} />
-              </SheetSection>
-            )}
-
-            {source && (
-              <SheetSection title="Repository secrets">
-                <GitSourceSecretsSection
-                  stackName={stackName}
-                  canEdit={canMutateSource}
-                  linked
-                  disabled={saving || loading}
-                />
-              </SheetSection>
-            )}
-
-            {source && (
-              <SheetSection title="Manifest">
-                <GitManifestSummary
-                  stackName={stackName}
-                  summary={
-                    source.manifest ??
-                    (source.manifest_state
-                      ? {
-                          state: source.manifest_state,
-                          manifestVersion: 0,
-                          resolvedCommitSha: null,
-                          managedCount: 0,
-                          unmanagedCount: 0,
-                          refusedCount: 0,
-                          refused: [],
-                          hasBuildContexts: false,
-                          generatedAt: null,
-                        }
-                      : null)
-                  }
-                />
-              </SheetSection>
-            )}
-          </>
-        )}
+        {sheetBody}
       </SystemSheet>
 
       <GitSourceDiffDialog
@@ -978,7 +1169,7 @@ export function GitSourcePanel({
         open={adoptOpen}
         onOpenChange={setAdoptOpen}
         stackName={stackName}
-        onAdopted={() => { void load(); onSourceChanged?.(); }}
+        onAdopted={() => { void load('refresh'); onSourceChanged?.(); }}
       />
     </>
   );

@@ -1,13 +1,14 @@
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { promises as fsPromises, createReadStream, createWriteStream } from 'fs';
+import { promises as fsPromises, constants as fsConstants, createReadStream, createWriteStream } from 'fs';
 import type { Dirent } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { DatabaseService } from './DatabaseService';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import { COMPOSE_OVERRIDE_FILENAMES, COMPOSE_ROOT_FILENAMES } from '../utils/composeFilenames';
 import { isBinaryBuffer } from '../utils/binaryDetect';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sha256HexBuffer } from '../utils/hashing';
@@ -58,6 +59,30 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+/**
+ * Refuse a compose file that is not a regular file. A directory or a special
+ * file (FIFO, socket, device) cannot be read as a compose project, and opening a
+ * FIFO in blocking mode has no writer to end the wait. The code lets a route
+ * report the stack as unreadable without guessing at a project.
+ */
+function nonRegularComposeFileError(file: string): Error & { code: 'NOT_A_FILE' } {
+  return Object.assign(new Error(`Compose file ${file} is not a regular file`), {
+    code: 'NOT_A_FILE' as const,
+  });
+}
+
+/**
+ * Refuse an env file that is not a regular file. Compose loads these for
+ * interpolation on every run, and opening a FIFO in blocking mode has no writer
+ * to end the wait. The code lets the caller name the invalid input instead of
+ * reporting it as merely unreadable.
+ */
+function nonRegularEnvFileError(file: string): Error & { code: 'NOT_A_FILE' } {
+  return Object.assign(new Error(`Env file ${file} is not a regular file`), {
+    code: 'NOT_A_FILE' as const,
+  });
+}
+
 // Explorer-only protection: includes the blueprint ownership marker without
 // putting it in PROTECTED_STACK_FILES (backup/rollback orphan removal).
 const EXPLORER_PROTECTED_STACK_FILES = new Set([
@@ -70,20 +95,21 @@ const EXPLORER_PROTECTED_STACK_FILES = new Set([
 // was taken; `.checksums` is the integrity manifest verified before a restore.
 const BACKUP_MARKER_FILES = new Set(['.timestamp', '.checksums']);
 
-// Compose filenames Sencho recognizes as a managed stack, in resolution-priority
-// order. Used by getStacks / hasComposeFile / firstComposeFilename.
-const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
-const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
-// Override filenames docker compose can auto-discover, listed in priority order (first
-// match wins, not paired to the chosen base file's family). We resolve the first that
-// exists, mirroring compose's default override resolution, to re-add it when an explicit
-// -f list (mesh injection) would otherwise suppress that discovery.
-const COMPOSE_OVERRIDE_FILENAMES = [
-  'compose.override.yaml',
-  'compose.override.yml',
-  'docker-compose.override.yaml',
-  'docker-compose.override.yml',
-] as const;
+// Compose filenames Sencho recognizes as a managed stack, in the resolution
+// order Compose itself uses. Used by getStacks / hasComposeFile /
+// firstComposeFilename, and by every read or save that has to pick the same
+// file Compose loads.
+const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(COMPOSE_ROOT_FILENAMES);
+
+/** True when `name` is one of the four compose filenames Sencho resolves, and nothing else. */
+export function isComposeBasename(name: string): boolean {
+  return IMPORT_COMPOSE_FILENAME_SET.has(name);
+}
+// Override filenames docker compose can auto-discover, in the resolution order
+// Compose itself uses (first match wins, not paired to the chosen base file's
+// family). We resolve the first that exists, mirroring compose's default
+// override resolution, to re-add it when an explicit -f list (mesh injection)
+// would otherwise suppress that discovery.
 const COMPOSE_OVERRIDE_FILENAME_SET = new Set<string>(COMPOSE_OVERRIDE_FILENAMES);
 
 /** True for adopt-scan candidates: any .yml/.yaml that is not a compose override. */
@@ -238,11 +264,19 @@ export class FileSystemService {
   }
 
   async hasComposeFile(dir: string): Promise<boolean> {
-    this.assertWithinBase(dir);
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
+    // Canonical inline js/path-injection barrier at the fs sink below: CodeQL
+    // credits neither the wrapped isPathWithinBase helper nor a check in a
+    // caller's scope, so the containment check has to be here. The compose base
+    // itself is not a stack, and every caller passes a stack directory, so the
+    // prefix check is the whole rule.
+    const baseResolved = path.resolve(this.baseDir);
+    const resolvedDir = path.resolve(dir);
+    if (!resolvedDir.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       try {
-        await fsPromises.access(path.join(dir, file));
+        await fsPromises.access(path.join(resolvedDir, file));
         return true;
       } catch {
         // continue
@@ -251,25 +285,103 @@ export class FileSystemService {
     return false;
   }
 
-  private async getComposeFilePath(stackName: string): Promise<string> {
+  /**
+   * The compose file this stack resolves to, or null when none of the four
+   * filenames exists.
+   *
+   * `access` decides what a link may point at. A read ('read', the default)
+   * follows a compose file that links anywhere inside the shared compose
+   * directory, which is how a stack shares a main file or an override; the
+   * stack's own directory is never followed, so a stack directory that is
+   * itself a link to another location is refused either way. A write ('write')
+   * additionally requires the file to resolve inside the stack directory, so a
+   * save never lands in another stack's file. A link that reaches outside the
+   * compose directory, or a dangling one, is rejected in both modes and is not
+   * treated as a missing file.
+   */
+  private async resolveComposeFile(
+    stackName: string,
+    access: 'read' | 'write' = 'read',
+  ): Promise<{ filename: string; absolute: string } | null> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
-      const filePath = path.join(stackDir, file);
-      try {
-        await fsPromises.access(filePath);
-        if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
-        return filePath;
-      } catch {
-        // continue
+    await this.assertRealWithinStack(stackName, stackDir);
+    // Containment sits on the lstat. The stack dir is already checked above,
+    // and static analysis only credits the check that sits at the sink.
+    const baseResolved = path.resolve(this.baseDir);
+    for (const file of COMPOSE_ROOT_FILENAMES) {
+      const filePath = path.resolve(stackDir, file);
+      if (!filePath.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
       }
+      try {
+        await fsPromises.lstat(filePath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      await this.assertRealWithinBase(filePath);
+      if (access === 'write') await this.assertRealWithinStack(stackName, filePath);
+      // Containment says where the path lands, not what it lands on. A shared
+      // main file or override is a legitimate regular file; a directory or a
+      // FIFO is not a project, and opening the FIFO in blocking mode would wait
+      // for a writer that never comes. Refuse before any read opens it.
+      if (!(await fsPromises.stat(filePath)).isFile()) {
+        throw nonRegularComposeFileError(file);
+      }
+      if (isDebugEnabled()) console.debug('[FileSystemService:debug] Resolved compose file', { stackName, file });
+      return { filename: file, absolute: filePath };
     }
-    throw new Error(`No compose file found for stack: ${stackName}`);
+    return null;
+  }
+
+  private async getComposeFilePath(stackName: string, access: 'read' | 'write' = 'read'): Promise<string> {
+    const resolved = await this.resolveComposeFile(stackName, access);
+    if (!resolved) throw new Error(`No compose file found for stack: ${stackName}`);
+    return resolved.absolute;
   }
 
   async getComposeFilename(stackName: string): Promise<string> {
     return path.basename(await this.getComposeFilePath(stackName));
+  }
+
+  /**
+   * Reject a compose file a read or a render must not follow. A missing file is
+   * not an error: there is nothing to follow. A link into the shared compose
+   * directory is allowed, because Compose itself loads it and the stack
+   * legitimately deploys it. A link that leaves the compose directory, and a
+   * stack directory that is itself a link, are rejected. Also rejects the first
+   * override file docker compose merges on its own, which is a different path
+   * from the compose file read and save check.
+   */
+  async assertComposeFileReadable(stackName: string): Promise<void> {
+    await this.resolveComposeFile(stackName, 'read');
+    await this.assertDiscoveredOverrideReadable(stackName);
+  }
+
+  private async assertDiscoveredOverrideReadable(stackName: string): Promise<void> {
+    const stackDir = this.resolveStackDir(stackName);
+    const baseResolved = path.resolve(this.baseDir);
+    for (const file of COMPOSE_OVERRIDE_FILENAMES) {
+      const target = path.resolve(stackDir, file);
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        await fsPromises.lstat(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      await this.assertRealWithinBase(target);
+      // Discovery stops at the first name that exists, exactly as Compose does,
+      // but only a regular file can be merged. A directory/FIFO/socket here would
+      // make the render block or fail, so it is refused at the admission point.
+      if (!(await fsPromises.stat(target)).isFile()) {
+        throw nonRegularComposeFileError(file);
+      }
+      return;
+    }
   }
 
   /**
@@ -346,6 +458,10 @@ export class FileSystemService {
       const filePath = await this.getComposeFilePath(stackName);
       return await fsPromises.readFile(filePath, 'utf-8');
     } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH' || code === 'INVALID_STACK_NAME') throw error;
       console.error('Error reading stack content:', sanitizeForLog((error as Error)?.message ?? String(error)));
       throw new Error(`Failed to read stack: ${stackName}`);
     }
@@ -357,7 +473,7 @@ export class FileSystemService {
    * and read share a single file descriptor so they observe the same inode
    * state, even if the file is replaced (rename) between the two calls.
    */
-  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number }> {
+  async getStackContentWithMtime(stackName: string): Promise<{ content: string; mtimeMs: number; filename: string }> {
     const untrustedFilePath = await this.getComposeFilePath(stackName);
     // Canonical js/path-injection barrier: resolve against a known-safe root
     // then check the result is contained in that root. The form mirrors
@@ -367,11 +483,17 @@ export class FileSystemService {
     if (!safePath.startsWith(baseResolved + path.sep)) {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    const fh = await fsPromises.open(safePath, 'r');
+    // Open non-blocking before asking the descriptor what it is. O_NONBLOCK has
+    // no effect on a regular file, but a FIFO that replaced the resolved file in
+    // the check/open gap gives this call a descriptor to inspect instead of
+    // sleeping until a writer appears. The descriptor's own type is authoritative,
+    // so the read still only ever returns a regular compose file.
+    const fh = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
     try {
       const stat = await fh.stat();
+      if (!stat.isFile()) throw nonRegularComposeFileError(path.basename(safePath));
       const content = await fh.readFile('utf-8');
-      return { content, mtimeMs: stat.mtimeMs };
+      return { content, mtimeMs: stat.mtimeMs, filename: path.basename(safePath) };
     } finally {
       await fh.close();
     }
@@ -381,6 +503,8 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     const filePath = path.join(stackDir, 'compose.yaml');
     await this.assertRealWithinBase(filePath);
+    await this.assertRealWithinStack(stackName, stackDir);
+    await this.assertRealWithinStack(stackName, filePath);
     try {
       // Buffer input is written byte-exact (the encoding option is ignored for
       // Buffers); string input keeps the utf-8 write. Byte-exactness matters to
@@ -406,12 +530,32 @@ export class FileSystemService {
     stackName: string,
     content: string,
     expectedMtimeMs: number | null,
+    expectedFilename: string | null = null,
   ): Promise<
-    | { ok: true; mtimeMs: number }
-    | { ok: false; currentMtimeMs: number; currentContent: string }
+    | { ok: true; mtimeMs: number; filename: string }
+    | { ok: false; reason: 'mtime' | 'source'; currentMtimeMs: number; currentContent: string; filename: string | null }
   > {
+    // A write resolution refuses a compose file that links out of the stack
+    // directory: the save would otherwise land in the shared target, which the
+    // read path deliberately follows.
+    const resolved = await this.resolveComposeFile(stackName, 'write');
+    if (expectedFilename !== null && (!resolved || resolved.filename !== expectedFilename)) {
+      if (!resolved) {
+        return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+      }
+      const current = await this.readContainedCompose(resolved.absolute);
+      return {
+        ok: false,
+        reason: 'source',
+        currentMtimeMs: current.mtimeMs,
+        currentContent: current.content,
+        filename: resolved.filename,
+      };
+    }
+
     const stackDir = this.resolveStackDir(stackName);
-    const untrustedFilePath = path.join(stackDir, 'compose.yaml');
+    const untrustedFilePath = resolved ? resolved.absolute : path.join(stackDir, 'compose.yaml');
+    const filename = resolved ? resolved.filename : 'compose.yaml';
     // Canonical js/path-injection barrier: path.resolve(SAFE_ROOT, untrusted)
     // followed by a single startsWith check, both inline with the sink.
     const baseResolved = path.resolve(this.baseDir);
@@ -420,34 +564,81 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    // The resolved file is where the write lands, so ownership is checked again
+    // at the sink: a link that appeared after the resolution above is refused
+    // rather than followed into another stack's file.
+    await this.assertRealWithinStack(stackName, safePath);
 
-    if (expectedMtimeMs !== null) {
+    if (expectedMtimeMs !== null && resolved) {
       let fh: import('fs/promises').FileHandle | null = null;
       try {
         fh = await fsPromises.open(safePath, 'r');
         const stat = await fh.stat();
         if (Math.floor(stat.mtimeMs) !== Math.floor(expectedMtimeMs)) {
           const currentContent = await fh.readFile('utf-8');
-          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+          return { ok: false, reason: 'mtime', currentMtimeMs: stat.mtimeMs, currentContent, filename };
         }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        // File doesn't exist yet, treat as fresh write.
+        if (expectedFilename !== null) {
+          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+        }
       } finally {
         if (fh) await fh.close();
       }
     }
 
+    if (expectedFilename !== null) {
+      const latest = await this.resolveComposeFile(stackName, 'write');
+      if (!latest || latest.filename !== expectedFilename) {
+        if (!latest) {
+          return { ok: false, reason: 'source', currentMtimeMs: 0, currentContent: '', filename: null };
+        }
+        const current = await this.readContainedCompose(latest.absolute);
+        return {
+          ok: false,
+          reason: 'source',
+          currentMtimeMs: current.mtimeMs,
+          currentContent: current.content,
+          filename: latest.filename,
+        };
+      }
+    }
+
     await fsPromises.writeFile(safePath, content, 'utf-8');
     const newStat = await fsPromises.stat(safePath);
-    return { ok: true, mtimeMs: newStat.mtimeMs };
+    return { ok: true, mtimeMs: newStat.mtimeMs, filename };
+  }
+
+  private async readContainedCompose(untrustedFilePath: string): Promise<{ content: string; mtimeMs: number }> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedFilePath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(safePath);
+    const fh = await fsPromises.open(safePath, 'r');
+    try {
+      const stat = await fh.stat();
+      const content = await fh.readFile('utf-8');
+      return { content, mtimeMs: stat.mtimeMs };
+    } finally {
+      await fh.close();
+    }
   }
 
   /**
-   * Optimistic-concurrency write for arbitrary paths under the stack dir
-   * (used for .env files; the path was already validated by the caller).
+   * Optimistic-concurrency write for an env file under a stack directory (the
+   * path was already validated by the caller).
+   *
+   * `stackName` is the stack the write is authorized for, and the target must
+   * resolve inside that stack's own directory: an env file that links into
+   * another stack is refused, exactly like a compose save, so a stack-scoped
+   * save never lands in another stack's file. A link that stays inside the
+   * stack keeps working.
    */
   async writeFileIfUnchanged(
+    stackName: string,
     untrustedTargetPath: string,
     content: string,
     expectedMtimeMs: number | null,
@@ -463,6 +654,7 @@ export class FileSystemService {
       throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
     }
     await this.assertRealWithinBase(safePath);
+    await this.assertRealWithinStack(stackName, safePath);
 
     if (expectedMtimeMs !== null) {
       let fh: import('fs/promises').FileHandle | null = null;
@@ -483,6 +675,106 @@ export class FileSystemService {
     await fsPromises.writeFile(safePath, content, 'utf-8');
     const newStat = await fsPromises.stat(safePath);
     return { ok: true, mtimeMs: newStat.mtimeMs };
+  }
+
+  /**
+   * Exclusive create for the editor's first save on a stack with no env file.
+   * Fails when the target already exists so a stale client can never overwrite
+   * a file it has not read; the caller turns that into the same 412 conflict
+   * the optimistic-concurrency path uses. The path is resolved and contained
+   * like writeFileIfUnchanged.
+   */
+  async createFileExclusive(
+    untrustedTargetPath: string,
+    content: string,
+  ): Promise<
+    | { ok: true; mtimeMs: number }
+    | { ok: false; currentMtimeMs: number; currentContent: string }
+  > {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, untrustedTargetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    await this.assertRealWithinBase(safePath);
+
+    let fh: import('fs/promises').FileHandle | null = null;
+    try {
+      // O_EXCL makes creation atomic; O_NOFOLLOW keeps a symlink planted after
+      // the containment check from ever being followed. On Linux a symlink at
+      // the target surfaces as EEXIST and goes through the conflict read below.
+      // A missing parent (the stack directory was deleted after the caller's
+      // existence check) surfaces as ENOENT and is left to the route, which
+      // reports the vanished stack instead of recreating the directory.
+      fh = await fsPromises.open(
+        safePath,
+        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      );
+      await fh.writeFile(content, 'utf-8');
+      await fh.close();
+      fh = null;
+      const newStat = await fsPromises.stat(safePath);
+      return { ok: true, mtimeMs: newStat.mtimeMs };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // The path exists. A symlink can be planted at the target between the
+        // pre-open containment check and the failed exclusive open, so repeat
+        // the check and read through a handle that never follows a link: the
+        // conflict payload must not become a way to read outside the compose
+        // root. A vanished or linked target is refused as an invalid path;
+        // EISDIR propagates and the route answers 409.
+        await this.assertRealWithinBase(safePath);
+        let reader: import('fs/promises').FileHandle | null = null;
+        try {
+          reader = await fsPromises.open(safePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+          const stat = await reader.stat();
+          const currentContent = await reader.readFile('utf-8');
+          return { ok: false, currentMtimeMs: stat.mtimeMs, currentContent };
+        } catch (readErr) {
+          const code = (readErr as NodeJS.ErrnoException).code;
+          if (code === 'ELOOP') {
+            throw Object.assign(new Error('Env target is a symlink; refusing to follow it'), { code: 'INVALID_PATH' });
+          }
+          if (code === 'ENOENT') {
+            throw Object.assign(new Error('Env target vanished during the conflict read'), { code: 'INVALID_PATH' });
+          }
+          throw readErr;
+        } finally {
+          if (reader) await reader.close();
+        }
+      }
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw Object.assign(new Error('Env target is a symlink; refusing to follow it'), { code: 'INVALID_PATH' });
+      }
+      // The exclusive open may have created the file before the write failed
+      // (ENOSPC, EIO): remove the leftover so a retry can create again and
+      // Compose never reads a partial env file the operator never wrote. The
+      // path must still name the same file this call created (same inode and
+      // size), so a replacement by another actor is never deleted; the window
+      // between that check and the unlink is accepted (a stack-dir writer can
+      // already do worse, and leaving the file is the safe failure). Best
+      // effort, preserving the original error.
+      if (fh) {
+        let createdIno: number | null = null;
+        let createdSize = -1;
+        try {
+          const created = await fh.stat();
+          createdIno = created.ino;
+          createdSize = created.size;
+        } catch { /* ignore: still close below */ }
+        await fh.close().catch(() => {});
+        fh = null;
+        try {
+          const current = await fsPromises.lstat(safePath);
+          if (createdIno !== null && current.ino === createdIno && current.size === createdSize) {
+            await fsPromises.unlink(safePath);
+          }
+        } catch { /* best effort */ }
+      }
+      throw err;
+    } finally {
+      if (fh) await fh.close().catch(() => {});
+    }
   }
 
   async statMtime(untrustedTargetPath: string): Promise<number | null> {
@@ -527,6 +819,55 @@ export class FileSystemService {
     return fsPromises.readFile(filePath, encoding);
   }
 
+  /**
+   * Open an env file without blocking and refuse the descriptor unless it is a
+   * regular file.
+   *
+   * Compose loads env files for interpolation on every run, and a path that
+   * became a FIFO after a caller-side check would hold a blocking read until a
+   * writer appears. The type is decided on the descriptor that is then read
+   * (O_NONBLOCK has no effect on a regular file), so no check/open gap can
+   * sleep and no second lookup can redirect the read to another file. A socket
+   * cannot be opened at all and a directory is not openable for reading on
+   * every platform, so both are refused as the same unusable input.
+   */
+  private async openRegularEnvFile(
+    filePath: string,
+    label: string,
+  ): Promise<import('fs/promises').FileHandle> {
+    let fh: import('fs/promises').FileHandle;
+    try {
+      fh = await fsPromises.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENXIO' || code === 'EISDIR') throw nonRegularEnvFileError(label);
+      throw error;
+    }
+    try {
+      if (!(await fh.stat()).isFile()) throw nonRegularEnvFileError(label);
+      return fh;
+    } catch (error) {
+      await fh.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Read an env file only when the descriptor is a regular file. Used for the
+   * interpolation env files a Compose run is told to load, where a FIFO with no
+   * writer must produce a refusal instead of a wait.
+   */
+  async readEnvFile(filePath: string, encoding: BufferEncoding = 'utf-8'): Promise<string> {
+    this.assertWithinBase(filePath);
+    await this.assertRealWithinBase(filePath);
+    const fh = await this.openRegularEnvFile(filePath, path.basename(filePath));
+    try {
+      return await fh.readFile(encoding);
+    } finally {
+      await fh.close();
+    }
+  }
+
   async writeFile(filePath: string, content: string, encoding: BufferEncoding = 'utf-8'): Promise<void> {
     this.assertWithinBase(filePath);
     await this.assertRealWithinBase(filePath);
@@ -547,7 +888,16 @@ export class FileSystemService {
     }
     await this.assertRealWithinBase(envPath);
     try {
-      return await fsPromises.readFile(envPath, 'utf-8');
+      // The project .env is read for interpolation on every Compose run, so a
+      // FIFO that replaced it would hold this read until a writer appears. The
+      // descriptor is opened non-blocking and its type is checked before the
+      // read, so no check/open gap can sleep.
+      const fh = await this.openRegularEnvFile(envPath, `${path.basename(stackName)}/.env`);
+      try {
+        return await fh.readFile('utf-8');
+      } finally {
+        await fh.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         console.error('Error reading env file:', error);
@@ -560,6 +910,9 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     const envPath = path.join(stackDir, '.env');
     await this.assertRealWithinBase(envPath);
+    // The write follows the path, so ownership is checked at the sink: a .env
+    // that links into another stack is refused rather than overwritten.
+    await this.assertRealWithinStack(stackName, envPath);
     try {
       await fsPromises.writeFile(envPath, content, 'utf-8');
     } catch (error) {
@@ -611,7 +964,7 @@ export class FileSystemService {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
     const baseResolved = path.resolve(this.baseDir);
-    for (const file of IMPORT_COMPOSE_FILENAMES) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       if (file === 'compose.yaml') continue;
       // Containment barrier at the unlink sink (same pattern as rollback orphan removal).
       const target = path.resolve(baseResolved, path.join(stackDir, file));
@@ -649,7 +1002,7 @@ export class FileSystemService {
 
   private async firstComposeFilename(dir: string): Promise<string | null> {
     this.assertWithinBase(dir);
-    for (const file of IMPORT_COMPOSE_FILENAMES) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       try {
         await fsPromises.access(path.join(dir, file));
         return file;
@@ -972,6 +1325,35 @@ export class FileSystemService {
   }
 
   /**
+   * Reject when an existing stack file resolves outside that stack's own
+   * directory. Root containment alone lets `a/docker-compose.yml ->
+   * ../b/compose.yaml` pass, so a read or save authorized for stack `a` would
+   * act on stack `b`. The stack dir is compared as `<real root>/<stackName>`,
+   * so a stack dir that is itself a link to a sibling is refused too. Links
+   * that stay inside the stack dir keep working. A path that does not exist
+   * yet has nothing to follow and passes. Call after assertRealWithinBase,
+   * which rejects dangling links.
+   */
+  private async assertRealWithinStack(stackName: string, targetPath: string): Promise<void> {
+    const baseResolved = path.resolve(this.baseDir);
+    const safePath = path.resolve(baseResolved, targetPath);
+    if (!safePath.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
+    let realTarget: string;
+    try {
+      realTarget = await fsPromises.realpath(safePath);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw e;
+    }
+    const realStackDir = path.join(await fsPromises.realpath(this.baseDir), stackName);
+    if (realTarget !== realStackDir && !realTarget.startsWith(realStackDir + path.sep)) {
+      throw Object.assign(new Error('Compose file resolves outside its stack directory'), { code: 'SYMLINK_ESCAPE' });
+    }
+  }
+
+  /**
    * Reject when `targetPath` (an absolute managed stack dir, or a managed file
    * inside it) would let an operation escape the real compose root via a
    * symlink/junction. Complements the lexical inline barrier at each sink, which
@@ -1027,10 +1409,17 @@ export class FileSystemService {
         // cursor did not resolve. A dangling symlink still lstat's (the link
         // exists); a genuinely absent component does not. Reject the dangling
         // link; walk up past an absent component to the nearest real ancestor.
+        // The lstat must be asked whether it is a link, not merely whether it
+        // succeeds: realpath and lstat are two syscalls, so a concurrent writer
+        // can leave a plain file at cursor in the gap. Reading any successful
+        // lstat as a dangling link then refused a path inside the base, which
+        // turned two racing creates of one env file into a 409 instead of the
+        // 412 the loser is meant to get. Containment is unaffected: a real
+        // symlink is still refused here, and the walk up confirms the nearest
+        // real ancestor is under realBase.
         let danglingLink = false;
         try {
-          await fsPromises.lstat(cursor);
-          danglingLink = true;
+          danglingLink = (await fsPromises.lstat(cursor)).isSymbolicLink();
         } catch (le) {
           if ((le as NodeJS.ErrnoException).code !== 'ENOENT') throw le;
         }
@@ -1203,8 +1592,7 @@ export class FileSystemService {
       checksums[file] = sha256HexBuffer(buf);
     };
 
-    const composeFiles = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-    for (const file of composeFiles) {
+    for (const file of COMPOSE_ROOT_FILENAMES) {
       const src = path.resolve(baseResolved, path.join(stackDir, file));
       if (!src.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
@@ -1546,7 +1934,12 @@ export class FileSystemService {
    * requires stack:edit, which already grants equivalent host access via
    * compose. Tracked as a follow-up hardening, not a per-root regression.
    */
-  private async resolveSafePathWithin(rootAbsDir: string, relPath: string): Promise<string> {
+  private async resolveSafePathWithin(rootAbsDir: string, relPath: string, realRootDir?: string): Promise<string> {
+    // `realRootDir` is the physical form of `rootAbsDir`, for callers whose root
+    // is a lexical path that a symlinked parent can make differ from the paths
+    // realpath resolves. Omit it when the root already is the canonical one (a
+    // bind-mount root, which its caller pre-authorizes by realpath).
+    const containmentRoot = realRootDir ?? rootAbsDir;
     // Canonical js/path-injection barrier inline with the realpath sinks below:
     // isPathWithinBase performs the same containment check, but static analysis
     // only credits the path.resolve + startsWith form when it sits at the sink.
@@ -1580,7 +1973,7 @@ export class FileSystemService {
           // Reached the root: realpath the untainted base (never a tainted input)
           // and reattach the not-yet-existing suffix.
           const realBase = await fsPromises.realpath(baseResolved);
-          if (!isPathWithinBase(realBase, rootAbsDir)) {
+          if (!isPathWithinBase(realBase, containmentRoot)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
           realTarget = path.join(realBase, ...suffix);
@@ -1593,7 +1986,7 @@ export class FileSystemService {
         }
         try {
           const realExisting = await fsPromises.realpath(existing);
-          if (!isPathWithinBase(realExisting, rootAbsDir)) {
+          if (!isPathWithinBase(realExisting, containmentRoot)) {
             throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
           }
           realTarget = path.join(realExisting, ...suffix);
@@ -1606,7 +1999,7 @@ export class FileSystemService {
       }
     }
 
-    if (!isPathWithinBase(realTarget, rootAbsDir)) {
+    if (!isPathWithinBase(realTarget, containmentRoot)) {
       throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
     }
 
@@ -1634,7 +2027,29 @@ export class FileSystemService {
     if (!isPathWithinBase(stackDir, this.baseDir)) {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    return this.resolveSafePathWithin(stackDir, relPath);
+    return this.resolveSafePathWithin(stackDir, relPath, await this.realStackRoot(stackName));
+  }
+
+  /**
+   * The physical stack directory, `<real compose root>/<stackName>`, the same
+   * rule assertRealWithinStack applies.
+   *
+   * Stack path resolution compares realpath'd targets against the root it is
+   * given, so a lexical root is wrong the moment COMPOSE_DIR is itself a
+   * symlink: every file resolves through the link to a physical prefix the
+   * lexical root never matches, and a legitimate stack would read as an escape.
+   * A stack directory that links somewhere else is still refused, because its
+   * real root is the compose root plus the stack name, not the link target.
+   */
+  private async realStackRoot(stackName: string): Promise<string> {
+    const baseResolved = path.resolve(this.baseDir);
+    try {
+      return path.join(await fsPromises.realpath(baseResolved), stackName);
+    } catch (e) {
+      // A compose root that does not exist yet holds nothing to resolve through.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      return path.resolve(baseResolved, stackName);
+    }
   }
 
   /**
@@ -1792,12 +2207,25 @@ export class FileSystemService {
    * giving the caller a definitive "did not exist when we wrote it" signal.
    * The non-exclusive default uses rename, which is atomic against partial
    * reads but clobbers any existing target.
+   *
+   * `mode` is applied to the staging file's descriptor before it is promoted. A
+   * plain chmod after the rename would briefly expose the new content with the
+   * process umask's creation mode, and a chmod failure would leave the write
+   * committed but the mode wrong. Staging the mode keeps the promotion
+   * all-or-nothing: the target either keeps its previous content and mode, or
+   * gets the new content with the requested mode.
    */
   private async writeStackFileAtomic(
     safePath: string,
     data: string | Buffer | Readable,
-    opts: { exclusive?: boolean } = {},
+    opts: { exclusive?: boolean; mode?: number } = {},
   ): Promise<void> {
+    if (
+      opts.mode !== undefined
+      && (!Number.isInteger(opts.mode) || opts.mode < 0 || opts.mode > 0o777)
+    ) {
+      throw Object.assign(new Error('Invalid permission bits'), { code: 'INVALID_PATH' });
+    }
     await fsPromises.mkdir(path.dirname(safePath), { recursive: true });
     // crypto.randomBytes gives a guaranteed-length high-entropy suffix; Math.random
     // can drop leading zeros which narrows entropy unpredictably.
@@ -1814,6 +2242,7 @@ export class FileSystemService {
         await pipeline(data, ws);
         const synced = await fsPromises.open(tmpPath, 'r+');
         try {
+          if (opts.mode !== undefined) await synced.chmod(opts.mode);
           await synced.sync();
         } finally {
           await synced.close();
@@ -1823,6 +2252,7 @@ export class FileSystemService {
         stagedTmp = true;
         try {
           await fh.writeFile(data);
+          if (opts.mode !== undefined) await fh.chmod(opts.mode);
           await fh.sync();
         } finally {
           await fh.close();
@@ -1851,11 +2281,16 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Write `content` to a stack-relative path. `mode`, when given, is set on the
+   * staging file before promotion, so the target lands with exactly that mode
+   * instead of the process umask's creation mode.
+   */
   async writeStackFile(
     stackName: string,
     relPath: string,
     content: string | Buffer,
-    opts?: { exclusive?: boolean },
+    opts?: { exclusive?: boolean; mode?: number },
   ): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await this.writeStackFileAtomic(safePath, content, opts);
@@ -1998,16 +2433,20 @@ export class FileSystemService {
    * target) for operations where following would mutate a file other than
    * the one the user clicked on.
    */
-  private async resolveSafeLeafPathWithin(rootAbsDir: string, relPath: string): Promise<string> {
+  private async resolveSafeLeafPathWithin(rootAbsDir: string, relPath: string, realRootDir?: string): Promise<string> {
     if (relPath === '' || relPath === '.') {
-      return this.resolveSafePathWithin(rootAbsDir, '');
+      return this.resolveSafePathWithin(rootAbsDir, '', realRootDir);
     }
     const parentRel = path.dirname(relPath);
     const baseName = path.basename(relPath);
     if (!baseName || baseName === '.' || baseName === '..') {
       throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
     }
-    const safeParent = await this.resolveSafePathWithin(rootAbsDir, parentRel === '.' ? '' : parentRel);
+    const safeParent = await this.resolveSafePathWithin(
+      rootAbsDir,
+      parentRel === '.' ? '' : parentRel,
+      realRootDir,
+    );
     return path.join(safeParent, baseName);
   }
 
@@ -2016,7 +2455,7 @@ export class FileSystemService {
     if (!isPathWithinBase(stackDir, this.baseDir)) {
       throw Object.assign(new Error('Stack name escapes compose directory'), { code: 'INVALID_PATH' });
     }
-    return this.resolveSafeLeafPathWithin(stackDir, relPath);
+    return this.resolveSafeLeafPathWithin(stackDir, relPath, await this.realStackRoot(stackName));
   }
 
   async deleteStackPath(stackName: string, relPath: string, recursive: boolean = false, scope?: FileRootScope): Promise<void> {

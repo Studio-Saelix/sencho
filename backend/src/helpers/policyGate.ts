@@ -234,7 +234,32 @@ export async function runPolicyGate(
   return true;
 }
 
+// Scans running right now, keyed by node and stack. The attempt row is written
+// only when a scan ends, so this is the only record that one is under way.
+const scansInFlight = new Map<string, number>();
+const scanKey = (nodeId: number, stackName: string): string => `${nodeId}:${stackName}`;
+
+/** True while a post-deploy scan (from a deploy or a rescan) is running for this stack on this node. */
+export function isPostDeployScanRunning(nodeId: number, stackName: string): boolean {
+  return (scansInFlight.get(scanKey(nodeId, stackName)) ?? 0) > 0;
+}
+
 export async function triggerPostDeployScan(
+  stackName: string,
+  nodeId: number,
+): Promise<void> {
+  const key = scanKey(nodeId, stackName);
+  scansInFlight.set(key, (scansInFlight.get(key) ?? 0) + 1);
+  try {
+    await runPostDeployScan(stackName, nodeId);
+  } finally {
+    const remaining = (scansInFlight.get(key) ?? 1) - 1;
+    if (remaining > 0) scansInFlight.set(key, remaining);
+    else scansInFlight.delete(key);
+  }
+}
+
+async function runPostDeployScan(
   stackName: string,
   nodeId: number,
 ): Promise<void> {

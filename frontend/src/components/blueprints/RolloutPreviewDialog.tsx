@@ -2,20 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import { GitOpsFacetCards } from '@/components/gitops/GitOpsFacetCards';
-import { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
 import { IdentityRow } from '@/components/gitops/GitOpsIdentityRow';
 import { ShortId } from '@/components/gitops/GitOpsShortId';
 import { GitOpsTargetCard } from '@/components/gitops/GitOpsTargetCard';
-import {
-    absentFault,
-    liveArtifactFacet,
-    livePlacementFacet,
-    liveRolloutFacet,
-    liveSourceFacet,
-} from '@/lib/gitopsState';
+import { absentFault, liveSourceFacet } from '@/lib/gitopsState';
 import {
     type BlueprintPreview,
     previewBlueprint,
@@ -52,15 +43,21 @@ function isBlueprintPreview(value: unknown): value is BlueprintPreview {
 }
 
 /**
- * The legacy combined approval stays separate from the decomposed authority
- * chips. It is only called combined rather than legacy when the Blueprint has
- * no live application, where it is the whole approval mechanism rather than the
- * pre-decomposition surface of one.
+ * The authority that made the plan effective, named as such. The legacy
+ * combined approval stays separate from the decomposed authority chips; it is
+ * only called combined rather than legacy when the Blueprint has no live
+ * application, where it is the whole approval mechanism. A plan covered by a
+ * configured policy's placement approval is approved, but calling that a
+ * combined approval would be false.
  */
 function approvalLabel(preview: BlueprintPreview): string {
     const value = preview.effectiveApproval === 'reapproval_required'
         ? 'reapproval required'
         : preview.effectiveApproval;
+    if (preview.approvalAuthority === 'configured_policy') return `placement policy: ${value}`;
+    // A hold names why the plan is waiting. Calling that wait a legacy combined
+    // approval would point at an authority that is not the one holding it.
+    if (preview.approvalHoldReason) return value;
     const hasLiveApplication = preview.gitops != null && preview.gitops.targetMode !== 'not_applicable';
     return hasLiveApplication ? `legacy combined: ${value}` : value;
 }
@@ -111,6 +108,10 @@ export function RolloutPreviewDialog({
     const blocked = (preview?.summary.blocker ?? 0) > 0;
     const canConfirm = !!preview && !loading && !submitting && !blocked;
     const gitManaged = isGitManagedPreview(preview);
+    // The plan is already effective under a configured policy's own approval, so
+    // the reconciler runs it without this dialog. What the confirm adds is the
+    // operator taking the decision over, which is what the sentence says.
+    const policyApproved = preview != null && preview.approvalAuthority === 'configured_policy';
 
     async function refreshPreview(): Promise<void> {
         try {
@@ -203,7 +204,13 @@ export function RolloutPreviewDialog({
                         <p className="text-xs text-stat-subtitle">
                             {gitManaged
                                 ? 'This approval covers the reviewed place and remove outcomes for this Blueprint. Rollout authorization is a separate step.'
-                                : 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.'}
+                                : policyApproved
+                                    // The old sentence here claimed the fleet cannot change without this
+                                    // confirmation, which a policy approval had already made false: it
+                                    // authorizes the reconciler on its own. What confirming adds is that
+                                    // the decision becomes yours, so that is what this says.
+                                    ? 'The placement policy already approves this plan. Confirming records your own approval for the same outcomes, which takes the decision over from the policy.'
+                                    : 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.'}
                         </p>
                         <div className="flex flex-wrap gap-3 text-xs font-mono uppercase tracking-[0.15em]">
                             <span className="text-stat-value">Safe {preview.summary.safe}</span>
@@ -211,6 +218,9 @@ export function RolloutPreviewDialog({
                             <span className="text-destructive">Blockers {preview.summary.blocker}</span>
                             <span className="text-stat-subtitle">{approvalLabel(preview)}</span>
                         </div>
+                        {preview.approvalHoldReason ? (
+                            <p className="text-xs text-warning">{preview.approvalHoldReason}</p>
+                        ) : null}
                         <p className="text-xs text-stat-subtitle">{preview.healthNote}</p>
                         <GitOpsEvidenceSection preview={preview} />
                         {preview.gitopsFingerprint && (
@@ -342,9 +352,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
     const live = projection && projection.targetMode !== 'not_applicable' ? projection : null;
     const faults = projection ? absentFault(projection) : [];
     const source = liveSourceFacet(projection);
-    const artifact = liveArtifactFacet(projection);
-    const placement = livePlacementFacet(projection);
-    const rollout = liveRolloutFacet(projection);
     if (!live && faults.length === 0) return null;
 
     const nodeNames = new Map<number, string>();
@@ -355,13 +362,12 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
     return (
         <div className={`rounded-md border ${sectionBorderClass('neutral')} px-3 py-2`}>
             <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-stat-subtitle mb-1.5">
-                {live ? 'GitOps authority and evidence' : 'GitOps state unavailable'}
+                GitOps authority and evidence
             </div>
             <div className="space-y-2">
-                {faults.length > 0 && <GitOpsFaultCard message={faults[0].message} />}
+                <GitOpsStatus revision={projection} nodeName={nodeName} includeTargets={false} />
                 {live && (
                     <>
-                        <GitOpsApprovalChips approvals={live.approvals} placement={placement} rollout={rollout} />
                         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
                             {source && (
                                 <>
@@ -387,13 +393,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
                                 <ShortId value={live.rolloutGenerationId} />
                             </IdentityRow>
                         </dl>
-                        <GitOpsFacetCards
-                            source={source}
-                            artifact={artifact}
-                            placement={placement}
-                            rollout={rollout}
-                            authorityPolicies={live.authorityPolicies}
-                        />
                         {live.targets.length > 0 && (
                             <div className="space-y-2">
                                 <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-stat-subtitle">
@@ -404,7 +403,6 @@ function GitOpsEvidenceSection({ preview }: { preview: BlueprintPreview }) {
                                 ))}
                             </div>
                         )}
-                        <GitOpsCaveats revision={projection} />
                     </>
                 )}
             </div>

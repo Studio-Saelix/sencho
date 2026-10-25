@@ -3,19 +3,19 @@ title: Deploy Progress
 description: Stream live output from stack deploy, update, install, restart, stop, take down, and node scan operations with a structured log view, a minimizable pill, and an optional inline status band.
 ---
 
-When you trigger a stack operation that runs through `docker compose` or the Docker Engine, Sencho opens a live progress view that streams output as it happens. Each line becomes a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The progress view appears as a centered modal overlay by default or as a quiet status band on the stack detail when you prefer a less intrusive style. Either way, the view can be minimized to a floating pill that follows you across navigation so you can leave the App Store mid-install and still see the status from any screen.
+When you trigger a stack operation that runs through `docker compose` or the Docker Engine, Sencho opens a live progress view that streams output as it happens. Each line becomes a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The progress view appears as a quiet status band on the stack detail by default, or as a centered modal overlay if you prefer one. Either way, the view can be minimized to a floating pill that follows you across navigation so you can leave the App Store mid-install and still see the status from any screen.
 
 ## Showing, hiding, and styling deploy progress
 
 Deploy progress is **on by default**. To run operations without it, open **Settings > Infrastructure > Stacks** and turn off **Deploy progress**. While it is on, **Progress style** chooses how it appears:
 
-- **Modal** (the default): a centered overlay that opens automatically and streams the full structured log.
-- **Inline**: a quiet status band on the stack detail itself, with the full log a click away under **View output**.
+- **Inline** (the default): a quiet status band on the stack detail itself, with the full log a click away under **View output**.
+- **Modal**: a centered overlay that opens automatically and streams the full structured log.
 
 The choices are saved to the current browser only and synced across tabs in the same browser without a reload.
 
 <Frame>
-  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings Stacks panel showing the Deploy progress toggle set to Enabled, the Progress style selector with Modal selected, the Observe health after updates toggle, and the Observation window field." />
+  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings Stacks panel showing the Deploy progress toggle set to Enabled, the Progress style selector with Inline selected, the Observe health after updates toggle, and the Observation window field." />
 </Frame>
 
 ## Using the modal
@@ -191,7 +191,7 @@ The [health gate](#health-gate) activates only after **Deploy** and **Update**; 
     The health gate only fires after **deploy** and **update** actions. Restart, stop, take down, install, Git apply, and Scan this node complete without a post-operation observation period. If you want health monitoring after a restart, deploy or update the stack instead.
   </Accordion>
   <Accordion title="I changed the deploy progress setting but it did not take effect">
-    The settings live in `localStorage`: the on/off toggle under `sencho.deploy-feedback.enabled` and the Modal/Inline choice under `sencho.deploy-feedback.style`. Both apply to the current tab without a reload, and other tabs in the same browser pick up the change through a `storage` event. Deploy progress defaults to on in Modal style, so only an explicit choice changes it. If a tab still does not honour the setting, refresh that tab. The settings do not sync across browsers or devices; each one carries its own choice.
+    The settings live in `localStorage`: the on/off toggle under `sencho.deploy-feedback.enabled` and the Modal/Inline choice under `sencho.deploy-feedback.style`. Both apply to the current tab without a reload, and other tabs in the same browser pick up the change through a `storage` event. Deploy progress defaults to on in Inline style, so only an explicit choice changes it. If a tab still does not honour the setting, refresh that tab. The settings do not sync across browsers or devices; each one carries its own choice.
   </Accordion>
 </AccordionGroup>
 

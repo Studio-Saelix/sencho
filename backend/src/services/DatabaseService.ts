@@ -24,6 +24,7 @@ import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
 import { PLACEMENT_POLICY_REASONS } from './gitops/placementPolicy';
+import type { DismissalMode } from './findingDismissals/types';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 export type { RollbackOperationKind } from '../types/rollbackGeneration';
@@ -84,6 +85,84 @@ export interface StackUpdateDetail {
 const SERVICES_JSON_VERSION = 1;
 const DEFAULT_RECOVERY_RETENTION_DAYS = 7;
 const DEFAULT_RECOVERY_MAX_GENERATIONS = 0;
+// Bounds of gitops_artifact_retry_interval_mins. The floor matches the Blueprint
+// reconciler tick, below which no retry is reachable; the ceiling keeps a stored
+// value from parking a target unverified for longer than a day.
+const DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS = 5;
+const MAX_ARTIFACT_RETRY_INTERVAL_MINS = 1440;
+// Bounds of gitops_history_retention_days. The window is what keeps the
+// insert-only history and outbox tables from growing for the life of an
+// installation; the ceiling keeps a stored value from retaining rows longer
+// than a year.
+const DEFAULT_GITOPS_HISTORY_RETENTION_DAYS = 30;
+const MAX_GITOPS_HISTORY_RETENTION_DAYS = 365;
+// How long past the history window an undrained outbox row is kept. The repair
+// that drains these rows from their payload runs at startup, so a restart
+// inside this grace can still announce them. A process that stays up does not
+// retry them. A row still undrained after the grace is dropped so it cannot
+// accumulate for ever.
+const UNDRAINED_OUTBOX_GRACE_DAYS = 7;
+// History and outbox rows deleted per prune pass. A first prune on a long-lived
+// install has months of backlog to clear and SQLite has one writer, so an
+// unbounded transaction would block every other write on the instance for its
+// duration. The pass runs at the end of each monitor evaluation (every 30
+// seconds), not on the 15-minute janitor, and clears the rest on later passes.
+export const GITOPS_PRUNE_CHUNK_ROWS = 5000;
+// What a prune may delete, in one place so the delete statement and the
+// remaining-count, when developer mode runs it, can never disagree.
+//
+// A row older than the window is pruned unless it is the newest row of a live
+// application: only a live application has a "last activity" fact to preserve.
+//
+// The portfolio's "last activity" fact reads `MAX(created_at)` over history
+// (`latestTransitionByApplication`), and its readers select only active
+// applications. Deleting an idle application's last row would silently empty its
+// activity column with no change on the application itself, since polling off, a
+// suspended source, a detached node and an idle Blueprint are indistinguishable
+// from "no activity" once the rows are gone.
+//
+// Ties on created_at are broken by rowid, SQLite's insertion-order key. The id
+// column is a random UUID and does not sort by recency (`latestSettledAttempt`
+// already orders by rowid for that reason). One attempt's started and settled
+// rows share the same envelope timestamp, so a UUID tie-break can keep the
+// started row and delete the settled one. Startup recovery then treats that
+// attempt as open and re-settles it. rowid keeps the later insert, which is
+// the settlement. The chunk delete orders the same way, so a pass that stops
+// between the two rows leaves the settlement in place.
+//
+// Scoped to live applications rather than to every application_id, because the
+// tombstone is the only thing that outlives a stack: `gitops_applications` keeps a
+// deleted or detached row as a frozen record forever, so an unscoped exemption
+// would retain one history row per stack ever retired and leave exactly the
+// growth this setting exists to stop. 'creating' counts as live because its rows
+// are written before the application is activated, and dropping them would leave
+// an application that goes live with no recorded activity at all. The application
+// lookup is a primary-key seek. The newer-row probe uses
+// idx_gitops_history_app_created: one seek for a later timestamp and one for
+// the same timestamp, with the rowid tie applied on that second seek. A
+// retired application stops after the primary-key seek.
+//
+// An unsettled reservation older than the window is pruned once a newer row
+// exists for that application. Startup recovery then does not see it. The
+// reservation survives past the window only when it is still that application's
+// newest row, which is the quiet-application case. Keeping every unsettled row
+// would retain attempts the store documents as staying unsettled forever.
+const GITOPS_HISTORY_PRUNEABLE = `created_at < ?
+  AND (
+    -- The application is retired, so no projection reads its history.
+    NOT EXISTS (
+      SELECT 1 FROM gitops_applications application
+      WHERE application.id = gitops_history.application_id
+        AND application.lifecycle_status IN ('active','creating')
+    )
+    -- Or this row is not the newest one, for any application.
+    OR EXISTS (
+      SELECT 1 FROM gitops_history newer
+      WHERE newer.application_id = gitops_history.application_id
+        AND (newer.created_at > gitops_history.created_at
+             OR (newer.created_at = gitops_history.created_at AND newer.rowid > gitops_history.rowid))
+    )
+  )`;
 
 function isStackServiceStatus(value: unknown): value is StackServiceStatus {
     if (!value || typeof value !== 'object') return false;
@@ -380,6 +459,13 @@ export interface StackDriftFindingRow {
     actual_json: string | null;
     detected_at: number;
     resolved_at: number | null;
+    /** A team dismissal on this finding, kept after the row closes. All six columns are written and cleared together. */
+    dismissed_by: string | null;
+    dismissed_at: number | null;
+    dismissed_fingerprint: string | null;
+    dismissed_mode: string | null;
+    dismissed_expires_at: number | null;
+    dismissed_count: number | null;
 }
 
 export interface StackExposureIntentRow {
@@ -1198,6 +1284,7 @@ export class DatabaseService {
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
+        this.migrateDriftFindingDismissals();
         this.migrateGitSourceMultiFile();
         this.migrateGitSourceSshDeployKey();
         this.migrateGitSourcePrivateCa();
@@ -1205,6 +1292,9 @@ export class DatabaseService {
         this.migrateGitSourceChangePlan();
         this.migrateGitOpsRecoveryColumns();
         this.migrateGitOpsCreateCheckpointSshDeployKey();
+        this.migrateGitOpsPauseOrigin();
+        this.migrateGitOpsRolloutWithdrawal();
+        this.migrateGitOpsSourceConfirmation();
         this.migrateNodeUpdateSkips();
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
@@ -1869,6 +1959,27 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_ack_stack
         ON preflight_acknowledgements(node_id, stack_name);
 
+      -- Hub-held team dismissals of attention findings (FindingDismissalStore).
+      -- surface and mode are validated in code so a new surface needs no rebuild.
+      CREATE TABLE IF NOT EXISTS finding_dismissals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        surface TEXT NOT NULL,
+        finding_key TEXT NOT NULL,
+        stack_name TEXT,
+        fingerprint TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        count_at INTEGER NOT NULL,
+        mode TEXT NOT NULL,
+        expires_at INTEGER,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_dismissals_key
+        ON finding_dismissals(node_id, surface, finding_key);
+      CREATE INDEX IF NOT EXISTS idx_finding_dismissals_surface
+        ON finding_dismissals(surface, node_id);
+
       CREATE TABLE IF NOT EXISTS stack_exposure (
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
@@ -2160,6 +2271,12 @@ export class DatabaseService {
         addColIfMissing('gitops_applications', 'placement_policy_refused_at', 'INTEGER NULL');
         addColIfMissing('gitops_applications', 'placement_policy',
             "TEXT NOT NULL DEFAULT 'operator' CHECK (placement_policy IN ('operator','bounded_auto'))");
+        // The recovery failure a target row still claims, kept beside the shared
+        // failure columns. No backfill: a row whose shared slot a later failure
+        // had already taken over carries no proof of what the claim was, and
+        // inventing one would be worse than the absence.
+        maybeAddCol('gitops_target_current', 'recovery_failure_class', 'TEXT NULL');
+        maybeAddCol('gitops_target_current', 'recovery_failure_at', 'INTEGER NULL');
         // Called on every boot, not only the one that created the column: a
         // process that died between the ALTER and the backfill would otherwise
         // skip it for ever, because every later boot sees a duplicate column.
@@ -2314,14 +2431,13 @@ export class DatabaseService {
         // Managed by /api/sso/auth-mode, not the generic /api/settings route
         // (activation needs safety validation).
         stmt.run('authentication_mode', 'local_and_sso');
-        stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         // Superseded-generation retention (days) and a per-stack cap on total
-        // retained generations (0 = unlimited). Never applies to the current
+        // retained generations (0 = unlimited, default 1). Never applies to the current
         // generation, which stays protected until superseded or released.
         stmt.run('recovery_retention_days', '7');
-        stmt.run('recovery_max_generations', '0');
+        stmt.run('recovery_max_generations', '1');
         stmt.run('image_update_check_interval_minutes', '120');
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
@@ -2330,7 +2446,7 @@ export class DatabaseService {
         // current behavior; missing key is also treated as enabled at read time.
         stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
-        stmt.run('env_block_deploy_on_missing_required', '0');
+        stmt.run('env_block_deploy_on_missing_required', '1');
         stmt.run('auto_create_missing_external_networks', '0');
         // Silently extend an actively-used session's cookie instead of hard
         // expiring it. On by default (matches how most session-based web apps
@@ -2340,6 +2456,16 @@ export class DatabaseService {
 stmt.run('gitops_schema_version', '1');
         // Global GitOps polling starts off after an upgrade; operators opt in.
         stmt.run('gitops_poll_interval_mins', '0');
+        // Minutes between retries of an artifact freeze whose registry resolve
+        // could not complete. The reconciler ticks every 60s, so 1 minute is the
+        // reachable floor. Kept off the generic read path on purpose: it is only
+        // consulted for a target whose approved identity is still unresolved.
+        stmt.run('gitops_artifact_retry_interval_mins', '5');
+        // Days of GitOps history and settled-outbox rows kept before the
+        // monitor's cleanup pass prunes them. Both tables are insert-only and
+        // the reconcile tick appends to them continuously, so the window is the
+        // only bound on their size; it defaults on rather than off.
+        stmt.run('gitops_history_retention_days', '30');
         // SSO role sync defaults off: admin-set roles persist across SSO sign-ins;
         // operators who want IdP group membership to drive roles opt in via Settings > SSO.
         stmt.run('sso_role_sync', '0');
@@ -2882,6 +3008,15 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
     }
 
+    private migrateDriftFindingDismissals(): void {
+        this.tryAddColumn('stack_drift_findings', 'dismissed_by', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_at', 'INTEGER');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_fingerprint', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_mode', 'TEXT');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_expires_at', 'INTEGER');
+        this.tryAddColumn('stack_drift_findings', 'dismissed_count', 'INTEGER');
+    }
+
     private migrateGitSourceSshDeployKey(): void {
         this.tryAddColumn('stack_git_sources', 'encrypted_deploy_key', 'TEXT');
         this.tryAddColumn('stack_git_sources', 'ssh_known_hosts_entry', 'TEXT');
@@ -2913,6 +3048,54 @@ stmt.run('gitops_schema_version', '1');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_generation_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_artifact_set_id', 'TEXT');
         this.tryAddColumn('stack_update_recovery_generations', 'gitops_source_acceptance_ref', 'TEXT');
+    }
+
+    private migrateGitOpsPauseOrigin(): void {
+        // SQLite cannot add a CHECK through ALTER TABLE, so an upgraded database
+        // enforces the enum in application code only; the fresh-install DDL
+        // carries it. Rows that already held a system or health pause backfill
+        // as 'operator', the safe direction: they survive an acceptance until an
+        // operator resumes once, rather than being lifted unannounced.
+        this.tryAddColumn('gitops_applications', 'pause_origin', "TEXT NOT NULL DEFAULT 'operator'");
+    }
+
+    private migrateGitOpsRolloutWithdrawal(): void {
+        const added = this.tryAddColumn('gitops_rollout_generations', 'withdrawn_at', 'INTEGER NULL');
+        const backfilled = this.getGlobalSettings()['gitops_rollout_withdrawal_backfilled'] === '1';
+        if (!added && backfilled) return;
+        // The ALTER commits on its own, so the backfill is tracked by a settings
+        // flag rather than by the column's presence: a crash between the two
+        // statements, or a downgrade and re-upgrade, resumes the backfill
+        // instead of skipping it. The flag and the backfill commit together, so
+        // a partial state cannot persist.
+        //
+        // A generation superseded before this column existed cannot say whether
+        // the operator or a system path superseded it. Backfill every
+        // superseded authorization as withdrawn, the safe direction: the
+        // automatic policy waits for a person once after the upgrade rather
+        // than re-minting a rollout the operator may have withdrawn.
+        this.db.transaction(() => {
+            if (!backfilled) {
+                this.db.prepare(
+                    `UPDATE gitops_rollout_generations SET withdrawn_at = superseded_at
+                     WHERE superseded_at IS NOT NULL AND provenance = 'rollout_authorization'`,
+                ).run();
+                this.db.prepare(
+                    "INSERT OR REPLACE INTO global_settings (key, value) VALUES ('gitops_rollout_withdrawal_backfilled', '1')",
+                ).run();
+            }
+        })();
+        this.cachedGlobalSettings = null;
+    }
+
+    private migrateGitOpsSourceConfirmation(): void {
+        // A confirmed absence of placement has to stay distinct from an
+        // acceptance nobody confirmed, and the promise that a rollout would
+        // wait has to survive the request. Both live in this object. A null
+        // column means no object was stored. When the placement pointer is
+        // also set, the reader treats that pointer as a confirmation that
+        // must wait for a person.
+        this.tryAddColumn('gitops_approvals', 'source_confirmation_json', 'TEXT NULL');
     }
 
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {
@@ -4434,7 +4617,7 @@ stmt.run('gitops_schema_version', '1');
 
     // --- Stack Drift Findings (the persisted drift ledger) ---
 
-    public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at'>): number {
+    public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at' | `dismissed_${string}`>): number {
         const res = this.db.prepare(
             `INSERT INTO stack_drift_findings
                 (node_id, stack_name, service, finding_type, severity, message, expected_json, actual_json, detected_at, resolved_at)
@@ -4456,6 +4639,39 @@ stmt.run('gitops_schema_version', '1');
         return this.db.prepare(
             'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? AND resolved_at IS NULL ORDER BY detected_at ASC, id ASC'
         ).all(nodeId, stackName) as StackDriftFindingRow[];
+    }
+
+    /** One ledger row by id, open or resolved. */
+    public getDriftFinding(id: number): StackDriftFindingRow | undefined {
+        return this.db.prepare('SELECT * FROM stack_drift_findings WHERE id = ?').get(id) as StackDriftFindingRow | undefined;
+    }
+
+    /** The open finding for one service and kind on a stack, if the ledger holds it. */
+    public getOpenDriftFindingByKey(nodeId: number, stackName: string, service: string, findingType: string): StackDriftFindingRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM stack_drift_findings WHERE node_id = ? AND stack_name = ? AND service = ? AND finding_type = ? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1'
+        ).get(nodeId, stackName, service, findingType) as StackDriftFindingRow | undefined;
+    }
+
+    /** Record a dismissal on an open finding. Closed rows are never dismissed. */
+    public setDriftFindingDismissal(id: number, d: {
+        by: string; at: number; fingerprint: string; mode: DismissalMode; expiresAt: number | null; count: number;
+    }): boolean {
+        return this.db.prepare(
+            `UPDATE stack_drift_findings
+                SET dismissed_by = ?, dismissed_at = ?, dismissed_fingerprint = ?,
+                    dismissed_mode = ?, dismissed_expires_at = ?, dismissed_count = ?
+              WHERE id = ? AND resolved_at IS NULL`
+        ).run(d.by, d.at, d.fingerprint, d.mode, d.expiresAt, d.count, id).changes > 0;
+    }
+
+    public clearDriftFindingDismissal(id: number): boolean {
+        return this.db.prepare(
+            `UPDATE stack_drift_findings
+                SET dismissed_by = NULL, dismissed_at = NULL, dismissed_fingerprint = NULL,
+                    dismissed_mode = NULL, dismissed_expires_at = NULL, dismissed_count = NULL
+              WHERE id = ? AND dismissed_by IS NOT NULL`
+        ).run(id).changes > 0;
     }
 
     /** Recent findings for a stack: open ones first, then resolved, each newest first. */
@@ -4989,6 +5205,56 @@ stmt.run('gitops_schema_version', '1');
         }
     }
 
+    /**
+     * Minutes a target's unresolved artifact expectation is left alone before a
+     * drift check retries resolving it.
+     *
+     * Unlike the poll interval there is no off value: turning the retry off would
+     * leave a target unverified until an unrelated redeploy, which is the failure
+     * the retry exists to remove. So a failed read falls back to the default
+     * rather than to 0, and the floor is one minute because the Blueprint
+     * reconciler that drives the retry ticks on that cadence.
+     */
+    public getGitOpsArtifactRetryIntervalMins(): number {
+        try {
+            const raw = this.getGlobalSettings()['gitops_artifact_retry_interval_mins'];
+            const parsed = parseInt(String(raw ?? ''), 10);
+            if (!Number.isFinite(parsed) || parsed < 1) {
+                console.warn(`[DatabaseService] invalid gitops_artifact_retry_interval_mins "${String(raw)}"; treating as ${DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS}`);
+                return DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS;
+            }
+            return Math.min(parsed, MAX_ARTIFACT_RETRY_INTERVAL_MINS);
+        } catch (e) {
+            console.warn(
+                '[DatabaseService] gitops_artifact_retry_interval_mins read failed; treating as %d:',
+                DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS,
+                (e as Error).message,
+            );
+            return DEFAULT_ARTIFACT_RETRY_INTERVAL_MINS;
+        }
+    }
+
+    /**
+     * Days of GitOps history to keep.
+     *
+     * History is insert-only and the reconcile tick appends to it continuously,
+     * so this is the only bound on the table's size. There is no off value:
+     * turning retention off would leave the history and its outbox growing for
+     * the life of the installation, which is the accumulation this setting
+     * exists to stop. A missing or unusable stored value uses the default. A
+     * failed read throws, so the caller can skip the delete instead of pruning
+     * with a window the operator did not choose.
+     */
+    public getGitOpsHistoryRetentionDays(): number {
+        const stored = this.getGlobalSettings()['gitops_history_retention_days'];
+        const raw = parseInt(stored ?? '', 10);
+        if (!Number.isFinite(raw) || raw < 1) {
+            console.warn(`[DatabaseService] invalid gitops_history_retention_days "${String(stored)}"; treating as ${DEFAULT_GITOPS_HISTORY_RETENTION_DAYS}`);
+            return DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        }
+        return Math.min(raw, MAX_GITOPS_HISTORY_RETENTION_DAYS);
+    }
+
     /** Total generations retained per stack, current included (0 = unlimited). */
     public getRecoveryMaxGenerations(): number {
         try {
@@ -5379,6 +5645,12 @@ stmt.run('gitops_schema_version', '1');
         stmt.run(nodeId);
     }
 
+    /** Marks one row read. Returns false when no row with that id exists on that node. */
+    public markNotificationRead(nodeId: number, id: number): boolean {
+        const result = this.db.prepare('UPDATE notification_history SET is_read = 1 WHERE node_id = ? AND id = ?').run(nodeId, id);
+        return result.changes > 0;
+    }
+
     public deleteNotification(nodeId: number, id: number): void {
         const stmt = this.db.prepare('DELETE FROM notification_history WHERE node_id = ? AND id = ?');
         stmt.run(nodeId, id);
@@ -5498,6 +5770,110 @@ stmt.run('gitops_schema_version', '1');
             ttl: Number(ttlInfo.changes ?? 0),
             perStack: stackOverflow.length,
             perNode: unattachedOverflow.length,
+        };
+    }
+
+    /**
+     * Drop one bounded chunk of GitOps history and its consumed outbox rows
+     * older than the window.
+     *
+     * What a prune may delete, and why each live application's newest row is exempt
+     * from it, is documented on `GITOPS_HISTORY_PRUNEABLE`.
+     * `historyRemaining` and `outboxRemaining` are exact only while developer mode
+     * is on. The diagnostic log is the only reader, and the counts walk the
+     * backlog, so they are skipped otherwise and reported as `null`: an
+     * unmeasured remainder is unknown, not zero.
+     *
+     * A drained outbox row is pruned with the history it announced. An undrained
+     * row is a notification the fanout has not written yet, or a payload a later
+     * decoder is meant to repair, so it gets a grace period past the window. The
+     * repair runs at startup, so the grace only helps an instance that restarts
+     * in time. A row still undrained after the grace is dropped, and the warning
+     * reports how many this pass deleted, because one pass is capped and keeping
+     * the row for ever is the unbounded growth the window exists to stop.
+     */
+    public cleanupOldGitOpsHistory(
+        daysToKeep = DEFAULT_GITOPS_HISTORY_RETENTION_DAYS,
+    ): { history: number; outbox: number; historyRemaining: number | null; outboxRemaining: number | null } {
+        const days = Number.isFinite(daysToKeep) && daysToKeep > 0
+            // Floor before the guard, not after it: a fraction between 0 and 1
+            // floors to 0, which is not an off value and would delete everything
+            // non-exempt.
+            ? Math.min(Math.max(Math.floor(daysToKeep), 1), MAX_GITOPS_HISTORY_RETENTION_DAYS)
+            : DEFAULT_GITOPS_HISTORY_RETENTION_DAYS;
+        const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+        const undrainedCutoff = cutoff - (UNDRAINED_OUTBOX_GRACE_DAYS * 24 * 60 * 60 * 1000);
+
+        const deleteHistoryChunk = this.db.prepare(
+            `DELETE FROM gitops_history
+             WHERE id IN (
+                 SELECT id FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT ?
+             )`,
+        );
+        // Two statements rather than one OR, so each branch keeps its own row
+        // cap. One statement with both predicates and one LIMIT would still use
+        // the two partial indexes, and it would cap the combined delete. Both
+        // branches are bounded by the same row cap, so a first prune with
+        // months of outbox backlog clears it over later passes rather than
+        // holding the writer for all of it.
+        const deleteDrained = this.db.prepare(
+            `DELETE FROM gitops_settled_outbox
+             WHERE settled_history_id IN (
+                 SELECT settled_history_id FROM gitops_settled_outbox
+                 WHERE drained_at IS NOT NULL AND created_at < ?
+                 LIMIT ?
+             )`,
+        );
+        const deleteUndrained = this.db.prepare(
+            `DELETE FROM gitops_settled_outbox
+             WHERE settled_history_id IN (
+                 SELECT settled_history_id FROM gitops_settled_outbox
+                 WHERE drained_at IS NULL AND created_at < ?
+                 LIMIT ?
+             )`,
+        );
+        // One transaction per pass, so a long backlog is cleared over several
+        // passes rather than holding SQLite's single writer for all of it.
+        const pruned = this.db.transaction(() => {
+            const deletedHistory = deleteHistoryChunk.run(cutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            const deletedDrained = deleteDrained.run(cutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            const deletedUndrained = deleteUndrained.run(undrainedCutoff, GITOPS_PRUNE_CHUNK_ROWS);
+            return {
+                history: Number(deletedHistory.changes ?? 0),
+                outbox: Number(deletedDrained.changes ?? 0) + Number(deletedUndrained.changes ?? 0),
+                undrained: Number(deletedUndrained.changes ?? 0),
+            };
+        })();
+        // Counted after the delete, and only for the diagnostic log. The history
+        // count walks whatever backlog is still left, and the monitor tick runs
+        // this every 30 seconds. Null rather than 0 when they are skipped, so the
+        // log cannot read "none left" for a table that was never measured.
+        let historyRemaining: number | null = null;
+        let outboxRemaining: number | null = null;
+        if (this.getGlobalSettings().developer_mode === '1') {
+            historyRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_history WHERE ${GITOPS_HISTORY_PRUNEABLE}`,
+            ).get(cutoff) as { n: number }).n;
+            outboxRemaining = (this.db.prepare(
+                `SELECT COUNT(*) AS n FROM gitops_settled_outbox
+                 WHERE (drained_at IS NOT NULL AND created_at < ?)
+                    OR (drained_at IS NULL AND created_at < ?)`,
+            ).get(cutoff, undrainedCutoff) as { n: number }).n;
+        }
+
+        if (pruned.undrained > 0) {
+            console.warn(
+                `[DatabaseService] dropping ${pruned.undrained} undrained GitOps outbox row(s) older than ${days + UNDRAINED_OUTBOX_GRACE_DAYS} days`,
+            );
+        }
+
+        return {
+            history: pruned.history,
+            outbox: pruned.outbox,
+            historyRemaining,
+            outboxRemaining,
         };
     }
 
@@ -5661,6 +6037,7 @@ stmt.run('gitops_schema_version', '1');
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM finding_dismissals WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_update_recovery_generations WHERE node_id = ?').run(id);

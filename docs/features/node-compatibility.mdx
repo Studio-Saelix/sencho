@@ -15,7 +15,7 @@ Features whose capability is missing from the active node's list are replaced by
   Capabilities are flag-based, not version-based. Sencho never compares version numbers; it checks whether the active node explicitly advertises support for each feature. This keeps the system forward-compatible as new capabilities are added.
 </Note>
 
-An action is not always behind a capability. A capability gates a feature whose absence would leave you with a broken or misleading panel, which is what makes a lock card the right answer there. An action added by a later release has nothing to fall back to on a node without it, so it is sent anyway and the node refuses it. **Save & Pull Images** in the [compose editor](/features/editor#save-options) behaves this way: on a mixed-version fleet it writes the compose file and then fails the image download, naming a missing API endpoint rather than the version difference. Updating that node is what makes the action work there.
+An action is not always behind a capability. A capability gates a feature whose absence would leave you with a broken or misleading panel, which is what makes a lock card the right answer there. An action added by a later release has nothing to fall back to on a node without it, so it is sent anyway and the node refuses it. **Save & Pull Images** in the [compose editor](/features/editor#save-options) behaves this way: on a mixed-version fleet it writes the compose file and then fails the image download, naming a missing API endpoint rather than the version difference. Saving from an empty **.env** tab behaves the same way, and does not become a silent overwrite on a supported node: on a node that predates create-on-save, a stack with no env file is refused with `No env file exists for this stack`, and if a file does exist the save is refused as a conflict with the file's current content, so the editor asks before replacing it and does not ask again after a confirmed overwrite. That conflict detection relies on the conditional env writes added in Sencho 0.87.0; a node older than that cannot detect a file that appeared after the tab loaded, so update the node.
 
 ## What you will see
 
@@ -92,6 +92,20 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `stack-delete-prune-volumes` | Preserve volumes on Delete unless the operator opts in to remove them |
 | `guided-external-network-preflight` | Guided missing-external-network check before deploy |
 | `service-scoped-update` | Per-service update, rebuild, and restore on multi-service stacks |
+| `notification-suppression-schedule` | Weekly maintenance windows on mute rules |
+| `notification-suppression-replica-retraction` | Removing a mute rule from a node when it is deleted on the control instance |
+| `service-scoped-stack-alert` | Stack alert rules that target one service |
+| `scoped-stack-auth-evidence` | Stack-scoped permissions enforced on requests forwarded to a node |
+| `authentication-mode` | The Authentication mode setting under SSO |
+| `remote-registry-credentials` | Private registry credentials delivered from the control instance to the node for Compose operations |
+| `remote-registry-exact-ref-proof-v1` | Proof that a delivered registry credential matches the exact image reference |
+| `remote-registry-sealed-envelope-v1` | Sealed delivery of registry credentials to the node |
+| `remote-image-inspect-v1` | Image inspection and update checks for a node through the control instance |
+| `remote-auto-update-checked-v1` | Auto-update runs on a node that are checked and verified from the control instance |
+| `gitops-source-controller` | Git sources and their source policy |
+| `blueprint-digest-pins-v1` | Digest-pinned Blueprint rollouts |
+| `fleet-readiness-v1` | Per-node readiness evidence and the per-stack readiness rollup behind the Readiness tab |
+| `health-gate-observation-v1` | Health observation of a stack on a remote node, for health-gated rollouts and updates |
 
 <Note>
   `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node has no scanner installed, it omits this capability and the scanning UI is replaced by a lock card whose body reads "Install a scanner from the Scanner setup tab." instead of the generic upgrade message.

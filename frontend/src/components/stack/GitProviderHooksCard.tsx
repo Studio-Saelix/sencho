@@ -64,6 +64,8 @@ interface ProviderHooksResponse {
 interface GitProviderHooksCardProps {
   stackName: string;
   canEdit: boolean;
+  /** Node the requests target; omitted means the active node. */
+  nodeId?: number | null;
 }
 
 const PROVIDER_OPTIONS: { value: GitProviderKind; label: string }[] = [
@@ -123,7 +125,7 @@ function formatDeliveryState(state: GitProviderDeliveryState): string {
   return state.replace(/_/g, ' ');
 }
 
-export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCardProps) {
+export function GitProviderHooksCard({ stackName, canEdit, nodeId }: GitProviderHooksCardProps) {
   const { activeNode } = useNodes();
   const [loading, setLoading] = useState(true);
   const [endpoints, setEndpoints] = useState<ProviderHookEndpoint[]>([]);
@@ -138,7 +140,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
   const [expandedDeliveries, setExpandedDeliveries] = useState<string | null>(null);
 
   const controlsDisabled = !canEdit || !directSource;
-  const nodeId = activeNode?.id;
+  const hookNodeId = nodeId ?? activeNode?.id;
 
   const availableProviders = useMemo(
     () => PROVIDER_OPTIONS.filter((opt) => !endpoints.some((ep) => ep.provider === opt.value)),
@@ -148,7 +150,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks`);
+      const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks`, { nodeId });
       if (res.ok) {
         const data: ProviderHooksResponse = await res.json();
         setEndpoints(data.endpoints ?? []);
@@ -162,7 +164,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
     } finally {
       setLoading(false);
     }
-  }, [stackName]);
+  }, [stackName, nodeId]);
 
   useEffect(() => {
     void load();
@@ -191,6 +193,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
     setCreating(true);
     try {
       const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks`, {
+        nodeId,
         method: 'POST',
         body: JSON.stringify({ provider: selectedProvider, event_scope: newEventScope }),
       });
@@ -217,7 +220,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
     try {
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks/${encodeURIComponent(endpointId)}/rotate`,
-        { method: 'POST' },
+        { nodeId, method: 'POST' },
       );
       if (res.ok) {
         const data = await res.json() as { secret: string };
@@ -242,7 +245,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
     try {
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks/${encodeURIComponent(endpointId)}`,
-        { method: 'PATCH', body: JSON.stringify(patch) },
+        { nodeId, method: 'PATCH', body: JSON.stringify(patch) },
       );
       if (res.ok) {
         await load();
@@ -260,7 +263,7 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
     try {
       const res = await apiFetch(
         `/stacks/${encodeURIComponent(stackName)}/git-source/provider-hooks/${encodeURIComponent(endpointId)}`,
-        { method: 'DELETE' },
+        { nodeId, method: 'DELETE' },
       );
       if (res.ok) {
         toast.success('Provider hook deleted.');
@@ -278,8 +281,8 @@ export function GitProviderHooksCard({ stackName, canEdit }: GitProviderHooksCar
   };
 
   const hookUrl = (endpointId: string): string | null => {
-    if (!nodeId) return null;
-    return `${window.location.origin}/api/gitops/hooks/${nodeId}/${endpointId}`;
+    if (!hookNodeId) return null;
+    return `${window.location.origin}/api/gitops/hooks/${hookNodeId}/${endpointId}`;
   };
 
   if (loading) {

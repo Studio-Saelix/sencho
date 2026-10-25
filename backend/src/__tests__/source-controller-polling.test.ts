@@ -198,6 +198,55 @@ describe('SourceController poll scheduling', () => {
         expect(getApp('app-superseded').next_poll_at).toBe(Date.now() + 5 * 60 * 1_000);
     });
 
+    it('keeps the poll cadence alive while a recovery hold stands', async () => {
+        seedApplication('app-held', 'held-web', 'automatic');
+        // A rollback that may have moved the target holds the application until
+        // success evidence retires it. The hold clears without any operator
+        // touching the source, so the cursor the held fetch consumed has to be
+        // replaced.
+        const tx = GitOpsTransitions.getInstance();
+        const at = Date.now();
+        tx.rollbackInProgress({
+            applicationId: 'app-held',
+            nodeId: 1,
+            recoveryRef: 'rb-held',
+            recoveryGenerationId: null,
+            envelope: { operationId: 'held-open', actor: 'test', trigger: 'manual', at },
+        });
+        tx.rollbackPartialFailed({
+            applicationId: 'app-held',
+            nodeId: 1,
+            recoveryRef: 'rb-held',
+            failureClass: 'partial',
+            envelope: { operationId: 'held-fail', actor: 'test', trigger: 'manual', at: at + 1 },
+        });
+        expect(getApp('app-held').recovery_phase).toBe('failed');
+
+        armPastPoll('app-held', 'arm-held');
+        mockDue([getApp('app-held')]);
+        spyOnReconcile().mockImplementation(async () => {
+            // The held fetch runs and consumes the cursor before it settles,
+            // exactly as the real reconcile does; the hold makes the settled
+            // result recovery_required rather than a success shape.
+            const env = { operationId: 'fetch-held-op', actor: 'system:source-controller', trigger: 'poll', at: Date.now() };
+            GitOpsTransitions.getInstance().fetchStarted('app-held', env);
+            GitOpsTransitions.getInstance().fetched('app-held', 'e'.repeat(40), env);
+            return {
+                outcome: 'recovery_required',
+                reason: 'Recovery from an earlier failed mutation is still outstanding.',
+                nextAction: 'view_target_results',
+            };
+        });
+
+        controller.start();
+        await advanceOneTick();
+
+        // The held fetch consumed the cursor; a fresh one keeps the source in
+        // the cadence, so the first poll after the hold clears fetches the new
+        // commits instead of leaving the source idle.
+        expect(getApp('app-held').next_poll_at).toBe(Date.now() + 5 * 60 * 1_000);
+    });
+
     it('does not schedule after a failure-shaped outcome', async () => {
         seedApplication('app-failed', 'failed-web', 'automatic');
         armPastPoll('app-failed', 'arm-failed');

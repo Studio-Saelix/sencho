@@ -49,6 +49,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         content: '',
         envContent: '',
         envExists: false,
+        envInventoryFailed: false,
         envFiles: [],
         selectedEnvFile: '',
         isFileLoading: false,
@@ -302,10 +303,35 @@ describe('MobileStackDetail mobile editing', () => {
         expect(setActiveTab).toHaveBeenCalledWith('compose');
     });
 
-    it('normalizes an env tab to compose when the stack has no env file', () => {
+    it('keeps the env tab usable without an env file and explains the creation', () => {
         const setActiveTab = vi.fn();
         render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false, setActiveTab })} />);
-        expect(setActiveTab).toHaveBeenCalledWith('compose');
+        // No redirect to compose: the tab stays usable and its first save
+        // creates the default .env.
+        expect(setActiveTab).not.toHaveBeenCalled();
+        expect(screen.getByRole('tab', { name: '.env' })).toHaveAttribute('aria-selected', 'true');
+        expect(
+            screen.getByText(/will be created in the stack directory when you save/),
+        ).toBeInTheDocument();
+    });
+
+    it('hides the mobile creation notice while an env file exists', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'env', envExists: true, envFiles: ['.env'] })} />);
+        expect(
+            screen.queryByText(/will be created in the stack directory when you save/),
+        ).not.toBeInTheDocument();
+    });
+
+    it('shows the mobile inventory-failure notice instead of the creation notice', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false, envInventoryFailed: true })}
+            />,
+        );
+        expect(
+            screen.queryByText(/will be created in the stack directory when you save/),
+        ).not.toBeInTheDocument();
+        expect(screen.getByText(/environment files could not be loaded/)).toBeInTheDocument();
     });
 
     it('blocks textarea edits while an env-file load is in flight', () => {

@@ -31,6 +31,18 @@ export interface ImageRemediationFacts {
   imageRefsUpdateAvailable: string[];
   imageRefsWaitingUpstream: string[];
   imageRefsUpdateUnknown: string[];
+  /**
+   * The stack services behind each confirmed update: one row per raw finding
+   * image_ref and service whose fresh check found a newer image. This is what
+   * lets a verb update a specific stack instead of sending the operator to look.
+   */
+  updateServiceTargets: UpdateServiceTarget[];
+}
+
+export interface UpdateServiceTarget {
+  imageRef: string;
+  stackName: string;
+  serviceName: string;
 }
 
 export interface ClassifyImageRemediationInput {
@@ -122,12 +134,27 @@ function emptyRemediationFacts(
     imageRefsUpdateAvailable: [],
     imageRefsWaitingUpstream: [],
     imageRefsUpdateUnknown: [],
+    updateServiceTargets: [],
     ...overrides,
   };
 }
 
 function pushUnique(list: string[], ref: string): void {
   if (!list.includes(ref)) list.push(ref);
+}
+
+/** Services whose own fresh check confirmed a newer image, for one finding image. */
+function confirmedUpdateServices(
+  imageRef: string,
+  matches: IndexedService[],
+  freshnessWindowMs: number,
+  now: number,
+): UpdateServiceTarget[] {
+  return matches
+    .filter(({ service, checkedAt }) => service.checkStatus === 'ok'
+      && service.hasUpdate
+      && isStackFresh(checkedAt, now, freshnessWindowMs))
+    .map(({ stackName, service }) => ({ imageRef, stackName, serviceName: service.service }));
 }
 
 /**
@@ -156,6 +183,7 @@ export function classifyImageRemediation(input: ClassifyImageRemediationInput): 
   const imageRefsUpdateAvailable: string[] = [];
   const imageRefsWaitingUpstream: string[] = [];
   const imageRefsUpdateUnknown: string[] = [];
+  const updateServiceTargets: UpdateServiceTarget[] = [];
 
   const index = buildUpdateServiceIndex(details);
   for (const finding of findings) {
@@ -165,6 +193,11 @@ export function classifyImageRemediation(input: ClassifyImageRemediationInput): 
       case 'update_available':
         fixableWithImageUpdate += finding.count;
         pushUnique(imageRefsUpdateAvailable, finding.image_ref);
+        for (const target of confirmedUpdateServices(finding.image_ref, matches, freshnessWindowMs, now)) {
+          if (!updateServiceTargets.some((t) => t.imageRef === target.imageRef && t.stackName === target.stackName && t.serviceName === target.serviceName)) {
+            updateServiceTargets.push(target);
+          }
+        }
         break;
       case 'waiting_upstream':
         fixableWaitingUpstream += finding.count;
@@ -184,5 +217,6 @@ export function classifyImageRemediation(input: ClassifyImageRemediationInput): 
     imageRefsUpdateAvailable,
     imageRefsWaitingUpstream,
     imageRefsUpdateUnknown,
+    updateServiceTargets,
   });
 }

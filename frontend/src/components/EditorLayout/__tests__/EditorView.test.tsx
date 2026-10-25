@@ -52,6 +52,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     content: '',
     envContent: '',
     envExists: false,
+    envInventoryFailed: false,
     envFiles: [],
     selectedEnvFile: '',
     isFileLoading: false,
@@ -236,14 +237,67 @@ describe('EditorView single edit gate', () => {
   });
 });
 
+describe('EditorView env creation affordance', () => {
+  afterEach(() => {
+    lastLanguage = undefined;
+    lastValue = undefined;
+    lastReadOnly = undefined;
+  });
+
+  it('keeps the .env tab enabled without an env file and explains the creation', () => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false })} />);
+    expect(screen.getByRole('tab', { name: '.env' })).toBeEnabled();
+    expect(
+      screen.getByText(/will be created in the stack directory when you save/),
+    ).toBeInTheDocument();
+  });
+
+  it('hides the creation notice when the stack already has an env file', () => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'env', envExists: true })} />);
+    expect(
+      screen.queryByText(/will be created in the stack directory when you save/),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows an inventory-failure notice instead of the creation notice and locks the buffer', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'env',
+          envExists: false,
+          envInventoryFailed: true,
+        })}
+      />,
+    );
+    expect(
+      screen.queryByText(/will be created in the stack directory when you save/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/environment files could not be loaded/)).toBeInTheDocument();
+    expect(lastReadOnly).toBe(true);
+  });
+
+  it('shows the plain no-file line to a user who cannot edit the stack', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'env',
+          envExists: false,
+          can: () => false,
+        })}
+      />,
+    );
+    expect(
+      screen.queryByText(/will be created in the stack directory when you save/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText('This stack has no environment file yet.')).toBeInTheDocument();
+  });
+});
+
 describe('EditorView image pull affordance', () => {
-  /** Opens the save dropdown attached to Save & Deploy. The trigger is the
-   *  chevron Radix marks with aria-haspopup, which is the only stable handle:
-   *  the button carries an icon and no text. */
   const openSaveMenu = async () => {
-    const trigger = document.querySelector('[aria-haspopup="menu"]');
-    if (!trigger) throw new Error('save menu trigger not found');
-    await userEvent.click(trigger);
+    await userEvent.click(screen.getByRole('button', { name: 'More save actions' }));
   };
 
   it('offers Save & Pull Images when the user holds stack:edit and stack:deploy', async () => {
@@ -296,9 +350,7 @@ describe('EditorView image pull affordance', () => {
     expect(deployButton).toBeDisabled();
     // The chevron shares the primary's disabled state, so the whole split control
     // is inert rather than half-open.
-    const trigger = document.querySelector('[aria-haspopup="menu"]');
-    expect(trigger).not.toBeNull();
-    expect(trigger?.closest('button')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'More save actions' })).toBeDisabled();
   });
 
   it('leaves the save row live during an unrelated action', async () => {

@@ -1,6 +1,7 @@
 import { Server, Search, RotateCcw } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 import { FleetTopology } from '../fleet/FleetTopology';
 import { NodeCard } from './NodeCard';
 import { OverviewToolbar } from './OverviewToolbar';
@@ -29,8 +30,6 @@ interface OverviewTabProps {
     fleetStackLabelMap: Record<number, Record<string, StackLabel[]>>;
     updateStatusMap: Map<number, NodeUpdateStatus>;
     onNavigateToNode: (nodeId: number, stackName: string) => void;
-    onOpenNodeNetworking: (nodeId: number) => void;
-    networkingByNode: Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>;
     gitopsAttentionByNode: Map<number, number>;
     onUpdate?: (nodeId: number) => void;
     updatingNodeId: number | null;
@@ -69,8 +68,6 @@ export function OverviewTab({
     fleetStackLabelMap,
     updateStatusMap,
     onNavigateToNode,
-    onOpenNodeNetworking,
-    networkingByNode,
     gitopsAttentionByNode,
     onUpdate,
     updatingNodeId,
@@ -89,9 +86,11 @@ export function OverviewTab({
     onCheckUpdates,
     checkingUpdates,
 }: OverviewTabProps) {
+    // A fast answer never flashes the skeleton; the pane just holds still.
+    const { showBusy } = useVisualBusy(loading);
     return (
         <>
-            {loading && (
+            {loading && showBusy && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                     {Array.from({ length: 3 }).map((_, i) => (
                         <div key={i} className="rounded-xl border bg-card p-4 space-y-3">
@@ -151,8 +150,6 @@ export function OverviewTab({
                                     key={node.id}
                                     node={node}
                                     onNavigate={onNavigateToNode}
-                                    onOpenNetworking={onOpenNodeNetworking}
-                                    networkingSignal={networkingByNode.get(node.id)}
                                     gitopsAttention={gitopsAttentionByNode.get(node.id)}
                                     labelMap={fleetStackLabelMap[node.id] ?? {}}
                                     updateStatus={updateStatusMap.get(node.id)}

@@ -165,7 +165,7 @@ These rules activate when the stack publishes at least one host port. They use t
 | Sensitive service exposed on all interfaces | High | A service that looks like a database or admin tool (postgres, redis, adminer, and similar) publishes on all interfaces. |
 | Stack publishes ports without an exposure intent | Warning | The stack publishes host ports but no exposure intent has been set in the Networking tab. |
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
-| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL or reverse-proxy intent set. |
+| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `sencho.service.url` label, and no reverse-proxy intent. |
 
 ### Self-protection
 

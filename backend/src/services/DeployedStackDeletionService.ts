@@ -22,6 +22,7 @@ import { MeshService } from './MeshService';
 import { NotificationService } from './NotificationService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
@@ -417,6 +418,7 @@ export class DeployedStackDeletionService {
       db.deleteStackProjectEnvFiles(nodeId, stackName);
       db.deleteStackScans(nodeId, stackName);
       db.deleteNotificationsForStack(nodeId, stackName);
+      removeStackMuteRules(nodeId, stackName);
     } catch (dbErr) {
       console.error(
         '[DeployedStackDeletion] Secondary DB cleanup failed for %s; recovery rows already retired:',

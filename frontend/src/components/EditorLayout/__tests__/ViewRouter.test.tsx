@@ -52,6 +52,7 @@ const baseProps = {
     config: { open: vi.fn(), canOpen: () => true },
   },
   unreportedNotificationNodeIds: new Set<number>(),
+  onMarkNotificationRead: vi.fn(),
   fleetNodeIntent: null as number | null,
   onFleetNodeIntentConsumed: vi.fn(),
   securityTab: 'overview' as const,

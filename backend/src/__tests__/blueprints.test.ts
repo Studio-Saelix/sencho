@@ -434,7 +434,7 @@ describe('BlueprintService per-stack lock', () => {
         };
         vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(true);
         vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
-            kind: 'ok',
+            kind: 'present',
             marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
         });
         vi.spyOn(FileSystemService.prototype, 'readStackFile').mockResolvedValue({
@@ -508,7 +508,7 @@ describe('BlueprintService per-stack lock', () => {
         };
         vi.spyOn(svc as unknown as PrivateProbe, 'stackDirExists').mockResolvedValue(opts.stackExists ?? true);
         vi.spyOn(svc as unknown as PrivateProbe, 'readLocalMarkerFromDisk').mockResolvedValue({
-            kind: 'ok',
+            kind: 'present',
             marker: { blueprintId: bp.id, revision: bp.revision, lastApplied: 1 },
         });
         vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
@@ -649,7 +649,7 @@ describe('BlueprintService per-stack lock', () => {
         expect(outcome.status).toBe('failed');
         expect(outcome.error).toContain('already in progress');
         // No marker file was written (the lock guards the file writes too).
-        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toBeNull();
+        expect(await BlueprintService.getInstance().readMarker(bp.name, node)).toEqual({ kind: 'missing' });
         // The manual op still holds the lock; the deploy never acquired it.
         expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
     });
@@ -809,7 +809,7 @@ describe('BlueprintService marker parsing + name-conflict guard', () => {
 
 describe('BlueprintReconciler drift alert node wording', () => {
     type ReconcilerWithDrift = {
-        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest') => Promise<void>;
+        handleDrift: (blueprint: Blueprint, node: Node, reason: string, cause: 'revision' | 'container' | 'digest', isNewEpisode: boolean) => Promise<void>;
     };
 
     function seedRemoteNode(name: string): number {
@@ -830,7 +830,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -848,7 +848,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'revision');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -858,10 +858,23 @@ describe('BlueprintReconciler drift alert node wording', () => {
         );
     });
 
+    it('suggest-mode repeat of the same drift is not re-announced', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ name: 'drift-repeat', drift_mode: 'suggest', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'compose changed', 'revision', false);
+
+        expect(dispatchSpy).not.toHaveBeenCalled();
+    });
+
     it('stateful marker-loss on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
         const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'missing' });
         const nodeId = seedNode();
         const bp = seedBlueprint({
             name: 'marker-local',
@@ -872,7 +885,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision');
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision', true);
 
         // A declined repair is a hold, not a detection notice: it says the policy
         // refused to act and leaves the deployment row in that state. The text
@@ -883,6 +896,43 @@ describe('BlueprintReconciler drift alert node wording', () => {
             'blueprint_drift_repair_held',
             'Auto-fix for "marker-local" on this node was declined: this Blueprint lost its marker and is stateful, so auto-fix was declined to avoid stomping unowned data',
             { stackName: 'marker-local', actor: 'system:blueprint' },
+        );
+    });
+
+    it('does not claim a stateful Blueprint lost its marker when the read failed', async () => {
+        // The same hold, reached because the marker could not be read. The
+        // Blueprint did not lose anything, so the text must not say that it did:
+        // this string is what an operator reads to decide whether a human has to
+        // go and look at the node.
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            kind: 'failed',
+            error: 'the node answered HTTP 502',
+        });
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'marker-unreadable',
+            drift_mode: 'enforce',
+            classification: 'stateful',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'volumes diverged', 'revision', true);
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_repair_held',
+            expect.stringContaining('this Blueprint is stateful, so auto-fix is declined'),
+            { stackName: 'marker-unreadable', actor: 'system:blueprint' },
+        );
+        expect(dispatchSpy).not.toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_repair_held',
+            expect.stringContaining('lost its marker'),
+            expect.anything(),
         );
     });
 
@@ -916,7 +966,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         });
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'image identity differs', 'digest');
+        await reconciler.handleDrift(bp, node, 'image identity differs', 'digest', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'warning',
@@ -953,7 +1003,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'compose changed', 'digest');
+        await reconciler.handleDrift(bp, node, 'compose changed', 'digest', true);
 
         expect(dispatchSpy).toHaveBeenCalledWith(
             'error',
@@ -980,7 +1030,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container');
+        await reconciler.handleDrift(bp, node, 'no containers running for this blueprint', 'container', true);
 
         expect(deploySpy).toHaveBeenCalledTimes(1);
         expect(digestSpy).not.toHaveBeenCalled();
@@ -1006,7 +1056,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
         const node = DatabaseService.getInstance().getNode(nodeId)!;
         const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
 
-        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container');
+        await reconciler.handleDrift(gitBp, node, 'no containers running for this blueprint', 'container', true);
 
         expect(reapplySpy).toHaveBeenCalledTimes(1);
         expect(deploySpy).not.toHaveBeenCalled();

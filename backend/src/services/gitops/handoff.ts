@@ -1,5 +1,3 @@
-import { promises as fsPromises } from 'fs';
-import path from 'path';
 import { randomUUID } from 'crypto';
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
@@ -9,7 +7,7 @@ import type {
   GitOpsGenerationRow,
   GitOpsTargetCurrentRow,
 } from './types';
-import { GitOpsStore } from './store';
+import { emptyTargetRow, GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import {
   decodePreflightEvidenceJson,
@@ -24,8 +22,14 @@ import {
   setRegistryReadinessDepsForTests,
   type RegistryReadinessDeps,
 } from './registryReadiness';
-import { stackManagedRoot } from './directApplication';
+import { readAppliedComposeContent } from './gitManagedMaterialization';
+import {
+  driftHoldReason,
+  sourceConfirmationDrift,
+  UNREADABLE_SOURCE_CONFIRMATION,
+} from './sourceConfirmation';
 import { decodeGitOpsRequiredTargetsJson } from './json';
+import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { recoveryBindingForTarget } from './recoveryCapture';
 import {
   DEFAULT_HEALTH_ROLLOUT_POLICY,
@@ -36,7 +40,7 @@ import {
   type HealthRolloutPolicy,
 } from './healthPolicy';
 import { probeRemoteCapability, type RemoteCapabilityProbe } from '../../helpers/remoteCapabilities';
-import { HEALTH_ROLLOUT_POLICY_CAPABILITY } from '../CapabilityRegistry';
+import { HEALTH_GATE_OBSERVATION_CAPABILITY } from '../CapabilityRegistry';
 import { HealthGateService } from '../HealthGateService';
 import type { HealthRolloutExecutor } from './healthRolloutExecutor';
 import { DatabaseService, type Node } from '../DatabaseService';
@@ -46,6 +50,57 @@ import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 
 export { setRegistryReadinessDepsForTests };
+
+/**
+ * Why a mint is refused because the placement it was about is no longer the one
+ * preflight covered. Refused rather than retried here: the next evaluation runs
+ * against the placement as it stands, which is the only evidence that can
+ * describe the current target set.
+ */
+export const AUTHORIZATION_INPUTS_MOVED_REASON =
+  'The approved placement changed while registry readiness was being evaluated; nothing was authorized.';
+
+/**
+ * Why unattended authorization must not mint for this acceptance, or null when
+ * the stored confirmation still describes the application (or there is none).
+ *
+ * Only the stored claim is read. Authorize rewrites it and Resume clears it,
+ * and either can land while the request that accepted the commit is still
+ * handing off. Checking that request again would pause a rollout those
+ * decisions had already released. The object keeps whichever placement was
+ * named, including none, and whichever rollout promise was confirmed.
+ * An operator mint does not call this: authorizing is that decision.
+ */
+export function sourceConfirmationHoldReason(app: GitOpsApplicationRow): string | null {
+  const stored = GitOpsStore.getInstance().storedSourceConfirmation(app);
+  if (stored.status === 'unreadable') return UNREADABLE_SOURCE_CONFIRMATION;
+  if (stored.status !== 'present') return null;
+  const drift = sourceConfirmationDrift(app, stored.confirmation);
+  return drift ? driftHoldReason(drift) : null;
+}
+
+/**
+ * Whether the ingredients a mint is about to write still describe the ones
+ * registry preflight was run against.
+ *
+ * Compared field by field rather than by a subset, because the mint copies
+ * every one of them onto a rollout generation that cannot be edited afterwards,
+ * and a silent mismatch is a rollout whose recorded readiness describes
+ * something other than what it authorizes.
+ */
+function sameAuthorizationIngredients(
+  left: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+  right: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+): boolean {
+  if (left.rolloutCandidateId !== right.rolloutCandidateId) return false;
+  if (left.acceptedGenerationId !== right.acceptedGenerationId) return false;
+  if (left.artifactSetId !== right.artifactSetId) return false;
+  if (left.intentRevisionId !== right.intentRevisionId) return false;
+  if (left.sourceAcceptanceRef !== right.sourceAcceptanceRef) return false;
+  if (left.placementApprovalRef !== right.placementApprovalRef) return false;
+  return left.requiredNodeIds.length === right.requiredNodeIds.length
+    && left.requiredNodeIds.every((nodeId, index) => nodeId === right.requiredNodeIds[index]);
+}
 
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
 
@@ -206,7 +261,24 @@ export type DispatchContext = {
 
 export type DispatchResult =
   | { status: 'dispatched' }
-  | { status: 'blocked'; reason: string };
+  | {
+      status: 'blocked';
+      reason: string;
+      /**
+       * Whether a durable application hold is the right response. Required, so
+       * every refusal site decides: a durable state (a missing node, a failed
+       * deploy, a blocked gate) holds, while a transient refusal or the
+       * caller's own staleness does not.
+       */
+      holdable: boolean;
+      /**
+       * True when the pause this refusal names is already on record: the
+       * application is paused, or every remaining target is. A caller that
+       * holds transient refusals still skips these, because a second pause
+       * would need a second Resume to undo one decision.
+       */
+      alreadyPaused?: boolean;
+    };
 
 export interface TargetAdapter {
   dispatch(generation: AcceptedGeneration, context: DispatchContext): Promise<DispatchResult>;
@@ -258,11 +330,31 @@ function liveRolloutBinding(app: GitOpsApplicationRow): FutureRolloutAuthorizati
  * reads the application pointer cannot see a rollout that is mid-deploy. An
  * automatic placement approved during one clears the authorization and
  * supersedes the generation that deploy is running under.
+ *
+ * An unresolved health run counts as in flight too. The stage covers the apply
+ * and the acknowledgement that ends it, but not what follows: a rollout is acked
+ * before its verdict lands, so its target sits acked-but-unsettled for the rest
+ * of the observation window with the run still outstanding, and the stage alone
+ * calls that idle. The pointer is the target's own record of the run it awaits,
+ * the same one the dispatch queue and the startup reconciliation read, and the
+ * gate does not care which policy reserved it: observe decides nothing from a
+ * verdict and its queue does not wait for one, so the run it reserves is pure
+ * observation, and the only thing an approval during that window displaces is
+ * the rollout generation the run is bound to.
+ *
+ * A pointer that outlives its verdict does not hold anything up for ever. The
+ * startup reconciliation walks every target still pointing at a run: a run that
+ * went terminal has its recorded verdict replayed through the same transition a
+ * live one takes, and only a run whose row is gone needs the pointer released.
  */
 export function hasTargetOperationInFlight(store: GitOpsStore, applicationId: string): boolean {
   return store
     .listTargets(applicationId)
-    .some((target) => target.target_status === 'active' && target.active_operation_stage !== null);
+    .some(
+      (target) =>
+        target.target_status === 'active'
+        && (target.active_operation_stage !== null || target.pending_health_run_id !== null),
+    );
 }
 
 /**
@@ -355,6 +447,33 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'The rollout authorization policy requires an operator to authorize.' };
     }
 
+    // The durable half of a source confirmation. The request that carried it is
+    // gone by the time preparation resolves, the reconciler re-drives, or a
+    // restart comes back. The acceptance recorded the placement and whether a
+    // rollout was allowed to start, including a confirmation that no placement
+    // was approved.
+    //
+    // Enforced here, at the one funnel every mint passes. An operator mint is
+    // exempt on purpose, because asking to authorize the rollout is the
+    // decision the confirmation deferred, taken against the placement as it
+    // stands now.
+    //
+    // Held rather than merely refused, because a refusal with nothing behind it
+    // is re-attempted on the next reconcile and the operator would watch a
+    // rollout sit queued with no reason attached to it. The acceptance stands.
+    if (!alreadyAuthorized && authority === 'configured_policy') {
+      const reason = sourceConfirmationHoldReason(app);
+      if (reason) {
+        holdBlockedRolloutDispatch(app.id, { reason, holdable: true }, {
+          actor: 'system:rollout-dispatch',
+          trigger: 'blueprint_dispatch',
+          requireLiveBinding: false,
+          origin: 'operator',
+        });
+        return { ok: false, reason };
+      }
+    }
+
     const artifactRefusal = executableArtifactRefusalReason(
       store.getArtifactSet(ingredients.artifactSetId)?.qualification,
     );
@@ -390,6 +509,26 @@ export async function ensureRolloutAuthorization(
     // Re-read after the await: a pause placed while preflight ran must not
     // mint, supersede, or invalidate the authorization it is holding.
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
+
+    // The evidence above is about the ingredients read before the await, and
+    // the mint below is written against whatever the row says by then. Anything
+    // that moved in between would pair readiness evaluated for one target set
+    // with an authorization minted for another: a placement re-approved during
+    // preflight changes the approval and the frozen set, and a source
+    // acceptance landing in the same window changes the generation, the artifact
+    // set and the acceptance without touching the other pair. Compared in full,
+    // because every one of these is something the mint writes onto an
+    // immutable rollout generation.
+    //
+    // Refuse rather than write: a rollout generation cannot be edited, so a
+    // mismatched mint could only be undone by superseding the rollout it already
+    // queued. The next evaluation runs against the ingredients as they stand,
+    // which is the only evidence that can describe the current state.
+    const settled = store.authorizationIngredients(store.getApplication(applicationId) ?? app);
+    if (!settled || !sameAuthorizationIngredients(ingredients, settled)) {
+      return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
+    }
+
     const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
     const preflightFingerprint = fingerprintPreflightEvidence(preflight);
     const transitions = GitOpsTransitions.getInstance();
@@ -427,6 +566,16 @@ export async function ensureRolloutAuthorization(
     // this rollout can be captured. A policy the operator changes afterwards
     // applies at the next authorization, never to a rollout already running.
     const strategyJson = frozenStrategyFor(store, app, ingredients.intentRevisionId);
+    // The policy this mint is recorded under, read here rather than from the row
+    // this function opened with. Reading after the preflight await is what
+    // matters: that await is long enough for a policy edit to land, so a snapshot
+    // taken from the row read before it would already be stale by the time the
+    // write transaction compares it. What is left is the synchronous gap to the
+    // write, and an operator mint records no snapshot because no policy decided
+    // it.
+    const policyProvenanceJson = authority === 'configured_policy'
+      ? encodePolicySnapshot(configuredSnapshotFor(store.getApplication(applicationId) ?? app))
+      : null;
     try {
       transitions.rolloutAuthorized({
         applicationId: app.id,
@@ -438,6 +587,7 @@ export async function ensureRolloutAuthorization(
         actor,
         envelope: envelopeFor(actor, trigger),
         authority,
+        policyProvenanceJson,
       });
     } catch (err) {
       const message = errorMessage(err);
@@ -452,6 +602,16 @@ export async function ensureRolloutAuthorization(
             applicationId: app.id,
             envelope: envelopeFor(actor, `${trigger}:preflight_race`),
           });
+          // Read again rather than reused from above: the failed attempt and the
+          // invalidation both happened after that read, and the retry is a
+          // separate mint that has to carry the snapshot for itself. Reading
+          // here also keeps the window the agreement check guards down to the
+          // write. The racing writer's row is preferred because it is the
+          // freshest, and the caller's row is the fallback for an application
+          // that could not be read at all.
+          const racedPolicyProvenanceJson = authority === 'configured_policy'
+            ? encodePolicySnapshot(configuredSnapshotFor(raced ?? app))
+            : null;
           try {
             transitions.rolloutAuthorized({
               applicationId: app.id,
@@ -463,6 +623,7 @@ export async function ensureRolloutAuthorization(
               actor,
               envelope: envelopeFor(actor, `${trigger}:preflight_race`),
               authority,
+              policyProvenanceJson: racedPolicyProvenanceJson,
             });
           } catch (retryErr) {
             return { ok: false, reason: `Rollout authorization failed: ${errorMessage(retryErr)}` };
@@ -484,37 +645,6 @@ export async function ensureRolloutAuthorization(
     }
     return { ok: true, binding };
   });
-}
-
-async function readAppliedComposeContent(
-  app: GitOpsApplicationRow,
-  genRow: GitOpsGenerationRow,
-): Promise<string> {
-  const stackName = app.configured_source_stack_name;
-  if (!stackName) {
-    throw new Error('Bound application has no retained source stack identity');
-  }
-  if (!genRow.applied_dir || genRow.applied_dir.trim() === '') {
-    throw new Error('accepted generation has no applied materialization directory');
-  }
-  const managedRoot = stackManagedRoot(stackName);
-  const appliedAbs = path.resolve(managedRoot, genRow.applied_dir);
-  if (!appliedAbs.startsWith(managedRoot + path.sep)) {
-    throw new Error('applied materialization path escapes the managed root');
-  }
-  const composePath = path.resolve(appliedAbs, 'compose.yaml');
-  if (!composePath.startsWith(appliedAbs + path.sep)) {
-    throw new Error('compose path escapes the applied materialization directory');
-  }
-  try {
-    return await fsPromises.readFile(composePath, 'utf8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      throw new Error('accepted generation materialization is missing compose.yaml', { cause: err });
-    }
-    throw err;
-  }
 }
 
 /**
@@ -754,21 +884,18 @@ function policyForDispatch(
     : { kind: 'policy', policy: DEFAULT_HEALTH_ROLLOUT_POLICY };
 }
 
-/** The stack a Blueprint target is deployed under, as the intent names it. */
-function deployStackNameFor(
-  store: GitOpsStore,
-  app: GitOpsApplicationRow,
-  nodeId: number,
-): string | null {
-  const target = store.getTarget(app.id, nodeId);
-  const targetIntent = target?.intent_revision_id
-    ? store.getIntentRevision(target.intent_revision_id)
-    : undefined;
-  const appIntent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
-  return targetIntent?.deploy_stack_name
-    ?? app.configured_source_stack_name
-    ?? appIntent?.deploy_stack_name
-    ?? null;
+/**
+ * The stack a Blueprint target is deployed under, as the intent names it.
+ *
+ * The intent's `deploy_stack_name` is the name the apply writes, on a local node
+ * and on a remote one, so it is the only stack a health run can observe. The
+ * source stack an application was converted from is a different workload, and a
+ * target that has not acked its first Blueprint rollout has no intent of its own
+ * yet, so falling back to that name would watch, or 404 on, the wrong stack.
+ */
+function deployStackNameFor(store: GitOpsStore, app: GitOpsApplicationRow): string | null {
+  if (!app.intent_revision_id) return null;
+  return store.getIntentRevision(app.intent_revision_id)?.deploy_stack_name ?? null;
 }
 
 /**
@@ -776,13 +903,13 @@ function deployStackNameFor(
  * observe.
  *
  * The hub runs a health gate on a target's behalf by reading that target's
- * Docker directly, and a remote node's Docker is not directly reachable; all
- * access to it goes through the HTTP proxy. Sending non-observe health work to a
- * node that cannot serve the verdict would leave the rollout waiting on evidence
- * that can never arrive, so the refusal happens before the apply is dispatched
- * and before any run is reserved.
+ * runtime facts, and for a remote node those come from the node's own
+ * observation route over the HTTP proxy. A node too old to serve them cannot
+ * produce a verdict, and sending non-observe health work to one would leave the
+ * rollout waiting on evidence that can never arrive, so the refusal happens
+ * before the apply is dispatched and before any run is reserved.
  *
- * A local target is not probed: this instance can already read it, so there is
+ * A local target is not probed: this instance reads it itself, so there is
  * nothing to confirm.
  */
 async function refuseUngatedRemoteTarget(
@@ -792,12 +919,12 @@ async function refuseUngatedRemoteTarget(
   if (node.type !== 'remote') return null;
   const probe = healthCapabilityProbeForTests
     ? await healthCapabilityProbeForTests(node.id)
-    : await probeRemoteCapability(node.id, HEALTH_ROLLOUT_POLICY_CAPABILITY);
+    : await probeRemoteCapability(node.id, HEALTH_GATE_OBSERVATION_CAPABILITY);
   if (probe.kind === 'supported') return null;
   if (probe.kind === 'unreachable') {
     return `Node ${node.name} could not be asked whether it supports health-gated rollout (${probe.detail}); the rollout policy "${policy}" was not applied.`;
   }
-  return `Node ${node.name} does not support health-gated rollout, so the policy "${policy}" cannot run against it. Choose "observe" for this application, or move the target to a node that supports it.`;
+  return `Node ${node.name} does not report the observed health this policy needs, so the policy "${policy}" cannot run against it. Update Sencho on that node, choose "observe" for this application, or move the target to a node that supports it.`;
 }
 
 type ReservedTargetRun =
@@ -806,7 +933,7 @@ type ReservedTargetRun =
   /** This rollout's own earlier run, adopted so it keeps observing the attempt. */
   | { status: 'replayed'; runId: string; stackName: string }
   | { status: 'skip'; runId: null }
-  | { status: 'blocked'; reason: string };
+  | { status: 'blocked'; reason: string; holdable: boolean };
 
 /**
  * Allocate the health run for one target, before its apply goes out.
@@ -831,12 +958,14 @@ function reserveTargetHealthRun(args: {
   if (!args.stackName) {
     return {
       status: 'blocked',
+      holdable: true,
       reason: `The stack name for node ${args.node.id} could not be read, so no health run could be reserved.`,
     };
   }
   if (!args.binding.acceptedGenerationId) {
     return {
       status: 'blocked',
+      holdable: true,
       reason: 'The accepted generation is missing, so no health run could be bound to this rollout.',
     };
   }
@@ -858,6 +987,7 @@ function reserveTargetHealthRun(args: {
     if (!gatesAdvancement(args.policy)) return { status: 'skip', runId: null };
     return {
       status: 'blocked',
+      holdable: true,
       reason: 'The health gate is turned off, so a rollout that depends on health outcomes was not dispatched. Turn the health gate on, or set this application to observe.',
     };
   }
@@ -870,7 +1000,7 @@ function reserveTargetHealthRun(args: {
     return { status: 'replayed', runId: reservation.runId, stackName: args.stackName };
   }
   if (!reservation.runId) {
-    return { status: 'blocked', reason: 'The health run for this target could not be reserved.' };
+    return { status: 'blocked', reason: 'The health run for this target could not be reserved.', holdable: true };
   }
   return { status: 'reserved', runId: reservation.runId, stackName: args.stackName };
 }
@@ -918,20 +1048,26 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     const store = GitOpsStore.getInstance();
     const app = store.getApplication(generation.applicationId);
     if (!app) {
-      return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.' };
+      return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.', holdable: false };
     }
     if (app.target_mode !== 'blueprint') {
-      return { status: 'blocked', reason: 'Blueprint dispatch requires Blueprint target mode.' };
+      return { status: 'blocked', reason: 'Blueprint dispatch requires Blueprint target mode.', holdable: false };
+    }
+    // Suspension freezes automation for this source, the same way it stops the
+    // SourceController's acceptance and GitSourceService.retry. Refusing here
+    // covers every caller, including a future one that forgets to check.
+    if (app.suspended_at) {
+      return { status: 'blocked', reason: 'The source is suspended.', holdable: false };
     }
     const blueprintId = app.blueprint_id;
     if (blueprintId === null) {
-      return { status: 'blocked', reason: 'No Blueprint is bound to this application.' };
+      return { status: 'blocked', reason: 'No Blueprint is bound to this application.', holdable: false };
     }
     // A pause is an execution hold, not a rendering state: nothing dispatches
     // while it is set, including the boot-time reconstruction that resumes
     // authorized rollouts.
     if (app.pause_at) {
-      return { status: 'blocked', reason: 'The rollout is paused.' };
+      return { status: 'blocked', reason: 'The rollout is paused.', holdable: false, alreadyPaused: true };
     }
 
     const trigger = generation.trigger || 'blueprint_dispatch';
@@ -943,43 +1079,55 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       'configured_policy',
       () => !!store.getApplication(app.id)?.pause_at,
     );
-    if (!auth.ok) return { status: 'blocked', reason: auth.reason };
+    if (!auth.ok) return { status: 'blocked', reason: auth.reason, holdable: false };
     const binding = auth.binding;
 
     if (generation.generationId !== binding.acceptedGenerationId) {
+      // The caller dispatched a generation the live binding has moved past.
+      // That is the caller's staleness, not a state of this rollout, so it must
+      // not pause the successor the binding now names.
       return {
         status: 'blocked',
         reason: 'The accepted generation does not match the authorized application generation.',
+        holdable: false,
       };
     }
 
     const liveApp = store.getApplication(app.id);
     if (!liveApp?.rollout_authorization_ref) {
-      return { status: 'blocked', reason: 'Rollout authorization is missing after mint.' };
+      return { status: 'blocked', reason: 'Rollout authorization is missing after mint.', holdable: false };
     }
     if (!resolvesRolloutAuthorization(liveApp, binding)) {
-      return { status: 'blocked', reason: 'The current rollout authorization no longer matches the live binding.' };
+      return {
+        status: 'blocked',
+        reason: 'The current rollout authorization no longer matches the live binding.',
+        holdable: false,
+      };
     }
     if (liveApp.pause_at) {
-      return { status: 'blocked', reason: 'The rollout is paused.' };
+      return { status: 'blocked', reason: 'The rollout is paused.', holdable: false, alreadyPaused: true };
     }
     const liveAuthorizationRef = liveApp.rollout_authorization_ref;
 
     const genRow = store.getGeneration(binding.acceptedGenerationId);
     if (!genRow || genRow.application_id !== liveApp.id) {
-      return { status: 'blocked', reason: 'The authorized generation row could not be read.' };
+      return { status: 'blocked', reason: 'The authorized generation row could not be read.', holdable: false };
     }
 
     let composeContent: string;
     try {
       composeContent = await readAppliedComposeContent(liveApp, genRow);
     } catch (err) {
-      return { status: 'blocked', reason: errorMessage(err) };
+      // Not held: a missing materialization is a file state rather than a
+      // verdict on the rollout. A caller that can re-drive it does (the
+      // reconciler retries preparation while the artifact is unresolved); the
+      // health executor holds it because nothing else re-drives its queue.
+      return { status: 'blocked', reason: errorMessage(err), holdable: false };
     }
 
     const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
     if (!blueprint) {
-      return { status: 'blocked', reason: 'The bound Blueprint could not be read.' };
+      return { status: 'blocked', reason: 'The bound Blueprint could not be read.', holdable: false };
     }
 
     const tx = GitOpsTransitions.getInstance();
@@ -988,6 +1136,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     if (frozenForDispatch.kind === 'refused') {
       return {
         status: 'blocked',
+        holdable: true,
         reason: 'The rollout this application was authorized for is no longer the one on record.',
       };
     }
@@ -1024,6 +1173,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       if (unfinished) {
         return {
           status: 'blocked',
+          holdable: true,
           reason: 'A roll back for this rollout has not finished. Finish or undo it before the rollout continues.',
         };
       }
@@ -1038,18 +1188,41 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       for (const nodeId of binding.requiredNodeIds) {
         const node = DatabaseService.getInstance().getNode(nodeId);
         if (!node) {
-          return { status: 'blocked', reason: `Required target node ${nodeId} is missing.` };
+          return { status: 'blocked', reason: `Required target node ${nodeId} is missing.`, holdable: true };
         }
         const refusal = await refuseUngatedRemoteTarget(node, healthPolicy);
-        if (refusal) return { status: 'blocked', reason: refusal };
+        if (refusal) return { status: 'blocked', reason: refusal, holdable: true };
       }
+    }
+
+    // Every frozen target gets its row before the first deploy, the same
+    // first-contact write the Inline producer makes on `deploy_start`. A
+    // Blueprint application has no targets until something is sent somewhere,
+    // and this path sends to the frozen set rather than one node at a time:
+    // without these rows a multi-node rollout dispatched against
+    // `requiredNodeIds` fails on the first target whose row was never created,
+    // because `blueprintDeployStarted` resolves through the target row and
+    // refuses an unknown target. A node that no longer exists is skipped here;
+    // the gated preflight refuses it before any row is created, and the deploy
+    // loop refuses it by name for the other policies. A row already present is
+    // left untouched, so a tombstoned target, a fence, or a spent retry budget
+    // survives row creation and only an actual deploy revives the target.
+    // Rows are written before the per-target lock and pause checks on purpose:
+    // an authorized rollout whose first target is briefly held still has a
+    // frozen set, and the projection should read it as queued rather than
+    // absent.
+    const now = Date.now();
+    for (const nodeId of binding.requiredNodeIds) {
+      if (store.getTarget(liveApp.id, nodeId)) continue;
+      if (!DatabaseService.getInstance().getNode(nodeId)) continue;
+      store.upsertTarget(emptyTargetRow(liveApp.id, nodeId, now));
     }
 
     for (const nodeId of queue) {
       // Re-read before every target: a pause that lands while this loop runs
       // stops the rollout at the next target rather than after the fleet.
       if (store.getApplication(liveApp.id)?.pause_at) {
-        return { status: 'blocked', reason: 'The rollout was paused while it was running.' };
+        return { status: 'blocked', reason: 'The rollout was paused while it was running.', holdable: false, alreadyPaused: true };
       }
       const target = store.getTarget(liveApp.id, nodeId);
       // A per-target pause holds that target alone: the rest of the queue
@@ -1098,7 +1271,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             sanitizeForLog(errorMessage(err)),
           );
         }
-        return { status: 'blocked', reason: `Required target node ${nodeId} is missing.` };
+        return { status: 'blocked', reason: `Required target node ${nodeId} is missing.`, holdable: true };
       }
 
       // Refused before the apply and before any run is reserved: sending
@@ -1106,7 +1279,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
       // would leave the rollout waiting on evidence that never arrives.
       if (gated) {
         const refusal = await refuseUngatedRemoteTarget(node, healthPolicy);
-        if (refusal) return { status: 'blocked', reason: refusal };
+        if (refusal) return { status: 'blocked', reason: refusal, holdable: true };
       }
 
       // A replayed reservation is this target's own earlier run for the same
@@ -1116,7 +1289,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         app: liveApp,
         binding,
         node,
-        stackName: deployStackNameFor(store, liveApp, nodeId),
+        stackName: deployStackNameFor(store, liveApp),
         policy: healthPolicy,
         actor: generation.actor ?? null,
       });
@@ -1127,6 +1300,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         return {
           status: 'blocked',
           reason: `Deploy to node ${nodeId} is already in progress.`,
+          holdable: false,
         };
       }
 
@@ -1141,9 +1315,26 @@ export class BlueprintTargetAdapter implements TargetAdapter {
             envelope: envelopeFor(generation.actor, trigger),
           });
         } catch (err) {
+          // The reservation above is now armed by nobody, so this run has to be
+          // abandoned here. Not for the reason the ack catch gives: that throw
+          // happens after the deploy-start row is written, so the pointer is set
+          // and a later dispatch really does skip this target. This one throws
+          // *inside* the mutate, before `pending_health_run_id` is written, so
+          // nothing is skipped. The hazard is the row itself: an observing run
+          // for a deploy that was never opened, which reads as an open
+          // observation of the accepted generation and would hide a health
+          // failure on it until a later run replaced the row or a restart swept
+          // it. Finalizing the row is what keeps that from being possible.
+          if (reserved.status === 'reserved' || reserved.status === 'replayed') {
+            abandonTargetHealthRun(node, reserved);
+          }
           return {
             status: 'blocked',
             reason: `Could not open deploy for node ${nodeId}: ${errorMessage(err)}`,
+            // Not held: a refused transition is a store contention or an
+            // invariant refusal, not a verdict on the rollout. The health
+            // executor holds it because nothing else re-drives its queue.
+            holdable: false,
           };
         }
 
@@ -1202,6 +1393,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           }
           return {
             status: 'blocked',
+            holdable: true,
             reason: outcome.error
               ? `Deploy to node ${nodeId} failed: ${outcome.error}`
               : `Deploy to node ${nodeId} did not complete.`,
@@ -1236,6 +1428,10 @@ export class BlueprintTargetAdapter implements TargetAdapter {
           return {
             status: 'blocked',
             reason: `Could not record ack for node ${nodeId}: ${errorMessage(err)}`,
+            // Same as the deploy-open refusal: a store refusal is not a verdict
+            // on the rollout, and the health executor holds it because nothing
+            // else re-drives its queue.
+            holdable: false,
           };
         }
         // A replayed run is armed too, for the same reason the id was kept: it is
@@ -1250,11 +1446,16 @@ export class BlueprintTargetAdapter implements TargetAdapter {
     }
 
     // Nothing ran because every remaining target is paused: report the hold
-    // rather than a dispatch, so the caller does not count it as progress.
+    // rather than a dispatch, so the caller does not count it as progress. The
+    // pause is already the durable record, and escalating a per-target pause to
+    // an application pause would need two Resumes (the target's and the
+    // fleet's) to undo one decision, so this refusal is not holdable.
     if (!anyDispatched && pausedTargets.length > 0) {
       return {
         status: 'blocked',
         reason: `The rollout is paused on ${pausedTargets.length} target${pausedTargets.length === 1 ? '' : 's'}.`,
+        holdable: false,
+        alreadyPaused: true,
       };
     }
     return { status: 'dispatched' };
@@ -1290,12 +1491,25 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
       // Held, not just logged. There is no scheduler here: this dispatch is the
       // only thing that brings the next target, so a refusal left unheld is a
       // rollout that stops with no hold and no recorded reason, and a retry whose
-      // budget is already spent. The hold is what makes the refusal visible and
-      // resumable.
-      holdReconstructedRollout(
-        applicationId,
-        `The rollout could not advance: ${result.reason}`,
-      );
+      // budget is already spent. Transient refusals are held too, restoring what
+      // this path always did; a pause that is already on record is skipped so one
+      // decision never needs two Resumes.
+      //
+      // Origin `system`: this is a dispatch refusal, not a health verdict. A
+      // stale or transient one describes the rollout it was about, so a source
+      // acceptance that supersedes that rollout clears it. Only a real policy
+      // decision (a stop, a pause, a rollback) carries the health origin.
+      holdBlockedRolloutDispatch(applicationId, {
+        reason: `The rollout could not advance: ${result.reason}`,
+        holdable: result.holdable,
+        alreadyPaused: result.alreadyPaused,
+      }, {
+        actor: 'system:health-rollout-policy',
+        trigger: 'startup_reconstruct',
+        requireLiveBinding: false,
+        holdTransient: true,
+        origin: 'system',
+      });
       console.warn(
         '[GitOps] Health-gated rollout could not advance %s: %s',
         sanitizeForLog(applicationId),
@@ -1310,18 +1524,169 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
 }
 
 /**
- * Hold a rollout discovered at startup, through the same application-wide pause
- * the executor uses, so there is one hold an operator can read and clear.
+ * Hold an authorized rollout whose dispatch was refused.
+ *
+ * A refusal returned only as a note is a rollout that stops with no durable
+ * reason: the projection still reads `rollout_queued`, and the workplace has
+ * nothing to act on. The hold is the same application pause the health executor
+ * uses, so there is one reason to read and one verb (Resume) to clear it. No-op
+ * when the application is already paused (its reason is the current one) or
+ * when no authorization is live: a refusal before the mint is the caller's to
+ * report, and pausing there would hold a rollout nothing has authorized.
+ *
+ * The origin is chosen by the refusal's kind, never by the caller, except for
+ * an operator-origin hold, which is the one hold nobody can schedule away: a
+ * dispatch refusal carries `system`, which is what lets a source acceptance
+ * clear it when it supersedes the rollout the hold was about. A real health
+ * decision (a stop, a pause, a rollback) carries `health` and survives until the
+ * operator resumes; an operator pause, and a refusal that exists because an
+ * operator asked to review something first, carry `operator` and do the same.
  */
-function holdReconstructedRollout(applicationId: string, why: string): void {
+export function holdBlockedRolloutDispatch(
+  applicationId: string,
+  blocked: { reason: string; holdable: boolean; alreadyPaused?: boolean },
+  options: {
+    actor?: string;
+    trigger?: string;
+    requireLiveBinding?: boolean;
+    /**
+     * Hold transient refusals too. The health executor is the only caller that
+     * needs this: its dispatch is the only thing that brings the next target,
+     * and on this path a transient refusal used to hold, so dropping it would
+     * leave the rollout queued with no reason and no re-drive. An
+     * already-recorded pause is still skipped. This decides whether to hold, not
+     * the origin: an executor dispatch refusal is still a `system` hold.
+     */
+    holdTransient?: boolean;
+    /**
+     * Who the hold belongs to. `system` for a dispatch refusal (cleared by a
+     * source acceptance that supersedes the rollout), `health` for a policy
+     * decision, `operator` for a hold that exists because an operator asked to
+     * see it before anything moves. Only `system` is released by a later source
+     * acceptance; the other two need the operator. Defaults to `system`.
+     */
+    origin?: 'system' | 'health' | 'operator';
+  } = {},
+): void {
+  // A refusal that says nothing durable about the rollout is not a hold for the
+  // callers that can be re-driven or that share the rollout with another
+  // dispatch. Lock contention resolves when the holder finishes, and a pause is
+  // already the durable record; pausing on either would stop a healthy rollout
+  // another dispatch is advancing.
+  if (!options.holdTransient && blocked.holdable === false) return;
+  if (options.holdTransient && blocked.holdable === false && blocked.alreadyPaused === true) return;
   const store = GitOpsStore.getInstance();
-  if (store.getApplication(applicationId)?.pause_at) return;
-  GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, why, {
-    operationId: `health-rollout-reconstruct-${applicationId}`,
-    actor: 'system:health-rollout-policy',
-    trigger: 'startup_reconstruct',
-    at: Date.now(),
+  const app = store.getApplication(applicationId);
+  if (!app || app.pause_at) return;
+  if ((options.requireLiveBinding ?? true) && !liveRolloutBinding(app)) return;
+  try {
+    GitOpsTransitions.getInstance().rolloutPaused(applicationId, null, blocked.reason, {
+      // Fresh per hold, not derived from the application: history and the
+      // outbox dedupe on (application, operation, stage), so a deterministic id
+      // would let a second hold after a resume commit the pause while writing
+      // no history and announcing nothing.
+      operationId: randomUUID(),
+      actor: options.actor ?? 'system:rollout-dispatch',
+      trigger: options.trigger ?? 'blueprint_dispatch',
+      at: Date.now(),
+    }, options.origin ?? 'system');
+  } catch (err) {
+    // A hold that cannot be recorded must not turn a refused dispatch into a
+    // thrown one: the refusal is the answer, and the hold is only its durable
+    // copy. A tombstoned application is the realistic case.
+    console.error(
+      '[GitOps] Could not hold blocked rollout %s: %s',
+      sanitizeForLog(applicationId),
+      sanitizeForLog(err instanceof Error ? err.message : String(err)),
+    );
+  }
+}
+
+/**
+ * Whether an automatic-policy rollout still has dispatch work to do.
+ *
+ * The reconciler's content pass uses this to re-drive a handoff that skipped or
+ * was transiently refused: a resolved generation with no live authorization
+ * (the slow accept, the re-enabled Blueprint), or one whose authorized rollout
+ * still has unacked targets (a refusal that nothing else retries).
+ *
+ * False when the artifact is not resolved, when every required target is
+ * settled, or when a remaining target already has an open health run: the gate
+ * owns that target, and a second dispatch would adopt the same run and race the
+ * verdict for it.
+ */
+export function gitManagedDispatchWarranted(app: GitOpsApplicationRow): boolean {
+  const store = GitOpsStore.getInstance();
+  if (!app.accepted_generation_id) return false;
+  const blueprint = app.blueprint_id !== null
+    ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
+    : undefined;
+  if (!blueprint?.enabled) return false;
+  const artifact = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+  if (!artifact || (artifact.qualification !== 'exact' && artifact.qualification !== 'qualified')) {
+    return false;
+  }
+  // A target with an operation in flight is already being advanced, so a second
+  // dispatch would only race the per-target lock and re-run the preflight. A
+  // stage left behind by a crash belongs to the boot sweep, which finalizes it.
+  if (store.listTargets(app.id).some(
+    (target) => target.target_status === 'active' && target.active_operation_stage !== null,
+  )) {
+    return false;
+  }
+  // A withdrawn authorization is an operator decision, not a pending handoff.
+  // Only `rolloutSuperseded` writes `withdrawn_at`; a system supersede (a
+  // preflight drift, a placement invalidation, a re-authorization) leaves it
+  // null and stays eligible for the automatic policy to re-mint. The pointer
+  // alone cannot tell the two apart, and a placement re-approval can move it
+  // onto a generation that is not superseded.
+  const latestAuthorization = store.latestRolloutAuthorizationForAcceptedGeneration(
+    app.id,
+    app.accepted_generation_id,
+  );
+  if (latestAuthorization && latestAuthorization.withdrawn_at !== null) return false;
+  const binding = store.currentAuthorizationBinding(app);
+  if (!binding) {
+    // The handoff mints under the automatic policy, but only from a state that
+    // is actually authorizable. A missing placement approval is the operator's
+    // next step (the approve route is where that happens), so calling the
+    // handoff every tick would only record its refusal. Once the approval is
+    // there, this arm authorizes and dispatches without a person. An unfinished
+    // rollback is refused inside the handoff itself, so every caller shares
+    // that gate.
+    return app.placement_approval_ref !== null;
+  }
+  const authRef = app.rollout_authorization_ref;
+  if (!authRef) return true;
+  let frozen: FrozenHealthPolicy;
+  try {
+    frozen = frozenHealthPolicy(store, app, binding);
+  } catch {
+    // A frozen policy that cannot be read is a damaged authority pointer; a
+    // re-drive could run the wrong gating, so it waits for a person.
+    return false;
+  }
+  const gated = frozen.kind === 'policy' && gatesAdvancement(frozen.policy);
+  const remaining = binding.requiredNodeIds.filter((nodeId) => {
+    const target = store.getTarget(app.id, nodeId);
+    // A fenced target's turn is over: the dispatch queue moves past it, so
+    // counting it as remaining would re-drive a rollout with nothing to do.
+    if (fencedOutOfTheQueue(target, app)) return false;
+    // A per-target pause is a recorded operator decision. The queue skips it,
+    // so counting it as remaining would run the full authorization path on
+    // every tick with nothing to deploy.
+    if (target?.pause_at) return false;
+    return gated
+      ? !settledForGatedRollout(target, binding, authRef)
+      : !targetAlreadyAcked(target, binding, authRef);
   });
+  if (remaining.length === 0) return false;
+  // An open run under a gating policy is already bringing this target its
+  // verdict; a second dispatch would adopt the same run and race the gate.
+  if (gated && remaining.some((nodeId) => awaitingHealthVerdict(store.getTarget(app.id, nodeId)))) {
+    return false;
+  }
+  return true;
 }
 
 export async function reconstructBlueprintRolloutQueue(): Promise<number> {
@@ -1356,7 +1721,14 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
       .map((nodeId) => store.getTarget(app.id, nodeId))
       .find((target) => holdableHealthFence(target) && target!.rollout_generation_id === app.rollout_generation_id);
     if (fenced) {
-      holdReconstructedRollout(app.id, 'a target was fenced by its health rollout policy');
+      // A fence is a health decision, so the hold carries the health origin and
+      // waits for the operator even across a later source acceptance.
+      holdBlockedRolloutDispatch(app.id, { reason: 'a target was fenced by its health rollout policy', holdable: true }, {
+        actor: 'system:health-rollout-policy',
+        trigger: 'startup_reconstruct',
+        requireLiveBinding: false,
+        origin: 'health',
+      });
       continue;
     }
     // Under a health-gated policy an acked target is still unverified until its
@@ -1399,6 +1771,14 @@ export async function reconstructBlueprintRolloutQueue(): Promise<number> {
       sanitizeForLog(app.id),
       sanitizeForLog(result.reason),
     );
+    // A restart is a place refusals cluster (locks still held, targets not yet
+    // reachable), so the same durable hold the manual and automatic paths place
+    // belongs here too: otherwise the rollout resumes as queued with the reason
+    // only in the server log. The origin is explicit: a restart dispatch refusal
+    // is a system hold, cleared by a source acceptance like any other.
+    holdBlockedRolloutDispatch(app.id, { reason: `The rollout could not advance after a restart: ${result.reason}`, holdable: result.holdable }, {
+      origin: 'system',
+    });
   }
   return resumed;
 }

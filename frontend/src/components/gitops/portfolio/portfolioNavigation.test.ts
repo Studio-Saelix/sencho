@@ -7,15 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APPLICATION_QUERY_PARAM,
   GITOPS_APPLICATION_EVENT,
+  GITOPS_BLUEPRINT_EVENT,
+  GITOPS_GIT_SOURCE_EVENT,
   applicationIdFromSearch,
   attentionNextStep,
   closeGitOpsApplication,
+  openBlueprintInPlace,
   openGitOpsApplication,
   portfolioRowActions,
+  type GitOpsBlueprintRequest,
+  type GitOpsGitSourceTarget,
 } from './portfolioNavigation';
 import { portfolioRow } from '../application/applicationFixtures';
 import { BLUEPRINT_INTENT_EVENT, type BlueprintIntent } from '@/lib/blueprintIntent';
-import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
+import { SENCHO_NAVIGATE_EVENT, SENCHO_OPEN_STACK_EVENT, type SenchoNavigateDetail, type SenchoOpenStackDetail } from '@/lib/events';
+import { clearBlueprintIntent } from '@/lib/blueprintIntent';
 
 beforeEach(() => {
   window.history.replaceState({ senchoIdx: 4 }, '', '/nodes/local/gitops?mode=direct');
@@ -91,12 +97,22 @@ describe('portfolio row actions and attention next steps', () => {
     return seen;
   }
 
-  it('offers a Direct row its application, stack, and Git source', () => {
+  it('offers a Direct row its Git source and stack, never a separate application page', () => {
     const labels = portfolioRowActions(direct, { canOpenFleet: true }).map(action => action.label);
-    expect(labels).toEqual(['Open application', 'Open stack', 'Open Git source']);
+    expect(labels).toEqual(['Open Git source', 'Open stack']);
     const git = portfolioRowActions(direct, { canOpenFleet: true }).find(action => action.label === 'Open Git source')!;
-    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run))
-      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, destination: 'git' }]);
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, git.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
+    // In place: the Git source opens over the workplace, never by switching to the stack.
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, git.run)).toEqual([]);
+  });
+
+  it('opens a Direct source failure Git source in place when the session cannot retry it', () => {
+    const next = attentionNextStep('source_failed', direct);
+    expect(next.label).toBe('Open Git source');
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name }]);
+    expect(captured<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, next.run)).toEqual([]);
   });
 
   it('offers a Blueprint row its Blueprint only when Fleet is reachable', () => {
@@ -135,7 +151,71 @@ describe('portfolio row actions and attention next steps', () => {
     expect(attentionNextStep('source_failed', direct).label).toBe('Open Git source');
   });
 
+  it.each([
+    ['source_failed', 'retry'],
+    ['source_retry_scheduled', 'retry'],
+    ['source_unknown_outcome', 'retry'],
+    ['source_suspended', 'resume'],
+  ] as const)('runs %s as %s in place when the session may', (reason, action) => {
+    const next = attentionNextStep(reason, direct, { can: wanted => wanted === action });
+    expect(next.label).toBe(action === 'resume' ? 'Resume' : 'Retry');
+  });
+
+  it('falls back to opening the Git source when the session may not run the verb', () => {
+    expect(attentionNextStep('source_suspended', direct, { can: () => false }).label).toBe('Open Git source');
+  });
+
+  it('opens a Direct pending update review in the Git source, which pulls and shows the diff', () => {
+    const next = attentionNextStep('source_review_pending', direct);
+    expect(next.label).toBe('Review update');
+    expect(captured<GitOpsGitSourceTarget>(GITOPS_GIT_SOURCE_EVENT, next.run))
+      .toEqual([{ nodeId: direct.nodeId, stackName: direct.stackName, applicationName: direct.name, intent: 'review' }]);
+  });
+
   it('opens the application for a Blueprint failure, which has no single stack', () => {
     expect(attentionNextStep('deploy_failed', blueprint).label).toBe('Open');
   });
 });
+
+describe('openBlueprintInPlace', () => {
+  afterEach(() => clearBlueprintIntent());
+
+  function listen<T>(type: string, run: () => void, take?: (detail: T) => void): T[] {
+    const seen: T[] = [];
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<T>).detail;
+      seen.push(detail);
+      take?.(detail);
+    };
+    window.addEventListener(type, handler);
+    try { run(); } finally { window.removeEventListener(type, handler); }
+    return seen;
+  }
+
+  it('stays in the workplace when a host takes the request', () => {
+    let navigated: SenchoNavigateDetail[] = [];
+    let intents: BlueprintIntent[] = [];
+    const requests = listen<GitOpsBlueprintRequest>(GITOPS_BLUEPRINT_EVENT, () => {
+      navigated = listen<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, () => {
+        intents = listen<BlueprintIntent>(BLUEPRINT_INTENT_EVENT, () => openBlueprintInPlace({ kind: 'open', blueprintId: 4 }));
+      });
+    }, request => { request.handled = true; });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].intent).toEqual({ kind: 'open', blueprintId: 4 });
+    expect(navigated).toEqual([]);
+    expect(intents).toEqual([]);
+  });
+
+  it('falls back to the Fleet Blueprints tab when nothing hosts it', () => {
+    const navigated = listen<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, () => openBlueprintInPlace({ kind: 'create' }));
+    expect(navigated).toEqual([{ view: 'fleet', fleetTab: 'deployments' }]);
+  });
+
+  it('is what a Blueprint row opens', () => {
+    const row = portfolioRow({ id: 'bp:3', targetMode: 'blueprint', nodeId: null, stackName: null, blueprintId: 3 });
+    const open = portfolioRowActions(row, { canOpenFleet: true }).find(action => action.label === 'Open Blueprint')!;
+    const requests = listen<GitOpsBlueprintRequest>(GITOPS_BLUEPRINT_EVENT, open.run, r => { r.handled = true; });
+    expect(requests.map(r => r.intent)).toEqual([{ kind: 'open', blueprintId: 3 }]);
+  });
+});
+

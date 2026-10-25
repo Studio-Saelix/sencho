@@ -16,6 +16,7 @@ import {
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import type { StackAction } from './EditorView';
+import { ENV_READ_FAILED_NOTICE } from './envNotice';
 
 interface MobileComposeEditorProps {
     content: string;
@@ -25,6 +26,8 @@ interface MobileComposeEditorProps {
     activeTab: 'compose' | 'env' | 'files';
     setActiveTab: (tab: 'compose' | 'env' | 'files') => void;
     envExists: boolean;
+    /** The env inventory request failed; unknown is not the same as absent. */
+    envInventoryFailed: boolean;
     envFiles: string[];
     selectedEnvFile: string;
     changeEnvFile: (file: string) => Promise<void>;
@@ -60,6 +63,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         activeTab,
         setActiveTab,
         envExists,
+        envInventoryFailed,
         envFiles,
         selectedEnvFile,
         changeEnvFile,
@@ -78,18 +82,18 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
 
     // The save handlers (saveFile) key off the shared editorState.activeTab, so the
     // displayed buffer must match it. The desktop editor can hand off a 'files' tab
-    // (or 'env' with no env file) when it crosses into the mobile breakpoint; left
-    // alone the textarea would show compose while a save silently no-ops on 'files'.
-    // Normalize to 'compose' so the visible edit always saves to the visible file.
+    // when it crosses into the mobile breakpoint; left alone the textarea would
+    // show compose while a save silently no-ops on 'files'. Normalize to 'compose'
+    // so the visible edit always saves to the visible file.
     useEffect(() => {
-        if (activeTab === 'files' || (activeTab === 'env' && !envExists)) {
+        if (activeTab === 'files') {
             setActiveTab('compose');
         }
-    }, [activeTab, envExists, setActiveTab]);
+    }, [activeTab, setActiveTab]);
 
-    // Mirror of the normalization above for this render: 'env' only when an env
-    // file exists, else 'compose'. The effect makes the shared activeTab follow.
-    const tab: 'compose' | 'env' = activeTab === 'env' && envExists ? 'env' : 'compose';
+    // The .env tab stays available without an env file: its first save creates
+    // the default .env, same as the desktop editor.
+    const tab: 'compose' | 'env' = activeTab === 'env' ? 'env' : 'compose';
     const value = tab === 'compose' ? content || '' : envContent || '';
     // Switching the env file refetches and overwrites the env buffer, so block it
     // while there are unsaved edits (matches the desktop selector being disabled
@@ -104,7 +108,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     const saveAndDeployDisabled = saveDisabled || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.
-    const editorReadOnly = !canEdit || isFileLoading;
+    const editorReadOnly = !canEdit || isFileLoading || (tab === 'env' && !envExists && envInventoryFailed);
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -121,38 +125,32 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                         <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
                         Cancel
                     </button>
-                    {envExists ? (
-                        <div
-                            role="tablist"
-                            aria-label="File to edit"
-                            className="flex gap-1 rounded-lg border border-card-border bg-well p-1 shadow-[var(--shadow-well)]"
-                        >
-                            {(['compose', 'env'] as const).map(id => {
-                                const on = tab === id;
-                                return (
-                                    <button
-                                        key={id}
-                                        type="button"
-                                        role="tab"
-                                        aria-selected={on}
-                                        onClick={() => setActiveTab(id)}
-                                        className={cn(
-                                            'rounded-md px-3 py-1.5 font-mono text-[11px] lowercase tracking-[0.08em] transition-colors',
-                                            on
-                                                ? 'bg-card text-stat-value shadow-card-bevel'
-                                                : 'text-stat-subtitle hover:text-foreground',
-                                        )}
-                                    >
-                                        {id === 'compose' ? 'compose' : '.env'}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    ) : (
-                        <span className="font-mono text-[11px] lowercase tracking-[0.08em] text-stat-subtitle">
-                            compose.yaml
-                        </span>
-                    )}
+                    <div
+                        role="tablist"
+                        aria-label="File to edit"
+                        className="flex gap-1 rounded-lg border border-card-border bg-well p-1 shadow-[var(--shadow-well)]"
+                    >
+                        {(['compose', 'env'] as const).map(id => {
+                            const on = tab === id;
+                            return (
+                                <button
+                                    key={id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={on}
+                                    onClick={() => setActiveTab(id)}
+                                    className={cn(
+                                        'rounded-md px-3 py-1.5 font-mono text-[11px] lowercase tracking-[0.08em] transition-colors',
+                                        on
+                                            ? 'bg-card text-stat-value shadow-card-bevel'
+                                            : 'text-stat-subtitle hover:text-foreground',
+                                    )}
+                                >
+                                    {id === 'compose' ? 'compose' : '.env'}
+                                </button>
+                            );
+                        })}
+                    </div>
                 </div>
 
                 {tab === 'env' && envFiles.length > 1 && (
@@ -170,7 +168,13 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                     </Select>
                 )}
             </div>
-
+            {tab === 'env' && !envExists && canEdit && (
+                <p className="shrink-0 border-b border-hairline bg-brand/8 px-4 py-2 font-mono text-[11px] leading-snug text-brand">
+                    {envInventoryFailed
+                        ? ENV_READ_FAILED_NOTICE
+                        : 'This stack has no environment file yet. It will be created in the stack directory when you save.'}
+                </p>
+            )}
             {/* Editor */}
             <div className="min-h-0 flex-1 overflow-hidden p-3">
                 <textarea

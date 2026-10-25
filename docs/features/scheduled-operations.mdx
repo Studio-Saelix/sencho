@@ -26,7 +26,7 @@ Open the **Schedules** tab from the top navigation bar. The page opens on the Ti
 The Timeline plots every firing of every enabled task across a rolling 24-hour window starting from the current minute.
 
 - **Masthead.** A `NEXT 24 HOURS` kicker, an italic display heading, the window's start and end timestamps in a monospace range, and a right-anchored **Next** pill that reads out the time and task name of the next firing and a relative countdown.
-- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Upkeep (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down) and standalone container actions (Restart Container, Stop Container, Start Container); Updates holds per-stack, per-node, and label-targeted image updates; Security holds vulnerability scans; Upkeep holds node resource prunes; Backups holds fleet snapshots.
+- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Upkeep (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack lifecycle actions (Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down) and standalone container actions (Restart Container, Stop Container, Start Container); Updates holds per-stack, per-node, and label-targeted image updates; Security holds vulnerability scans; Upkeep holds node resource prunes; Backups holds compose file backups and fleet snapshots.
 - **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and a target: the stack for stack actions, the container name for container actions, the selected node for prune and scan, and "Entire fleet" for a fleet snapshot. Hover a pill for the full detail (action, task name, and node). Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
 - **Now rail.** A glowing vertical rail at the current minute, anchored to the left of the track at page open and drifting right as time passes (the page recomputes positions periodically).
 - **Axis.** Six monospace time ticks run along the bottom, evenly spaced through the window.
@@ -82,7 +82,7 @@ The All tasks toggle swaps the lane track for a sortable table.
 Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Upkeep, and Backups.
 
 <Frame>
-  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. A floating list shows the 'Lifecycle' category header above Backup Stack Compose Files, Start / Bring Up Stack, a checked Restart Stack, Stop Stack, and Take Stack Down, with a scrollbar indicating more items (the three container actions) and further categories (Updates, Security, Upkeep, Backups) below. Beneath the list, still visible, are the Schedule section's Simple/Advanced toggle, a Once/Hourly/Daily/Weekly/Monthly frequency row set to Daily, Time inputs reading 03:00, the generated preview 'At 03:00 AM · 0 3 * * *', the Enabled toggle, the Delete after successful run checkbox, and Cancel/Create buttons." />
+  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. A floating list shows the 'Lifecycle' category header above Start / Bring Up Stack, a checked Restart Stack, Stop Stack, Take Stack Down, and Restart Container, with a scrollbar indicating more items (the remaining container actions) and further categories (Updates, Security, Upkeep, Backups) below. Beneath the list, still visible, are the Schedule section's Simple/Advanced toggle, a Once/Hourly/Daily/Weekly/Monthly frequency row set to Daily, Time inputs reading 03:00, the generated preview 'At 03:00 AM · 0 3 * * *', the Enabled toggle, the Delete after successful run checkbox, and Cancel/Create buttons." />
 </Frame>
 
 Common fields:
@@ -153,7 +153,7 @@ When creating a Prune Node Resources task, the **Label Filter (optional)** input
 
 ### Stack lifecycle scheduling
 
-Backup Stack Compose Files, Start / Bring Up Stack, Stop Stack, and Take Stack Down let you schedule lifecycle events for individual stacks on a per-node basis. A common pattern for development or staging stacks is:
+Start / Bring Up Stack, Stop Stack, and Take Stack Down let you schedule lifecycle events for individual stacks on a per-node basis. A common pattern for development or staging stacks is:
 
 - A **Stop Stack** or **Take Stack Down** task at the end of the working day (for example, `0 19 * * 1-5`, 7 PM on weekdays).
 - A **Start / Bring Up Stack** task at the start of the working day (for example, `0 8 * * 1-5`, 8 AM on weekdays).

@@ -45,7 +45,7 @@ There are two surfaces that initiate an update on a remote node:
 The **Skip** button next to Update hides the update prompt for that node and excludes it from **Update all** until a newer version is released; the row shows a **Skipped vX.Y.Z** badge with an **Unskip** button to bring the prompt back early. The skip is per-node and per-version: when the next Sencho release comes out, the skip clears automatically and the update surfaces again. Skipping and unskipping both require the admin role.
 
 <Frame>
-  <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing an Online badge, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
+  <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing a Proxy marker, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
 </Frame>
 
 When an update is available, this same card gains a warning **Update available** pill next to the version chip and an outline **Update to vX.Y.Z** button across the bottom (not pictured above, since every node in this fleet is currently up to date). Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.

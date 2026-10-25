@@ -178,6 +178,21 @@ export class CacheService {
   }
 
   /**
+   * Read a live entry without touching the hit/miss counters.
+   *
+   * For the negative-lookup shape, where a key that is absent is the expected
+   * answer rather than a miss worth reporting. A cache consulted as a fast path
+   * on every request would otherwise report a near-total miss rate and make the
+   * stats endpoint unreadable for the caches whose misses actually mean
+   * something.
+   */
+  public peek<T>(key: string): T | undefined {
+    const entry = this.store.get(key) as CacheEntry<T> | undefined;
+    if (!entry || entry.expiresAt <= Date.now()) return undefined;
+    return entry.value;
+  }
+
+  /**
    * Set a value with a TTL. If the total number of entries exceeds
    * MAX_ENTRIES, the oldest expired entries are purged first; if still
    * over cap, the insertion is rejected with a warning (defense in depth).

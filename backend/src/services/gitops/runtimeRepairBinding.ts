@@ -19,6 +19,7 @@ import type {
   GitOpsApplicationRow,
   GitOpsTargetCurrentRow,
 } from './types';
+import { targetRecoveryFailureMoved } from './recoveryClaim';
 
 /** Why a repair was not attempted. Each arm is a state, not an error. */
 export type RuntimeRepairHoldReason =
@@ -47,26 +48,29 @@ export type RuntimeRepairHoldReason =
 /**
  * Whether something about this target's recovery still owns its next mutation.
  *
- * Everything except a recovery that finished successfully. `complete` and
- * `failed` are both terminal and both persist for the life of the target, so
- * testing the column for non-null would hold every target that has ever been
- * recovered, which is most of them after a rollback. `complete` is the one
- * terminal phase that releases the target.
+ * Everything except a recovery that finished successfully, or a rollback the
+ * node refused before it could move anything. `complete` and `failed` are both
+ * terminal and both persist for the life of the target, so testing the column
+ * for non-null would hold every target that has ever been recovered, which is
+ * most of them after a rollback. `complete` is the one terminal phase that
+ * releases the target.
  *
- * `failed` does not release it. An explicit deploy is already withheld on a
- * failed recovery (`appDeployWithheld` in `derive.ts`, which reads the
- * application-level column; the transition writers set both together), so
- * letting auto-repair through here would let Enforce perform exactly the
- * mutation an operator is not permitted to make.
+ * `failed` does not release it, unless the record says the restore never moved
+ * anything (`pre_mutation`): that class deliberately sets no application-level
+ * hold (`appDeployWithheld` in `derive.ts` reads the application column, not
+ * the target's), and this binding reads the target's own row, so it repairs a
+ * refused target even while the application holds for a different target's
+ * failure.
  *
- * Mirrors the recovery checks in `derive.ts`; kept local rather than imported so
- * this module stays below the projection.
+ * The recovery claim comes from `targetRecoveryFailureMoved` (`recoveryClaim.ts`),
+ * which reads the claim's own class rather than the shared failure slot: a later
+ * deploy or withdraw failure can no longer make a moved claim read as a refusal,
+ * and a restore still in flight owns the target before any recorded claim is
+ * considered. The same predicate decides the application hold and the
+ * acknowledgement clearing, so the three surfaces cannot drift.
  */
-function recoveryOwnsTarget(phase: string | null): boolean {
-  return phase === 'capturing'
-    || phase === 'restoring'
-    || phase === 'compensating'
-    || phase === 'failed';
+function recoveryOwnsTarget(target: GitOpsTargetCurrentRow): boolean {
+  return targetRecoveryFailureMoved(target);
 }
 
 export type RuntimeRepairBinding =
@@ -114,7 +118,7 @@ export function resolveRuntimeRepairBinding(
     target.health_stop_reason === 'rollback_pending'
     || target.partial_json !== null
     || target.lkg_unavailable_at !== null
-    || recoveryOwnsTarget(target.recovery_phase)
+    || recoveryOwnsTarget(target)
     || target.pending_health_run_id !== null
   ) {
     return { kind: 'hold', reason: 'recovery_bound' };

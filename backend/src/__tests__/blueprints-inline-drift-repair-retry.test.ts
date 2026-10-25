@@ -63,14 +63,14 @@ function seedNode(): Node {
   return DatabaseService.getInstance().getNode(nodeId)!;
 }
 
-function seedEnforceBlueprint(node: Node): Blueprint {
+function seedDriftBlueprint(node: Node, driftMode: 'enforce' | 'suggest' = 'enforce'): Blueprint {
   counter += 1;
   return DatabaseService.getInstance().createBlueprint({
     name: `retry-bp-${counter}`,
     description: null,
     compose_content: 'services:\n  web:\n    image: nginx:alpine\n',
     selector: { type: 'nodes', ids: [node.id] },
-    drift_mode: 'enforce',
+    drift_mode: driftMode,
     classification: 'stateless',
     classification_reasons: [],
     enabled: true,
@@ -122,7 +122,7 @@ function countAlerts(): { categories: () => string[] } {
 describe('a refused drift repair does not strand the deployment', () => {
   it('keeps the row drifted and retries on the next tick when the approved digest is unavailable', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const checks = countDriftChecks();
@@ -151,7 +151,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('returns the row to drifted when another operation holds the deploy lock', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const checks = countDriftChecks();
@@ -177,7 +177,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('settles a container-level refusal, which takes the other repair path', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const alerts = countAlerts();
@@ -211,7 +211,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('alerts on the first failure a deploy recorded itself, because that failure is new', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const checks = countDriftChecks();
@@ -240,7 +240,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('alerts once for a name conflict and does not re-repair the blocked row', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -265,7 +265,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('leaves a name conflict the repair already recorded alone', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -288,7 +288,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('settles a repair that throws, which is a refusal that reached no deploy', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const checks = countDriftChecks();
@@ -315,7 +315,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('alerts again when the same failure returns after the drift converged', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     const alerts = countAlerts();
@@ -347,7 +347,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('does not report an already-reported failure again just because a lock was lost in between', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -377,7 +377,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('names the directory in the alert when a name conflict blocks the repair for good', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -403,7 +403,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('stays silent when the target converged while the repair was in flight', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -423,7 +423,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('settles a refusal on a Git-managed blueprint, which repairs by reapplying the generation', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     DatabaseService.getInstance().updateBlueprintContentOrigin(blueprint.id, 'git', 'app-git-managed');
     const gitBlueprint = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
     approvePlace(gitBlueprint, node.id);
@@ -452,7 +452,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('keeps the original drift timestamp when a later tick re-observes the same drift', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -475,7 +475,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('alerts once for a failure that persists instead of once per tick', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -496,7 +496,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('alerts again when the failure changes, because a different refusal needs a different fix', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -516,7 +516,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 
   it('leaves a successful repair to the deploy path that already wrote the row', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     approvePlace(blueprint, node.id);
     writeRow(blueprint, node.id, 'drifted');
     countDriftChecks();
@@ -543,7 +543,7 @@ describe('a refused drift repair does not strand the deployment', () => {
 describe('a drifted row is a drift-check target in its own right', () => {
   it('enters the drift-check bucket when its applied revision still matches', () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     writeRow(blueprint, node.id, 'drifted');
 
     const decision = (BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute)
@@ -556,7 +556,7 @@ describe('a drifted row is a drift-check target in its own right', () => {
 
   it('keeps an in-flight row out of every bucket', () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     writeRow(blueprint, node.id, 'correcting');
 
     const decision = (BlueprintReconciler.getInstance() as unknown as ReconcilerWithCompute)
@@ -569,7 +569,7 @@ describe('a drifted row is a drift-check target in its own right', () => {
 
   it('projects one drift check for a drifted row, not one per path that mentions it', async () => {
     const node = seedNode();
-    const blueprint = seedEnforceBlueprint(node);
+    const blueprint = seedDriftBlueprint(node);
     writeRow(blueprint, node.id, 'drifted');
 
     const preview = await buildBlueprintPreview(blueprint.id);
@@ -585,5 +585,124 @@ describe('a drifted row is a drift-check target in its own right', () => {
     expect(forNode[0]).toMatchObject({ severity: 'warning', kind: 'executor', detail: expect.any(String) });
     expect(preview?.executorActions).toEqual([{ nodeId: node.id, action: 'check_enforce' }]);
     expect(preview?.confirmableActions).toEqual([{ nodeId: node.id, action: 'check_enforce' }]);
+  });
+});
+
+describe('a Suggest-mode drift episode is announced once', () => {
+  it('announces a persistent drift once, not once per tick', async () => {
+    const node = seedNode();
+    const blueprint = seedDriftBlueprint(node, 'suggest');
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'active');
+    countDriftChecks();
+    const alerts = countAlerts();
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    expect(
+      DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status,
+      'the drift is still real after the repeat checks',
+    ).toBe('drifted');
+    expect(
+      alerts.categories().filter((category) => category === 'blueprint_drift_detected'),
+      'one episode, one alert',
+    ).toHaveLength(1);
+  });
+
+  it('announces again when the drift clears and returns', async () => {
+    const node = seedNode();
+    const blueprint = seedDriftBlueprint(node, 'suggest');
+    approvePlace(blueprint, node.id);
+    writeRow(blueprint, node.id, 'active');
+    let checks = 0;
+    vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockImplementation(async () => {
+      checks += 1;
+      // The second check finds the workload converged; the third finds the
+      // drift again, which is a new episode rather than a repeat.
+      return checks === 2
+        ? { kind: 'matched' }
+        : { kind: 'drifted', reason: DRIFT_REASON, cause: 'digest' };
+    });
+    const alerts = countAlerts();
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    expect(
+      DatabaseService.getInstance().getDeployment(blueprint.id, node.id)?.status,
+      'the returned drift is back on the row',
+    ).toBe('drifted');
+    expect(
+      alerts.categories().filter((category) => category === 'blueprint_drift_detected'),
+      'a new episode is announced',
+    ).toHaveLength(2);
+  });
+
+  it('treats a held target as the same episode when the check resumes', async () => {
+    const node = seedNode();
+    const blueprint = seedDriftBlueprint(node, 'suggest');
+    approvePlace(blueprint, node.id);
+    const firstSeen = Date.now() - 60_000;
+    writeRow(blueprint, node.id, 'repair_held', { last_drift_at: firstSeen });
+    countDriftChecks();
+    const alerts = countAlerts();
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    const dep = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(dep?.status).toBe('drifted');
+    expect(dep?.last_drift_at, 'the episode keeps its start time through a hold').toBe(firstSeen);
+    expect(
+      alerts.categories().filter((category) => category === 'blueprint_drift_detected'),
+      'a hold is a decision about the repair, not a new episode',
+    ).toHaveLength(0);
+  });
+
+  it('stamps the episode start when a hold began it and the drift resumes', async () => {
+    const node = seedNode();
+    const blueprint = seedDriftBlueprint(node, 'enforce');
+    approvePlace(blueprint, node.id);
+    // A deployed row carries no drift start until something drifts.
+    writeRow(blueprint, node.id, 'active', { last_drift_at: null, drift_summary: null });
+    const alerts = countAlerts();
+    let checks = 0;
+    vi.spyOn(BlueprintService.getInstance(), 'checkForDrift').mockImplementation(async () => {
+      checks += 1;
+      // The first check carries an evidence block, so Enforce holds the target
+      // before any drift write; the second finds the block cleared while the
+      // drift is still there.
+      return checks === 1
+        ? {
+            kind: 'drifted',
+            reason: DRIFT_REASON,
+            cause: 'digest',
+            repairBlock: { reason: 'evidence_incomplete', detail: 'the marker names no generation' },
+          }
+        : { kind: 'drifted', reason: DRIFT_REASON, cause: 'digest' };
+    });
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+    const held = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(held?.status).toBe('repair_held');
+    expect(held?.last_drift_at, 'a hold carries no drift start of its own').toBeNull();
+
+    // The operator moves to Suggest, where a resumed drift would be announced
+    // if it counted as a new episode, then the hold clears.
+    DatabaseService.getInstance().updateBlueprint(blueprint.id, { drift_mode: 'suggest' });
+    const switched = DatabaseService.getInstance().getBlueprint(blueprint.id)!;
+    approvePlace(switched, node.id);
+
+    await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+
+    const resumed = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
+    expect(resumed?.status).toBe('drifted');
+    expect(resumed?.last_drift_at, 'the episode start is recorded when the drift resumes').not.toBeNull();
+    expect(
+      alerts.categories().filter((category) => category === 'blueprint_drift_detected'),
+      'the hold began the episode, so the resumed drift is not a new one',
+    ).toHaveLength(0);
   });
 });

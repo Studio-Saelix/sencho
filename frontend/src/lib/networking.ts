@@ -173,6 +173,11 @@ function adaptFinding(f: Partial<NetworkingFinding>): NetworkingFinding {
     recommendedActions: f.recommendedActions ?? [],
     sources: f.sources ?? ['live'],
     doctorFindings: f.doctorFindings ?? [],
+    // A node that predates dismissals sends none of these; the finding then simply cannot be dismissed.
+    fingerprint: typeof f.fingerprint === 'string' ? f.fingerprint : '',
+    count: typeof f.count === 'number' && f.count >= 1 ? f.count : 1,
+    dismissPolicy: f.dismissPolicy === 'any' || f.dismissPolicy === 'timed' ? f.dismissPolicy : 'none',
+    ...(f.acknowledged === true ? { acknowledged: true } : {}),
   };
 }
 

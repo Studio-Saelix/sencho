@@ -18,6 +18,11 @@ import {
   buildRollbackItems,
   buildServicesSignal,
   containersSignal,
+  describeRollbackManagedInputs,
+  storedComposeCoverage,
+  storedRestoreCoverage,
+  type RestoreCoverage,
+  type StoredComposeCoverage,
   diskSignal,
   driftSignal,
   healthchecksSignal,
@@ -243,38 +248,49 @@ export class UpdateGuardService {
 
     const { StackUpdateRecoveryService, shortGenerationId } = await import('./StackUpdateRecoveryService');
     const { assessGenerationEligibility } = await import('./rollbackEligibility');
+    const { RollbackGenerationStore } = await import('./RollbackGenerationStore');
     const recoverySvc = StackUpdateRecoveryService.getInstance();
     const currentGen = recoverySvc.getCurrent(nodeId, stackName);
 
+    // A rollback restores the stored generation, so its coverage is read from
+    // that generation. A row with no stored content has no coverage recorded,
+    // and a stored manifest that cannot be read is reported as unreadable.
+    const storedManifest = currentGen?.content_path
+      ? await this.collect('recovery generation content', stackName, () =>
+        RollbackGenerationStore.readVerifiedGeneration(nodeId, stackName, currentGen.content_path!))
+      : null;
+    const restoreCoverage: RestoreCoverage = storedManifest === null
+      ? 'not_recorded'
+      : storedManifest === 'error'
+        ? 'unreadable'
+        : storedRestoreCoverage(storedManifest);
+    const composeCoverage: StoredComposeCoverage = storedManifest === null || storedManifest === 'error'
+      ? 'not_recorded'
+      : storedComposeCoverage(storedManifest);
+
     const recoveryGeneration = currentGen
-      ? { exists: true as const, shortId: shortGenerationId(currentGen.id) }
+      ? { exists: true as const, shortId: shortGenerationId(currentGen.id), restoreCoverage, composeCoverage }
       : { exists: false as const };
 
     const policyEligibility = currentGen
       ? await this.collect('rollback eligibility', stackName, () => assessGenerationEligibility(currentGen))
       : null;
 
-    const managedInputs = await this.collect('managed inputs', stackName, async () => {
+    const liveInventory = await this.collect('managed inputs', stackName, async () => {
       const { resolveRollbackInventory } = await import('./rollbackInventory');
-      const inventory = await resolveRollbackInventory(nodeId, stackName);
-      if (inventory.exactCoverage) {
-        return {
-          covered: true,
-          detail: `Exact authored-project coverage includes ${inventory.entries.length} managed path(s).`,
-        };
-      }
-      return {
-        covered: false,
-        detail: inventory.coverageRefusal
-          || 'Exact authored-project coverage is incomplete for this stack.',
-      };
+      return resolveRollbackInventory(nodeId, stackName);
+    });
+    const managedInputs = describeRollbackManagedInputs({
+      coverage: currentGen ? restoreCoverage : null,
+      stored: storedManifest === null || storedManifest === 'error' ? null : storedManifest,
+      live: liveInventory,
     });
 
     const sopsKeys = await this.collect('repository secrets', stackName, async () => {
       const gitSource = db.getGitSource(stackName);
       if (!gitSource) return null;
 
-      const { resolveActiveRequiredRecipients } = await import('./gitops/sops/capability');
+      const { missingRecipientsForCapability, resolveActiveCapability } = await import('./gitops/sops/capability');
       const { SopsIdentityStore } = await import('./gitops/sops/identityStore');
       const { GitOpsStore } = await import('./gitops/store');
       const app = GitOpsStore.getInstance().getLiveDirectApplication(stackName);
@@ -282,19 +298,19 @@ export class UpdateGuardService {
         return { ready: true, detail: 'No GitOps application is linked yet.' };
       }
 
-      const required = resolveActiveRequiredRecipients({
+      const capability = resolveActiveCapability({
         stackName,
         nodeId,
         gitopsGenerationId: currentGen?.gitops_generation_id ?? null,
       });
-      if (required.length === 0) {
+      if (!capability || capability.requiredRecipients.length === 0) {
         return { ready: true, detail: 'The restore target does not require SOPS decryption on this node.' };
       }
 
       const known = new Set(
         SopsIdentityStore.getInstance().listPublic(app.id, stackName).map((identity) => identity.recipient),
       );
-      const missing = required.filter((recipient) => !known.has(recipient));
+      const missing = missingRecipientsForCapability(capability, known);
       if (missing.length > 0) {
         return {
           ready: false,

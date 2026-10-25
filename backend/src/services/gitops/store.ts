@@ -2,6 +2,12 @@ import type Database from 'better-sqlite3';
 import { DatabaseService, type HealthGateRunRow, type StackGitSource } from '../DatabaseService';
 import type { GitOpsHistoryCursor, GitOpsHistoryStage } from './history';
 import {
+  decodeSourceConfirmation,
+  encodeSourceConfirmation,
+  type SourceConfirmation,
+  type StoredSourceConfirmation,
+} from './sourceConfirmation';
+import {
   decodeArtifactEvidenceJson,
   decodeGitOpsApprovedTargetEffectJson,
   decodeGitOpsJson,
@@ -124,6 +130,7 @@ const APPLICATION_INSERT_COLUMNS = [
   'active_generation_id',
   'pause_at',
   'pause_reason',
+  'pause_origin',
   'source_suspended_reason',
   'source_policy',
   'placement_policy',
@@ -222,6 +229,22 @@ export class GitOpsStore {
   }
 
   /**
+   * Every live Git-managed Blueprint application, enabled or not.
+   *
+   * The reconciler's content pass uses this rather than the enabled-Blueprint
+   * list: preparation is a property of the accepted generation, and a
+   * Blueprint the operator disabled still has one waiting to be materialized
+   * and resolved.
+   */
+  listLiveGitManagedApplications(): GitOpsApplicationRow[] {
+    return this.db().prepare(
+      `SELECT * FROM gitops_applications
+       WHERE target_mode = 'blueprint' AND lifecycle_status = 'active'
+       ORDER BY created_at ASC`,
+    ).all() as GitOpsApplicationRow[];
+  }
+
+  /**
    * The live Blueprint application whose current intent deploys this stack.
    *
    * A Blueprint-managed stack carries no application id on disk, so the stack
@@ -259,13 +282,21 @@ export class GitOpsStore {
       ?? this.getLiveBlueprintApplicationBySourceStack(stackName);
   }
 
-  getLiveBlueprintModeApplicationByRepoUrl(repoUrl: string): GitOpsApplicationRow | undefined {
+  /**
+   * Every live application in Blueprint target mode.
+   *
+   * The one-repository-per-Blueprint guard reads this whole set rather than
+   * querying by URL, because a repository has an unbounded number of valid
+   * spellings and `configured_repo_url = ?` only ever proves byte equality.
+   * The set is bounded by the number of Blueprints: `idx_gitops_app_active_blueprint_any`
+   * already holds one live Blueprint application per Blueprint id.
+   */
+  listLiveBlueprintModeApplications(): GitOpsApplicationRow[] {
     return this.db().prepare(
       `SELECT * FROM gitops_applications
-       WHERE configured_repo_url = ?
-         AND target_mode = 'blueprint'
+       WHERE target_mode = 'blueprint'
          AND lifecycle_status IN ('active','creating')`,
-    ).get(repoUrl) as GitOpsApplicationRow | undefined;
+    ).all() as GitOpsApplicationRow[];
   }
 
   /**
@@ -449,6 +480,46 @@ export class GitOpsStore {
     return this.db().prepare('SELECT * FROM gitops_intent_revisions WHERE id = ?').get(id) as GitOpsIntentRevisionRow | undefined;
   }
 
+  /**
+   * Whether a pin was recorded on an intent newer than `afterIntentId`.
+   *
+   * `rowid` is the insert order, so a later pin still counts when it shares
+   * `created_at` with the intent the approval names. The current intent is
+   * excluded: the caller already knows it names no pin.
+   */
+  hasPinnedIntentAfter(applicationId: string, afterIntentId: string, excludingIntentId: string): boolean {
+    const row = this.db().prepare(
+      `SELECT 1 AS found FROM gitops_intent_revisions
+       WHERE application_id = ?
+         AND pinned_node_id IS NOT NULL
+         AND id != ?
+         AND rowid > (SELECT rowid FROM gitops_intent_revisions WHERE id = ?)
+       LIMIT 1`,
+    ).get(applicationId, excludingIntentId, afterIntentId) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
+  /**
+   * Whether any intent other than the current one records a pin.
+   *
+   * The whole history, for an application with no decomposed placement approval
+   * to measure from: such an approval names no intent, so there is nothing to
+   * cut the search at, and a pin written two or more intents back and never
+   * confirmed is still a pin nobody answered for. Reading one intent back
+   * instead let a clear hide behind the next edit, which then placed the freed
+   * node without Apply.
+   */
+  hasPinnedIntentExcept(applicationId: string, excludingIntentId: string): boolean {
+    const row = this.db().prepare(
+      `SELECT 1 AS found FROM gitops_intent_revisions
+       WHERE application_id = ?
+         AND pinned_node_id IS NOT NULL
+         AND id != ?
+       LIMIT 1`,
+    ).get(applicationId, excludingIntentId) as { found: number } | undefined;
+    return row !== undefined;
+  }
+
   getRolloutCandidate(id: string): GitOpsRolloutCandidateRow | undefined {
     return this.db().prepare('SELECT * FROM gitops_rollout_candidates WHERE id = ?').get(id) as GitOpsRolloutCandidateRow | undefined;
   }
@@ -571,14 +642,23 @@ export class GitOpsStore {
    * while it does.
    */
   listApplicationsWithOpenOperations(): GitOpsApplicationRow[] {
+    // In-flight recovery phases count as open work on their own, not only when
+    // a marker accompanies them. A build before this one wrote no marker for a
+    // restore, so a row it left `restoring` would otherwise never be selected,
+    // and boot could never reclassify it into a state an operator can clear.
     return this.db().prepare(
       `SELECT a.* FROM gitops_applications a
        WHERE a.lifecycle_status IN ('active','creating')
          AND (
            a.active_operation_stage IS NOT NULL
+           OR a.recovery_phase IN ('capturing','restoring','compensating')
            OR EXISTS (
              SELECT 1 FROM gitops_target_current t
-             WHERE t.application_id = a.id AND t.active_operation_stage IS NOT NULL
+             WHERE t.application_id = a.id
+               AND (
+                 t.active_operation_stage IS NOT NULL
+                 OR t.recovery_phase IN ('capturing','restoring','compensating')
+               )
            )
          )
        ORDER BY a.created_at ASC`,
@@ -869,19 +949,22 @@ export class GitOpsStore {
       else decodeGitOpsJson(row.blast_json);
     }
     if (row.policy_provenance_json !== null) decodeGitOpsJson(row.policy_provenance_json);
+    if (row.source_confirmation_json != null && decodeSourceConfirmation(row.source_confirmation_json).status !== 'present') {
+      throw new GitOpsJsonError('source_confirmation_json is not a confirmation');
+    }
     this.db().prepare(
       `INSERT INTO gitops_approvals (
         id, kind, authority, authoritative, application_id, generation_id, intent_revision_id,
         artifact_set_id, rollout_candidate_id, rollout_generation_id, source_acceptance_ref,
         placement_approval_ref, required_targets_json, preflight_fingerprint, fingerprint,
-        blast_json, policy_provenance_json, actor, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        blast_json, policy_provenance_json, source_confirmation_json, actor, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.kind, row.authority, row.authoritative, row.application_id, row.generation_id,
       row.intent_revision_id, row.artifact_set_id, row.rollout_candidate_id, row.rollout_generation_id,
       row.source_acceptance_ref, row.placement_approval_ref, row.required_targets_json,
       row.preflight_fingerprint, row.fingerprint, row.blast_json, row.policy_provenance_json,
-      row.actor, row.created_at,
+      row.source_confirmation_json ?? null, row.actor, row.created_at,
     );
   }
 
@@ -899,7 +982,8 @@ export class GitOpsStore {
       row.intent_revision_id, row.rollout_candidate_id, row.rollout_generation_id, row.source_acceptance_ref,
       row.placement_approval_ref, row.rollout_authorization_ref, row.legacy_combined_approval_ref,
       row.preflight_fingerprint, row.latest_preflight_evidence_json, row.latest_operation_id, row.active_operation_id, row.active_operation_stage,
-      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.source_suspended_reason,
+      row.active_operation_at, row.active_generation_id, row.pause_at, row.pause_reason, row.pause_origin,
+      row.source_suspended_reason,
       row.source_policy, row.placement_policy, row.rollout_authorization_policy,
       row.placement_policy_refusal_reason, row.placement_policy_refused_at,
       row.poll_interval_secs, row.next_poll_at, row.attempt_seq, row.partial_json,
@@ -1006,15 +1090,15 @@ export class GitOpsStore {
         artifact_set_id, placement_approval_ref, source_acceptance_ref, rollout_authorization_ref,
         required_targets_json, preflight_fingerprint, preflight_evidence_json, rollout_strategy_json,
         policy_snapshot_json,
-        provenance, supersedes_generation_id, superseded_at, operation_id, actor, trigger, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        provenance, supersedes_generation_id, superseded_at, withdrawn_at, operation_id, actor, trigger, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id, row.application_id, row.intent_revision_id, row.rollout_candidate_id,
       row.accepted_generation_id, row.artifact_set_id, row.placement_approval_ref,
       row.source_acceptance_ref, row.rollout_authorization_ref, row.required_targets_json,
       row.preflight_fingerprint, row.preflight_evidence_json, row.rollout_strategy_json,
       row.policy_snapshot_json,
-      row.provenance, row.supersedes_generation_id, row.superseded_at, row.operation_id,
+      row.provenance, row.supersedes_generation_id, row.superseded_at, row.withdrawn_at, row.operation_id,
       row.actor, row.trigger, row.created_at,
     );
   }
@@ -1023,6 +1107,38 @@ export class GitOpsStore {
     this.db().prepare(
       'UPDATE gitops_rollout_generations SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL',
     ).run(supersededAt, id);
+  }
+
+  /**
+   * Record that the operator withdrew this rollout.
+   *
+   * Separate from `superseded_at` on purpose: system supersedes (a preflight
+   * drift, a placement invalidation, a re-authorization) must stay
+   * distinguishable from the operator's Supersede and Rollback, because only
+   * the latter blocks the automatic policy from minting a replacement.
+   */
+  markRolloutGenerationWithdrawn(id: string, withdrawnAt: number): void {
+    this.db().prepare(
+      'UPDATE gitops_rollout_generations SET withdrawn_at = ? WHERE id = ? AND withdrawn_at IS NULL',
+    ).run(withdrawnAt, id);
+  }
+
+  /**
+   * The newest rollout authorization opened for one accepted source, if any.
+   *
+   * Ordered by `rowid`: monotonic and never reused, because rows are never
+   * deleted. `created_at` alone is not enough, since a clock step backwards can
+   * sort an earlier withdrawn row after a later authorization and hide it.
+   */
+  latestRolloutAuthorizationForAcceptedGeneration(
+    applicationId: string,
+    acceptedGenerationId: string,
+  ): GitOpsRolloutGenerationRow | undefined {
+    return this.db().prepare(
+      `SELECT * FROM gitops_rollout_generations
+       WHERE application_id = ? AND provenance = 'rollout_authorization' AND accepted_generation_id = ?
+       ORDER BY rowid DESC LIMIT 1`,
+    ).get(applicationId, acceptedGenerationId) as GitOpsRolloutGenerationRow | undefined;
   }
 
   upsertTarget(row: GitOpsTargetCurrentRow): void {
@@ -1040,10 +1156,10 @@ export class GitOpsStore {
         connectivity, latest_stage, active_operation_id, active_operation_stage, active_operation_at,
         active_generation_id, active_intent_revision_id, active_rollout_candidate_id,
         failure_stage, failure_class, failure_at, recovery_ref, recovery_generation_id,
-        recovery_phase, interruption_stage, interruption_at, interruption_operation_id,
+        recovery_phase, recovery_failure_class, recovery_failure_at, interruption_stage, interruption_at, interruption_operation_id,
         interruption_generation_id, interruption_intent_revision_id, interruption_rollout_candidate_id,
         pause_at, pause_reason, retry_at, suspended_at, partial_json, evidence_limitations_json, updated_at
-      ) VALUES (${Array(57).fill('?').join(', ')})
+      ) VALUES (${Array(59).fill('?').join(', ')})
       ON CONFLICT(application_id, node_id) DO UPDATE SET
         target_status=excluded.target_status,
         desired_generation_id=excluded.desired_generation_id,
@@ -1087,6 +1203,8 @@ export class GitOpsStore {
         recovery_ref=excluded.recovery_ref,
         recovery_generation_id=excluded.recovery_generation_id,
         recovery_phase=excluded.recovery_phase,
+        recovery_failure_class=excluded.recovery_failure_class,
+        recovery_failure_at=excluded.recovery_failure_at,
         interruption_stage=excluded.interruption_stage,
         interruption_at=excluded.interruption_at,
         interruption_operation_id=excluded.interruption_operation_id,
@@ -1113,7 +1231,7 @@ export class GitOpsStore {
       row.connectivity, row.latest_stage, row.active_operation_id, row.active_operation_stage, row.active_operation_at,
       row.active_generation_id, row.active_intent_revision_id, row.active_rollout_candidate_id,
       row.failure_stage, row.failure_class, row.failure_at, row.recovery_ref, row.recovery_generation_id,
-      row.recovery_phase, row.interruption_stage, row.interruption_at, row.interruption_operation_id,
+      row.recovery_phase, row.recovery_failure_class, row.recovery_failure_at, row.interruption_stage, row.interruption_at, row.interruption_operation_id,
       row.interruption_generation_id, row.interruption_intent_revision_id, row.interruption_rollout_candidate_id,
       row.pause_at, row.pause_reason, row.retry_at, row.suspended_at, row.partial_json,
       row.evidence_limitations_json, row.updated_at,
@@ -1279,6 +1397,131 @@ export class GitOpsStore {
        SET accepted_generation_id = ?, artifact_set_id = ?
        WHERE id = ?`,
     ).run(acceptedGenerationId, artifactSetId, candidateId);
+  }
+
+  /**
+   * Move a candidate's generation binding to the generation an acceptance just
+   * recorded, clearing its artifact binding.
+   *
+   * Distinct from `bindRolloutCandidateSource`, which is the first binding and
+   * refuses to overwrite a different one. This is the source-change path: the
+   * acceptance cleared the rollout authorization in the same transaction, so
+   * the candidate's previous binding describes content nothing may execute any
+   * more, and leaving it would make `authorizationIngredients` refuse the new
+   * generation for ever. The artifact binding is cleared rather than pointed at
+   * the acceptance's seed set, because the freeze that follows advances the
+   * application's set to the resolved one and authorization re-stamps both from
+   * that resolved set.
+   */
+  rebindRolloutCandidateSource(applicationId: string, candidateId: string, acceptedGenerationId: string): void {
+    const candidate = this.getRolloutCandidate(candidateId);
+    if (!candidate) throw new Error('rollout candidate not found');
+    if (candidate.application_id !== applicationId) {
+      throw new Error('rollout candidate belongs to another application');
+    }
+    if (candidate.accepted_generation_id === acceptedGenerationId && candidate.artifact_set_id === null) {
+      return;
+    }
+    this.db().prepare(
+      `UPDATE gitops_rollout_candidates
+       SET accepted_generation_id = ?, artifact_set_id = NULL
+       WHERE id = ?`,
+    ).run(acceptedGenerationId, candidateId);
+  }
+
+  /**
+   * The confirmation stored on the current source acceptance.
+   *
+   * Absent means there is no confirmation object and no legacy placement
+   * pointer. That covers a poll and a confirmation a person later released.
+   * Present means they confirmed, and the placement inside it may still be
+   * null: they confirmed that none was approved. A placement pointer written
+   * before the confirmation object existed is read as a confirmation of that
+   * placement whose rollout was not allowed to start, the direction that waits
+   * for a person rather than rolling out on a claim this build cannot read.
+   */
+  storedSourceConfirmation(app: GitOpsApplicationRow): StoredSourceConfirmation {
+    if (!app.source_acceptance_ref) return { status: 'absent' };
+    const acceptance = this.getApproval(app.source_acceptance_ref);
+    if (!acceptance || acceptance.kind !== 'source_acceptance') return { status: 'absent' };
+    const stored = decodeSourceConfirmation(acceptance.source_confirmation_json);
+    if (stored.status === 'absent' && acceptance.placement_approval_ref) {
+      return {
+        status: 'present',
+        confirmation: {
+          placementApprovalRef: acceptance.placement_approval_ref,
+          rolloutMayStart: false,
+        },
+      };
+    }
+    return stored;
+  }
+
+  /**
+   * The placement pointer inside a stored confirmation, or null when the
+   * confirmation named none or the acceptance was not confirmed.
+   *
+   * This does not tell those two apart. Callers that enforce the confirmation
+   * use `storedSourceConfirmation`.
+   */
+  confirmedPlacementForAcceptance(app: GitOpsApplicationRow): string | null {
+    const stored = this.storedSourceConfirmation(app);
+    if (stored.status !== 'present') return null;
+    return stored.confirmation.placementApprovalRef;
+  }
+
+  /**
+   * Re-point an acceptance's confirmation at the placement an operator has now
+   * authorized, and record that a rollout may start.
+   *
+   * An operator mint is exempt from the confirmation guard, because asking to
+   * authorize the rollout is the decision the confirmation deferred. Without
+   * this, that decision would be re-litigated the next time the authorization
+   * lapsed and the automatic policy tried again, asking the operator to resume a
+   * placement they had already authorized deliberately. Re-pointing rather than
+   * clearing keeps the guard working for the next replacement, and recording
+   * that a rollout may start is what lets that later attempt proceed.
+   */
+  recordConfirmedPlacement(applicationId: string, placementApprovalRef: string | null): boolean {
+    return this.writeSourceConfirmation(applicationId, {
+      placementApprovalRef,
+      rolloutMayStart: true,
+    });
+  }
+
+  /**
+   * Release an acceptance's confirmation.
+   *
+   * The operator's resume is the answer to a hold: they have seen the reason and
+   * want the rollout to carry on under the placement and the rollout policy as
+   * they stand, so the acceptance is no longer bound to either fact it was
+   * confirmed against. Narrow on purpose. The decision itself (generation,
+   * authority, actor) is immutable, and what this clears is the precondition
+   * this same module attaches to it. The history row keeps the application's
+   * placement pointer and rollout policy at that moment. It does not keep the
+   * confirmation object, so it cannot separate an acceptance nobody confirmed
+   * from one that confirmed no placement was approved.
+   */
+  releaseConfirmedPlacement(applicationId: string): boolean {
+    return this.writeSourceConfirmation(applicationId, null);
+  }
+
+  private writeSourceConfirmation(applicationId: string, confirmation: SourceConfirmation | null): boolean {
+    const app = this.getApplication(applicationId);
+    if (!app?.source_acceptance_ref) return false;
+    const acceptance = this.getApproval(app.source_acceptance_ref);
+    if (!acceptance || acceptance.kind !== 'source_acceptance') return false;
+    const json = confirmation ? encodeSourceConfirmation(confirmation) : null;
+    const placement = confirmation?.placementApprovalRef ?? null;
+    if ((acceptance.source_confirmation_json ?? null) === json && acceptance.placement_approval_ref === placement) {
+      return false;
+    }
+    const result = this.db().prepare(
+      `UPDATE gitops_approvals
+       SET placement_approval_ref = ?, source_confirmation_json = ?
+       WHERE id = ? AND kind = ?`,
+    ).run(placement, json, acceptance.id, 'source_acceptance');
+    return result.changes > 0;
   }
 
   /**
@@ -1492,6 +1735,8 @@ export function emptyTargetRow(
     recovery_ref: null,
     recovery_generation_id: null,
     recovery_phase: null,
+    recovery_failure_class: null,
+    recovery_failure_at: null,
     interruption_stage: null,
     interruption_at: null,
     interruption_operation_id: null,

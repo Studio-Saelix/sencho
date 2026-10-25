@@ -39,6 +39,7 @@ let GitOpsTransitions: typeof import('../services/gitops/transitions').GitOpsTra
 let BlueprintTargetAdapter: typeof import('../services/gitops/handoff').BlueprintTargetAdapter;
 let buildAcceptedGeneration: typeof import('../services/gitops/handoff').buildAcceptedGeneration;
 let ensureRolloutAuthorization: typeof import('../services/gitops/handoff').ensureRolloutAuthorization;
+let hasTargetOperationInFlight: typeof import('../services/gitops/handoff').hasTargetOperationInFlight;
 let dataDir: string;
 let setRegistryReadinessDepsForTests: typeof import('../services/gitops/handoff').setRegistryReadinessDepsForTests;
 let setHealthCapabilityProbeForTests: typeof import('../services/gitops/handoff').setHealthCapabilityProbeForTests;
@@ -59,6 +60,7 @@ beforeAll(async () => {
     BlueprintTargetAdapter,
     buildAcceptedGeneration,
     ensureRolloutAuthorization,
+    hasTargetOperationInFlight,
     reconstructBlueprintRolloutQueue,
     setHealthCapabilityProbeForTests,
     setRegistryReadinessDepsForTests,
@@ -121,6 +123,13 @@ function projectFixture(fixture: Seeded) {
   return projectApplication(fixture.applicationId, false)!;
 }
 
+/** The stack a seeded Blueprint deploys, as its intent names it. */
+function deployedStackName(applicationId: string): string {
+  const store = GitOpsStore.getInstance();
+  const app = store.getApplication(applicationId)!;
+  return store.getIntentRevision(app.intent_revision_id!)!.deploy_stack_name;
+}
+
 /**
  * The arguments of the most recent deploy, so a test can assert what a retry was
  * told to do.
@@ -144,7 +153,7 @@ function reserveRunFor(
   const run: HealthGateRunRow = {
     id: `run-orphan-${randomUUID()}`,
     node_id: nodeId,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'rollout',
     status,
     reason: null,
@@ -274,6 +283,43 @@ describe('freezing the policy into rollout authorization', () => {
     expect(() => decodeFrozenRolloutStrategy('[]')).toThrow(/not a JSON object/i);
   });
 
+  it('an unsettled target refuses a new authorization, and a live one is untouched by it', async () => {
+    // The second reader of the same predicate. Minting is the moment a placement
+    // change would displace a rollout, so a target still awaiting its verdict has
+    // to hold it here too, and this is the path an operator takes by hand, so the
+    // refusal is what they will meet rather than a message about a health window.
+    const fixture = seedApp({ nodeCount: 1 });
+    await writeAppliedCompose(fixture.applicationId);
+    const store = GitOpsStore.getInstance();
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, fixture.nodeId!),
+      latest_stage: 'blueprint_ack_recorded',
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+
+    const refused = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toMatch(/in flight for a rollout target/i);
+    expect(store.getApplication(fixture.applicationId)!.rollout_authorization_ref).toBeNull();
+
+    // Authority that already exists is not re-litigated against what is running.
+    // A gated rollout is authorized before it deploys anything, so this is the
+    // state its own verdicts arrive in, and the gate above would otherwise hold
+    // every rollout off its own fleet.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId!)!,
+      pending_health_run_id: null,
+    });
+    const minted = await ensureRolloutAuthorization(fixture.applicationId, 'tester', 'manual', undefined, 'operator');
+    expect(minted.ok).toBe(true);
+
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, fixture.nodeId!)!,
+      pending_health_run_id: `run-${randomUUID()}`,
+    });
+    expect((await ensureRolloutAuthorization(fixture.applicationId, 'tester')).ok).toBe(true);
+  });
+
   it('a policy change mid-rollout does not change the running rollout', async () => {
     const fixture = seedApp({ nodeCount: 1 });
     await writeAppliedCompose(fixture.applicationId);
@@ -321,6 +367,31 @@ describe('one target at a time under a non-observe policy', () => {
     expect(deploySpy).toHaveBeenCalledTimes(3);
   });
 
+  it('observe reserves runs like every other policy, so it holds the same pointer', async () => {
+    // Observe decides nothing from a verdict, and the queue ignores a target that
+    // is waiting on one, so the run it reserves is pure observation. It is still
+    // a run the target is waiting on, which is what the placement gate reads, so
+    // this pins that the gate's answer does not depend on the policy: a gate that
+    // counted only gating policies would answer false here, and the difference
+    // between those two answers is a placement decision nobody chose to change.
+    const fixture = await authorizeWithPolicy('observe', 2);
+    vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    await dispatch(fixture);
+
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.pending_health_run_id).not.toBeNull();
+    expect(target.active_operation_stage).toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+    // Nothing about the rollout waits on it, which is the whole difference
+    // between observe and a gating policy and the reason the answer is a choice.
+    expect(decideHealthRolloutAction({
+      policy: 'observe', verdict: 'failed', attemptsUsed: 0, recoveryAvailable: true,
+    }).action).toBe('none');
+  });
+
   it('a failed verdict on the second target pauses the rollout and never reaches the third', async () => {
     const fixture = await authorizeWithPolicy('pause', 3);
     const [first, second, third] = fixture.nodeIds;
@@ -356,6 +427,9 @@ describe('one target at a time under a non-observe policy', () => {
     });
 
     expect(store.getApplication(fixture.applicationId)?.pause_at).not.toBeNull();
+    // The executor's hold is a health hold, so a later source acceptance leaves
+    // it waiting for the operator.
+    expect(store.getApplication(fixture.applicationId)?.pause_origin).toBe('health');
     expect(store.getTarget(fixture.applicationId, third!)?.applied_generation_id).toBeNull();
     expect(deploySpy).toHaveBeenCalledTimes(2);
   });
@@ -442,6 +516,69 @@ describe('the preallocated health run', () => {
     expect(run.status).toBe('unknown');
     expect(DatabaseService.getInstance().getHealthGateRun(fixture.nodeId!, run.stack_name, run.id)?.status)
       .toBe('unknown');
+  });
+});
+
+describe('an unresolved run reads as an operation in flight', () => {
+  it('a real ack leaves the target unsettled with no stage, and the predicate says so', async () => {
+    // The window this covers is only reachable through the real path, so it is
+    // driven through it rather than seeded. The apply lands, the ack clears the
+    // stage, and the rollout then waits out its observation window with the run
+    // still open. Reading only the stage calls that target idle, and a placement
+    // approved in that window supersedes a rollout the fleet has not finished.
+    const fixture = await gatedAttempt('pause');
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+
+    expect(target.latest_stage).toBe('blueprint_ack_recorded');
+    expect(target.active_operation_stage).toBeNull();
+    expect(target.pending_health_run_id).not.toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    // The verdict is what ends the window, so it is what ends the conflict. A
+    // target waiting on nothing is a target an operator can place around.
+    finishHealth(fixture, fixture.nodeId!, 'passed', undefined, 'pause');
+    const settled = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(settled.pending_health_run_id).toBeNull();
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
+  });
+
+  it('reads each of the two pieces of evidence on its own', () => {
+    const fixture = seedApp({ nodeCount: 2 });
+    const store = GitOpsStore.getInstance();
+    const nodeId = fixture.nodeId!;
+    const other = fixture.nodeIds[1]!;
+
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, nodeId),
+      active_operation_stage: 'blueprint_deploy_started',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    // The stage alone is the case that already worked. The pointer alone is the
+    // one that read as idle.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, nodeId)!,
+      active_operation_stage: null,
+      pending_health_run_id: 'run-unresolved',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
+
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, nodeId)!,
+      pending_health_run_id: null,
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
+
+    // A target the application no longer runs is not an operation in flight for
+    // it, so neither piece of evidence on a tombstoned row holds anything up.
+    store.upsertTarget({
+      ...targetRow(fixture.applicationId, other),
+      target_status: 'tombstoned',
+      active_operation_stage: 'blueprint_deploy_started',
+      pending_health_run_id: 'run-tombstoned',
+    });
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
   });
 });
 
@@ -560,6 +697,10 @@ describe('retry, stop, and rollback', () => {
     expect(after.recovery_ref).toBe(recoveryRef);
     expect(after.recovery_generation_id).toBe('gen-pre-rollout');
     expect(after.pending_health_run_id).not.toBe(firstRun);
+    // The replacement run is a second observation window, not a gap between two.
+    // Reading the released pointer here as "nothing in flight" would let a
+    // placement approve straight over a retry the policy asked for.
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(true);
   });
 
   it('does not re-dispatch a target whose retry budget is already spent', async () => {
@@ -980,6 +1121,9 @@ describe('retry, stop, and rollback', () => {
     // leave a released pointer beside a fence nothing acts on, under a rollout
     // still authorized to re-apply the generation.
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_at).not.toBeNull();
+    // The fence path writes its pause with health origin, so an acceptance
+    // leaves it for the operator.
+    expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.pause_origin).toBe('health');
 
     // Replaying the same verdict changes nothing: the run this target was
     // awaiting is already consumed, so the second report is history and never a
@@ -988,6 +1132,35 @@ describe('retry, stop, and rollback', () => {
     expect(result.healthUnattributable).toBeFalsy();
     expect(GitOpsStore.getInstance().getApplication(fixture.applicationId)!.rollout_generation_id)
       .toBe(run!.rollout_generation_id);
+  });
+
+  it('abandons the reserved run when the deploy could not be opened at all', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1);
+    // The transition that claims the operation throws before the target row is
+    // written, which is the shape a conflicting operation on the same target
+    // takes. Nothing is skipped afterwards, because the pending pointer was
+    // never set, so what is left behind is the run row itself.
+    vi.spyOn(GitOpsTransitions.getInstance(), 'blueprintDeployStarted').mockImplementation(() => {
+      throw new Error('conflicting target operation');
+    });
+
+    const result = await dispatch(fixture);
+
+    expect(result.status).toBe('blocked');
+    expect(result.status === 'blocked' && result.reason).toMatch(/Could not open deploy/);
+
+    // The reservation is finalized rather than left reading as an open
+    // observation. An observing row here would name the accepted generation, and
+    // the health projection reads an open observation of the failed generation
+    // as work that is about to produce its replacement verdict, so a real failure
+    // on it would stop being reported until a later run replaced the row or a
+    // restart swept it.
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0].status).not.toBe('observing');
+    expect(reserved[0].ended_at).not.toBeNull();
+    expect(GitOpsStore.getInstance().getTarget(fixture.applicationId, fixture.nodeId!)!
+      .pending_health_run_id).toBeNull();
   });
 
   it('a verdict for a target on an earlier rollout is evidence, even when the application has moved on', async () => {
@@ -1015,6 +1188,10 @@ describe('retry, stop, and rollback', () => {
     const target = store.getTarget(fixture.applicationId, nodeId)!;
     expect(target.pending_health_run_id).toBeNull();
     expect(target.healthy_generation_id).toBeNull();
+    // The released pointer is what ends the conflict. A superseded rollout whose
+    // verdict is never released would hold every later placement off this
+    // application for ever, which is the one way this rule could do lasting harm.
+    expect(hasTargetOperationInFlight(store, fixture.applicationId)).toBe(false);
     // Recorded as a verdict about the rollout the target left, which is the
     // record an operator reads to see why nothing was decided. Naming it as a
     // superseded application instead would describe a target that had been
@@ -1413,15 +1590,21 @@ describe('retry, stop, and rollback', () => {
     );
     markRecoveryPoint(rolled, 'rec-pre-rollout', 'gen-before-rollout');
     await dispatch(rolled);
+    // The same recovery ref the executor opened with: a terminal for an attempt
+    // a newer rollback superseded is ignored, and this completion has to be
+    // recognised as the live one.
+    const rolledRef = rolledStore.getTarget(rolled.applicationId, rolled.nodeId!)!.recovery_ref!;
     GitOpsTransitions.getInstance().rollbackCompleted({
       applicationId: rolled.applicationId,
       nodeId: rolled.nodeId!,
-      recoveryRef: 'health-rollout-rollback-test',
+      recoveryRef: rolledRef,
       recoveryGenerationId: 'gen-before-rollout',
       capturedArtifactSetId: null,
       capturedSourceAcceptanceRef: null,
       envelope: { operationId: 'rb-1', actor: 'tester', trigger: 'manual', at: Date.now() },
     });
+    // The completion releases the marker its own open wrote.
+    expect(rolledStore.getTarget(rolled.applicationId, rolled.nodeId!)!.active_operation_stage).toBeNull();
     // The executor holds the rollout after a completed rollback, so there is
     // something for the operator to resume from.
     GitOpsTransitions.getInstance().rolloutPaused(rolled.applicationId, null, 'held', {
@@ -1640,6 +1823,9 @@ describe('retry, stop, and rollback', () => {
 
     expect(restoreSpy).toHaveBeenCalledTimes(1);
     expect(restoreSpy.mock.calls[0]![0].generationId).toBe(genId(fixture, 'pre-rollout'));
+    // The restore addresses the stack the apply wrote, not the source stack the
+    // Blueprint was converted from.
+    expect(restoreSpy.mock.calls[0]![0].stackName).toBe(deployedStackName(fixture.applicationId));
 
     // The completion is the part that was never exercised, and it is the part
     // that has to land: the target is back on the pre-rollout generation, the
@@ -1650,6 +1836,24 @@ describe('retry, stop, and rollback', () => {
     expect(after.health_stop_reason).toBe('rollback_completed');
     const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
     expect(app.pause_at).not.toBeNull();
+  });
+
+  it('a rollback whose target has no intent of its own still restores the deploy stack', async () => {
+    const fixture = await gatedAttempt('rollback');
+    seedOwnedGeneration(fixture, genId(fixture, 'pre-rollout'));
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    // A recovery point can outlive the intent pointer a Blueprint ack writes.
+    // The restore still addresses the stack the apply wrote, never the source
+    // stack the Blueprint was converted from.
+    const store = GitOpsStore.getInstance();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    store.upsertTarget({ ...target, intent_revision_id: null });
+    const restoreSpy = await mockRestore();
+
+    await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    expect(restoreSpy).toHaveBeenCalledTimes(1);
+    expect(restoreSpy.mock.calls[0]![0].stackName).toBe(deployedStackName(fixture.applicationId));
   });
 
   it('a completion that cannot be recorded is a partial failure, and the rollout stays held', async () => {
@@ -1740,6 +1944,166 @@ describe('retry, stop, and rollback', () => {
     const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
 
     expect(outcome.action).toBe('rollback_partial_failed');
+  });
+
+  it('a restore refused before it can mutate does not hold the application', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    // The hub recorded a pre-rollout generation, but the node holds no point
+    // for it, so the restore is refused before it can touch anything.
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The target keeps the visible failure and the rollout stays held, but the
+    // application is not parked in a recovery that can never complete.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).not.toBe('failed');
+    expect(app.failure_stage).not.toBe('recovery');
+    expect(app.pause_at).not.toBeNull();
+  });
+
+
+  it('skips a health rollback while the target is already restoring', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    GitOpsTransitions.getInstance().rollbackInProgress({
+      applicationId: fixture.applicationId,
+      nodeId: fixture.nodeId!,
+      recoveryRef: 'rb-health-live',
+      recoveryGenerationId: genId(fixture, 'pre-rollout'),
+      envelope: { operationId: 'op-health-live', actor: 'tester', trigger: 'manual', at: Date.now() },
+    });
+    const restore = await mockRestore();
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // A manual rollback already owns the target. The health policy does not
+    // open a second restore, and that operation's own terminal settles the
+    // application.
+    expect(outcome.action).toBe('none');
+    expect(outcome.reason).toBe('rollback_in_progress');
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('records a terminal when the hold itself throws after the open', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    // The open succeeds, then the hold throws before the restore goes out.
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rolloutPaused').mockImplementationOnce(() => {
+      throw new Error('db write failed');
+    });
+    const restore = await mockRestore();
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The target must not be left restoring: with rollbacks serialized per
+    // target, that state would refuse every later rollback in-process.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(restore).not.toHaveBeenCalled();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.active_operation_stage).toBeNull();
+    expect(store.getApplication(fixture.applicationId)?.recovery_phase).toBe('failed');
+
+    // A later manual rollback is accepted rather than refused.
+    expect(() => GitOpsTransitions.getInstance().rollbackInProgress({
+      applicationId: fixture.applicationId,
+      nodeId: fixture.nodeId!,
+      recoveryRef: 'rb-after-hold-throw',
+      recoveryGenerationId: genId(fixture, 'pre-rollout'),
+      envelope: { operationId: 'op-after-hold-throw', actor: 'tester', trigger: 'manual', at: Date.now() },
+    })).not.toThrow();
+  });
+
+  it('settles a health rollback whose refused-target record fails once', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // The refusal was proven; only its record failed. The executor settles it
+    // like the manual route instead of holding for a restore that never ran.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBeNull();
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBeNull();
+  });
+
+  it('settles a health rollback whose possibly-moved record fails once', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    // A failure that may have moved the target: the class is partial, so the
+    // settle must retry it as partial rather than as a refusal, and the hold
+    // must survive the retry.
+    await mockRestore({ ok: false, code: 'RESTORE_FAILED', error: 'The restore did not complete.' });
+    const { GitOpsTransitions } = await import('../services/gitops/transitions');
+    vi.spyOn(GitOpsTransitions.getInstance(), 'rollbackPartialFailed')
+      .mockImplementationOnce(() => {
+        throw new Error('db write failed');
+      });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    expect(outcome.action).toBe('rollback_partial_failed');
+    expect(outcome.reason).toBe('rollback_unrecorded');
+    const target = store.getTarget(fixture.applicationId, fixture.nodeId!)!;
+    expect(target.recovery_phase).toBe('failed');
+    expect(target.recovery_failure_class).toBe('partial');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
+  });
+
+  it('keeps an earlier mutated hold when a health rollback is refused elsewhere', async () => {
+    const fixture = await gatedAttempt('rollback');
+    const store = GitOpsStore.getInstance();
+    const otherNode = fixture.nodeIds.find((nodeId) => nodeId !== fixture.nodeId)!;
+    // Another target already failed after a possible mutation and owns the hold.
+    store.upsertTarget({
+      ...store.getTarget(fixture.applicationId, otherNode)!,
+      recovery_phase: 'failed',
+      failure_stage: 'recovery',
+      failure_class: 'partial',
+      recovery_ref: 'rb-other',
+      recovery_failure_class: 'partial',
+      recovery_failure_at: 7,
+      failure_at: 7,
+    });
+    markRecoveryPoint(fixture, 'rec-pre-rollout', genId(fixture, 'pre-rollout'));
+    await mockRestore({ ok: false, code: 'NO_RECOVERY_POINT', error: 'This stack has no recovery point to restore.' });
+
+    const outcome = await decide(fixture, 'failed', spyExecutor(), 'rollback');
+
+    // This refusal moved nothing, but it must not release the hold another
+    // target's possible mutation still needs.
+    expect(outcome.action).toBe('rollback_partial_failed');
+    const app = store.getApplication(fixture.applicationId)!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.failure_class).toBe('partial');
+    expect(app.recovery_ref).toBe('rb-other');
+    expect(store.getTarget(fixture.applicationId, fixture.nodeId!)!.failure_class).toBe('pre_mutation');
   });
 
   it('a health failure never creates source, placement, or artifact authority', async () => {
@@ -1988,10 +2352,33 @@ describe('remote targets', () => {
     const result = await dispatch(fixture);
 
     expect(result.status).toBe('blocked');
-    if (result.status === 'blocked') expect(result.reason).toMatch(/does not support health-gated rollout/i);
+    if (result.status === 'blocked') expect(result.reason).toMatch(/does not report the observed health/i);
     expect(deploySpy).not.toHaveBeenCalled();
     // Refused before the apply and before any reservation.
     expect(latestRolloutRun(fixture)).toBeUndefined();
+  });
+
+  it('dispatches to a remote target that serves observations, reserving its run', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1, { remote: true });
+    setHealthCapabilityProbeForTests(async () => ({ kind: 'supported' }));
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const result = await dispatch(fixture);
+
+    if (result.status === 'blocked') throw new Error(result.reason);
+    expect(result.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    // The run is the target's own, on the node that will answer for it.
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0]!.node_id).toBe(fixture.nodeId);
+    expect(reserved[0]!.status).toBe('observing');
+    // The leaf is asked about the stack the apply writes, not the source stack
+    // the Blueprint adopted: the source stack does not exist there.
+    const app = GitOpsStore.getInstance().getApplication(fixture.applicationId)!;
+    expect(reserved[0]!.stack_name).toBe(deployedStackName(fixture.applicationId));
+    expect(reserved[0]!.stack_name).not.toBe(app.configured_source_stack_name);
   });
 
   it('treats an unreachable target as refused, not as supported', async () => {
@@ -2018,6 +2405,29 @@ describe('remote targets', () => {
     if (result.status === 'blocked') throw new Error(result.reason);
     expect(result.status).toBe('dispatched');
     expect(deploySpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the stack a first rollout observes', () => {
+  it('reserves the run under the deploy stack, not the adopted source stack', async () => {
+    const fixture = await authorizeWithPolicy('pause', 1);
+    const store = GitOpsStore.getInstance();
+    const app = store.getApplication(fixture.applicationId)!;
+    // A target with no intent of its own has not acked a Blueprint rollout yet,
+    // which is the state a first rollout reserves its run in.
+    expect(store.getTarget(fixture.applicationId, fixture.nodeId!)!.intent_revision_id).toBeNull();
+    expect(deployedStackName(fixture.applicationId)).not.toBe(app.configured_source_stack_name);
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployAuthorizedMaterialization')
+      .mockResolvedValue({ status: 'active' });
+
+    const result = await dispatch(fixture);
+
+    if (result.status === 'blocked') throw new Error(result.reason);
+    expect(result.status).toBe('dispatched');
+    expect(deploySpy).toHaveBeenCalledTimes(1);
+    const reserved = finishedRolloutRuns(fixture);
+    expect(reserved).toHaveLength(1);
+    expect(reserved[0]!.stack_name).toBe(deployedStackName(fixture.applicationId));
   });
 });
 
@@ -2260,7 +2670,7 @@ function beginReplacementAttempt(fixture: Seeded): string {
   DatabaseService.getInstance().insertHealthGateRun({
     id: runId,
     node_id: fixture.nodeId!,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'rollout',
     status: 'observing',
     reason: null,
@@ -2298,7 +2708,7 @@ function recordCompletedRun(fixture: Seeded, nodeId: number, status: 'passed' | 
   DatabaseService.getInstance().insertHealthGateRun({
     id: runId,
     node_id: nodeId,
-    stack_name: `src-${fixture.applicationId}`,
+    stack_name: deployedStackName(fixture.applicationId),
     trigger_action: 'deploy',
     status: 'observing',
     reason: null,
@@ -2397,6 +2807,9 @@ async function decide(
 
 async function writeAppliedCompose(applicationId: string): Promise<void> {
   const app = GitOpsStore.getInstance().getApplication(applicationId)!;
+  // The hub-side applied materialization is keyed by the retained source stack,
+  // which is where the accepted generation's compose is staged. It is not the
+  // stack a target deploys.
   const stackName = app.configured_source_stack_name!;
   const generation = GitOpsStore.getInstance().getGeneration(app.accepted_generation_id!)!;
   const nodeId = (await import('../services/NodeRegistry')).NodeRegistry.getInstance().getDefaultNodeId();
@@ -2410,13 +2823,18 @@ async function writeAppliedCompose(applicationId: string): Promise<void> {
 }
 
 function intentRow(id: string, applicationId: string, blueprintId: number): GitOpsIntentRevisionRow {
+  // The name the apply writes, and the one every health run for this target has
+  // to observe. It differs from the retained source stack name on purpose: a
+  // seed where the two match cannot catch a first rollout reserving its run
+  // under the source stack.
+  const deployedName = DatabaseService.getInstance().getBlueprint(blueprintId)!.name;
   return {
     id,
     application_id: applicationId,
     blueprint_id: blueprintId,
     compose_content_sha256: 'a'.repeat(64),
     blueprint_revision: 1,
-    deploy_stack_name: `src-${applicationId}`,
+    deploy_stack_name: deployedName,
     selector_json: JSON.stringify({ type: 'nodes', ids: [] }),
     pinned_node_id: null,
     cordon_implications_json: JSON.stringify({ pinnedOverridesCordon: false }),

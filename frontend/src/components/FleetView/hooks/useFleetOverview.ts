@@ -1,8 +1,8 @@
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useFleetLabels, labelPaletteKey } from './useFleetLabels';
 import { useNodeLabels } from './useNodeLabels';
-import { isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk } from '../nodeUtils';
+import { attentionRank, isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeDisk } from '../nodeUtils';
 import type { FleetNode, ViewMode, FleetPreferences, NodeUpdateStatus } from '../types';
 
 interface MastheadStats {
@@ -12,9 +12,7 @@ interface MastheadStats {
     totalContainers: number;
     totalContainersAll: number;
     avgCpuNum: number;
-    worstCpu: { name: string; percent: number } | null;
     totalMemUsed: number;
-    totalMemTotal: number;
 }
 
 interface UseFleetOverviewOptions {
@@ -38,7 +36,18 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
     // summary. Loaded fail-soft like the networking summary: no count, no chip.
     const [gitopsAttentionByNode, setGitopsAttentionByNode] = useState<Map<number, number>>(new Map());
     const gitopsLoadedRef = useRef(false);
+    // One controller per request kind: a new overview poll must not cancel the
+    // networking or GitOps request it did not start, and vice versa.
     const abortRef = useRef<AbortController | null>(null);
+    const networkingAbortRef = useRef<AbortController | null>(null);
+    const networkingBusyRef = useRef(false);
+    const gitopsAbortRef = useRef<AbortController | null>(null);
+
+    useEffect(() => () => {
+        abortRef.current?.abort();
+        networkingAbortRef.current?.abort();
+        gitopsAbortRef.current?.abort();
+    }, []);
 
     const { fleetPalette, fleetStackLabelMap } = useFleetLabels({ nodes });
     const { labelsByNodeId, distinctLabels } = useNodeLabels({ nodes });
@@ -46,9 +55,15 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
     // The networking summary fans out to every remote (each with its own
     // timeout), so it is loaded detached: it must never gate the overview's
     // loading state, and a failure just leaves the networking filter empty.
-    const loadNetworkingSummary = useCallback(async (signal: AbortSignal) => {
+    const loadNetworkingSummary = useCallback(async () => {
+        // One at a time: restarting it on every fast poll would abort a slow
+        // summary (a half-open remote holds it for its whole budget) each time.
+        if (networkingBusyRef.current) return;
+        networkingBusyRef.current = true;
+        const controller = new AbortController();
+        networkingAbortRef.current = controller;
         try {
-            const res = await apiFetch('/fleet/networking-summary', { localOnly: true, signal });
+            const res = await apiFetch('/fleet/networking-summary', { localOnly: true, signal: controller.signal });
             if (!res.ok) return;
             const data = await res.json() as { nodes?: { nodeId: number; summary: { exposed: { count: number }; unknownExposure: { count: number }; networkDrift: { count: number } } | null }[] };
             const map = new Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>();
@@ -58,6 +73,8 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             setNetworkingByNode(map);
         } catch (error) {
             if (!(error instanceof DOMException && error.name === 'AbortError')) console.warn('Failed to fetch fleet networking summary:', error);
+        } finally {
+            networkingBusyRef.current = false;
         }
     }, []);
 
@@ -66,9 +83,15 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
     // runs on the first load and on a manual refresh, not on every heartbeat.
     // A count is shown only for a node the hub could read; an unreachable node
     // gets no chip rather than one that could read as "nothing needs you".
-    const loadGitopsAttention = useCallback(async (signal: AbortSignal) => {
+    // `gitopsLoadedRef` flips only once the request settles, so an aborted
+    // request is retried by the next overview instead of staying empty.
+    const loadGitopsAttention = useCallback(async () => {
+        gitopsAbortRef.current?.abort();
+        const controller = new AbortController();
+        gitopsAbortRef.current = controller;
         try {
-            const res = await apiFetch('/gitops/applications?limit=1', { localOnly: true, signal });
+            const res = await apiFetch('/gitops/applications?limit=1', { localOnly: true, signal: controller.signal });
+            gitopsLoadedRef.current = true;
             if (!res.ok) {
                 setGitopsAttentionByNode(new Map());
                 return;
@@ -86,6 +109,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             setGitopsAttentionByNode(map);
         } catch (error) {
             if (error instanceof DOMException && error.name === 'AbortError') return;
+            gitopsLoadedRef.current = true;
             console.warn('Failed to fetch GitOps attention summary:', error);
             setGitopsAttentionByNode(new Map());
         }
@@ -102,19 +126,22 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             if (res.ok) {
                 setNodes(await res.json());
                 setLastSyncAt(Date.now());
+            } else {
+                console.error('Failed to fetch fleet overview: HTTP', res.status);
             }
             // Detached: it must never gate the loading state cleared in `finally`.
-            void loadNetworkingSummary(controller.signal);
-            if (!gitopsLoadedRef.current || showRefresh) {
-                gitopsLoadedRef.current = true;
-                void loadGitopsAttention(controller.signal);
-            }
+            void loadNetworkingSummary();
+            if (!gitopsLoadedRef.current || showRefresh) void loadGitopsAttention();
         } catch (error) {
             if (error instanceof DOMException && error.name === 'AbortError') return;
             console.error('Failed to fetch fleet overview:', error);
         } finally {
-            setLoading(false);
-            setRefreshing(false);
+            // An aborted call was replaced by a newer one that still owns the
+            // loading state; clearing it here would flash an empty fleet.
+            if (abortRef.current === controller) {
+                setLoading(false);
+                setRefreshing(false);
+            }
         }
     }, [loadNetworkingSummary, loadGitopsAttention]);
 
@@ -128,14 +155,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         const avgCpuNum = onlineNodes.length > 0
             ? onlineNodes.reduce((sum, n) => sum + getNodeCpu(n), 0) / onlineNodes.length
             : 0;
-        const worstCpuNode = onlineNodes.length > 0
-            ? onlineNodes.reduce((worst, n) => getNodeCpu(n) > getNodeCpu(worst) ? n : worst, onlineNodes[0])
-            : null;
-        const worstCpu = worstCpuNode
-            ? { name: worstCpuNode.name, percent: getNodeCpu(worstCpuNode) }
-            : null;
         const totalMemUsed = onlineNodes.reduce((sum, n) => sum + getNodeMemUsed(n), 0);
-        const totalMemTotal = onlineNodes.reduce((sum, n) => sum + getNodeMemTotal(n), 0);
         return {
             nodeCount: nodes.length,
             onlineCount,
@@ -143,9 +163,7 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
             totalContainers,
             totalContainersAll,
             avgCpuNum,
-            worstCpu,
             totalMemUsed,
-            totalMemTotal,
         };
     }, [nodes, onlineNodes]);
 
@@ -197,6 +215,9 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         filtered.sort((a, b) => {
             let cmp = 0;
             switch (prefs.sortBy) {
+                case 'attention':
+                    cmp = attentionRank(a) - attentionRank(b) || a.name.localeCompare(b.name);
+                    break;
                 case 'name':
                     cmp = a.name.localeCompare(b.name);
                     break;

@@ -18,6 +18,8 @@ import {
 } from './json';
 import { insertHistory, type DeployDispatchedPayload, type DeployIntentRefusedPayload, type GitOpsHistoryStage, type HistoryOutcome, type PromotionCommittedPayload } from './history';
 import { emptyTargetRow, GitOpsStore } from './store';
+import { CONFIRMATION_STALE, driftSentence, encodeSourceConfirmation, sourceConfirmationDrift, type SourceConfirmation } from './sourceConfirmation';
+import { canonicalRepoKeyFromUrl } from './repoIdentity';
 import { SopsIdentityStore } from './sops/identityStore';
 import type {
   ArtifactQualification,
@@ -47,6 +49,14 @@ import {
   policyValuesEqual,
 } from './policyComposition';
 import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
+import {
+  recoveryClaimMoved,
+  recoveryClaimRetirable,
+  recoveryFailureClaimAt,
+  recoveryFailureClaimClass,
+  targetRecoveryFailureMoved,
+  targetRestoreInFlight,
+} from './recoveryClaim';
 import type { PlacementPolicyReason } from './placementPolicy';
 import { runningGenerationForTarget } from './recoveryCapture';
 import { sanitizeForLog } from '../../utils/safeLog';
@@ -109,6 +119,17 @@ export type AppliedArgs = {
   authority: Exclude<GitOpsApprovalAuthority, 'legacy_combined'>;
   envelope: EventEnvelope;
   activateCreating?: boolean;
+  /**
+   * The confirmation an operator made for this acceptance. Omitted when nobody
+   * confirmed one, which is a poll: a cadence is configured rather than confirmed.
+   *
+   * Recorded whole. The placement may be null, and the rollout promise may say
+   * the rollout would wait. A confirmation that lives only in a request body is
+   * gone by the time preparation resolves or a restart brings the reconciler
+   * back, and those are exactly the paths that would otherwise deploy somewhere
+   * the operator did not name, or start a rollout they were told would wait.
+   */
+  confirmation?: SourceConfirmation;
 };
 
 /**
@@ -208,8 +229,16 @@ export type HealthRunReservation = {
   runId: string | null;
 };
 
+/**
+ * A refused state change.
+ *
+ * `code` names which guard refused, for callers that have to branch on the
+ * reason. The message is for the operator and stays prose, because branching
+ * on prose is what forced `GitOpsBindingService` to test a message for the
+ * word "repo" to tell two refusals apart.
+ */
 export class GitOpsTransitionError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly code?: string) {
     super(message);
     this.name = 'GitOpsTransitionError';
   }
@@ -318,16 +347,65 @@ export class GitOpsTransitions {
       assertReady: (app) => {
         const live = this.store().getLiveBlueprintApplication(args.blueprintId);
         if (live && live.id !== app.id) {
-          throw new GitOpsTransitionError('live blueprint application already exists');
+          throw new GitOpsTransitionError('live blueprint application already exists', 'live_blueprint_application');
         }
-        if (app.configured_repo_url) {
-          const sameRepo = this.store().getLiveBlueprintModeApplicationByRepoUrl(app.configured_repo_url);
-          if (sameRepo && sameRepo.id !== app.id) {
-            throw new GitOpsTransitionError('live blueprint application already claims this repo');
-          }
-        }
+        this.assertRepoClaimFree(app);
       },
     });
+  }
+
+  /**
+   * One live Blueprint-mode application may claim a given repository.
+   *
+   * Compared on the canonical repository identity, not the configured URL:
+   * a repository has an unbounded number of valid spellings (`https://` and
+   * scp-style SSH for the same clone, with or without `.git`, with or without
+   * a trailing slash, host case either way), and byte equality proves nothing
+   * about any of them.
+   *
+   * Fail-closed, which is why an unidentifiable URL refuses rather than
+   * passing. An application whose repository cannot be named may well be
+   * claiming this one, and a guard that assumed otherwise would hand out a
+   * second claim on the same repository. The cost is that one unidentifiable
+   * live claimant refuses every later conversion until it is retired,
+   * detached, or tombstoned, which is the intended trade: the refusal is
+   * loud, names the condition, and never silently allows a duplicate.
+   *
+   * Only `configured_repo_url` is read, because a Blueprint-mode row cannot
+   * go back to Direct and reconfigure: material configuration applies to
+   * Direct applications only, and the claim is fixed when the row enters this
+   * mode. The stored identity would answer the same question, from the same
+   * `RepoIdentity` shape, without a second column that can disagree.
+   */
+  private assertRepoClaimFree(app: GitOpsApplicationRow): void {
+    const key = canonicalRepoKeyFromUrl(app.configured_repo_url ?? '');
+    if (key === null) {
+      // The stored URL is the only thing to fix, and it is editable while the
+      // application is still Direct, so the message says so rather than
+      // describing the condition and stopping there.
+      throw new GitOpsTransitionError(
+        'this git source has no repository path to identify; set a repository URL on the git source first',
+        'live_blueprint_repo',
+      );
+    }
+    for (const other of this.store().listLiveBlueprintModeApplications()) {
+      if (other.id === app.id) continue;
+      const otherKey = canonicalRepoKeyFromUrl(other.configured_repo_url ?? '');
+      if (otherKey === null) {
+        // Naming the holding Blueprint is what makes this actionable: the
+        // operator retires or detaches that one to clear the refusal, and
+        // "a live blueprint application" alone sends them looking through every
+        // Git-managed Blueprint instead.
+        throw new GitOpsTransitionError(
+          `blueprint ${other.blueprint_id} claims a repository that cannot be identified; `
+          + 'retire or detach it to continue',
+          'live_blueprint_repo',
+        );
+      }
+      if (otherKey === key) {
+        throw new GitOpsTransitionError('live blueprint application already claims this repo', 'live_blueprint_repo');
+      }
+    }
   }
 
   convertBlueprintToDirect(args: {
@@ -355,6 +433,17 @@ export class GitOpsTransitions {
           throw new GitOpsTransitionError('live direct application already exists');
         }
       },
+      // A Direct application has no rollout to pause, and every resume route
+      // resolves a Git-managed Blueprint, so a pause carried into this mode is
+      // one nothing can clear. Whatever held it was about the Blueprint
+      // rollout that Retire ends.
+      onRetarget: (app) => {
+        if (app.pause_at === null) return {};
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
+        return { pauseAt: null };
+      },
     });
   }
 
@@ -380,6 +469,71 @@ export class GitOpsTransitions {
       },
       matchesDestination: (app) => app.target_mode === 'inline_blueprint',
       assertReady: () => undefined,
+      // Demotion changes who decides, so it takes the Git-era authority with it.
+      // The placement approval was written about Git-managed placement and its
+      // frozen required set describes Git content, and the rollout
+      // authorization policy it could run under was very often not an operator's
+      // choice for Inline at all: the startup migration backfilled automatic on
+      // every active Git-managed row. Carrying either across would hand the next
+      // Inline tick an unattended authority nobody granted for Inline
+      // placement, on nodes whose deployments are stamped with the revision
+      // they had while Git content was running. Both go back to the operator
+      // with the mode; an operator who wants unattended placement sets the
+      // rollout authorization policy again from the Inline authority row.
+      //
+      // The preflight evidence goes with them, for its own reason: this row
+      // never runs Git-managed content again. `inline_blueprint` is a terminal
+      // mode. The only transition into it is this demotion, nothing accepts it
+      // as an entry mode, and `loadConvertBinding` refuses anything that is not
+      // `direct`, so the row a Detach produced is never converted back; binding
+      // a fresh Git source to the same Blueprint tombstones it first.
+      // `recordPreflightEvaluation` is the evidence column's only writer, and
+      // neither of its callers can reach this row again: the Direct apply path
+      // resolves its application through `getLiveDirectApplication`, and the
+      // Git-managed authorization path is refused for a mode that is not
+      // `blueprint` before it evaluates. The transition also skips an
+      // `inline_blueprint` row outright, so nothing will ever refresh or
+      // contradict what is stored. Left in place it is a permanent stale claim:
+      // the row answers "the last registry preflight for this application
+      // evaluated this" with a fingerprint naming an authorization it no longer
+      // has, and no mode change, apply, or invalidation cleared it, which is why
+      // it outlived everything it was evaluated for until now.
+      // Every column the clear writes is in the early-return condition, so the
+      // no-op is exact: a row carrying only a dangling `rollout_authorization_ref`
+      // would otherwise be reported as having nothing to clear and left with a
+      // ref nothing resolves, with no history row admitting it.
+      //
+      // The rollout pause goes with them. A hold is the one column with a verb
+      // that only exists in the mode being left: every resume route resolves a
+      // Git-managed Blueprint and answers `NOT_GIT_MANAGED` for this row
+      // afterwards, so a pause carried across reads as a paused rollout nobody
+      // can clear. Whatever held it was about the rollout this demotion ends.
+      onRetarget: (app) => {
+        if (app.placement_approval_ref === null
+          && app.rollout_authorization_ref === null
+          && app.rollout_authorization_policy === 'manual'
+          && app.latest_preflight_evidence_json === null
+          && app.preflight_fingerprint === null
+          && app.pause_at === null) {
+          return {};
+        }
+        app.placement_approval_ref = null;
+        app.rollout_authorization_ref = null;
+        app.rollout_authorization_policy = 'manual';
+        app.latest_preflight_evidence_json = null;
+        app.preflight_fingerprint = null;
+        app.pause_at = null;
+        app.pause_reason = null;
+        app.pause_origin = 'operator';
+        return {
+          placementApprovalRef: null,
+          rolloutAuthorizationRef: null,
+          rolloutAuthorizationPolicy: 'manual',
+          latestPreflightEvidenceJson: null,
+          preflightFingerprint: null,
+          pauseAt: null,
+        };
+      },
     });
   }
 
@@ -396,6 +550,13 @@ export class GitOpsTransitions {
     };
     matchesDestination: (app: GitOpsApplicationRow) => boolean;
     assertReady: (app: GitOpsApplicationRow) => void;
+    /**
+     * Extra row edits applied in the same transaction once the retarget has
+     * landed, on the reloaded row. The returned delta is recorded in the
+     * retarget's history row beside the mode change, so an edit this makes is
+     * as auditable as the retarget it rides on.
+     */
+    onRetarget?: (app: GitOpsApplicationRow) => Record<string, unknown>;
   }): TransitionResult {
     return this.raw().transaction(() => {
       const app = this.store().getApplication(args.applicationId);
@@ -429,11 +590,13 @@ export class GitOpsTransitions {
       }
       const updated = this.store().getApplication(app.id);
       if (!updated) throw new GitOpsTransitionError('application not found');
+      const extra = args.onRetarget ? args.onRetarget(updated) : {};
+      if (args.onRetarget) this.writeApplication(updated);
       const historyId = this.history(updated, args.envelope, {
         stage: 'application_retargeted',
         outcome: 'committed',
         before: { targetMode: args.expectedMode },
-        after: { targetMode: next.targetMode },
+        after: { targetMode: next.targetMode, ...extra },
       });
       return { historyIds: historyId ? [historyId] : [], replayed: !historyId };
     })();
@@ -713,6 +876,12 @@ export class GitOpsTransitions {
       const targets = this.acceptanceTargets(app, args);
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Shared with `sourceAccepted` so both acceptance entry points leave the
+      // candidate naming the generation they just accepted. In production
+      // `applied` is Direct-only, where this is a no-op; keeping the call here
+      // means a future blueprint caller cannot reintroduce the stranded-binding
+      // state this pair exists to prevent.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
       for (const target of targets) {
         if (app.target_mode === 'direct') {
           this.applyTargetAcceptanceMutation(target, args);
@@ -742,8 +911,19 @@ export class GitOpsTransitions {
       // in the shared requireAcceptableCandidate guard.
       if (app.suspended_at) throw new GitOpsTransitionError('source is suspended');
       this.requireAcceptableCandidate(app, args);
+      // After every await that led here. The row was re-read inside this
+      // transaction, so a placement or a rollout policy that moved during
+      // policy evaluation or candidate revalidation refuses the commit instead
+      // of accepting a claim that no longer describes the application.
+      if (args.confirmation) {
+        const drift = sourceConfirmationDrift(app, args.confirmation);
+        if (drift) throw new GitOpsTransitionError(driftSentence(drift), CONFIRMATION_STALE);
+      }
       this.invalidateAuthorizationOnSourceChange(app, args.envelope, extras);
       this.applySourceAcceptanceMutation(app, args);
+      // Blueprint-only in effect: a Direct application has no rollout
+      // candidate, so the helper returns without touching anything.
+      this.rebindRolloutCandidateOnAcceptance(app, args.generationId);
     }, {
       generationId: args.generationId,
       artifactSetId: args.artifactSetId,
@@ -1087,6 +1267,13 @@ export class GitOpsTransitions {
         target.failure_at = null;
       }
       this.clearTargetInterruption(target, 'deploy_started');
+      // Compose bound a generation, which is success evidence, so a stale
+      // recovery claim is retired the same way a Blueprint acknowledgement
+      // retires one. A restore still in flight is left alone: this bind may
+      // have landed beside it rather than after it.
+      this.clearTargetInterruption(target, 'recovery_started');
+      this.retireRecoveryClaimOnSuccess(target, applicationId, envelope);
+      this.markInFlightRestore(target, envelope.at);
       return { before: {}, after: { deployedGenerationId: generationId } };
     });
   }
@@ -1102,6 +1289,8 @@ export class GitOpsTransitions {
     return this.mutateTarget(applicationId, nodeId, envelope, 'deploy_unbound', generationId, (target) => {
       this.requireMatchingDeploy(target, generationId, envelope);
       this.clearTargetActive(target);
+      this.retireNonMovingRecoveryClaim(target, applicationId, envelope);
+      this.markInFlightRestore(target, envelope.at);
       target.failure_stage = 'deploy';
       target.failure_class = 'unbound';
       target.failure_at = envelope.at;
@@ -1129,6 +1318,8 @@ export class GitOpsTransitions {
   ): TransitionResult {
     return this.mutateTarget(applicationId, nodeId, envelope, 'deploy_failed', null, (target) => {
       this.clearTargetActive(target);
+      this.retireNonMovingRecoveryClaim(target, applicationId, envelope);
+      this.markInFlightRestore(target, envelope.at);
       target.failure_stage = 'deploy';
       target.failure_class = failureClass;
       target.failure_at = envelope.at;
@@ -1303,7 +1494,13 @@ export class GitOpsTransitions {
             && app.pause_at === null
           ) {
             try {
-              this.rolloutPaused(args.applicationId, null, healthHoldReason(decision.reason), args.envelope);
+              this.rolloutPaused(
+                args.applicationId,
+                null,
+                healthHoldReason(decision.reason),
+                args.envelope,
+                'health',
+              );
             } catch (error) {
               if (!(error instanceof GitOpsTransitionError)) throw error;
               console.warn(
@@ -1500,6 +1697,12 @@ export class GitOpsTransitions {
       target.lkg_artifact_set_id = null;
       target.lkg_unavailable_at = null;
       target.lkg_unavailable_reason = null;
+      // A restore that is still moving keeps its marker through the retirement,
+      // so boot can still select and reclassify it after a crash.
+      this.markInFlightRestore(target, envelope.at);
+      // A retired target stops answering for the hold it may have claimed; if it
+      // was the last claimant, the hold goes with it rather than stranding.
+      this.clearApplicationRecoveryWhenNoTargetFails(applicationId, nodeId, envelope);
       return { before, after: { targetStatus: 'tombstoned' } };
     });
   }
@@ -1584,11 +1787,19 @@ export class GitOpsTransitions {
    * Change the placement policy. Configuration, not work.
    *
    * Mints no intent revision and no rollout candidate, and clears no source
-   * acceptance, placement approval, or rollout authorization. The edit decides
-   * what a *future* placement decision may do; the approvals already standing
-   * were made under the snapshot that authorized them and keep running under
-   * it. That is the same rule the health policy write follows, and it is why a
-   * policy change never appears as drift.
+   * acceptance and no operator approval. The edit decides what a *future*
+   * placement decision may do; an operator's approval stands, because an
+   * operator is not the policy. That is the same rule the health policy write
+   * follows, and it is why a policy change never appears as drift.
+   *
+   * Arming the policy again is the one exception, and it withdraws what the
+   * policy itself decided while it was last armed, with the rollout
+   * authorization that stood on it. Execution stops the moment the policy goes,
+   * but the approvals stayed on the row, so setting the policy back handed the
+   * next tick a decision made days earlier, on evidence nobody has read since.
+   * Re-arming says what a *future* change may do unattended; the change that
+   * was already decided waits for the operator, and the generation it opened
+   * waits with it, so the rollout pauses rather than being cancelled under them.
    *
    * Refuses while an operation is in flight, because the operation is reading
    * the policy this edit would change underneath it.
@@ -1611,22 +1822,51 @@ export class GitOpsTransitions {
         if (app.placement_policy === args.placementPolicy) {
           throw new GitOpsTransitionError('the placement policy is already set to that value');
         }
-        const before = { placementPolicy: app.placement_policy };
         app.placement_policy = args.placementPolicy;
         // A reason recorded under the old policy explains a decision that policy
         // made, and this one is no longer configured. Left in place it would be
         // read as the current reason for whatever review is open next.
         app.placement_policy_refusal_reason = null;
         app.placement_policy_refused_at = null;
-        return { before, after: { placementPolicy: args.placementPolicy } };
+        // The snapshot the single writer takes records both the policy value and
+        // the pointers it moved, so the withdrawal needs no payload of its own.
+        if (args.placementPolicy === 'bounded_auto') this.withdrawPolicyAuthority(app);
       },
     );
+  }
+
+  /**
+   * Withdraw the authority a policy wrote, leaving an operator's alone.
+   *
+   * The pointers are what name the authority, so clearing them is what makes it
+   * unusable: the reconciler's policy path and the preview's authority label
+   * both resolve through the placement pointer, and a rollout authorization is
+   * only live while the placement it names is. The authority recorded on the row
+   * decides this rather than the pointer being non-null, because an operator's
+   * approval is the operator's own decision and survives every policy edit.
+   *
+   * An unreadable approval row is left in place on purpose. A missing row is
+   * damage, and the gate that resolves it refuses the whole plan rather than
+   * falling back to the operator's own approval, which is the direction damage
+   * should fail.
+   */
+  private withdrawPolicyAuthority(app: GitOpsApplicationRow): void {
+    if (app.placement_approval_ref === null) return;
+    if (this.store().getApproval(app.placement_approval_ref)?.authority !== 'configured_policy') return;
+    app.placement_approval_ref = null;
+    app.rollout_authorization_ref = null;
   }
 
   /**
    * Change the rollout authorization policy. Configuration, not work, on the
    * same terms as `placementPolicyChanged`: nothing already authorized is
    * withdrawn, and no intent, candidate, or generation is minted or cleared.
+   *
+   * Arming it again is the exception, and it withdraws what stood on the
+   * automatic authority rather than only pausing it. Executing a placement is a
+   * rollout, so both settings gate one unattended authority; an operator's
+   * approval is untouched, and the generation stays so a fresh approval and
+   * authorization re-drive it.
    */
   rolloutAuthorizationPolicyChanged(args: {
     applicationId: string;
@@ -1648,9 +1888,9 @@ export class GitOpsTransitions {
         if (app.rollout_authorization_policy === args.policy) {
           throw new GitOpsTransitionError('the rollout authorization policy is already set to that value');
         }
-        const before = { rolloutAuthorizationPolicy: app.rollout_authorization_policy };
         app.rollout_authorization_policy = args.policy;
-        return { before, after: { rolloutAuthorizationPolicy: args.policy } };
+        // Same terms as `placementPolicyChanged`, and recorded the same way.
+        if (args.policy === 'automatic') this.withdrawPolicyAuthority(app);
       },
     );
   }
@@ -1947,17 +2187,20 @@ export class GitOpsTransitions {
     nodeId: number | null,
     reason: string,
     envelope: EventEnvelope,
+    origin: 'operator' | 'system' | 'health' = 'operator',
   ): TransitionResult {
     if (nodeId === null) {
       return this.mutateApp(applicationId, envelope, 'rollout_paused', 'committed', (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         app.pause_at = envelope.at;
         app.pause_reason = reason;
+        app.pause_origin = origin;
       }, {
         // The reason is operator-authored evidence for the hold. The compact
         // app snapshot omits it, so it is merged into the delta explicitly and
-        // the notification carries it.
-        historyAfter: { pauseReason: reason },
+        // the notification carries it. The origin travels with it so a reader
+        // can tell a hold a source change may clear from one only a person can.
+        historyAfter: { pauseReason: reason, pauseOrigin: origin },
       });
     }
     return this.mutateTarget(applicationId, nodeId, envelope, 'rollout_paused', null, (target) => {
@@ -1975,6 +2218,13 @@ export class GitOpsTransitions {
         if (!app.pause_at) throw new GitOpsTransitionError('application is not paused');
         app.pause_at = null;
         app.pause_reason = null;
+        app.pause_origin = 'operator';
+        // An application-wide resume is the operator's answer to whatever the
+        // hold said, so an acceptance bound to a placement they have now seen
+        // stops binding it. Only the fleet-wide verb does this: a target-scoped
+        // resume answers one target's fence and says nothing about where the
+        // application as a whole may deploy.
+        this.store().releaseConfirmedPlacement(applicationId);
         // A resume answers a *hold*: the operator has seen it and wants the
         // rollout to carry on, so the target the hold was about is deployed again
         // and the policy decides afresh. `health_attempts` is deliberately kept, so
@@ -2078,11 +2328,32 @@ export class GitOpsTransitions {
       if (args.intent.application_id !== args.applicationId) {
         throw new GitOpsTransitionError('intent belongs to another application');
       }
+      // Read before the pointer moves: the freeze is keyed on the compose, and
+      // only the intent this one replaces can say what that compose was.
+      const previousIntentId = app.intent_revision_id;
+      const previousIntent = previousIntentId === null
+        ? null
+        : this.store().getIntentRevision(previousIntentId) ?? null;
       this.store().insertIntentRevision(args.intent);
       app.intent_revision_id = args.intent.id;
-      // Inline freeze is per intent revision. A new intent must drop the prior
-      // freeze so the next successful deploy binds digests for this compose.
-      if (app.target_mode === 'inline_blueprint') {
+      // Inline freeze is per compose content. A compose edit must drop the prior
+      // freeze so the next successful deploy binds this compose's digests.
+      //
+      // A roster change mints an intent without touching the compose, and the
+      // freeze was cleared for it anyway. That dropped the desired generation on
+      // every placed target and left the applied one where it was, so the next
+      // freeze pointed every retained target at a generation id for content it
+      // was already running: the reconciler repairs a retained node only when the
+      // compose changed, so nothing ever re-acknowledged it and the projection
+      // reported a permanent "running a different generation" divergence that no
+      // Apply could clear. Content is the identity the freeze exists for, so a
+      // change that leaves the content alone keeps it.
+      //
+      // An unreadable prior intent falls to clearing: the freeze is an
+      // executable identity, and re-resolving it is the safe direction.
+      const composeChanged = previousIntent === null
+        || previousIntent.compose_content_sha256 !== args.intent.compose_content_sha256;
+      if (app.target_mode === 'inline_blueprint' && composeChanged) {
         this.clearInlineFreezePointers(app);
       }
       this.invalidatePlacementOnMaterialChange(app, args.envelope, extras);
@@ -2401,6 +2672,7 @@ export class GitOpsTransitions {
           provenance: args.provenance ?? 'legacy_inline',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2445,9 +2717,18 @@ export class GitOpsTransitions {
    * to authorize (config deploy may proceed under a qualified claim); exact
    * convergence is derived later only when qualification is exact.
    *
-   * Authority defaults to `configured_policy` (the automatic handoff minting
-   * on the configured policy's behalf). An explicit operator authorization
-   * passes `operator`, so the approval row records who actually decided.
+   * `authority` is required rather than defaulted, for the reason it is
+   * required on `placementApproved`: the only two values are an operator and a
+   * configured policy, and a default here would mislabel an operator's approval
+   * as a policy's. `policyProvenanceJson` is checked against it as a pair rather
+   * than trusted individually, because a decision with no record of the policy
+   * that made it is not reviewable, and an approval that claims a policy must
+   * be able to name it.
+   *
+   * The approval carries the snapshot the decision was made under, so the
+   * approval is self-sufficient: the generation it opens freezes the same
+   * snapshot, and once that generation is superseded or unreadable the approval
+   * row is the only record left of which policy authorized the rollout.
    */
   rolloutAuthorized(args: {
     applicationId: string;
@@ -2458,7 +2739,8 @@ export class GitOpsTransitions {
     actor: string | null;
     envelope: EventEnvelope;
     strategyJson?: string;
-    authority?: 'operator' | 'configured_policy';
+    authority: 'operator' | 'configured_policy';
+    policyProvenanceJson: string | null;
   }): TransitionResult {
     return this.mutateApp(
       args.applicationId,
@@ -2469,6 +2751,34 @@ export class GitOpsTransitions {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
         if (app.target_mode !== 'blueprint') {
           throw new GitOpsTransitionError('rollout authorization is only for Blueprint target mode');
+        }
+        if (args.authority === 'configured_policy' && args.policyProvenanceJson === null) {
+          throw new GitOpsTransitionError('a policy-authorized rollout must record its policy snapshot');
+        }
+        if (args.authority === 'operator' && args.policyProvenanceJson !== null) {
+          throw new GitOpsTransitionError('an operator rollout authorization records no policy snapshot');
+        }
+        if (args.authority === 'configured_policy' && args.policyProvenanceJson !== null) {
+          // The snapshot that authorized the decision was read by the caller,
+          // before this transaction. The generation below freezes the policy
+          // configured right now. A policy edit landing in between would make
+          // those two records disagree about one decision, and would mean the
+          // authorization was granted under a policy the operator had already
+          // changed. Comparing them here is what makes the two records agree by
+          // construction rather than by luck, and it is the same check
+          // `placementApproved` makes for its own decision.
+          //
+          // The comparison is over the whole snapshot, not just this domain,
+          // because the snapshot is the unit of provenance: the approval record
+          // and the frozen generation are two records of one decision, so
+          // letting them disagree about any domain is what this exists to
+          // prevent. A refused mint is not a stranded rollout: the caller
+          // returns the refusal and the next dispatch mints under the policy
+          // configured then.
+          const authorizing = decodePolicySnapshot(args.policyProvenanceJson);
+          if (!policyValuesEqual(authorizing, configuredSnapshotFor(app))) {
+            throw new GitOpsTransitionError('the configured policy changed while the decision was being applied');
+          }
         }
         // The mint-time gates, enforced here rather than at the caller.
         //
@@ -2481,7 +2791,7 @@ export class GitOpsTransitions {
         // exist skipped the drift remint, so a tag move could discard an
         // operator's authorization and replace it with a fresh policy-authorized
         // one, with no operator and no policy that permitted it.
-        if ((args.authority ?? 'configured_policy') === 'configured_policy') {
+        if (args.authority === 'configured_policy') {
           if (app.rollout_authorization_policy !== 'automatic') {
             throw new GitOpsTransitionError(
               'the rollout authorization policy requires an operator to authorize',
@@ -2520,10 +2830,20 @@ export class GitOpsTransitions {
         );
         const requiredTargetsJson = encodeGitOpsRequiredTargetsJson(ingredients.requiredNodeIds);
 
+        // An operator mint is the decision a source confirmation deferred, so
+        // the acceptance it authorizes stops being bound to the placement the
+        // confirmation named. Re-pointed rather than cleared, so a later
+        // replacement is still caught. Written here, inside the mint's own
+        // transaction, so a recorded authorization and a stale precondition
+        // cannot both be left standing.
+        if (args.authority === 'operator') {
+          this.store().recordConfirmedPlacement(args.applicationId, ingredients.placementApprovalRef);
+        }
+
         this.store().insertApproval({
           id: args.approvalId,
           kind: 'rollout_authorization',
-          authority: args.authority ?? 'configured_policy',
+          authority: args.authority,
           authoritative: 1,
           application_id: args.applicationId,
           generation_id: ingredients.acceptedGenerationId,
@@ -2537,7 +2857,9 @@ export class GitOpsTransitions {
           preflight_fingerprint: args.preflightFingerprint,
           fingerprint: null,
           blast_json: null,
-          policy_provenance_json: null,
+          // The policy this decision was made under, for a policy-authorized
+          // mint. An operator mint records none, because no policy decided it.
+          policy_provenance_json: args.policyProvenanceJson,
           actor: args.actor,
           created_at: args.envelope.at,
         });
@@ -2570,10 +2892,13 @@ export class GitOpsTransitions {
           // The snapshot this generation executes. Read from the live
           // application row rather than from the binding, so what is frozen is
           // what the operator has configured, not a value a caller supplied.
+          // The check above is what makes this the same snapshot the approval
+          // records, rather than one that merely happened to match.
           policy_snapshot_json: encodePolicySnapshot(configuredSnapshotFor(app)),
           provenance: 'rollout_authorization',
           supersedes_generation_id: previousGenerationId,
           superseded_at: null,
+          withdrawn_at: null,
           operation_id: args.envelope.operationId,
           actor: args.actor,
           trigger: args.envelope.trigger,
@@ -2611,20 +2936,35 @@ export class GitOpsTransitions {
   /**
    * Withdraw a live rollout authorization on the operator's decision.
    *
-   * The generation stays on the application as the record that a rollout was
-   * abandoned, while the authorization itself is cleared: a superseded
-   * generation whose authorization still resolved would let the dispatch
-   * boundary start it again. A later authorization mints a new generation over
-   * the same placement and accepted source, which is the only way forward from
-   * here.
+   * The row withdrawn is the pointer's generation when it is an authorization,
+   * otherwise the latest authorization recorded for the current accepted
+   * source. The second case is real: a system supersede (a preflight drift or a
+   * placement invalidation) can leave the pointer on a placement generation
+   * while an earlier authorization is still the newest one the automatic
+   * policy would re-mint. Marking only the pointer's row would miss it and let
+   * the policy redeploy what the operator rolled back from.
+   *
+   * The generation pointer stays as it is: when it names the abandoned
+   * authorization the projection reports the abandoned rollout, and when it
+   * names a placement generation that is still the current placement state. A
+   * later authorization mints a new generation over the same placement and
+   * accepted source, which is the only way forward from here.
    */
   rolloutSuperseded(args: {
     applicationId: string;
     envelope: EventEnvelope;
   }): TransitionResult {
-    // Read before the transaction only to annotate the history row; the
-    // guards below re-read and remain authoritative if the row moved.
-    const named = this.store().getApplication(args.applicationId)?.rollout_generation_id ?? null;
+    // Read before the transaction only to annotate the history row; the guards
+    // below re-read and remain authoritative if the row moved.
+    const before = this.store().getApplication(args.applicationId);
+    const namedBefore = before?.rollout_generation_id ?? null;
+    const namedRowBefore = namedBefore ? this.store().getRolloutGeneration(namedBefore) : undefined;
+    const latestBefore = before?.accepted_generation_id
+      ? this.store().latestRolloutAuthorizationForAcceptedGeneration(before.id, before.accepted_generation_id)
+      : undefined;
+    const annotation = namedRowBefore?.provenance === 'rollout_authorization'
+      ? namedBefore
+      : latestBefore?.id ?? null;
     return this.mutateApp(
       args.applicationId,
       args.envelope,
@@ -2632,23 +2972,23 @@ export class GitOpsTransitions {
       'superseded',
       (app) => {
         if (app.lifecycle_status !== 'active') throw new GitOpsTransitionError('application is not live');
-        if (!app.rollout_generation_id) {
+        const named = app.rollout_generation_id;
+        const namedRow = named ? this.store().getRolloutGeneration(named) : undefined;
+        const latest = app.accepted_generation_id
+          ? this.store().latestRolloutAuthorizationForAcceptedGeneration(app.id, app.accepted_generation_id)
+          : undefined;
+        const target = namedRow?.provenance === 'rollout_authorization' ? namedRow : latest;
+        if (!target || target.application_id !== app.id) {
           throw new GitOpsTransitionError('there is no live rollout generation to supersede');
-        }
-        const live = this.store().getRolloutGeneration(app.rollout_generation_id);
-        if (!live || live.application_id !== app.id) {
-          throw new GitOpsTransitionError('the live rollout generation could not be read');
-        }
-        if (live.provenance !== 'rollout_authorization') {
-          throw new GitOpsTransitionError('only an authorized rollout can be superseded');
         }
         app.rollout_authorization_ref = null;
         app.preflight_fingerprint = null;
-        // The generation pointer stays: the projection reports the abandoned
-        // rollout rather than pretending the application never had one.
-        this.store().markRolloutGenerationSuperseded(app.rollout_generation_id, args.envelope.at);
+        // The withdrawal marker is what tells the automatic policy this was an
+        // operator decision, not a system supersede it may re-mint.
+        this.store().markRolloutGenerationSuperseded(target.id, args.envelope.at);
+        this.store().markRolloutGenerationWithdrawn(target.id, args.envelope.at);
       },
-      named ? { rolloutGenerationId: named } : {},
+      annotation ? { rolloutGenerationId: annotation } : {},
     );
   }
 
@@ -2691,7 +3031,9 @@ export class GitOpsTransitions {
           activeStage: target.active_operation_stage,
           targetStatus: target.target_status,
         };
-        target.target_status = 'active';
+        if (before.targetStatus !== 'active') {
+          this.reviveTarget(target, args.applicationId, args.envelope);
+        }
         // A newer deploy supersedes an older one, which is how a redeploy of a
         // stuck request takes over. Anything else in flight is a different
         // operation, and displacing it would abandon it with no terminal event.
@@ -2773,11 +3115,18 @@ export class GitOpsTransitions {
     // materialization is what is actually running.
     if (app.intent_revision_id !== intentRevisionId) return false;
     if ((app.rollout_candidate_id ?? null) !== (rolloutCandidateId ?? null)) return false;
+    // The deploy's own marker is gone by the time a duplicate ack arrives, but a
+    // restore opened beside the deploy leaves a `recovery_started` marker in its
+    // place. That marker is another operation's, not evidence this apply is
+    // still pending, so the shortcut still applies; matching the deploy request
+    // instead would throw and make the adapter abandon its health run.
+    const deployStillMarked = target.active_operation_stage !== null
+      && target.active_operation_stage !== 'recovery_started';
     return app.accepted_generation_id !== null
       && target.applied_generation_id === app.accepted_generation_id
       && target.rollout_authorization_ref === app.rollout_authorization_ref
       && target.rollout_generation_id === app.rollout_generation_id
-      && target.active_operation_stage === null;
+      && !deployStillMarked;
   }
 
   /**
@@ -2849,6 +3198,9 @@ export class GitOpsTransitions {
         // candidate while the application carries none.
         if (app.intent_revision_id !== args.intentRevisionId) {
           target.legacy_applied_revision = args.legacyAppliedRevision;
+          // The deploy's marker is released with the deploy, and a restore that
+          // is still moving takes it back so a crash remains boot-recoverable.
+          this.markInFlightRestore(target, args.envelope.at);
           return { before, after: { supersededAck: true } };
         }
         target.intent_revision_id = args.intentRevisionId;
@@ -2863,6 +3215,18 @@ export class GitOpsTransitions {
         // derived from later evidence.
         target.desired_generation_id = app.accepted_generation_id;
         target.applied_generation_id = app.accepted_generation_id;
+        // The recorded identity described the previous artifact set, which is
+        // no longer the one this target is expected to satisfy. Keeping it would
+        // make the projection compare a stale identity against the new expected
+        // set and report confirmed artifact drift for a stack that has simply
+        // not been re-checked yet, so the observation is dropped and the target
+        // reads as awaiting verification until the reconciler looks again.
+        // Dropped rather than kept: an identity recorded against an expectation
+        // that no longer exists is not evidence about the current one.
+        if (target.expected_artifact_set_id !== null
+          && target.expected_artifact_set_id !== app.artifact_set_id) {
+          target.observed_artifact_identity_json = null;
+        }
         target.expected_artifact_set_id = app.artifact_set_id;
         target.latest_artifact_set_id = app.artifact_set_id;
         target.source_acceptance_ref = app.source_acceptance_ref;
@@ -2888,9 +3252,46 @@ export class GitOpsTransitions {
           target.failure_class = null;
           target.failure_at = null;
         }
+        // A recovery failure describes the state this apply replaced. Once the
+        // acknowledgement lands, the workload is the applied generation, so the
+        // stale fault is retired exactly as a deploy or withdrawal fault is.
+        // This is not a health claim: the health gate still observes the apply.
+        this.clearTargetInterruption(target, 'recovery_started');
+        this.retireRecoveryClaimOnSuccess(target, args.applicationId, args.envelope);
+        this.markInFlightRestore(target, args.envelope.at);
+        this.clearApplicationRecoveryWhenNoTargetFails(args.applicationId, args.nodeId, args.envelope);
         return { before, after: { intentRevisionId: args.intentRevisionId } };
       },
     );
+  }
+
+  /**
+   * Drop the application-level recovery failure once its last claimant is gone.
+   *
+   * A target that is not the acknowledged one still blocks the release when it
+   * may have moved itself, and when a restore is still running on it. The
+   * second case matters because the hold and the `restoring` stamp are both
+   * application-wide facts about work that has not reported an outcome: a
+   * sibling acknowledgement arriving mid-rollback must not release either. A
+   * `pre_mutation` claim is not such a claimant: it never held the application
+   * by itself, so it must not pin it once the last real hold is gone.
+   */
+  private clearApplicationRecoveryWhenNoTargetFails(
+    applicationId: string,
+    acknowledgedNodeId: number,
+    envelope: EventEnvelope,
+  ): void {
+    const remaining = this.store().listTargets(applicationId).some((row) =>
+      (row.node_id !== acknowledgedNodeId || targetRestoreInFlight(row))
+      && row.target_status !== 'tombstoned'
+      && targetRecoveryFailureMoved(row));
+    if (remaining) return;
+    this.withApplication(applicationId, envelope, (app) => {
+      if (app.recovery_phase !== 'failed' && app.failure_stage !== 'recovery') return;
+      app.recovery_phase = null;
+      app.recovery_ref = null;
+      this.clearAppFailure(app, ['recovery']);
+    });
   }
 
   /**
@@ -2993,6 +3394,8 @@ export class GitOpsTransitions {
         const before = { failureStage: target.failure_stage, pendingHealthRunId: target.pending_health_run_id };
         this.clearTargetActive(target);
         this.clearTargetInterruption(target, 'blueprint_deploy_started');
+        this.retireNonMovingRecoveryClaim(target, args.applicationId, args.envelope);
+        this.markInFlightRestore(target, args.envelope.at);
         target.failure_stage = 'blueprint_deploy';
         target.failure_class = args.failureClass;
         target.failure_at = args.envelope.at;
@@ -3075,6 +3478,14 @@ export class GitOpsTransitions {
         target.failure_stage = null;
         target.failure_class = null;
         target.failure_at = null;
+        // A restore that is still moving keeps its marker through the tombstone,
+        // so boot can still select and reclassify it after a crash.
+        this.markInFlightRestore(target, args.envelope.at);
+        // The recovery claim stays as residue, so a later revival still knows a
+        // restore on this target was never resolved; the tombstoned row stops
+        // counting as a claimant, and if it was the last one the hold goes with
+        // it rather than stranding.
+        this.clearApplicationRecoveryWhenNoTargetFails(args.applicationId, args.nodeId, args.envelope);
         return { before, after: { targetStatus: 'tombstoned' } };
       },
     );
@@ -3097,6 +3508,8 @@ export class GitOpsTransitions {
         const before = { failureStage: target.failure_stage };
         this.clearTargetActive(target);
         this.clearTargetInterruption(target, 'blueprint_withdraw_started');
+        this.retireNonMovingRecoveryClaim(target, args.applicationId, args.envelope);
+        this.markInFlightRestore(target, args.envelope.at);
         target.failure_stage = 'blueprint_withdraw';
         target.failure_class = args.failureClass;
         target.failure_at = args.envelope.at;
@@ -3126,15 +3539,45 @@ export class GitOpsTransitions {
       args.stage,
       null,
       (target) => {
+        const before = { latestStage: target.latest_stage, targetStatus: target.target_status };
         if (target.target_status !== 'active') {
-          throw new GitOpsTransitionError('cannot observe a tombstoned target');
+          // One observation re-opens a severed placement, and only one. A
+          // state-review hold is a decision that this node needs confirming
+          // before it may be placed, which is an explicit request for the node
+          // rather than a report about it, so a node the model had severed and
+          // that is still wanted comes back the way an explicit deploy brings it
+          // back. Every other stage is a report about what was seen, and
+          // reviving a retired target to record one would resurrect a placement
+          // nothing has asked for.
+          //
+          // This heals the projection whenever a hold is recorded against a
+          // severed node; it does not by itself restore automatic placement. The
+          // reconciler's decision pass skips severed nodes, so a node that was
+          // cleared has to be asked for again explicitly, which is the same
+          // deliberate act that brings a severed target back for a deploy.
+          //
+          // The two cannot chase each other on their own: a stale guard is
+          // cleared only for a node that is no longer desired, and this is
+          // recorded only for a node that is, so a clear cannot re-hold while
+          // the node stays undesired. A re-hold needs the node to become desired
+          // again, by an operator edit or a selector change, and that is a new
+          // placement decision rather than an oscillation.
+          if (args.stage !== 'blueprint_state_review') {
+            throw new GitOpsTransitionError('cannot observe a tombstoned target');
+          }
+          this.reviveTarget(target, args.applicationId, args.envelope);
+          // The severance abandoned whatever this target had in flight, and an
+          // interruption outranks the observation below, so a surviving one
+          // would report the abandoned operation instead of the hold that
+          // re-opened the placement. Cleared for the same reason tombstoning
+          // clears the active operation: nothing is going to finish it.
+          this.clearTargetInterruption(target, target.interruption_stage);
         }
         // The runtime facet projects these stages, which is the only route
         // an observation has into the derived status: the reconciler records
         // what it saw rather than moving any pointer. The history row written
         // alongside is the separate, unprojected record. `mutateTarget` stamps
         // the stage.
-        const before = { latestStage: target.latest_stage };
         return { before, after: { observed: args.stage } };
       },
     );
@@ -3181,6 +3624,14 @@ export class GitOpsTransitions {
    * differs. Direct Git recovery emits the `recovery_*` names; the rollout
    * rollback route emits these, because a rollout recovery is not a stack
    * update recovery even when it restores the same kind of state.
+   *
+   * The active-operation marker is what makes a crashed open recoverable: boot
+   * selects applications by an active stage or by an in-flight recovery phase,
+   * then `interruptActiveOperations` reclassifies any target still claiming
+   * `restoring`. Without either a crashed open would leave the target and the
+   * application in `restoring` for ever. It is only written when the target has
+   * no operation of its own, so a rollback that overlaps an in-flight deploy
+   * does not steal that deploy's acknowledgement identity.
    */
   rollbackInProgress(args: {
     applicationId: string;
@@ -3206,10 +3657,28 @@ export class GitOpsTransitions {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot roll back a tombstoned target');
         }
+        // One rollback per target, enforced here rather than only in the
+        // callers: a second restore opened over a moving one would take its
+        // recovery slot while the first is still writing files, which is how a
+        // hold gets released and a successful restore gets dropped. This
+        // transaction is the serialization point; the route and the health
+        // executor check first so the operator gets a clean answer.
+        if (targetRestoreInFlight(target)) {
+          throw new GitOpsTransitionError('a rollback is already in progress on this target');
+        }
         const before = { recoveryPhase: target.recovery_phase };
         target.recovery_phase = 'restoring';
         target.recovery_ref = args.recoveryRef;
         target.recovery_generation_id = args.recoveryGenerationId;
+        // A rollback can open beside a deploy that is already in flight (that
+        // deploy may be what is being recovered from), but never over another
+        // restore, so the marker is only written when nothing owns it.
+        if (target.active_operation_stage === null) {
+          target.active_operation_id = args.envelope.operationId;
+          target.active_operation_stage = 'recovery_started';
+          target.active_operation_at = args.envelope.at;
+          target.active_generation_id = args.recoveryGenerationId;
+        }
         this.withApplication(args.applicationId, args.envelope, (app) => {
           app.recovery_phase = 'restoring';
           app.recovery_ref = args.recoveryRef;
@@ -3225,34 +3694,57 @@ export class GitOpsTransitions {
    * Persists the failure class it was given rather than deriving one, because
    * the projection reports these columns verbatim. `partial` is the class this
    * alias adds over `recovery_failed`: some targets came back and some did not,
-   * which is neither of the recovery classes.
+   * which is neither of the recovery classes. `pre_mutation` records a restore
+   * the node refused before it could move anything: the failure stays visible
+   * on the target, but it does not hold the application by itself. A target
+   * that already carries a class that may have moved it keeps that class; a
+   * later refusal cannot downgrade a failure the target already proved.
+   *
+   * The no-target alias accepts only the classes that assert an application
+   * hold, so a refusal with nothing to record is not representable.
    */
   rollbackPartialFailed(args: {
     applicationId: string;
-    nodeId: number | null;
+    nodeId: number;
     recoveryRef: string;
     failureClass: 'pre_mutation' | 'post_mutation' | 'partial';
     envelope: EventEnvelope;
+  } | {
+    applicationId: string;
+    nodeId: null;
+    recoveryRef: string;
+    failureClass: 'post_mutation' | 'partial';
+    envelope: EventEnvelope;
   }): TransitionResult {
     const applyFailure = (row: {
-      recovery_phase: string | null;
+      recovery_phase: GitOpsTargetCurrentRow['recovery_phase'];
       recovery_ref: string | null;
       failure_stage: string | null;
       failure_class: string | null;
       failure_at: number | null;
+      recovery_failure_class: string | null;
+      recovery_failure_at: number | null;
     }): void => {
       row.recovery_phase = 'failed';
       row.recovery_ref = args.recoveryRef;
       row.failure_stage = 'recovery';
       row.failure_class = args.failureClass;
       row.failure_at = args.envelope.at;
+      row.recovery_failure_class = args.failureClass;
+      row.recovery_failure_at = args.envelope.at;
     };
 
     if (args.nodeId === null) {
+      // The application-only alias is a derivation too, not a direct stamp: it
+      // runs after the per-target terminals, so the live rows already carry the
+      // failure this alias is about, and a restore still moving on a target
+      // outside the operation's scope keeps the stamp it owns.
       return this.mutateApp(args.applicationId, args.envelope, 'rollback_partial_failed', 'failed', (app) => {
-        applyFailure(app);
+        this.deriveApplicationRecovery(app, args.envelope.at, []);
       });
     }
+    const refusedBeforeMutation = args.failureClass === 'pre_mutation';
+    let failedTarget: GitOpsTargetCurrentRow | undefined;
     const result = this.mutateTarget(
       args.applicationId,
       args.nodeId,
@@ -3260,21 +3752,182 @@ export class GitOpsTransitions {
       'rollback_partial_failed',
       null,
       (target) => {
-        const before = { recoveryPhase: target.recovery_phase, failureStage: target.failure_stage };
-        applyFailure(target);
-        return { before, after: { recoveryPhase: 'failed', failureClass: args.failureClass } };
+        failedTarget = target;
+        const before = {
+          recoveryPhase: target.recovery_phase,
+          failureStage: target.failure_stage,
+          recoveryFailureClass: target.recovery_failure_class,
+        };
+        // A refusal that defers to an earlier moved claim leaves the shared
+        // failure slot alone: that slot may now describe a later deploy or
+        // withdraw failure, and overwriting it would erase a record this
+        // refusal says nothing about. The claim keeps its own class and time in
+        // its own columns, and only the phase moves. The in-flight phase is not
+        // such a claim; it is this attempt's own open.
+        const priorMoved = refusedBeforeMutation && recoveryClaimMoved(target);
+        if (priorMoved) {
+          target.recovery_phase = 'failed';
+        } else {
+          applyFailure(target);
+        }
+        // The rollback is over on this target; release the marker its own open
+        // wrote. Serialization means no other restore can own it.
+        if (target.active_operation_stage === 'recovery_started') {
+          this.clearTargetActive(target);
+        }
+        // A terminal rollback also retires the interruption a crashed open left.
+        this.clearTargetInterruption(target, 'recovery_started');
+        if (refusedBeforeMutation) {
+          // Settled in the same transaction as the target write: a crash
+          // between the two would otherwise leave the application restoring.
+          // The target row is not flushed yet, so its in-memory state is what
+          // the settle reasons about.
+          this.settleRefusedRollback(args.applicationId, target, args.envelope);
+        }
+        return { before, after: { recoveryPhase: 'failed', failureClass: target.failure_class } };
       },
       'failed',
     );
-    // Application-wide too, not only on the target. `rollbackInProgress` opened
-    // the application into `restoring`, so recording the failure on the target
-    // alone would leave the application claiming a recovery is still running that
-    // has already failed, which is what reporting a partial rollback truthfully
-    // has to mean for the rollout as a whole.
-    this.withApplication(args.applicationId, args.envelope, (app) => {
-      applyFailure(app);
-    });
+    if (refusedBeforeMutation) {
+      return result;
+    }
+    // Application-wide too, not only on the target. Derived from the live
+    // targets rather than stamped directly: a restore still moving on a sibling
+    // target owns the application stamp, and a scope that did not include that
+    // target must not flip it to this failure's ref. When no sibling is moving,
+    // the derivation lands exactly the hold this failure claims.
+    const failedRow = failedTarget;
+    if (failedRow) {
+      this.withApplication(args.applicationId, args.envelope, (app) => {
+        this.deriveApplicationRecovery(app, args.envelope.at, [failedRow]);
+      });
+    }
     return result;
+  }
+
+  /**
+   * Settle a rollback whose per-target failure records could not be written.
+   *
+   * The route records each failure through `rollbackPartialFailed`; if those
+   * writes throw, the `restoring` stamp `rollbackInProgress` opened would
+   * otherwise stay. Retrying the records here is what gives the named targets
+   * a terminal state rather than leaving them restoring (and their
+   * active-operation marker blocking the next deploy); the application settles
+   * from the intended states whether or not the retries land, and the marker
+   * makes any target the retries miss recoverable at boot.
+   */
+  rollbackRefusalSettled(args: {
+    applicationId: string;
+    targets: Array<{ nodeId: number; failureClass: 'pre_mutation' | 'partial' }>;
+    recoveryRef: string;
+    envelope: EventEnvelope;
+  }): TransitionResult {
+    for (const { nodeId, failureClass } of args.targets) {
+      try {
+        this.rollbackPartialFailed({
+          applicationId: args.applicationId,
+          nodeId,
+          recoveryRef: args.recoveryRef,
+          failureClass,
+          envelope: args.envelope,
+        });
+      } catch (error) {
+        console.error(
+          '[GitOps] Could not record a failed rollback target on retry for %s: %s',
+          sanitizeForLog(args.applicationId),
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    // Settle from what the retries actually landed. Read after the retries so
+    // the rows carry their terminal state; a row the retry could not record is
+    // settled from its intended state instead, so one failed write does not
+    // strand the stamp. A refusal that deferred to an earlier moved claim leaves
+    // the shared slot alone, exactly as the write itself does.
+    const intended: GitOpsTargetCurrentRow[] = [];
+    for (const { nodeId, failureClass } of args.targets) {
+      const row = this.store().getTarget(args.applicationId, nodeId);
+      if (!row) continue;
+      const keepPrior = failureClass === 'pre_mutation' && recoveryClaimMoved(row);
+      intended.push(keepPrior ? { ...row, recovery_phase: 'failed' } : {
+        ...row,
+        recovery_phase: 'failed',
+        recovery_ref: args.recoveryRef,
+        failure_stage: 'recovery',
+        failure_class: failureClass,
+        recovery_failure_class: failureClass,
+        recovery_failure_at: args.envelope.at,
+        failure_at: args.envelope.at,
+      });
+    }
+    return this.mutateApp(args.applicationId, args.envelope, 'rollback_refusal_settled', 'committed', (app) => {
+      this.deriveApplicationRecovery(app, args.envelope.at, intended);
+    });
+  }
+
+  /**
+   * Derive the application-level recovery stamp from the live targets.
+   *
+   * One derivation for every writer that can settle, open or release the stamp:
+   * a refusal settling, a completion succeeding, and a revived placement. A
+   * restore still moving on any target owns the application, a target whose
+   * recovery failure may have moved it still owns the hold, and a target that
+   * already completed a recovery keeps the settled receipt. Deriving from the
+   * targets rather than from one operation's ref is what stops a sibling's
+   * success from releasing a hold another target still answers for.
+   *
+   * The hold check reads the claim's own class and time, not the shared failure
+   * slot: those columns are shared with deploy and withdraw failures, and a
+   * moved claim keeps its own record beside them.
+   *
+   * `overrides` carries the rows a caller has mutated in memory and not yet
+   * flushed. When a write happens in the same transaction, the database still
+   * holds the pre-write rows, so the caller's own target has to be passed in.
+   */
+  private settleRefusedRollback(
+    applicationId: string,
+    current: GitOpsTargetCurrentRow,
+    envelope: EventEnvelope,
+  ): void {
+    this.withApplication(applicationId, envelope, (app) => {
+      this.deriveApplicationRecovery(app, envelope.at, [current]);
+    });
+  }
+
+  private deriveApplicationRecovery(
+    app: GitOpsApplicationRow,
+    at: number,
+    overrides: GitOpsTargetCurrentRow[],
+  ): void {
+    const overrideIds = new Set(overrides.map((row) => row.node_id));
+    const others = this.store().listTargets(app.id).filter((row) =>
+      row.target_status !== 'tombstoned' && !overrideIds.has(row.node_id));
+    const live = [...others, ...overrides.filter((row) => row.target_status !== 'tombstoned')];
+    if (live.some((row) => targetRestoreInFlight(row))) {
+      // A restore is still moving on some target; whichever operation opened
+      // it settles the application. Leave the stamp it carries.
+      return;
+    }
+    const surviving = live.find((row) => recoveryClaimMoved(row));
+    if (surviving) {
+      app.recovery_phase = 'failed';
+      app.recovery_ref = surviving.recovery_ref ?? app.recovery_ref;
+      app.failure_stage = 'recovery';
+      // The claim's own record, not the shared slot: a later deploy or withdraw
+      // failure may be sitting there, and it is not what this hold is about. The
+      // time follows the same rule, so a hold is not reported as having started
+      // when the unrelated failure arrived.
+      app.failure_class = recoveryFailureClaimClass(surviving) ?? 'partial';
+      app.failure_at = recoveryFailureClaimAt(surviving) ?? at;
+      return;
+    }
+    if (live.some((row) => row.recovery_phase === 'complete')) {
+      app.recovery_phase = 'complete';
+    } else {
+      app.recovery_phase = null;
+      app.recovery_ref = null;
+    }
+    this.clearAppFailure(app, ['recovery']);
   }
 
   /**
@@ -3317,16 +3970,21 @@ export class GitOpsTransitions {
           healthyGenerationId: target.healthy_generation_id,
         };
         this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'recovery_started');
         target.recovery_phase = 'complete';
         target.recovery_ref = args.recoveryRef;
+        target.recovery_failure_class = null;
+        target.recovery_failure_at = null;
         if (target.failure_stage === 'recovery') {
           target.failure_stage = null;
           target.failure_class = null;
           target.failure_at = null;
         }
+        // The application stamp is derived from every live target, not set to
+        // complete outright: a sibling whose recovery may have moved still owns
+        // the hold, and this target's success must not release it.
         this.withApplication(args.applicationId, args.envelope, (app) => {
-          app.recovery_phase = 'complete';
-          this.clearAppFailure(app, ['recovery']);
+          this.deriveApplicationRecovery(app, args.envelope.at, [target]);
         });
 
         target.desired_generation_id = restored;
@@ -3391,6 +4049,13 @@ export class GitOpsTransitions {
       (target) => {
         if (target.target_status !== 'active') {
           throw new GitOpsTransitionError('cannot recover a tombstoned target');
+        }
+        // One restore per target, the same rule `rollbackInProgress` enforces:
+        // the rollout and Direct recovery paths write the same recovery slot,
+        // and a second restore opening over a moving one would take the slot
+        // while the first is still writing files.
+        if (targetRestoreInFlight(target)) {
+          throw new GitOpsTransitionError('a recovery is already in progress on this target');
         }
         const before = { recoveryPhase: target.recovery_phase };
         target.recovery_phase = 'restoring';
@@ -3459,15 +4124,19 @@ export class GitOpsTransitions {
           healthyGenerationId: target.healthy_generation_id,
         };
         this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'recovery_started');
         target.recovery_phase = 'complete';
+        target.recovery_failure_class = null;
+        target.recovery_failure_at = null;
         if (target.failure_stage === 'recovery') {
           target.failure_stage = null;
           target.failure_class = null;
           target.failure_at = null;
         }
+        // Derived from every live target: a sibling that may have moved still
+        // owns the hold, and this success must not release it.
         this.withApplication(args.applicationId, args.envelope, (app) => {
-          app.recovery_phase = 'complete';
-          this.clearAppFailure(app, ['recovery']);
+          this.deriveApplicationRecovery(app, args.envelope.at, [target]);
         });
 
         const generationId = args.recoveryGenerationId;
@@ -3537,11 +4206,14 @@ export class GitOpsTransitions {
       (target) => {
         const before = { recoveryPhase: target.recovery_phase };
         this.clearTargetActive(target);
+        this.clearTargetInterruption(target, 'recovery_started');
         target.recovery_phase = 'failed';
         target.recovery_ref = args.recoveryRef;
         target.failure_stage = 'recovery';
         target.failure_class = args.failureClass;
         target.failure_at = args.envelope.at;
+        target.recovery_failure_class = args.failureClass;
+        target.recovery_failure_at = args.envelope.at;
         this.withApplication(args.applicationId, args.envelope, (app) => {
           app.recovery_phase = 'failed';
           app.recovery_ref = args.recoveryRef;
@@ -3726,7 +4398,9 @@ export class GitOpsTransitions {
       // A restore that never finished is not still running. Left alone, the
       // phase reports a live recovery for ever, because only the terminal
       // recovery events clear it and neither one is coming.
-      const interruptedRecovery = app.recovery_phase === 'restoring' || app.recovery_phase === 'compensating';
+      const interruptedRecovery = app.recovery_phase === 'capturing'
+        || app.recovery_phase === 'restoring'
+        || app.recovery_phase === 'compensating';
       if (interruptedRecovery) {
         app.recovery_phase = 'failed';
         app.failure_stage = 'recovery';
@@ -3734,6 +4408,12 @@ export class GitOpsTransitions {
         app.failure_at = envelope.at;
       }
       if (app.active_operation_stage || interruptedRecovery) {
+        // The application row never carries the restore's marker (rollback and
+        // recovery opens write only the target's), so an in-flight recovery
+        // leaves no application operation stage here. The phase above is what
+        // reports the interruption; inventing a stage would set a value no
+        // recovery terminal clears, and the drift collectors read a set
+        // application stage as a standing suppression.
         app.interruption_stage = app.active_operation_stage;
         app.interruption_at = envelope.at;
         app.interruption_operation_id = app.active_operation_id;
@@ -3750,16 +4430,34 @@ export class GitOpsTransitions {
         if (id) historyIds.push(id);
       }
       for (const target of this.store().listTargets(applicationId)) {
-        const targetRecoveryInterrupted = target.recovery_phase === 'restoring'
-          || target.recovery_phase === 'compensating';
+        const targetRecoveryInterrupted = targetRestoreInFlight(target);
         if (!target.active_operation_stage && !targetRecoveryInterrupted) continue;
         if (targetRecoveryInterrupted) {
+          // Read the claim's own class and time before this branch rewrites
+          // them: a restore that was superseded by a newer attempt may already
+          // carry a class that proves movement, and that proof outranks this
+          // attempt's unknown outcome.
+          const priorClaim = recoveryFailureClaimClass(target);
           target.recovery_phase = 'failed';
           target.failure_stage = 'recovery';
           target.failure_class = 'interrupted';
           target.failure_at = envelope.at;
+          // A restore that was superseded by a newer attempt may already carry
+          // a class that proves movement. That proof outranks this attempt's
+          // unknown outcome, so it and its time are kept rather than
+          // overwritten.
+          const priorClaimAt = recoveryFailureClaimAt(target);
+          if (priorClaim !== null && priorClaim !== 'pre_mutation') {
+            target.recovery_failure_class = priorClaim;
+            target.recovery_failure_at = priorClaimAt ?? envelope.at;
+          } else {
+            target.recovery_failure_class = 'interrupted';
+            target.recovery_failure_at = envelope.at;
+          }
         }
-        target.interruption_stage = target.active_operation_stage;
+        // A marker-less in-flight restore still names what was interrupted.
+        target.interruption_stage = target.active_operation_stage
+          ?? (targetRecoveryInterrupted ? 'recovery_started' : null);
         target.interruption_at = envelope.at;
         target.interruption_operation_id = target.active_operation_id;
         target.interruption_generation_id = target.active_generation_id;
@@ -3869,6 +4567,14 @@ export class GitOpsTransitions {
   /** The mode-neutral application-row mutation `applied` and `sourceAccepted` share. */
   private applySourceAcceptanceMutation(app: GitOpsApplicationRow, args: AppliedArgs): void {
     this.insertAcceptanceRecords(app, args);
+    // A new acceptance replaces the content the previous refusal described, so
+    // that reason goes with it. The freeze that follows records its own refusal
+    // if this generation has one.
+    app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+      decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+      'git_managed_artifact_unmodellable',
+      null,
+    );
     app.accepted_generation_id = args.generationId;
     app.artifact_set_id = args.artifactSetId;
     app.latest_artifact_set_id = args.artifactSetId;
@@ -3883,6 +4589,34 @@ export class GitOpsTransitions {
     this.clearActive(app);
     this.clearAppFailure(app, ['apply', 'fetch', 'validation']);
     this.clearInterruption(app, 'apply_started');
+  }
+
+  /**
+   * Move the current rollout candidate onto the generation an acceptance just
+   * bound.
+   *
+   * The first authorization stamps the candidate with the generation and
+   * artifact it authorized (`bindRolloutCandidateSource`). A later source
+   * acceptance clears that authorization but keeps placement, so the candidate
+   * must name the new generation or `authorizationIngredients` refuses. The
+   * artifact binding is cleared rather than pointed at the acceptance's seed
+   * set: the freeze that follows advances the application's set to the resolved
+   * one, and a candidate pinned to the seed would then disagree with the
+   * application for ever. Authorization re-stamps both from the resolved set,
+   * the same way it does for a candidate opened before its first acceptance.
+   * Only a candidate that describes the current intent is moved; a candidate
+   * minted for an older intent belongs to a placement that was already
+   * invalidated and will be replaced by the next intent revision.
+   */
+  private rebindRolloutCandidateOnAcceptance(
+    app: GitOpsApplicationRow,
+    acceptedGenerationId: string,
+  ): void {
+    if (app.target_mode !== 'blueprint' || !app.rollout_candidate_id) return;
+    const candidate = this.store().getRolloutCandidate(app.rollout_candidate_id);
+    if (!candidate || candidate.application_id !== app.id) return;
+    if (candidate.intent_revision_id !== app.intent_revision_id) return;
+    this.store().rebindRolloutCandidateSource(app.id, candidate.id, acceptedGenerationId);
   }
 
   /** The Direct-only target-row mutation `applied` and `targetApplied` share. */
@@ -3919,7 +4653,11 @@ export class GitOpsTransitions {
       rollout_candidate_id: null,
       rollout_generation_id: null,
       source_acceptance_ref: null,
-      placement_approval_ref: null,
+      // This column copies the confirmation's placement, which is null both when
+      // nobody confirmed and when they confirmed that none was approved. The
+      // object below is what distinguishes those two.
+      placement_approval_ref: args.confirmation?.placementApprovalRef ?? null,
+      source_confirmation_json: args.confirmation ? encodeSourceConfirmation(args.confirmation) : null,
       required_targets_json: null,
       preflight_fingerprint: null,
       fingerprint: null,
@@ -3992,8 +4730,13 @@ export class GitOpsTransitions {
 
   /**
    * Drop Inline freeze pointers so the next successful deploy can mint a new
-   * generation and expected set for the current intent. Does not delete the
+   * generation and expected set for the current compose. Does not delete the
    * prior generation/artifact rows (history stays).
+   *
+   * Only for a compose change. `intentRevised` decides, and the reason is that
+   * the generation names executable content: dropping it for a roster change
+   * would re-point placed targets at a fresh id for the content they are
+   * already running.
    */
   private clearInlineFreezePointers(app: GitOpsApplicationRow): void {
     app.accepted_generation_id = null;
@@ -4017,13 +4760,51 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // A system hold belongs to the rollout this acceptance supersedes, and its
+    // reason describes that rollout. The clear runs for every target mode even
+    // though only Blueprint applications reach the hold helper today: the hold
+    // is about the superseded rollout rather than the content model, and a
+    // target-mode check here would be a second place to keep in step. An
+    // operator pause and a health-policy hold are deliberate stops and survive;
+    // only the operator's own resume clears those.
+    //
+    // An unfinished roll back is the exception: lifting the hold here would let
+    // the next dispatch deploy over a target whose rollback never finished. The
+    // dispatch queue does not skip a fence written by an older rollout
+    // generation, so the clear stays conservative and blocks while any live
+    // target still carries the fence. A retired row does not count: its
+    // rollback can never be finished, and blocking on it would wedge the
+    // application for ever. Finishing or undoing the rollback, then resuming
+    // and authorizing, is what moves the rollout on.
+    const rollbackPending = app.target_mode === 'blueprint'
+      && this.store().listTargets(app.id).some(
+        (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+      );
+    if (app.pause_at !== null && app.pause_origin === 'system' && !rollbackPending) {
+      const before = { pauseAt: app.pause_at, pauseReason: app.pause_reason, pauseOrigin: app.pause_origin };
+      app.pause_at = null;
+      app.pause_reason = null;
+      app.pause_origin = 'operator';
+      const cleared = this.history(app, envelope, {
+        stage: 'rollout_unpaused',
+        outcome: 'committed',
+        before,
+        after: { pauseAt: null, pauseReason: null, pauseOrigin: 'operator' },
+      });
+      if (cleared) extras.historyIds.push(cleared);
+    }
     if (app.target_mode !== 'blueprint') return;
-    if (!app.rollout_authorization_ref && !app.preflight_fingerprint) return;
     app.rollout_authorization_ref = null;
     app.preflight_fingerprint = null;
     if (!app.rollout_generation_id) return;
     const live = this.store().getRolloutGeneration(app.rollout_generation_id);
     if (!live || live.provenance !== 'rollout_authorization') return;
+    // A generation the operator already superseded keeps its pointer until this
+    // acceptance detaches it. Leaving it would make the next dispatch read the
+    // frozen strategy as moved on and refuse, which is how an earlier rollback
+    // or supersede disabled the automatic handoff for every later commit. The
+    // helper records the event only once, so an acceptance does not append a
+    // duplicate.
     this.recordRolloutGenerationSuperseded(app, app.rollout_generation_id, null, envelope, extras);
     app.rollout_generation_id = null;
   }
@@ -4032,6 +4813,20 @@ export class GitOpsTransitions {
    * Persist the latest redacted preflight evaluation on the application row.
    * Writes no history (reconcile-time evaluations must not spam the operator
    * list). Call before any mint or invalidate decision.
+   *
+   * An Inline Blueprint is skipped rather than written, because no caller can
+   * reach it there legitimately. The Direct apply path resolves its application
+   * through `getLiveDirectApplication` and the Git-managed authorization path
+   * is refused for a non-`blueprint` mode before it evaluates, so the one way
+   * an inline row arrives is a Detach landing inside that path's preflight
+   * await. The write would then describe an application this mode can never
+   * authorize, and nothing reads it: derive answers from the mode. The mint
+   * that follows is refused by `rolloutAuthorized`, so skipping the write
+   * leaves correct state behind.
+   *
+   * Skipped rather than refused: an exception here would turn a benign race
+   * into a failed authorize request, and the refusal is already reported by
+   * the mint that the caller reaches next.
    */
   recordPreflightEvaluation(args: {
     applicationId: string;
@@ -4041,6 +4836,7 @@ export class GitOpsTransitions {
     this.raw().transaction(() => {
       const app = this.store().getApplication(args.applicationId);
       if (!app) throw new GitOpsTransitionError('application not found');
+      if (app.target_mode === 'inline_blueprint') return;
       app.latest_preflight_evidence_json = args.evidenceJson;
       app.updated_at = args.at ?? Date.now();
       this.writeApplication(app);
@@ -4107,6 +4903,34 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Record or clear why a Git-managed generation's artifact identity cannot be
+   * modelled from its authored content.
+   *
+   * The freeze refuses compose shapes whose authored text can diverge from the
+   * rendered model, and a refusal is permanent for that generation. Persisting
+   * it is what keeps the cause visible: without it the refusal reaches only the
+   * accept response and the server log, and the surface shows the generic
+   * unresolved-artifact refusal instead.
+   */
+  setGitManagedArtifactLimitation(args: {
+    applicationId: string;
+    detail: string | null;
+    at?: number;
+  }): void {
+    this.raw().transaction(() => {
+      const app = this.store().getApplication(args.applicationId);
+      if (!app) throw new GitOpsTransitionError('application not found');
+      app.evidence_limitations_json = encodeGitOpsEvidenceLimitations(
+        decodeGitOpsEvidenceLimitations(app.evidence_limitations_json),
+        'git_managed_artifact_unmodellable',
+        args.detail === null ? null : { code: 'git_managed_artifact_unmodellable', detail: args.detail },
+      );
+      app.updated_at = args.at ?? Date.now();
+      this.writeApplication(app);
+    })();
+  }
+
+  /**
    * Clear a live rollout authorization when preflight evidence drifted or
    * blocked. Leaves placement approval intact. Appends history only when a
    * live rollout_authorization generation is superseded.
@@ -4164,6 +4988,11 @@ export class GitOpsTransitions {
     envelope: EventEnvelope,
     extras: { historyIds: string[] },
   ): void {
+    // Idempotent per generation: a row that is already marked must not append a
+    // second history row and notification, whichever caller reaches it again
+    // (a repeat drift invalidation, a re-approval, a re-authorization).
+    const existing = this.store().getRolloutGeneration(previousGenerationId);
+    if (!existing || existing.superseded_at !== null) return;
     this.store().markRolloutGenerationSuperseded(previousGenerationId, envelope.at);
     const superseded = this.history(app, envelope, {
       stage: 'rollout_generation_superseded',
@@ -4401,6 +5230,54 @@ export class GitOpsTransitions {
   }
 
   /**
+   * Bring a tombstoned placement back into the fleet.
+   *
+   * A revival is a placement, not evidence the abandoned restore resolved, so a
+   * claim that may have moved the target survives it and the application hold is
+   * re-derived from that claim: without this the target would report a failed
+   * recovery the application does not, and the repair gate would be the only
+   * thing still answering for it. A claim that moved nothing is retired here,
+   * because it holds nothing and would otherwise mask the placement's own status
+   * through the redeploy. Both revival paths share this, so they cannot drift.
+   */
+  private reviveTarget(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    target.target_status = 'active';
+    this.retireNonMovingRecoveryClaim(target, applicationId, envelope);
+    if (recoveryClaimMoved(target)) {
+      this.withApplication(applicationId, envelope, (app) => {
+        this.deriveApplicationRecovery(app, envelope.at, [target]);
+      });
+    }
+  }
+
+  /**
+   * Hand the active-operation marker back to a restore that is still moving.
+   *
+   * A deploy, withdrawal or acknowledgement clears the marker of the operation
+   * it terminates. When a restore was opened beside that operation, it has no
+   * marker of its own (its open leaves another stage's marker alone), so the
+   * terminal would leave the target `restoring` with nothing for boot to select
+   * and reclassify after a crash. The marker written here is the same shape the
+   * restore's own open writes; the operation id is deliberately absent, because
+   * the restore's original operation is not the one reporting, and every
+   * identity check treats a missing id as unclaimed rather than as a match.
+   */
+  private markInFlightRestore(target: GitOpsTargetCurrentRow, at: number): void {
+    if (!targetRestoreInFlight(target)) return;
+    if (target.active_operation_stage !== null) return;
+    target.active_operation_stage = 'recovery_started';
+    target.active_operation_at = at;
+    target.active_generation_id = target.recovery_generation_id;
+    target.active_operation_id = null;
+    target.active_intent_revision_id = null;
+    target.active_rollout_candidate_id = null;
+  }
+
+  /**
    * Release the in-flight operation, identity included.
    *
    * The identity columns go with the stage. Leaving them behind lets a later
@@ -4415,6 +5292,80 @@ export class GitOpsTransitions {
     target.active_generation_id = null;
     target.active_intent_revision_id = null;
     target.active_rollout_candidate_id = null;
+  }
+
+  /**
+   * Retire a target's recovery claim on evidence that the target is consistent.
+   *
+   * For success evidence only: an acknowledgement or a bind means the workload is
+   * a generation that was applied after the failed restore, so the fault it
+   * described is stale and can go. The rollback binding
+   * (`recovery_generation_id`) stays: it still names the generation a later
+   * rollback would restore.
+   *
+   * The application hold this target may have been the only claimant for is
+   * re-derived here: without it, clearing the claim would strand a hold that no
+   * target answers for.
+   *
+   * A restore still in flight is left completely alone. Its phase, ref and
+   * active-operation marker belong to the operation that is running, and
+   * clearing them would erase work that has not reported an outcome yet.
+   */
+  private retireRecoveryClaimOnSuccess(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    if (targetRestoreInFlight(target)) return;
+    if (recoveryFailureClaimClass(target) === null && target.recovery_phase !== 'failed') return;
+    this.clearRecoveryClaim(target, applicationId, envelope);
+  }
+
+  /**
+   * Retire a recovery claim a later failure makes irrelevant.
+   *
+   * Only a claim that moved nothing: a `pre_mutation` refusal never touched the
+   * target, so a deploy or withdraw failure arriving after it is the standing
+   * fault on this row and the refusal adds nothing. A claim that may have moved
+   * the target is never retired by a failure. The failure proves that a deploy
+   * or withdrawal went wrong, which says nothing about whether the half-restored
+   * files are consistent, and the single shared failure slot cannot hold both
+   * facts. The claim keeps its own class in `recovery_failure_class` and stays
+   * the target's runtime failure (the recovery slot outranks the shared slot in
+   * the projection), so the newer failure is recorded as history and the moved
+   * claim still holds the application and blocks automated work.
+   *
+   * Retiring the claim re-derives the application hold, so a refusal that was
+   * the last claimant cannot strand a hold nothing answers for.
+   */
+  private retireNonMovingRecoveryClaim(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    if (!recoveryClaimRetirable(target)) return;
+    this.clearRecoveryClaim(target, applicationId, envelope);
+  }
+
+  /**
+   * Drop the recovery slot and whatever the shared failure slot was describing
+   * on its behalf.
+   */
+  private clearRecoveryClaim(
+    target: GitOpsTargetCurrentRow,
+    applicationId: string,
+    envelope: EventEnvelope,
+  ): void {
+    target.recovery_phase = null;
+    target.recovery_ref = null;
+    target.recovery_failure_class = null;
+    target.recovery_failure_at = null;
+    if (target.failure_stage === 'recovery') {
+      target.failure_stage = null;
+      target.failure_class = null;
+      target.failure_at = null;
+    }
+    this.clearApplicationRecoveryWhenNoTargetFails(applicationId, target.node_id, envelope);
   }
 
   /**
@@ -4478,7 +5429,7 @@ export class GitOpsTransitions {
         legacy_combined_approval_ref=?, preflight_fingerprint=?, latest_preflight_evidence_json=?,
         latest_operation_id=?, active_operation_id=?,
         active_operation_stage=?, active_operation_at=?, active_generation_id=?,
-        pause_at=?, pause_reason=?, source_suspended_reason=?,
+        pause_at=?, pause_reason=?, pause_origin=?, source_suspended_reason=?,
         source_policy=?, placement_policy=?, rollout_authorization_policy=?,
         placement_policy_refusal_reason=?, placement_policy_refused_at=?,
         poll_interval_secs=?, next_poll_at=?, attempt_seq=?, partial_json=?,
@@ -4498,7 +5449,7 @@ export class GitOpsTransitions {
       app.legacy_combined_approval_ref, app.preflight_fingerprint, app.latest_preflight_evidence_json,
       app.latest_operation_id, app.active_operation_id,
       app.active_operation_stage, app.active_operation_at, app.active_generation_id,
-      app.pause_at, app.pause_reason, app.source_suspended_reason,
+      app.pause_at, app.pause_reason, app.pause_origin, app.source_suspended_reason,
       app.source_policy, app.placement_policy, app.rollout_authorization_policy,
       app.placement_policy_refusal_reason, app.placement_policy_refused_at,
       app.poll_interval_secs, app.next_poll_at, app.attempt_seq, app.partial_json,
@@ -4521,6 +5472,12 @@ function snapshotApp(app: GitOpsApplicationRow): Record<string, unknown> {
     artifactSetId: app.artifact_set_id,
     latestArtifactSetId: app.latest_artifact_set_id,
     sourceAcceptanceRef: app.source_acceptance_ref,
+    // The two pointers an authority change moves. Arming a policy again
+    // withdraws what that policy decided, and a row that recorded the policy
+    // changing without recording the authority it took with it could not tell
+    // that apart from a policy edit that left the approval alone.
+    placementApprovalRef: app.placement_approval_ref,
+    rolloutAuthorizationRef: app.rollout_authorization_ref,
     activeOperationStage: app.active_operation_stage,
     failureStage: app.failure_stage,
     // The three authority policies, and the recorded bounded-auto refusal.

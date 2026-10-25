@@ -58,18 +58,47 @@ clean.
 
 Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
 When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
-action with a count and a tab-shortcut button: newer images available to review, known-exploited
+action with a count and the button that resolves it: newer images available to review, known-exploited
 CVEs, elevated exploit risk on network-exposed workloads, detected secrets, unacknowledged Compose
 risks, and exposure that conflicts with declared Networking intent. Intentional network exposure is
 Security context, not an independent Action needed reason by itself. When only monitoring items
 remain (waiting for an upstream image, update availability unknown, network-exposed images not yet
 classified, findings awaiting triage, stale or failed scans) the card is titled **Why Monitoring**
-and lists them with View findings shortcuts (and Check again when image update availability could
-not be established and you can manage the node), so the operator can see what to keep an eye on
-without a permanent alarm. Shortcuts that carry affected image identities open Images already
-narrowed to those images, with a clearable banner so you can return to the full list. When the
+and lists them the same way, so the operator can see what to keep an eye on without a permanent
+alarm. Shortcuts that carry affected image identities open Images already narrowed to those images,
+with a clearable banner so you can return to the full list. When the
 reason includes exact driving findings, opening an image filters the scan report to that contributing
 set.
+
+Each row's button does the work where you see it:
+
+- **Review update** (newer image available) lists the affected stacks, opens the update readiness
+  review for the one you pick, and then **Update** applies it.
+- **Set exposure intent** (exposed images) classifies each affected service from a popover.
+- **Check again** (update availability unknown) re-runs the image update check and refreshes the
+  card.
+- **Rescan node** (stale scans) runs the node scan with live progress, when you can scan the node.
+- **Triage** (findings awaiting triage) and **Open History** (failed scans) switch to that tab, as do
+  the rows for secrets and Compose risks, which list every item there.
+  Triage is not offered on a replica node, which takes triage decisions from its control instance.
+
+A button only appears when your role can run it; otherwise the row keeps its shortcut to the
+relevant tab. When a button runs in place, the shortcut to the tab moves into the row's **⋯** menu.
+
+### Dismissing review items
+
+On rows that are review or informational, **Dismiss** sets the item aside for the whole team until it
+changes: it returns on its own when the images or stacks it covers change, or when it covers more
+than before. If it comes back in exactly the state you dismissed, it stays dismissed until the hold
+ends or you restore it. The arrow next to **Dismiss** offers 7 days or permanently. Update
+availability unknown, stale scans, and failed scans can only be dismissed for a set number of days,
+because the evidence behind them is missing or old. Items that keep the posture at Action needed cannot be dismissed; they go away when
+you resolve them.
+
+Dismissed items stay counted: the masthead and the posture word still include them. They appear under
+a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings
+one back. A toast right after dismissing offers **Undo**. Dismissing needs permission to manage the
+node.
 
 The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a

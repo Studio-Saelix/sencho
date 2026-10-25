@@ -100,6 +100,10 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   active_generation_id TEXT NULL,
   pause_at INTEGER NULL,
   pause_reason TEXT NULL,
+  -- Who placed the pause. A system hold (a refused dispatch) belongs to the
+  -- rollout it was holding, so a source acceptance clears it when it supersedes
+  -- that rollout; an operator pause and a health-policy hold survive.
+  pause_origin TEXT NOT NULL DEFAULT 'operator' CHECK (pause_origin IN ('operator','system','health')),
   -- Distinct from pause_reason: sourceSuspended/sourceUnsuspended write this
   -- field, not the one rolloutPaused/rolloutUnpaused share across app and
   -- target rows, so suspending a source can never clobber an unrelated
@@ -350,6 +354,11 @@ CREATE TABLE IF NOT EXISTS gitops_rollout_generations (
   )),
   supersedes_generation_id TEXT NULL,
   superseded_at INTEGER NULL,
+  -- Set only by the operator's Supersede or Rollback. A system supersede (a
+  -- preflight drift, a placement invalidation, a re-authorization) leaves this
+  -- null, which is what lets the automatic policy tell a withdrawal from a
+  -- supersede it may re-mint.
+  withdrawn_at INTEGER NULL,
   operation_id TEXT NOT NULL,
   actor TEXT NULL,
   trigger TEXT NOT NULL,
@@ -380,6 +389,12 @@ CREATE TABLE IF NOT EXISTS gitops_approvals (
   fingerprint TEXT NULL,
   blast_json TEXT NULL,
   policy_provenance_json TEXT NULL,
+  -- Present only on a source acceptance. Null means no confirmation object was
+  -- stored. A non-null placement pointer on that same row is still read as a
+  -- confirmation that must wait. A present object names the placement approval,
+  -- which may itself be null, and whether the confirmation allowed a rollout
+  -- to start.
+  source_confirmation_json TEXT NULL,
   actor TEXT NULL,
   created_at INTEGER NOT NULL,
   CHECK (
@@ -512,6 +527,17 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
       'capturing','restoring','compensating','complete','failed'
     )
   ),
+  -- The class and time of the recovery failure this row still claims.
+  --
+  -- failure_class is shared with deploy and withdraw failures, so a claim that
+  -- may have moved the target would lose its class and its timestamp the moment
+  -- a later failure wrote the shared slot, and the claim would read as a refusal
+  -- that moved nothing. These columns keep the claim's own record, so a failure
+  -- can record itself beside it without retiring it, and only success evidence
+  -- (an acknowledgement or a bind) or a claim that moved nothing is allowed to
+  -- drop it.
+  recovery_failure_class TEXT NULL,
+  recovery_failure_at INTEGER NULL,
   interruption_stage TEXT NULL CHECK (
     interruption_stage IS NULL OR interruption_stage IN (
       'deploy_started','blueprint_deploy_started','blueprint_withdraw_started','recovery_started'
@@ -625,6 +651,11 @@ CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
 CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
   ON gitops_settled_outbox(created_at)
   WHERE drained_at IS NULL;
+-- Drained rows are the steady-state majority. The prune deletes them by age on
+-- the monitor tick, and the undrained partial index above cannot serve that scan.
+CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_drained
+  ON gitops_settled_outbox(created_at)
+  WHERE drained_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS git_provider_endpoints (
   id TEXT PRIMARY KEY,

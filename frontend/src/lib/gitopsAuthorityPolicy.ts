@@ -135,8 +135,8 @@ const PLACEMENT_REASON_TEXT: Record<string, string> = {
   pin_driven_placement: 'Placement moved because a pin moved, which is a choice of where to run.',
   cordon_override: 'A node in the plan is cordoned, so moving work onto it would override that.',
   cordon_driven_removal: 'The node was cordoned, so this withdrawal follows from that cordon. Moving the workload is your decision to make.',
-  stale_node: 'A node in the plan is gone, or was last seen unreachable.',
-  unknown_connectivity: 'A node in the plan answered but could not be read.',
+  stale_node: 'A node in the plan is not answering, or was last seen unreachable.',
+  unknown_connectivity: 'A node in the plan has not reported, or is not a node this Sencho knows about.',
   missing_evidence: 'The evidence this decision needed could not be read at all.',
   malformed_evidence: 'The evidence this decision needed was present but unusable.',
   destructive_effect: 'The change would leave the application with no node running it.',
@@ -150,9 +150,9 @@ export function placementReasonText(reason: string): string {
 }
 
 /**
- * The line a facet card shows for its policy.
+ * The line a stage shows for its policy.
  *
- * Returns null when there is nothing worth saying, so a card never grows a line
+ * Returns null when there is nothing worth saying, so a stage never grows a line
  * that repeats its own state. The two cases that produce nothing are a policy
  * with no decision and no reason, and a domain that does not apply.
  */
@@ -171,6 +171,20 @@ export function policyReadFor(
 ): AuthorityPolicyRead | null {
   if (!policies) return null;
   return policies.find((entry) => entry.domain === domain) ?? null;
+}
+
+/**
+ * Whether a policy read has anything to print: a recorded decision, or a reason.
+ * The status block reads this before rendering, to know whether its Evidence
+ * control has anything behind it.
+ */
+export function policyLineVisible(read: AuthorityPolicyRead | null): boolean {
+  if (!read) return false;
+  return read.decision !== 'awaiting_operator' || Boolean(read.reason && placementReasonText(read.reason));
+}
+
+export function hasPolicyLines(policies?: readonly AuthorityPolicyRead[]): boolean {
+  return AUTHORITY_POLICY_DOMAINS.some((domain) => policyLineVisible(policyReadFor(policies, domain)));
 }
 
 export type { AuthorityPolicyDecision, AuthorityPolicyDomain, AuthorityPolicyRead };

@@ -4,84 +4,9 @@
   "author": "Studio Saelix",
   "role": "Vendor",
   "timestamp": "2026-05-18T00:00:00Z",
-  "last_updated": "2026-05-24T12:00:00Z",
-  "version": 8,
+  "last_updated": "2026-10-16T00:00:00Z",
+  "version": 10,
   "statements": [
-    {
-      "vulnerability": {
-        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-34040",
-        "name": "CVE-2026-34040",
-        "description": "Moby/Docker daemon authorization bypass"
-      },
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The authorization bypass affects Docker Engine's daemon-side plugin authorization hook on oversized request bodies. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never acts as a daemon and never runs authorization hooks. Sencho invokes compose only for up/down/ps operations against local user-authored compose files. The daemon auth code path is not reachable. The advisory's 'fixed in 29.3.1' refers to Docker Engine the daemon product. The Go library containing the fix is github.com/moby/moby/v2 (a new module path adopted on the docker-29.x branch), not github.com/docker/docker. Until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version."
-    },
-    {
-      "vulnerability": {
-        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-41567",
-        "name": "CVE-2026-41567",
-        "description": "Docker: PUT /containers/{id}/archive executes container binary on the host"
-      },
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The vulnerable code is the Docker Engine daemon-side handler for the PUT /containers/{id}/archive endpoint, which under certain conditions resolves the archive target by executing a binary from inside the container on the host. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves daemon HTTP routes. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and never calls the /archive route in either direction. The daemon-side archive handler is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
-    },
-    {
-      "vulnerability": {
-        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-42306",
-        "name": "CVE-2026-42306",
-        "description": "Docker: Race condition in docker cp allows bind mount redirection to host"
-      },
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The race condition is in the Docker Engine daemon-side bind-mount resolution path that backs `docker cp`, where a concurrent rename can redirect a copy operation onto a host path. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves the daemon-side cp endpoint and never resolves bind mounts on the host. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and does not invoke `docker cp` through compose. The vulnerable daemon-side code path is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
-    },
-    {
-      "vulnerability": {
-        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-41568",
-        "name": "CVE-2026-41568",
-        "description": "Docker: Race condition in docker cp allows creation of arbitrary empty files on the host via symlink swap"
-      },
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Sibling advisory to CVE-2026-42306. The vulnerable code is the Docker Engine daemon-side `docker cp` path, where a concurrent symlink swap during archive extraction can cause the daemon to create arbitrary empty files on the host filesystem. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves the daemon-side cp endpoint and never performs archive extraction on the host. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and does not invoke `docker cp` through compose. The vulnerable daemon-side code path is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
-    },
-    {
-      "vulnerability": {
-        "@id": "https://www.cve.org/CVERecord?id=CVE-2026-33997",
-        "name": "CVE-2026-33997",
-        "description": "Moby: Privilege validation bypass during plugin installation"
-      },
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/docker/docker@v28.5.2+incompatible"
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The vulnerability is in Docker Engine's daemon-side plugin installation flow, where a crafted plugin manifest can bypass capability validation and grant the plugin elevated privileges at install time. docker-compose v5.1.3 statically bundles docker/docker v28.5.2+incompatible as a client-side library for API types and codecs; it never serves the daemon plugin endpoints and never executes plugin installation logic. Sencho invokes compose only for up/down/ps operations against local user-authored compose files and never installs Docker plugins through compose. The daemon-side plugin installation handler is not reachable. The fix lives on the github.com/moby/moby/v2 module path; until upstream compose migrates to the v2 import path, v28.5.2+incompatible is the only Go-module-resolvable version of the affected library that compose can reference."
-    },
     {
       "vulnerability": {
         "@id": "https://github.com/advisories/GHSA-pmwq-pjrm-6p5r",
@@ -90,12 +15,26 @@
       },
       "products": [
         {
-          "@id": "pkg:golang/github.com/in-toto/in-toto-golang@v0.10.0"
+          "@id": "pkg:golang/github.com/in-toto/in-toto-golang@v0.11.0"
+        }
+      ],
+      "status": "fixed",
+      "status_notes": "Fixed upstream rather than triaged. docker/compose v5.6.0 resolves github.com/in-toto/in-toto-golang v0.11.0, the release that aligns the glob-negation operators in artifact rule patterns, and the source-built Compose plugin embeds that version, so the v0.10.0 build this statement used to cover is no longer shipped. The product below is the version the image carries now, and this statement records the resolution rather than suppressing a finding."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+        "name": "CVE-2026-93687",
+        "description": "braces is vulnerable to stack-exhaustion denial of service through deeply nested glob patterns (GHSA-vfj7-8cjw-p6xm)"
+      },
+      "products": [
+        {
+          "@id": "pkg:npm/braces@3.0.3"
         }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "The vulnerability is a glob-negation operator mismatch (`^` in in-toto-golang versus `!` in in-toto-python) that can cause an in-toto layout authored against one implementation to evaluate differently in the other. It manifests only when a supply-chain attestation layout authored with one in-toto implementation is then verified with another in the same pipeline. in-toto-golang v0.10.0 enters compose's module graph transitively through the SLSA/attestation verification helpers in buildkit and sigstore-go. Compose only invokes those helpers when verifying image attestations during `docker compose build` or pull-with-verification flows. Sencho invokes compose only for `up`, `down`, and `ps` against pre-built images on local user-authored compose files; it does not invoke `compose build`, does not perform image attestation verification, and does not author or evaluate in-toto layouts. The vulnerable glob-evaluation code path is not reached. Fixed in in-toto-golang v0.11.0; pending an upstream compose tag that pulls the bump, the v0.10.0 module remains in compose v5.1.3's graph."
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "braces 3.0.3 can exhaust the stack while parsing a deeply nested glob pattern, so exploitation requires an adversary to control the pattern text that braces compiles. In Sencho, braces enters the production image through micromatch, which http-proxy-middleware uses to compile the proxy context and path-filter patterns once at startup from static configuration; request URLs are matched against the compiled matcher and are never compiled as patterns. The remaining occurrences are development-time watchers (chokidar under nodemon and the TypeScript watcher) watching fixed paths. No request-controlled input reaches the braces parser, so the vulnerable code cannot be triggered by a remote adversary. No patched release exists: 3.0.3 is the newest published version and the advisory lists no fixed version, so the dependency audit gate honors this statement instead of blocking every change."
     }
   ]
 }

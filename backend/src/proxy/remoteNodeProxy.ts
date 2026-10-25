@@ -36,6 +36,7 @@ import {
 } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -64,6 +65,7 @@ import {
   classifyRegistryDeliveryRouteClass,
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
+import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -148,6 +150,25 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       //   Authentication is handled exclusively via the Bearer token below.
       proxyReq.removeHeader('x-node-id');
       proxyReq.removeHeader('cookie');
+      // Forwarding headers must describe what THIS instance validated, not
+      // what the caller sent. A remote that trusts this instance resolves the
+      // client from these headers, so relaying a caller-supplied
+      // X-Forwarded-For would let the caller choose the address the remote
+      // records. Replace them with the values Express resolved under this
+      // instance's own trusted-proxy policy. Strip every x-forwarded-* name
+      // first so the invariant does not depend on which names this handler
+      // happens to know about, then set the two this instance vouches for.
+      const validatedClientIp = req.ip;
+      const validatedProtocol = req.protocol;
+      for (const name of Object.keys(proxyReq.getHeaders())) {
+        if (name.startsWith('x-forwarded-')) proxyReq.removeHeader(name);
+      }
+      proxyReq.removeHeader('x-real-ip');
+      proxyReq.removeHeader('forwarded');
+      if (validatedClientIp) {
+        proxyReq.setHeader('x-forwarded-for', validatedClientIp);
+      }
+      proxyReq.setHeader('x-forwarded-proto', validatedProtocol);
       // Pilot-agent targets carry an empty token; see NodeRegistry.getProxyTarget.
       if (req.proxyTarget?.apiToken) {
         proxyReq.setHeader('Authorization', `Bearer ${req.proxyTarget.apiToken}`);
@@ -278,6 +299,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               getErrorMessage(cleanupErr, 'unknown'),
             );
           }
+          // Mute rules for the stack are authored on the hub, so the remote's own
+          // delete cleanup cannot reach them.
+          removeStackMuteRules(req.nodeId, route.stackName);
         }
       }
     },
@@ -813,6 +837,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
               }
               throw err;
             }
+            // Create-from-git authorization gate. Hop-1 discovery runs a full
+            // git fetch on the target with the caller's credentials, before
+            // the target's own permission check. Verify the caller on the hub
+            // first, mirroring the direct route's checks; the target still
+            // enforces both. Only the create-from-git stage carries a fetch.
+            const stage = classifyRegistryDeliveryOp(req.method, deliveryApiPath).stage;
+            if (stage === 'from-git-deploy-now' && !authorizeFromGitOnHub(req, res, req.rawBody)) {
+              return;
+            }
             const deliveryResult = await augmentRemoteProxyWithRegistryDelivery(
               req,
               req.nodeId,
@@ -907,6 +940,37 @@ function checkNodeManageOnHub(req: Request): boolean {
     return checkPermission(req, 'node:manage', 'node', String(req.nodeId));
   }
   return checkPermission(req, 'node:manage');
+}
+
+/**
+ * Hub-side authorization for create-from-git before hop-1 discovery runs.
+ * The permission check runs first, regardless of body shape, matching the
+ * direct route: stack:create globally, then stack:deploy when the request
+ * asks to deploy. Returns false after answering 403 when the caller is not
+ * authorized. For an authorized caller, a body without a stack name skips
+ * only the deploy sub-check; the target's field validation answers before
+ * its own fetch.
+ */
+function authorizeFromGitOnHub(req: Request, res: Response, rawBody: Buffer): boolean {
+  if (!checkPermission(req, 'stack:create')) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf-8'));
+  } catch {
+    return true;
+  }
+  if (parsed === null || typeof parsed !== 'object') return true;
+  const body = parsed as Record<string, unknown>;
+  const stackName = typeof body.stack_name === 'string' ? body.stack_name : null;
+  const deployRequested = body.deploy_now === true || body.auto_deploy_on_apply === true;
+  if (stackName && deployRequested && !checkPermission(req, 'stack:deploy', 'stack', stackName)) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
+  return true;
 }
 
 /**

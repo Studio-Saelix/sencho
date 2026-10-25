@@ -117,7 +117,7 @@ test.describe('Blueprint Git-managed content binding', () => {
 
   async function openBlueprintSheet(page: Page, name: string) {
     await page.getByRole('button', { name: 'Fleet', exact: true }).click();
-    await page.getByRole('tab', { name: /Deployments/i }).click();
+    await page.getByRole('tab', { name: /Blueprints/i }).click();
     const card = page.getByRole('button', { name: new RegExp(name) });
     await expect(card).toBeVisible({ timeout: 15_000 });
     await card.click();

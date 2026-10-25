@@ -1,9 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService, type Blueprint } from '../services/DatabaseService';
+import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import { BlueprintService } from '../services/BlueprintService';
 import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions } from '../services/gitops/transitions';
 import { commitBlueprintCreate, commitBlueprintUpdate } from '../services/gitops/blueprintProducers';
+import { encodeGitOpsApprovedTargetEffectJson } from '../services/gitops/json';
+import { configuredSnapshotFor, encodePolicySnapshot } from '../services/gitops/policyComposition';
+import { newGitOpsId } from '../services/gitops/directApplication';
 import {
   GitManagedContentError,
   GitOpsBindingService,
@@ -172,6 +177,111 @@ describe('GitOps binding service', () => {
       application_id: null,
     });
     expect(GitOpsStore.getInstance().getApplication(applicationId)?.target_mode).toBe('inline_blueprint');
+  });
+
+  it('does not place a new node from a Git-managed revision stamp after Detach is re-armed', async () => {
+    // The Git-managed case: bounded placement approved the node that is running,
+    // and the startup migration had set automatic rollout authorization, so no
+    // operator chose either for Inline. Detach changes who decides. Re-arming
+    // rollout and adding a node must still wait, because the running node's
+    // stamp is the revision Git content was deployed at.
+    const store = GitOpsStore.getInstance();
+    const blueprint = commitBlueprintCreate({
+      name: 'bp-detach-authority',
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:1.27\n',
+      selector: { type: 'nodes', ids: [1] },
+      drift_mode: 'suggest',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    }, () => [1]);
+    const applicationId = seedDirect('detach-authority-web');
+    GitOpsBindingService.getInstance().convertInlineToGit({
+      blueprintId: blueprint.id,
+      applicationId,
+      actor: 'tester',
+    });
+    const app = store.getApplication(applicationId)!;
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications
+          SET placement_policy = 'bounded_auto', rollout_authorization_policy = 'automatic'
+        WHERE id = ?`,
+    ).run(applicationId);
+    // Read back after the policy write: a policy-authorized approval has to
+    // carry the snapshot of the policies that decided it.
+    const configuredApp = store.getApplication(applicationId)!;
+
+    // Node 1 runs the placed revision. The approval names only that node, so a
+    // later selector edit that adds a real second node is one stateless place.
+    DatabaseService.getInstance().upsertDeployment({
+      blueprint_id: blueprint.id,
+      node_id: 1,
+      status: 'active',
+      applied_revision: blueprint.revision,
+      last_deployed_at: Date.now(),
+    });
+    GitOpsTransitions.getInstance().placementApproved({
+      applicationId,
+      approvalId: newGitOpsId(),
+      intentRevisionId: app.intent_revision_id!,
+      blastJson: encodeGitOpsApprovedTargetEffectJson([{ nodeId: 1, outcome: 'place' }]),
+      requiredNodeIds: [1],
+      fingerprint: null,
+      actor: 'tester',
+      envelope: { operationId: newGitOpsId(), actor: 'tester', trigger: 'test', at: Date.now() },
+      rolloutGenerationId: newGitOpsId(),
+      candidateId: app.rollout_candidate_id!,
+      authority: 'configured_policy',
+      policyProvenanceJson: encodePolicySnapshot(configuredSnapshotFor(configuredApp)),
+    });
+    expect(store.getApplication(applicationId)!.placement_approval_ref).not.toBeNull();
+
+    const stampedRevision = blueprint.revision;
+    GitOpsBindingService.getInstance().detachToInline({ blueprintId: blueprint.id, actor: 'tester' });
+
+    const demoted = store.getApplication(applicationId)!;
+    expect(demoted.target_mode).toBe('inline_blueprint');
+    expect(demoted.placement_approval_ref).toBeNull();
+    expect(demoted.rollout_authorization_ref).toBeNull();
+    expect(demoted.rollout_authorization_policy).toBe('manual');
+    expect(DatabaseService.getInstance().getDeployment(blueprint.id, 1)?.applied_revision)
+      .toBe(stampedRevision);
+
+    // The operator sets Inline rollout authorization back to automatic, which
+    // Detach had reset to operator-authorized. A real second node then joins the
+    // selector. The policy may approve that place; the tick must not run it,
+    // because node 1's stamp is the revision Git content was deployed at.
+    const node2 = DatabaseService.getInstance().getDb().prepare(
+      `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
+       VALUES ('detach-authority-b', 'local', 'proxy', '/tmp/compose', 0, 'online', ?)`,
+    ).run(Date.now());
+    const node2Id = Number(node2.lastInsertRowid);
+    DatabaseService.getInstance().getDb().prepare(
+      `UPDATE gitops_applications SET rollout_authorization_policy = 'automatic' WHERE id = ?`,
+    ).run(applicationId);
+
+    const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode')
+      .mockResolvedValue({ status: 'active' });
+    try {
+      commitBlueprintUpdate(
+        blueprint.id,
+        { selector: { type: 'nodes', ids: [1, node2Id] } },
+        'tester',
+        () => [1, node2Id],
+      );
+      const rearmed = store.getApplication(applicationId)!;
+      const approval = rearmed.placement_approval_ref
+        ? store.getApproval(rearmed.placement_approval_ref)
+        : undefined;
+      expect(approval?.authority).toBe('configured_policy');
+
+      await BlueprintReconciler.getInstance().reconcileOne(blueprint.id);
+      expect(deploySpy).not.toHaveBeenCalled();
+    } finally {
+      deploySpy.mockRestore();
+    }
   });
 
   it('describes Git-managed content without the retained source stack identity', () => {

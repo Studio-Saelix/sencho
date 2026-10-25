@@ -1,51 +1,37 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check, TriangleAlert, CircleSlash, WifiOff, RefreshCw,
   FileClock, FileCheck2, FileQuestion, type LucideIcon,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
+import { startService } from '@/lib/stackLifecycleApi';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
-import GitOpsStateCard, { GitOpsFaultCard } from '@/components/gitops/GitOpsStateCard';
-import GitOpsCaveats from '@/components/gitops/GitOpsCaveats';
-import GitOpsApprovalChips from '@/components/gitops/GitOpsApprovalChips';
+import { useAuth } from '@/context/AuthContext';
+import { Button } from '@/components/ui/button';
+import { ConfirmModal } from '@/components/ui/modal';
+import { DismissedSection } from '@/components/ui/dismissed-section';
+import { useFindingDismissal } from '@/hooks/useFindingDismissal';
+import { DRIFT_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
+import { describeDismissal } from '@/components/fleet/readiness/describeDismissal';
+import { useNow } from '@/components/fleet/readiness/useNow';
+import type { FindingDismissal } from '@/types/findingDismissal';
+import {
+  isDismissableDriftFinding,
+  type DriftLedgerEntry, type DriftTemporal,
+  type StackDriftFinding, type StackDriftStatus,
+} from '@/types/drift';
+import { DriftFindingRow, type DriftRowControls } from './DriftFindingRow';
+import { DRIFT_FINDING_LABEL } from './driftLabels';
+import { resolveDriftFinding, type DriftVerb } from './driftVerbs';
 import GitOpsDriftRow from '@/components/gitops/GitOpsDriftRow';
-import { GitOpsDigestDetail } from '@/components/gitops/GitOpsDigestDetail';
+import { GitOpsStatus } from '@/components/gitops/GitOpsStatus';
+import { buildGitOpsStatus } from '@/lib/gitopsStatus';
 import { useGitOpsApplicationPosture, type GitOpsApplicationPosture } from '@/components/gitops/useGitOpsApplicationPosture';
-import { POSTURE_LABEL, POSTURE_TONE_CLASS } from '@/lib/gitopsPortfolio';
-import { ARTIFACT_STATE_LOOKUP, ROLLOUT_STATE_LOOKUP, RUNTIME_STATE_LOOKUP, SOURCE_STATE_LOOKUP, absentFault, liveArtifactFacet, livePlacementFacet, liveRolloutFacet, liveSourceFacet, placementStateMeta } from '@/lib/gitopsState';
 import type { GitOpsRevisionProjection } from '@/types/gitops';
-import type { GitOpsPortfolioRow, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
-
-// Mirrors the backend payload shape (the frontend never imports backend).
-type StackDriftStatus = 'in-sync' | 'drifted' | 'missing-runtime' | 'unreachable';
-type DriftFindingKind =
-  | 'service-missing' | 'service-undeclared' | 'image-mismatch' | 'ports-mismatch'
-  | 'network-undeclared' | 'network-missing' | 'managed-path-conflict';
-
-interface StackDriftFinding {
-  kind: DriftFindingKind;
-  service: string;
-  detail: string;
-  expected?: string;
-  actual?: string;
-}
-
-interface DriftTemporal {
-  hasBaseline: boolean;
-  sourceChanged: boolean;
-  renderedChanged: boolean;
-}
-
-interface DriftLedgerEntry {
-  service: string;
-  kind: DriftFindingKind;
-  message: string;
-  detectedAt: number;
-  resolvedAt: number | null;
-}
+import type { GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
 interface StackDriftReport {
   stack: string;
@@ -65,6 +51,9 @@ interface StackDriftReport {
   // rendered the same as an answer of "nothing here", because the alternative is
   // telling an operator their node is out of date on a tab about drift.
   gitopsRevision?: GitOpsRevisionProjection;
+  // Open team dismissals for this stack's findings. Absent on an older remote node,
+  // which then offers no Dismiss because it cannot record one.
+  dismissals?: FindingDismissal[];
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -99,16 +88,6 @@ const STATUS_META: Record<StackDriftStatus, { label: string; icon: LucideIcon; t
   },
 };
 
-const FINDING_LABEL: Record<DriftFindingKind, string> = {
-  'service-missing': 'service missing',
-  'service-undeclared': 'undeclared',
-  'image-mismatch': 'image',
-  'ports-mismatch': 'ports',
-  'network-undeclared': 'network',
-  'network-missing': 'network missing',
-  'managed-path-conflict': 'managed path',
-};
-
 /** The temporal overlay: how the on-disk compose compares to the last deploy baseline. */
 function temporalMeta(temporal: DriftTemporal): { label: string; icon: LucideIcon; tone: string; line: string; key: string } {
   if (!temporal.hasBaseline) {
@@ -140,30 +119,7 @@ function temporalMeta(temporal: DriftTemporal): { label: string; icon: LucideIco
   };
 }
 
-function Finding({ finding }: { finding: StackDriftFinding }) {
-  const gitPath = finding.kind === 'managed-path-conflict';
-  return (
-    <div className="border-t border-muted py-2 first:border-t-0">
-      <div className="flex items-center gap-2">
-        {!gitPath && (
-          <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{finding.service}</span>
-        )}
-        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{FINDING_LABEL[finding.kind]}</span>
-      </div>
-      <div className="mt-1 text-[12px] text-foreground/90">{finding.detail}</div>
-      {finding.expected !== undefined && finding.actual !== undefined && (
-        <div className="mt-1 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
-          <span className="text-stat-subtitle">compose</span>
-          <span className="text-foreground/90">{finding.expected}</span>
-          <span className="text-stat-subtitle">→ running</span>
-          <span className="font-semibold text-foreground">{finding.actual}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
+function LedgerRow({ entry, onOpenGitSource }: { entry: DriftLedgerEntry; onOpenGitSource?: () => void }) {
   const resolved = entry.resolvedAt != null;
   const gitPath = entry.kind === 'managed-path-conflict';
   return (
@@ -172,10 +128,21 @@ function LedgerRow({ entry }: { entry: DriftLedgerEntry }) {
         {!gitPath && (
           <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{entry.service}</span>
         )}
-        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{FINDING_LABEL[entry.kind] ?? entry.kind}</span>
+        <span className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle">{DRIFT_FINDING_LABEL[entry.kind] ?? entry.kind}</span>
         <span className={cn('font-mono text-[10px] uppercase tracking-wide', resolved ? 'text-success' : 'text-warning')}>
           {resolved ? 'resolved' : 'open'}
         </span>
+        {gitPath && !resolved && onOpenGitSource && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto h-7 px-2 text-xs max-md:min-h-11"
+            data-testid="drift-verb-open-git-source"
+            onClick={onOpenGitSource}
+          >
+            Open Git source
+          </Button>
+        )}
       </div>
       <div className="mt-1 text-[12px] text-foreground/90">{entry.message}</div>
       <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
@@ -218,44 +185,6 @@ const EVIDENCE_META: Record<GitOpsPortfolioTargetSummary['evidence'], { label: s
 };
 
 /**
- * Fallback for a posture this build has no wording for, so a newer backend's
- * value renders as an explicit unknown rather than crashing the tab.
- */
-const UNRECOGNIZED_POSTURE = {
-  label: 'unknown',
-  tone: 'neutral',
-} as const;
-
-/**
- * One sentence saying what this posture means, in the words the rest of the tab
- * uses.
- *
- * Only the settled states get a positive sentence. Every other value says what
- * is missing rather than what is wrong, because the whole reason the posture is
- * fail-closed is that "not proven" and "proven bad" are different facts, and a
- * generic "needs attention" would erase that distinction on the one surface an
- * operator opens to find out.
- */
-function postureLine(row: GitOpsPortfolioRow): string {
-  switch (row.posture) {
-    case 'converged':
-      return 'Every target reached, complete, and current evidence confirms the intended generation is running.';
-    case 'converged_qualified':
-      return 'Every target reached the intended generation, but the executable artifact could not be proven bit-identical.';
-    case 'failed':
-      return 'Something was proven wrong. The lines below show what Sencho established on this node.';
-    case 'attention':
-      return 'A decision or repair is waiting on an operator. The lines below show what Sencho established on this node.';
-    case 'in_progress':
-      return 'Work is still in flight, so this is not a settled answer yet.';
-    case 'unknown':
-      return 'Sencho cannot currently prove any other state for this application.';
-    default:
-      return 'This application reports a state this Sencho build does not know.';
-  }
-}
-
-/**
  * The portfolio id for the application this revision belongs to.
  *
  * The two forms mirror the backend's identity: a Blueprint application is
@@ -280,96 +209,88 @@ function portfolioIdFor(revision: GitOpsRevisionProjection | null, nodeId: numbe
   return nodeId === undefined ? null : `${nodeId}:${revision.applicationId}`;
 }
 
-/**
- * The canonical posture for this stack's application.
- *
- * Everything else on this tab is node-local: the compose-versus-runtime report
- * and the revision projection both describe one node's own view, and a
- * projection that cannot prove a state says so through a caveat rather than a
- * status. The posture is computed once, hub-side, across every node holding a
- * target, and it is the only answer here that accounts for evidence that is
- * unknown, stale, or missing from a node that did not answer.
- *
- * Rendering it is what stops this tab showing every facet card reading satisfied,
- * with no drift listed, for an application the portfolio reports as unsettled.
- */
-function PostureCard(
-  { posture, nodeLabel }: {
-    posture: GitOpsApplicationPosture;
-    nodeLabel: (id: number) => string;
-  },
-) {
-  if (posture.kind === 'loading' || posture.kind === 'absent') return null;
-
-  if (posture.kind === 'unreadable') {
-    return (
-      <div data-testid="gitops-posture" data-posture="unreadable" className={cn(CARD_CLASS, 'border-warning/40 bg-warning/[0.06] text-warning')}>
-        <div className="flex items-center gap-2">
-          <FileQuestion className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-          <span className="font-mono text-[11px] uppercase tracking-wide">posture unreadable</span>
-        </div>
-        <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">
-          Sencho could not read this application’s overall state. The cards below describe one node, not the application.
-        </div>
-      </div>
-    );
-  }
-
-  const { row } = posture;
-  // A browser tab left open across a Sencho upgrade can hold this build against
-  // a newer backend that reports a posture this build has no wording for. The
-  // sibling application view renders that as an explicit unknown rather than
-  // dereferencing a missing entry, and a Drift tab that threw here would take
-  // the whole tab down, not just this card.
-  const meta = POSTURE_LABEL[row.posture] ?? UNRECOGNIZED_POSTURE;
-  // One glyph per posture, because two postures sharing an icon makes the card
-  // read as one state twice. Work in flight and cannot-prove are the pair most
-  // easily confused from a distance, and they are exactly the two that must not
-  // look alike.
-  const ICON_BY_TONE = {
-    success: FileCheck2,
-    destructive: TriangleAlert,
-    warning: TriangleAlert,
-    brand: RefreshCw,
-    neutral: FileQuestion,
-  } as const;
-  const Icon = ICON_BY_TONE[meta.tone];
-
+/** How fresh one node's observation is, from the portfolio's per-target evidence. */
+function TargetEvidence({ nodeId, evidence, unknown }: {
+  nodeId: number;
+  evidence: GitOpsPortfolioTargetSummary['evidence'] | undefined;
+  unknown: boolean;
+}) {
+  // A node the posture never covered reads as unknown, not as absent: the
+  // runtime state is a real observation, and what is missing is the
+  // application-level accounting.
+  if (!evidence && !unknown) return null;
+  const meta = EVIDENCE_META[evidence ?? 'unknown'];
   return (
-    <div data-testid="gitops-posture" data-posture={row.posture} className={cn(CARD_CLASS, 'border', POSTURE_TONE_CLASS[meta.tone])}>
-      <div className="flex items-center gap-2">
-        <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
-        <span className="font-mono text-[11px] uppercase tracking-wide">application · {meta.label}</span>
-      </div>
-      <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">
-        {postureLine(row)}
-      </div>
-      {(row.evidence.partial || row.evidence.unknown || row.evidence.unreachableNodes.length > 0) && (
-        <ul className="mt-1.5 space-y-0.5">
-          {row.evidence.unknown && (
-            <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
-              Part of this answer could not be read, so it is reported without interpreting it.
-            </li>
-          )}
-          {row.evidence.partial && (
-            <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
-              The evidence behind this is incomplete, so this is the best answer available.
-            </li>
-          )}
-          {row.evidence.unreachableNodes.length > 0 && (
-            <li className="font-mono text-[10px] leading-relaxed text-warning">
-              Not reached: {row.evidence.unreachableNodes.map(nodeLabel).join(', ')}.
-            </li>
-          )}
-        </ul>
-      )}
+    <div
+      data-testid="gitops-target-evidence"
+      data-evidence={evidence ?? 'unknown'}
+      data-node={nodeId}
+      className="mt-1 font-mono text-[10px] leading-relaxed text-stat-subtitle"
+    >
+      <span className={cn('uppercase tracking-wide', meta.tone)}>{meta.label}</span>
+      {' · '}
+      {meta.line}
     </div>
   );
 }
 
-export default function DriftPanel({ stackName }: { stackName: string }) {
+/** Whether the posture read left anything to say beyond the answer itself. */
+function hasPostureEvidence(posture: GitOpsApplicationPosture): boolean {
+  if (posture.kind === 'unreadable') return true;
+  if (posture.kind !== 'row') return false;
+  const { evidence } = posture.row;
+  return evidence.partial || evidence.unknown || evidence.unreachableNodes.length > 0;
+}
+
+/** What the application-level answer could not read, in the evidence rather than beside the Answer. */
+function PostureEvidence({ posture, nodeLabel }: {
+  posture: GitOpsApplicationPosture;
+  nodeLabel: (id: number) => string;
+}) {
+  if (!hasPostureEvidence(posture)) return null;
+  if (posture.kind === 'unreadable') {
+    return (
+      <p data-testid="gitops-posture-unreadable" className="font-mono text-[11px] leading-relaxed text-warning">
+        Sencho could not read this application’s overall state. The state shown describes one node, not the application.
+      </p>
+    );
+  }
+  if (posture.kind !== 'row') return null;
+  const { evidence } = posture.row;
+  return (
+    <ul data-testid="gitops-posture-evidence" className="space-y-0.5">
+      {evidence.unknown && (
+        <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
+          Part of this answer could not be read, so it is reported without interpreting it.
+        </li>
+      )}
+      {evidence.partial && (
+        <li className="font-mono text-[10px] leading-relaxed text-stat-subtitle">
+          The evidence behind this is incomplete, so this is the best answer available.
+        </li>
+      )}
+      {evidence.unreachableNodes.length > 0 && (
+        <li className="font-mono text-[10px] leading-relaxed text-warning">
+          Not reached: {evidence.unreachableNodes.map(nodeLabel).join(', ')}.
+        </li>
+      )}
+    </ul>
+  );
+}
+
+interface DriftPanelProps {
+  stackName: string;
+  /** Deploys the stack through the editor's own handler, so a redeploy here runs every gate it does. */
+  onRedeploy?: () => void | Promise<void>;
+  onEditCompose?: () => void;
+  onOpenGitSource?: () => void;
+}
+
+export default function DriftPanel({ stackName, onRedeploy, onEditCompose, onOpenGitSource }: DriftPanelProps) {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
+  const { can } = useAuth();
+  const now = useNow(30_000);
   const [report, setReport] = useState<StackDriftReport | null>(null);
   /**
    * The node `report` was read from, so a report can be recognised as belonging
@@ -386,6 +307,14 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const [loadError, setLoadError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [rechecking, setRechecking] = useState(false);
+  const [busyVerb, setBusyVerb] = useState<string | null>(null);
+  const [redeployTarget, setRedeployTarget] = useState<{ finding: StackDriftFinding; verb: Extract<DriftVerb, { kind: 'redeploy' }> } | null>(null);
+  const [redeploying, setRedeploying] = useState(false);
+  // The stack and node the panel shows right now. A request that outlives a
+  // switch compares the scope it started in against this, so a late answer never
+  // lands on another stack's report.
+  const scopeKey = `${nodeId ?? 'none'}:${stackName}`;
+  const liveScope = useRef(scopeKey);
 
   // Passive load when the stack OR active node changes (the same stack can exist on
   // two nodes), and on an explicit retry. Read-only: it never writes the ledger, so
@@ -399,8 +328,10 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
     // previous node's report, which both probes an identity that cannot exist and
     // shows a state belonging to the node the operator just left. `loading` is set
     // below for the same cycle, so the tab reads as checking rather than as wrong.
+    liveScope.current = `${nodeId ?? 'none'}:${stackName}`;
     setReport(null);
     setReportNodeId(undefined);
+    setRedeployTarget(null);
     const run = async () => {
       setLoading(true);
       setLoadError(false);
@@ -438,7 +369,9 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
         toast.error('Failed to re-check drift.');
         return;
       }
-      setReport((await res.json()) as StackDriftReport);
+      const fresh = (await res.json()) as StackDriftReport;
+      if (liveScope.current !== scopeKey) return;
+      setReport(fresh);
       setReportNodeId(nodeId);
       setLoadError(false);
     } catch {
@@ -446,6 +379,73 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
     } finally {
       setRechecking(false);
     }
+  };
+
+  const dismissalEndpoint = useMemo(() => ({
+    create: `/stacks/${encodeURIComponent(stackName)}/drift/dismissals`,
+    remove: (id: number) => `/stacks/${encodeURIComponent(stackName)}/drift/dismissals/${id}`,
+  }), [stackName]);
+  const { dismiss, restore, isPending } = useFindingDismissal({
+    endpoint: dismissalEndpoint,
+    onUpsert: dismissal => {
+      if (liveScope.current !== scopeKey) return;
+      setReport(prev => prev && ({
+        ...prev,
+        dismissals: [...(prev.dismissals ?? []).filter(d => d.findingKey !== dismissal.findingKey), dismissal],
+      }));
+    },
+    onRemove: id => {
+      if (liveScope.current !== scopeKey) return;
+      setReport(prev => prev && ({ ...prev, dismissals: (prev.dismissals ?? []).filter(d => d.id !== id) }));
+    },
+    onGone: () => { void recheck(); },
+  });
+
+  const verbKey = (finding: StackDriftFinding, verb: DriftVerb) => `${verb.kind}:${finding.kind}:${finding.service}`;
+
+  const startOne = async (finding: StackDriftFinding, verb: DriftVerb) => {
+    if (nodeId === undefined) return;
+    setBusyVerb(verbKey(finding, verb));
+    try {
+      const result = await startService(nodeId, stackName, finding.service);
+      if (result.ok) {
+        toast.success(`Started ${finding.service}.`);
+        await recheck();
+      } else if (result.reason === 'no-containers') {
+        toast.error(`${finding.service} has no container to start. Redeploy the stack to create it.`);
+      } else {
+        toast.error(result.message);
+      }
+    } catch (error) {
+      console.error('[DriftPanel] start service failed:', error);
+      toast.error(`Could not start ${finding.service}.`);
+    } finally {
+      setBusyVerb(null);
+    }
+  };
+
+  const runVerb = (finding: StackDriftFinding, verb: DriftVerb) => {
+    switch (verb.kind) {
+      case 'open-editor': onEditCompose?.(); return;
+      case 'open-git-source': onOpenGitSource?.(); return;
+      case 'redeploy': setRedeployTarget({ finding, verb }); return;
+      case 'start-service': void startOne(finding, verb); return;
+    }
+  };
+
+  const confirmRedeploy = async () => {
+    if (!onRedeploy) return;
+    setRedeploying(true);
+    try {
+      await onRedeploy();
+    } catch (error) {
+      console.error('[DriftPanel] redeploy failed:', error);
+      toast.error('Could not redeploy the stack.');
+    } finally {
+      setRedeploying(false);
+      setRedeployTarget(null);
+    }
+    await recheck();
   };
 
   const meta = report ? STATUS_META[report.status] : null;
@@ -463,16 +463,7 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   const busy = loading || rechecking;
 
   const revision = report?.gitopsRevision ?? null;
-  const gitopsFaults = revision ? absentFault(revision) : [];
   const gitopsLive = revision && revision.targetMode !== 'not_applicable' ? revision : null;
-  // Null for a Blueprint-owned stack: this route resolves through whatever
-  // manages the directory, and a Blueprint application has no Git source facet.
-  const gitopsSource = liveSourceFacet(revision);
-  const gitopsArtifact = liveArtifactFacet(revision);
-  const gitopsPlacement = livePlacementFacet(revision);
-  const gitopsRollout = liveRolloutFacet(revision);
-  const gitopsApprovals = gitopsLive ? gitopsLive.approvals : null;
-  const gitopsTargets = gitopsLive?.targets ?? [];
   const gitopsDrift = gitopsLive?.drift ?? [];
   // A target can name a node this client has no record of, so fall back to the
   // id rather than rendering an empty cell.
@@ -487,6 +478,25 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
   // what keeps a node change from composing the new node with the old report's
   // application for the length of the request.
   const reportIsCurrent = reportNodeId === nodeId;
+  // Verbs and Dismiss act on this node's stack, so they wait for a report read from it.
+  const canDeploy = reportIsCurrent && can('stack:deploy', 'stack', stackName, nodeId);
+  // Open stack editor is a no-op without edit authority, so the verb needs it too.
+  const canEdit = reportIsCurrent && can('stack:edit', 'stack', stackName, nodeId);
+  const verbContext = { canDeploy, hasRedeploy: onRedeploy !== undefined, hasEditor: canEdit && onEditCompose !== undefined, hasGitSource: onOpenGitSource !== undefined };
+  const findings = report?.findings ?? [];
+  const { dismissed } = partitionFindings(findings.filter(isDismissableDriftFinding), report?.dismissals ?? [], now, DRIFT_SEVERITY_SCALE);
+  const dismissedIds = new Set(dismissed.map(item => item.finding.id));
+  const activeFindings = findings.filter(f => f.id === undefined || !dismissedIds.has(f.id));
+  const rowControls: DriftRowControls = {
+    run: runVerb,
+    isBusy: (finding, verb) => busyVerb === verbKey(finding, verb),
+    canDismiss: canDeploy && report?.dismissals !== undefined,
+    isDismissing: finding => finding.id !== undefined && isPending(finding.id),
+    onDismiss: (finding, mode, days) => {
+      if (!isDismissableDriftFinding(finding)) return;
+      void dismiss(finding, mode, days);
+    },
+  };
   const posture = useGitOpsApplicationPosture(
     reportIsCurrent ? portfolioIdFor(revision, nodeId) : null,
     reportIsCurrent && revision && revision.targetMode !== 'not_applicable' ? revision.applicationId : null,
@@ -543,10 +553,13 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
               <div className="flex items-center gap-2">
                 <StatusIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
                 <span className="font-mono text-[11px] uppercase tracking-wide">{meta.label}</span>
-                {report.findings.length > 0 && (
+                {activeFindings.length > 0 && (
                   <span className="font-mono text-[10px] text-stat-subtitle">
-                    · {report.findings.length} finding{report.findings.length === 1 ? '' : 's'}
+                    · {activeFindings.length} finding{activeFindings.length === 1 ? '' : 's'}
                   </span>
+                )}
+                {dismissed.length > 0 && (
+                  <span className="font-mono text-[10px] text-stat-subtitle">· {dismissed.length} dismissed</span>
                 )}
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{meta.line}</div>
@@ -563,81 +576,20 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
             </div>
           )}
 
-          {gitopsFaults.length > 0 && <GitOpsFaultCard message={gitopsFaults[0].message} />}
-
-          {(gitopsSource || gitopsArtifact || gitopsPlacement || gitopsRollout || gitopsTargets.length > 0
-            || posture.kind === 'row' || posture.kind === 'unreadable') && (
-            <section>
-              <div className={cn(LABEL_CLASS, 'mb-1.5')}>gitops</div>
-              <div className="flex flex-col gap-2">
-                <PostureCard posture={posture} nodeLabel={nodeLabel} />
-                <GitOpsApprovalChips approvals={gitopsApprovals} placement={gitopsPlacement} rollout={gitopsRollout} />
-                {gitopsSource && (
-                  <GitOpsStateCard
-                    data-testid="gitops-source"
-                    stateKey={gitopsSource.status}
-                    state={SOURCE_STATE_LOOKUP[gitopsSource.status]}
-                  />
-                )}
-                {gitopsArtifact && (
-                  <GitOpsStateCard
-                    data-testid="gitops-artifact"
-                    stateKey={gitopsArtifact.status}
-                    state={ARTIFACT_STATE_LOOKUP[gitopsArtifact.status]}
-                  />
-                )}
-                {gitopsPlacement && (
-                  <GitOpsStateCard
-                    data-testid="gitops-placement"
-                    stateKey={gitopsPlacement.status}
-                    state={placementStateMeta(gitopsPlacement)}
-                  />
-                )}
-                {gitopsRollout && (
-                  <GitOpsStateCard
-                    data-testid="gitops-rollout"
-                    stateKey={gitopsRollout.status}
-                    state={ROLLOUT_STATE_LOOKUP[gitopsRollout.status]}
-                  />
-                )}
-                {gitopsTargets.map(t => {
-                  const evidence = targetEvidence.get(t.nodeId);
-                  // A node the posture never covered reads as unknown, not as
-                  // absent: the runtime card below is a real observation, and
-                  // what is missing is the application-level accounting.
-                  const evidenceMeta = evidence
-                    ? EVIDENCE_META[evidence]
-                    : unknownEvidence(t.nodeId)
-                      ? EVIDENCE_META.unknown
-                      : null;
-                  return (
-                    <GitOpsStateCard
-                      key={t.nodeId}
-                      data-testid="gitops-target"
-                      stateKey={t.runtime.status}
-                      state={RUNTIME_STATE_LOOKUP[t.runtime.status]}
-                    >
-                      <div className="mt-1 font-mono text-[10px] text-stat-subtitle">
-                        {nodeLabel(t.nodeId)}{t.stackName ? ` · ${t.stackName}` : ''}
-                      </div>
-                      {evidenceMeta && (
-                        <div
-                          data-testid="gitops-target-evidence"
-                          data-evidence={evidence ?? 'unknown'}
-                          className="mt-1 font-mono text-[10px] leading-relaxed text-stat-subtitle"
-                        >
-                          <span className={cn('uppercase tracking-wide', evidenceMeta.tone)}>{evidenceMeta.label}</span>
-                          {' · '}
-                          {evidenceMeta.line}
-                        </div>
-                      )}
-                      <GitOpsDigestDetail target={t} />
-                    </GitOpsStateCard>
-                  );
-                })}
-                <GitOpsCaveats revision={revision} />
-              </div>
-            </section>
+          {revision && (
+            <GitOpsStatus
+              heading="gitops"
+              revision={revision}
+              row={posture.kind === 'row' ? posture.row : null}
+              nodeName={nodeLabel}
+              extraMarker={posture.kind === 'unreadable' ? 'posture unreadable' : undefined}
+              targetExtra={t => <TargetEvidence nodeId={t.nodeId} evidence={targetEvidence.get(t.nodeId)} unknown={unknownEvidence(t.nodeId)} />}
+              proofExtra={hasPostureEvidence(posture) ? <PostureEvidence posture={posture} nodeLabel={nodeLabel} /> : undefined}
+            />
+          )}
+          {/* With no stage to report the status renders nothing, but a failed posture read must still warn. */}
+          {gitopsLive && posture.kind === 'unreadable' && !buildGitOpsStatus(revision, null) && (
+            <PostureEvidence posture={posture} nodeLabel={nodeLabel} />
           )}
 
           {gitopsDrift.length > 0 && (
@@ -657,16 +609,31 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
             </div>
           )}
 
-          {report.findings.length > 0 && (
+          {activeFindings.length > 0 && (
             <section>
               <div className={cn(LABEL_CLASS, 'mb-1.5')}>findings</div>
               <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
-                {report.findings.map((f, i) => (
-                  <Finding key={`${f.service}-${f.kind}-${i}`} finding={f} />
+                {activeFindings.map(f => (
+                  <DriftFindingRow
+                    key={`${f.service}-${f.kind}`}
+                    finding={f}
+                    resolution={resolveDriftFinding(f, verbContext)}
+                    controls={rowControls}
+                  />
                 ))}
               </div>
             </section>
           )}
+
+          <DismissedSection
+            items={dismissed.map(({ finding, dismissal }) => ({
+              id: dismissal.id,
+              title: [finding.service, DRIFT_FINDING_LABEL[finding.kind]].filter(part => part !== '').join(' · '),
+              meta: describeDismissal(dismissal, now),
+              onRestore: rowControls.canDismiss ? () => { void restore(dismissal.id); } : undefined,
+              restoring: isPending(dismissal.id),
+            }))}
+          />
 
           {ledger.length > 0 && (
             <section>
@@ -678,13 +645,28 @@ export default function DriftPanel({ stackName }: { stackName: string }) {
               </div>
               <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                 {ledger.map((e, i) => (
-                  <LedgerRow key={`${e.service}-${e.kind}-${e.detectedAt}-${i}`} entry={e} />
+                  <LedgerRow key={`${e.service}-${e.kind}-${e.detectedAt}-${i}`} entry={e} onOpenGitSource={reportIsCurrent ? onOpenGitSource : undefined} />
                 ))}
               </div>
             </section>
           )}
         </>
       )}
+
+      <ConfirmModal
+        open={redeployTarget !== null}
+        onOpenChange={open => { if (!open) setRedeployTarget(null); }}
+        kicker="DRIFT · REDEPLOY"
+        title={`Redeploy ${stackName}`}
+        description="Deploy the stack so its running services match the compose file."
+        hint="RECREATES DIFFERING SERVICES"
+        confirmLabel="Redeploy"
+        busyConfirmLabel="Redeploying…"
+        confirming={redeploying}
+        onConfirm={() => { void confirmRedeploy(); }}
+      >
+        <p className="text-sm text-stat-subtitle">{redeployTarget?.verb.confirm}</p>
+      </ConfirmModal>
     </div>
   );
 }

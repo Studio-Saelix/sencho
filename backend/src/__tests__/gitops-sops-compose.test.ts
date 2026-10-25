@@ -114,6 +114,99 @@ describe('ComposeService SOPS overlay args and mutation guards', () => {
     expect(args[projIdx + 1]).toBe(path.resolve(overlayDir));
   });
 
+  it('pins the stack project name when a live deploy runs from an overlay', async () => {
+    const stackName = 'sops-pin-project-live';
+    const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    const overlayDir = path.join(tmpDir, 'overlay-pin-live');
+    fs.mkdirSync(overlayDir, { recursive: true });
+
+    const args = await ComposeService.getInstance().buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      null,
+      overlayDir,
+    );
+    const pIdx = args.indexOf('-p');
+    expect(pIdx).toBeGreaterThan(-1);
+    expect(args[pIdx + 1]).toBe(stackName);
+  });
+
+  it('pins the stack project name for a captured single-file invocation from an overlay', async () => {
+    const stackName = 'sops-pin-project-captured';
+    const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    const overlayDir = path.join(tmpDir, 'overlay-pin-captured');
+    fs.mkdirSync(overlayDir, { recursive: true });
+
+    const invocation: RollbackInvocationRecord = {
+      composeArgsPrefix: [],
+      projectDirectory: null,
+      projectName: stackName,
+      explicitComposeFiles: [],
+    };
+
+    const args = await ComposeService.getInstance().buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      invocation,
+      overlayDir,
+    );
+    const pIdx = args.indexOf('-p');
+    expect(pIdx).toBeGreaterThan(-1);
+    expect(args[pIdx + 1]).toBe(stackName);
+  });
+
+  it('does not double-pin a captured prefix that already names the project', async () => {
+    const stackName = 'sops-pin-project-existing';
+    const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  x:\n    image: nginx\n');
+    const overlayDir = path.join(tmpDir, 'overlay-pin-existing');
+    fs.mkdirSync(overlayDir, { recursive: true });
+
+    const invocation: RollbackInvocationRecord = {
+      composeArgsPrefix: ['-f', 'compose.yaml', '-p', stackName],
+      projectDirectory: null,
+      projectName: stackName,
+      explicitComposeFiles: ['compose.yaml'],
+    };
+
+    const args = await ComposeService.getInstance().buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      invocation,
+      overlayDir,
+    );
+    expect(args.filter((token) => token === '-p')).toHaveLength(1);
+    expect(args[args.indexOf('-p') + 1]).toBe(stackName);
+  });
+
+  it('does not pin over a compose-declared project name', async () => {
+    const stackName = 'sops-compose-name';
+    const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const composeBody = 'name: customproj\nservices:\n  x:\n    image: nginx\n';
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), composeBody);
+    const overlayDir = path.join(tmpDir, 'overlay-compose-name');
+    fs.mkdirSync(overlayDir, { recursive: true });
+    fs.writeFileSync(path.join(overlayDir, 'compose.yaml'), composeBody);
+
+    const args = await ComposeService.getInstance().buildComposeArgsWithRecoveryOverride(
+      stackName,
+      ['up', '-d'],
+      null,
+      null,
+      overlayDir,
+    );
+    expect(args).not.toContain('-p');
+  });
+
   it('refuses a manual deploy of a SOPS-managed stack without an overlay', async () => {
     const stackName = 'sops-refuse-deploy';
     seedSopsStack(stackName, 'gen-sops-refuse-deploy');

@@ -164,6 +164,13 @@ describe('requiredPermission registry mapping', () => {
         expect(byId.get('labels')?.requiredPermission).toBe('stack:read');
     });
 
+    it('registers GitOps history retention in the GitOps search keywords', () => {
+        const gitops = SETTINGS_ITEMS.find(i => i.id === 'gitops');
+        for (const term of ['history', 'retention', 'prune', 'cleanup']) {
+            expect(gitops?.keywords, `keyword ${term}`).toContain(term);
+        }
+    });
+
     it('keeps adminOnly on identity, credentials, and emergency surfaces', () => {
         for (const id of [
             'sso',

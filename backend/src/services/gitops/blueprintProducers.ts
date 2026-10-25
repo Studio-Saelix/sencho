@@ -50,7 +50,12 @@ function evaluateAutomaticPlacement(
     }
 }
 
-function sha256(value: string): string {
+/**
+ * Hex SHA-256 of authored compose content, the same function that mints the
+ * `compose_content_sha256` an intent revision records. Shared so a producer
+ * verifying content against that hash cannot drift from the one that wrote it.
+ */
+export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
@@ -329,8 +334,11 @@ export function commitBlueprintUpdate(
 /**
  * Record a pin change.
  *
- * Pinning moves where a Blueprint is allowed to run, so it revises placement
- * the same way a selector edit does. Re-pinning to the node already pinned
+ * Setting or clearing a pin moves where a Blueprint is allowed to run, so it
+ * revises placement the same way a selector edit does. The evaluation that
+ * follows marks either direction pin-driven, so bounded auto does not approve
+ * it. Confirm Apply is what places the freed node. An operator placement
+ * policy never reaches that mark. Re-pinning to the node already pinned
  * changes nothing and writes nothing.
  */
 export function commitBlueprintPin(
@@ -451,6 +459,7 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
     // An Inline Blueprint has no Git source, so source policy is manual by

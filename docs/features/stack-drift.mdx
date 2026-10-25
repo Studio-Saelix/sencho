@@ -7,7 +7,7 @@ The **Drift** tab answers the core day-two operations question: does what is act
 
 Sencho treats your Compose file as the source of truth. Every time you open the Drift tab, it renders the effective model (variable substitution, multi-file merge, active profiles) and compares the live Docker runtime against that result. If you have deployed through Sencho, it also compares the current file against the baseline it recorded at deploy time, so you know whether the file has already changed for the next deploy.
 
-The check is always read-only. It reports drift; it never fixes it on its own.
+Opening the tab is read-only, and Sencho never changes a stack on its own. Each finding names the fix and offers a button that runs it, or you can set the finding aside for the team.
 
 <img
   src="/images/stack-drift/drift-in-sync.png"
@@ -56,9 +56,9 @@ Sencho records two hashes at deploy time: a raw-file hash (catches any text chan
 
 ## GitOps state
 
-For a stack managed by a Git source or a Blueprint, a **gitops** section sits below the deploy signal. Its first line is the application's overall state, then the per-domain states. For a Git-backed stack the source state uses the same phrase the Git Source panel shows; a Blueprint-delivered stack has no Git source of its own, so it shows only its per-node lines. Those say what Sencho has established about the stack on each node: whether a generation has been applied, whether it is deployed, whether its health verdict is still outstanding, and whether an operation was interrupted without a confirmed outcome.
+For a stack managed by a Git source or a Blueprint, a **gitops** section sits below the deploy signal. It uses the answer, path, and evidence block defined in the [GitOps overview](/features/gitops-overview#reading-a-status-answer-path-evidence). It leads with the application's overall state, with the reason that needs an operator first. A row beneath it names each stage that applies, and **Evidence** opens the recorded authority, the targets on each node, and what Sencho could not prove. For a Git-backed stack the source state uses the same phrase the Git Source panel shows; a Blueprint-delivered stack has no Git source of its own, so it shows only its per-node lines. Those say what Sencho has established about the stack on each node: whether a generation has been applied, whether it is deployed, whether its health verdict is still outstanding, and whether an operation was interrupted without a confirmed outcome.
 
-The first line, labelled **application**, is the one-line summary the GitOps workplace shows for the same application, and it is the same value in both places. It reads **converged** only when every target was reached and complete, current evidence confirms the intended generation is running. Every other value says Sencho cannot currently claim convergence; **unknown** in particular says nothing more than that, rather than naming a fault.
+The block's lead state is the one-line summary the GitOps workplace shows for the same application, and it is the same value in both places. It reads **converged** only when every target was reached and complete, current evidence confirms the intended generation is running. Every other value says Sencho cannot currently claim convergence; **unknown** in particular says nothing more than that, rather than naming a fault.
 
 This is a different question from the two signals above it. Those compare files and containers as they are right now. The gitops section reports what Sencho has proven and accepted over time, so a stack can be **In sync** at runtime while its application state reads **unknown**, meaning the containers look right but Sencho cannot prove that every target reported for the generation now intended.
 
@@ -105,9 +105,35 @@ A Compose port range such as `8000-8002:8000-8002` is compared conservatively. B
 
 The **network-undeclared** and **network-missing** findings reuse the same comparison the stack's [Networking](/features/compose-networking) tab uses, so the two surfaces never disagree about a network attachment. Sencho-verified `sencho_mesh` attachments for its own container and Mesh-opted-in stacks are excluded, while a manual attachment from an opted-out stack remains actionable. The difference is history: this tab persists findings in the drift ledger over time, while the Networking tab always shows the current live state with no history. A stack with an open network finding also counts toward the **Drift** chip in the Fleet Overview's Networking filter group, so a network-attachment mismatch is visible both per-stack here and across the fleet there.
 
+## Resolving a finding
+
+Under each finding a line says what fixes it, and the finding's button runs it. Redeploying asks you to confirm first; the other buttons act at once.
+
+| Finding | What it offers |
+|---------|----------------|
+| **Image** | **Redeploy to match compose** recreates the service on the image the Compose file names. When the running image is provably newer than the declared one, **Open stack editor** leads instead and **Redeploy to compose image** moves to the **...** menu, because redeploying would move the service back to an older image. Sencho can only prove "newer" from the images' build times; when it cannot, the redeploy leads. |
+| **Ports** | **Redeploy to match compose**, or **Open stack editor** to change the Compose file to match what is running. |
+| **Network undeclared** | **Redeploy to match compose**, or **Open stack editor** to declare the extra networks. |
+| **Network missing** | **Open stack editor**. A declared network that nothing uses is a Compose decision: remove it, or attach a service to it. |
+| **Service missing** | **Start service** starts the service's existing container. If its container was removed there is nothing to start, and Sencho says so and points to a redeploy, which is also in the **...** menu. |
+| **Undeclared service** | **Open stack editor**. Declare the service in Compose, or remove the stray container. |
+| **Managed path** | **Open Git source**, where the conflict is resolved. |
+
+**Redeploy** runs the same deploy as the editor's Deploy button, so the same checks and progress view apply. When it finishes, Sencho re-checks the stack and the finding clears from the list, and the history entry reads resolved.
+
+Open Git source is available to anyone who can open the tab. Open stack editor needs permission to edit the stack, and Redeploy, Start service, and Dismiss need permission to deploy it; the tab shows only the buttons that account can use.
+
+## Dismissing a finding
+
+**Dismiss** sets a finding aside for the whole team until it changes: the next time what it reports changes (a different image, different ports, more networks), it returns on its own. The arrow next to **Dismiss** offers 7 days or permanently. A managed-path conflict cannot be dismissed; it is resolved in the Git source.
+
+Dismissed findings stay counted: the status keeps its **Drifted** verdict, and the badge reads, for example, **1 finding · 1 dismissed**. Dismissed findings appear under a quiet **N dismissed** row with who dismissed them, when, and for how long, and **Restore** brings one back. A toast right after dismissing offers **Undo**.
+
+A dismissal belongs to the finding's entry in the drift history. When the finding clears, that entry resolves and the dismissal ends with it, so if the same difference appears again later it is a new finding and is shown. A difference that clears and returns between two checks is not seen as having cleared, and stays dismissed until a check notices the gap.
+
 ## When drift is recorded
 
-**Opening the tab** runs the spatial engine and displays the current state. It does not write anything to the ledger or update the history.
+**Opening the tab** runs the spatial engine and displays the current state. It does not write anything to the ledger or update the history. Dismissing a finding does check the stack and reconcile the ledger first, so the dismissal attaches to a recorded finding.
 
 **Clicking re-check** runs the spatial engine and then reconciles the result into the ledger: new findings are recorded with a detection timestamp, cleared findings are marked resolved, and Activity timeline events are written for any change. The history and "checked" timestamp update after a re-check.
 
@@ -149,7 +175,7 @@ Drift events also appear in the stack's **Activity** tab alongside deploys, rest
 1. Click any stack in the sidebar to open it.
 2. In the right-hand panel, switch to the **Drift** tab. If the tab row doesn't fit the panel width, scroll it to reveal Drift alongside the stack's other tabs (Anatomy, Activity, Doctor, Dossier, Environment, Networking, and so on).
 3. Read the status badge and any findings.
-4. Click **re-check** after editing the Compose file or after a manual Docker operation to refresh the ledger.
+4. Use the button on a finding to resolve it, or click **re-check** after editing the Compose file or after a manual Docker operation to refresh the ledger.
 
 **Files** and **Edit compose** are separate buttons next to the tab row, not tabs themselves; they open the file browser and the compose editor respectively.
 
@@ -163,7 +189,7 @@ Viewing the tab requires read access to the stack; any role that can see a stack
 
 ## Limitations
 
-**Read-only and advisory.** Drift detection never alters a stack. It reports differences and records them in the ledger, but deploying to resolve drift is a separate, explicit action.
+**Nothing runs on its own.** Drift detection never alters a stack by itself. It reports differences and records them in the ledger; redeploying or starting a service is an explicit action you choose on a finding.
 
 **No automatic background scanning.** Drift is checked when you open the tab, when you click re-check, and after every deploy or update through Sencho. There is no automatic background poll that checks stacks on a schedule outside of those events.
 

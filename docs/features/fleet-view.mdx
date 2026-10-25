@@ -3,14 +3,14 @@ title: Fleet View
 description: Monitor every node in your Sencho deployment from one screen, drill into stacks and containers, and orchestrate Sencho version updates across the fleet.
 ---
 
-The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Docker Labels, Deployments, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
+The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Docker Labels, Blueprints, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
 
 <Note>
   Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
 </Note>
 
 <Frame>
-  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail, an Online badge, a version chip, and a 'Networking · exposed' pill, followed by Opsix, Pitt-Moba, and SLX-Mars." />
+  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail and a version chip, followed by Opsix, Pitt-Moba, and SLX-Mars, each carrying a Proxy or Pilot marker in the corner." />
 </Frame>
 
 ## Page layout
@@ -21,23 +21,22 @@ The page has three rails stacked top to bottom: a status masthead, a tab strip p
 
 A single rail summarises the state of every registered node so you can read the whole estate without scrolling.
 
-- A **state word** that always reads `The fleet`, set in the editorial display face. The word changes color with the fleet's overall state: foreground when **Healthy** (every node online, none critical), warning when **Degraded** (any node offline), destructive when **Critical** (any online node above the CPU or disk threshold).
-- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar. When Healthy, the rail carries a slow ambient shimmer; when Degraded or Critical, it switches to a steady glow instead, so an alert state reads as calm, sustained emphasis rather than a distracting pulse.
-- A **meta line** in uppercase mono tracking that reads `<n> nodes · <m> online · last sync Xs`, where the sync delta uses compact units (`s` / `m` / `h`). While data is loading the line reads `syncing…` instead.
-- A **reasons line** below the meta line that names exactly what is wrong, e.g. `1 offline · 1 critical`. The reasons line is hidden when the fleet is Healthy.
+- A small **FLEET** label above the **state word**, set in the editorial display face. The word is the fleet's verdict and its color follows it: **Healthy** (every node online, none critical), **Degraded** (any node offline, shown in warning), **Critical** (any online node above the CPU or disk threshold, shown in destructive). It reads **Checking** until the first overview arrives, **Unavailable** if that first overview could not be loaded, and **No nodes** when none are registered, so an empty or unknown fleet never looks healthy.
+- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar. When Healthy, the rail carries a slow ambient shimmer; when Degraded or Critical, it switches to a steady glow instead.
+- A **detail line** under the state word that reads `<n> nodes · <m> offline · <k> critical · synced Xs ago`. Offline and critical appear only when they are above zero, and the sync delta uses compact units (`s` / `m` / `h` / `d`). The node count and sync age are replaced by `syncing…` while data loads and `not synced` if nothing has loaded yet.
 - Three **stat tiles** on the right edge, in mono tabular numerals:
 
 | Tile | What it shows |
 |------|---------------|
-| **CPU** | Average CPU across online nodes, with a sub-line that names the peak node (`peak <name> <percent>%`). The value tints amber once average CPU is at or above 80%. |
-| **MEM** | Total RAM used across online nodes, with `of <total> · <percent>%` underneath. |
-| **CONTAINERS** | Active running container count across online nodes, with `of <total> total` underneath. |
-
-- An **alerts indicator** pinned to the far right: a bell icon next to the current critical-node count, with an `alert` / `alerts` mono label. The icon and number tint destructive while the count is above zero.
+| **CPU** | Average CPU across online nodes. The value tints amber once the average is at or above 80%. |
+| **MEM** | Total RAM used across online nodes. |
+| **CONTAINERS** | Running containers across online nodes as `<running>/<total>`. |
 
 ### Tabs
 
-The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker Labels, Blueprints, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip.
+
+The strip is a single row: the monitoring tabs (Overview, Readiness, Map, Docker Labels), a vertical separator, then the tabs that change the fleet or hold its fleet-wide controls (Snapshots, Blueprints, Federation, Actions, Secrets). The row scrolls sideways when a narrow window cannot fit it, and keeps the tab you are on in view. An alternative is one setting away, under **Settings → Appearance → Fleet → Fleet tab layout** (saved to your account): **Compact** keeps Overview, Readiness, Map, Blueprints and Actions on the strip and puts the rest under **More**, which shows the name of the tab you are on when it lives there. Every tab opens with one click in the default layout; in Compact the tabs under **More** take two.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -46,7 +45,7 @@ The Fleet view is a tab strip. Every tier sees Overview, Readiness, Map, Docker 
 | **Readiness** | Community | What across the fleet needs attention before you operate, update, or recover it. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
 | **Docker Labels** | Community | Estate-wide audit of Docker and Compose labels across every node. See [Docker Label Audit](/features/docker-label-audit). |
-| **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
+| **Blueprints** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Limited availability | Cross-node service routing via Sencho Mesh when that surface is enabled on the instance. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
@@ -74,29 +73,29 @@ In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle.
 | Control | Behaviour |
 |---------|-----------|
 | **Search** | Collapsed to a single icon button by default; click it to expand the input (it stays expanded while a query is entered and collapses again on blur once cleared). Filters in real time against node names and the names of stacks deployed on each node. Typing `plex` keeps only nodes that have a `plex` stack; typing `dev` keeps only nodes whose name contains `dev`. |
-| **Sort** | Combobox with five orderings: Name, CPU Usage, Memory Usage, Containers, Status. The selection persists in the browser. |
+| **Sort** | Combobox with six orderings: Attention (the default; in ascending order offline nodes come first, then critical ones, then the rest by name), Name, CPU Usage, Memory Usage, Containers, Status. In the grid the Local node always stays first and the sort orders the remote nodes after it. The selection persists in the browser. |
 | **Direction toggle** | Arrow button next to the sort combobox. The icon rotates 180° and the title flips between *Switch to ascending* / *Switch to descending* to confirm the current direction. |
-| **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the [networking badge](#grid-view) on each card), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
+| **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the Networking section of each node's details sheet), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
 | **Grid / Topology** | Segmented control, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |
 | **Node Update** | Opens the [Node Updates sheet](#node-updates) and immediately re-checks every node's version, same as **Recheck** inside the sheet. |
 | **Manage nodes** | Admin-only. Navigates to **Settings → Infrastructure → Nodes**, where you register, edit, or remove nodes. |
 
 ### Grid view
 
-Every node renders as a card. The local node is pinned at the top of the grid with a cyan accent rail, a brand-tinted gradient wash, and a `★ Local` mono label in the top-right so it can never be confused with a remote.
+Every node renders as a card. The local node is pinned at the top of the grid with a cyan accent rail, a brand-tinted gradient wash, and a `★ Local` mono label in the top-right so it can never be confused with a remote. Every remote card carries a matching muted `Proxy` or `Pilot` label in the same corner, showing how the control instance reaches that node.
 
 | Element | Description |
 |---------|-------------|
 | **Server icon tile** | Green when online, muted when offline. Sits next to the node name. |
-| **Online / Offline badge** | Online (success palette, Wi-Fi icon) or Offline (secondary palette, Wi-Fi-off icon). |
-| **Type badge** | Outline pill reading `local` or `remote`. |
+| **Connection marker** | Corner label on remote cards: `Proxy` when the control instance reaches the node over its API, `Pilot` when the node connects out through a [Pilot Agent](/features/pilot-agent) tunnel. Hover it for a short explanation. |
+| **Offline** badge | Secondary pill with a Wi-Fi-off icon, shown only when the node is unreachable. Reachable nodes carry no status badge. |
 | **Version badge** | The node's Sencho version in mono tabular numerals (e.g. `v0.76.3`). Hidden if the node cannot report a version. |
 | **Update available** badge | Warning pill shown when a newer Sencho release is published for this node. |
 | **Pinned** badge | Shown instead of **Update available** when the node's own Sencho image is pinned to a digest (or an unrecognised pin) and cannot be updated automatically from here. A tooltip explains why. |
 | **Integration image** badge | Warning pill shown, for every role, whenever the local node's Sencho image is pinned to the `sencho-dev` integration repository (see [Verifying images](/operations/verifying-images)). Persistent: it shows whether or not a newer build is currently available. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
 | **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
-| **Networking** badge | Warning pill reading `Networking · exposed`, `Networking · drift`, or `Networking · unknown exposure`, shown when the node has a stack with published ports, detected network drift, or unresolved exposure. Click it to jump to that node's Networking page. |
+| **GitOps** chip | Outline pill reading `GitOps · <n> attention`, shown when `<n>` Git-managed applications involving this node need you. Click it to open the [GitOps portfolio](/features/gitops-portfolio) filtered to this node's attention queue. |
 | **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
 | **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
@@ -113,7 +112,7 @@ Every card carries a three-dot **Node actions** kebab in the top-right corner:
 
 | Action | Notes |
 |--------|-------|
-| **Node details** | Opens an info sheet with the node's connectivity, live capacity, Compose workload, version and update compatibility, and governance info (labels, cordon reason and date, default-node status, Compose directory, registration date). Available to anyone who can see the card; the label picker inside the sheet stays editable only for whoever holds `node:manage` on that node. |
+| **Node details** | Opens an info sheet with the node's connectivity, live capacity, Compose workload, version and update compatibility, and governance info (labels, cordon reason and date, default-node status, Compose directory, registration date). Available to anyone who can see the card; the label picker inside the sheet stays editable only for whoever holds `node:manage` on that node. For whoever holds `node:manage`, the sheet's toolbar also carries **Edit node**, **Cordon node** / **Uncordon node** and **Delete node**, the same actions as the kebab menu (the default node and the last local node have no Delete), plus **View networking** when the node has a networking signal. |
 | **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
 | **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
 | **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it. Existing deployments keep running. Requires the `node:manage` permission (admin, or node-admin when scoped to that node). |
@@ -191,7 +190,7 @@ A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confi
 
 ## The Readiness tab
 
-The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here, and nothing on this tab changes your stacks.
+The **Readiness** tab answers one question across the whole estate: what needs attention before you operate, update, recover, or rely on this fleet? It reports conditions, not configuration. A setting you deliberately left off is not a finding here. Most findings carry a button that fixes them on the spot, and nothing runs until you press it.
 
 Nothing is scored. Every state comes from evidence the hub or the node actually gathered, so a check that could not run reads as `not checked` or `unverified` and never as healthy.
 
@@ -201,13 +200,27 @@ Nothing is scored. Every state comes from evidence the hub or the node actually 
 
 ### The summary
 
-The strip at the top names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), says how many nodes have something to review, and counts nodes by state: needing attention, unverified, and healthy. The **last checked** tile keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance. The **Refresh** button in the Fleet toolbar runs the check again.
+The line under the tab strip names the fleet's worst state in a short phrase (`All clear`, `Partly verified`, `Partly checked`, `Degraded`, or `Needs attention`), then counts nodes by state (needing attention, degraded, unverified, and healthy) and findings. **Checked** on the right keeps ticking while the tab stays open, so you can tell a fresh reading from an old one at a glance, and reads `checking` while a new check runs. The check starts when you open Fleet, so the tab is usually ready by the time you reach it. The **Refresh** button in the Fleet toolbar runs the check again.
 
 The order is deliberate and worst-first: a known problem outranks a condition that could not be verified, and an unverified condition outranks a healthy one.
 
 ### Findings
 
-**Findings** is the worklist, worst first. Each row names the condition in a sentence, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The action button opens the surface where you act on it: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+**Findings** is the worklist, worst first. Each row names the condition in a sentence, says in one line what to do about it, carries the explanation the owning check gave (for example, why an update needs review), and names the node, stack, and domain it concerns. The button on a row does the fix where you are, or, when the work belongs on another page, opens that page: the stack, the node's details, the node's Security view, Auto-updates, Fleet Snapshots, or Settings > Nodes. A finding that restates a stack's update or rollback verdict repeats that verdict in the same words the stack's own readiness check uses, so `rollback not ready` means the same thing in both places.
+
+| Finding | Button | What it does |
+|---------|--------|--------------|
+| Node did not answer, slow to answer, or out of contact | **Test connection** | Tests the connection from the hub and re-checks. |
+| Stack is stopped, or some services are stopped | **Start stack** | Starts the stack's existing containers, including any that finished on purpose. If its containers were removed there is nothing to start, and the message offers **Open stack** instead, because bringing it back is a deploy. |
+| A check that could not read its evidence | **Check again** | Runs the readiness check again. |
+| An update is available and needs a look | **Review update** | Opens the update review. **Update** there applies it, the same way the stack's own update button does. A stack with nothing to update, or one whose update is blocked, gets **Open stack** instead, so the block is fixed at its cause. |
+| Rollback is not ready because no compose file is captured | **Capture recovery point** | Captures one now, so the stack can be rolled back. |
+| A fleet snapshot missed a node | **Take fleet snapshot** | Takes a new snapshot. |
+| A node has never been scanned, or its scans are old | **Scan node** | Scans the node's images and stacks for vulnerabilities, secrets, and misconfigurations. A scan takes a few minutes and runs while you keep working. |
+| The security scanner is missing | **Install scanner** | Asks you to confirm, then installs it on that node. |
+| Policy sync is paused because the node follows another hub | **Re-anchor to this hub** | Asks you to confirm, naming the hub the node follows now, then makes this hub the one that pushes policy to it. |
+
+A button only appears when your account may do what it does. Everything else keeps the page button.
 
 Use the filters above the table to narrow the list:
 
@@ -216,6 +229,14 @@ Use the filters above the table to narrow the list:
 - **Search** matches the finding text, its explanation, and node and stack names.
 
 When a node cannot be reached, its finding says so once, on Connectivity, instead of repeating the same cause for every domain the hub could not read.
+
+### Dismissing a finding
+
+A finding you have seen and decided to live with does not have to stay in the worklist. **Dismiss** on its row moves it out of the list in one click and shows an **Undo** for a few seconds. By default a dismissal holds until the finding changes: if the stack goes from one service down to two, the condition gets worse, or its underlying facts change, the finding comes back on its own. The chevron beside **Dismiss** offers **Dismiss for 7 days** and **Dismiss permanently**. A permanent dismissal still comes back if the finding gets worse.
+
+A dismissal applies to everyone on this hub, and the audit log records who made it. Dismissed findings are never hidden outright: the summary counts them (`2 dismissed`), and the **dismissed** row under the table lists each one with who dismissed it, when, and for how long. **Restore** puts a finding back in the list. A dismissal clears itself once the condition it covered has gone and a complete check confirms it, so the same problem returning later is shown again.
+
+Some findings cannot be dismissed. A finding that restates the Security posture is resolved on the Security page, so it has no **Dismiss**. A finding about evidence that could not be read, such as a node that did not answer, can be dismissed for a time but not permanently, because a permanent dismissal would hide the absence of evidence. Dismissing changes nothing about the matrix: its cells keep counting every finding, and the fleet's state and the node counts above stay what the evidence says.
 
 ### The readiness matrix
 
@@ -268,7 +289,7 @@ A summary strip above the map counts four kinds of issue, and the affected eleme
 
 ### When a node can't be reached
 
-The map is fleet-wide: the control instance gathers each node's view and merges them. If a node is offline or unreachable, a banner names it and the rest of the fleet still draws, so one dark node never blanks the whole map.
+The map is fleet-wide: the control instance gathers each node's view and merges them. Nodes are read a few at a time and each one is drawn as soon as it answers, with `n of N nodes` beside **Refresh** while the rest are pending, so a slow node never holds back the others. If a node is offline or unreachable, a banner names it with the reason (for example `Timed out after 8s` or `Timed out reading this node`) and the rest of the fleet still draws. **Retry** in the banner reloads only the nodes that failed. Reopening the tab shows the last map at once and refreshes it in the background once it is a minute old.
 
 ## Node Updates
 

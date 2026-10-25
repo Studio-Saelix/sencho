@@ -17,6 +17,10 @@ const STATIC_STACK_PATHS = new Set([
   '/stacks/import/move',
   '/stacks/bulk',
   '/stacks/from-git',
+  // Two-segment path under /stacks that is not a stack name. Without this the
+  // classifier would read `platform` as a stack called `platform` and demand an
+  // exact `stack:read` grant on it.
+  '/stacks/platform/docker-context',
 ]);
 
 /**
@@ -36,6 +40,7 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/containers', action: 'stack:read' },
   { method: 'GET', suffix: '/services', action: 'stack:read' },
   { method: 'GET', suffix: '/runtime-artifact-identity', action: 'stack:read' },
+  { method: 'GET', suffix: '/health-observation', action: 'stack:read' },
   { method: 'GET', suffix: '/effective-artifact-context', action: 'stack:read' },
   { method: 'GET', suffix: '/drift', action: 'stack:read' },
   { method: 'GET', suffix: '/preflight', action: 'stack:read' },
@@ -110,6 +115,8 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'POST', suffix: '/update', action: 'stack:deploy' },
   { method: 'POST', suffix: '/rollback', action: 'stack:deploy' },
   { method: 'POST', suffix: '/backup', action: 'stack:deploy' },
+  { method: 'POST', suffix: '/drift/dismissals', action: 'stack:deploy' },
+  { method: 'POST', suffix: '/scan-status/rescan', action: 'stack:deploy' },
 
   // Delete
   { method: 'DELETE', suffix: '', action: 'stack:delete' },
@@ -122,6 +129,9 @@ const EXACT_SUFFIX_INDEX = new Map<string, PermissionAction>(
 /** `/services/:serviceName/{restart|stop|start|update|restore|recovery}` */
 const SERVICE_SUFFIX_RE =
   /^\/services\/[^/]+\/(restart|stop|start|update|restore|recovery)$/;
+
+/** `/drift/dismissals/:id` */
+const DRIFT_DISMISSAL_DELETE_RE = /^\/drift\/dismissals\/[^/]+$/;
 
 /** `/preflight/acknowledgements/:id` */
 const PREFLIGHT_ACK_DELETE_RE = /^\/preflight\/acknowledgements\/[^/]+$/;
@@ -228,6 +238,10 @@ export function classifyStackApiPath(method: string, pathAfterApiStrip: string):
 
   if (methodUpper === 'DELETE' && PREFLIGHT_ACK_DELETE_RE.test(suffix)) {
     return { kind: 'named-stack', stackName, action: 'stack:edit' };
+  }
+
+  if (methodUpper === 'DELETE' && DRIFT_DISMISSAL_DELETE_RE.test(suffix)) {
+    return { kind: 'named-stack', stackName, action: 'stack:deploy' };
   }
 
   if (methodUpper === 'POST' && GIT_PROVIDER_HOOK_ROTATE_RE.test(suffix)) {

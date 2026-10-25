@@ -14,7 +14,7 @@
   var STYLES = { calm: 1, signature: 1 };
   var HEADINGS = { clean: 1, signature: 1 };
   var CHARTS = { muted: 1, heat: 1, signature: 1 };
-  // Calm/Readability: a fresh user (absent key) gets CALM via DEFAULTS; an
+  // Calm/Readability: a fresh user (absent key) gets CALM, with the Signature chart palette, via DEFAULTS; an
   // existing stored object fills missing appearance fields from SIGNATURE so a
   // returning user looks unchanged. Mirrors the presets in src/hooks/use-theme.ts.
   var SIG = {
@@ -24,7 +24,7 @@
   var DEFAULTS = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
-    visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
+    visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'signature',
     reducedEffects: true, reducedMotion: true, readability: false,
   };
 

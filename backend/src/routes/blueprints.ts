@@ -18,11 +18,10 @@ import {
     summarizeConfirmedOutcomes,
 } from '../services/BlueprintReconciler';
 import { BlueprintAnalyzer } from '../services/BlueprintAnalyzer';
-import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../services/blueprintPreviewProjection';
+import { buildBlueprintPreview, composeEffectiveApproval, evaluateLightweightEffectiveApproval } from '../services/blueprintPreviewProjection';
 import {
     confirmableActionsEqual,
     deriveBlastFromConfirmableActions,
-    evaluateEffectiveApproval,
     intentFingerprint,
     parseConfirmableActionsBody,
     serializeApprovedBlast,
@@ -581,18 +580,24 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         // leaf's rendered model (compose + override + multi-file specs).
         digestPins = body.digestPins;
     }
+    // Both node_proxy and pilot_tunnel are the hub-to-leaf machine hop: a
+    // Pilot-forwarded request is authenticated by the agent's loopback token
+    // rather than the hub's node token, and the auth middleware treats the two
+    // as the same credential. Browser sessions and opaque API tokens hold
+    // neither scope, so they still cannot opt a git-managed Blueprint into
+    // snapshot compose writes.
+    const isHubLeafMachineHop = req.machineAuthScope === 'node_proxy'
+        || req.machineAuthScope === 'pilot_tunnel';
     const allowGitManaged = body.allowGitManagedContent === true
         && typeof marker.applicationId === 'string'
         && marker.applicationId.length > 0
-        // Hub-to-leaf proxy only. Browser sessions and opaque API tokens must
-        // not opt a git-managed Blueprint into snapshot compose writes.
-        && req.machineAuthScope === 'node_proxy';
+        && isHubLeafMachineHop;
     // A recovery capture on a Blueprint apply is a hub-driven rollout feature:
     // a leaf has no GitOps rows of its own, so the hub both asks for the
     // capture and supplies the binding it should record. Only the machine-auth
     // hub hop may request it, on the same rule as git-managed content.
     const captureRecovery = body.captureRecovery === true
-        && req.machineAuthScope === 'node_proxy';
+        && isHubLeafMachineHop;
     try {
         const outcome = await BlueprintService.getInstance().applyLocalUnderLock(
             req.nodeId,
@@ -852,10 +857,11 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             return;
         }
         // Snapshot deploy may finish after a concurrent edit cleared approval.
-        // Report live effectiveApproval; do not hardcode "approved".
+        // Report the live composed approval, the same authority the preview and
+        // the tick read; do not hardcode "approved".
         const live = DatabaseService.getInstance().getBlueprint(id);
         const { effectiveApproval } = live
-            ? evaluateEffectiveApproval(live, preview.executorActions)
+            ? composeEffectiveApproval(live, preview.executorActions)
             : { effectiveApproval: 'pending' as const };
         const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
         const message = effectiveApproval === 'approved'
@@ -990,6 +996,44 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     } catch (error) {
         console.error('[Blueprints] Accept error:', error);
         res.status(500).json({ error: getErrorMessage(error, 'Failed to accept deployment') });
+    }
+});
+
+/**
+ * Check a name-conflict row again. Re-runs the ownership check only: a name
+ * still taken leaves the row as it is, a name that is free releases the row to
+ * `pending` so the next reconcile tick decides what happens. It never deploys,
+ * and a check that cannot tell leaves the row in conflict and answers an error.
+ * Same authority as accepting a deployment on this node.
+ */
+blueprintsRouter.post('/:id/deployments/:nodeId/recheck', async (req: Request, res: Response): Promise<void> => {
+    const id = parseIntParam(req, res, 'id');
+    if (id === null) return;
+    const nodeId = parseIntParam(req, res, 'nodeId');
+    if (nodeId === null) return;
+    try {
+        const db = DatabaseService.getInstance();
+        const blueprint = db.getBlueprint(id);
+        if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        if (refuseGitManagedContent(res, blueprint, GIT_MANAGED_INLINE_ERROR)) return;
+        if (!requirePermission(req, res, 'stack:deploy', 'stack', blueprint.name, nodeId)) return;
+        const node = db.getNode(nodeId);
+        const deployment = db.getDeployment(id, nodeId);
+        if (!node || !deployment) { res.status(404).json({ error: 'Deployment not found' }); return; }
+        if (deployment.status !== 'name_conflict') {
+            res.status(409).json({ error: 'This deployment is not in a name conflict.', code: 'not_name_conflict', status: deployment.status });
+            return;
+        }
+        const result = await BlueprintService.getInstance().recheckNameConflict(blueprint, node);
+        res.json({ cleared: result.cleared, status: result.deployment.status });
+    } catch (error) {
+        if (error instanceof BlueprintOwnershipProbeError) {
+            console.error('[Blueprints] Name conflict recheck could not verify ownership:', sanitizeForLog(error.message));
+            res.status(500).json({ error: error.message, code: 'ownership_probe_failed' });
+            return;
+        }
+        console.error('[Blueprints] Recheck error:', sanitizeForLog(getErrorMessage(error, 'recheck failed')));
+        res.status(500).json({ error: getErrorMessage(error, 'Failed to recheck the name conflict') });
     }
 });
 
@@ -1129,10 +1173,11 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         // the state this request committed rather than whatever the background
         // pass has reached by the time it is serialized.
         const gitopsRevision = projectCommittedRevision(id, 'blueprint pin');
-        // A pin that moved clears approval, so reconcileOne cannot mutate until
-        // Confirm Apply. Re-pinning the node already pinned changes nothing and
-        // leaves approval intact. Called either way so the resulting state is
-        // evaluated immediately instead of waiting for the next tick.
+        // A pin that moved, including clearing one, waits for Confirm Apply, so
+        // reconcileOne cannot place the freed node on its own. Re-pinning the
+        // node already pinned changes nothing and leaves approval intact.
+        // Called either way so the resulting state is evaluated immediately
+        // instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);

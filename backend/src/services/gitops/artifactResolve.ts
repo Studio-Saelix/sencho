@@ -3,7 +3,6 @@ import { classifyReferenceKind } from '../composeProjectContext';
 import { buildEffectiveServiceModel, type EffectiveServiceSpec } from '../effectiveServiceModel';
 import DockerController from '../DockerController';
 import type { ContainerInfo } from 'dockerode';
-import axios from 'axios';
 import { RegistryService } from '../RegistryService';
 import {
   parseImageRef,
@@ -11,15 +10,12 @@ import {
   selectLocalRepoDigests,
 } from '../registry-api';
 import { DatabaseService } from '../DatabaseService';
-import { NodeRegistry } from '../NodeRegistry';
-import { LicenseService } from '../LicenseService';
-import { PROXY_TIER_HEADER } from '../license-headers';
-import { safeAxiosTransport } from '../../utils/outboundTarget';
 import type { BuildContextPlan } from '../../types/gitProjectManifest';
 import type { ArtifactQualification } from './types';
 import {
   computeArtifactSetFingerprint,
   decodeArtifactEvidenceJson,
+  decodeObservedArtifactIdentity,
   encodeArtifactEvidenceJson,
   isRecord,
   type ArtifactEvidenceJson,
@@ -27,16 +23,20 @@ import {
   type ObservedArtifactIdentity,
   type ServiceArtifactEvidence,
 } from './json';
+import { observationMatchesExpected } from './artifactIdentity';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import { newGitOpsId } from './directApplication';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { readNodeProxyJson } from '../../helpers/nodeProxyJson';
 import {
   loadEffectiveArtifactContext,
   platformLabelOf,
+  readNodePlatform,
   type EffectiveArtifactContext,
   type NodePlatform,
 } from './effectiveArtifactContext';
+import { canonicalNodePlatform } from './platformNames';
 
 const REMOTE_RESOLVE_TIMEOUT_MS = 30_000;
 
@@ -103,9 +103,12 @@ function mapRegistryFailure(reason: string): ArtifactServiceFailureClass {
 async function resolveRegistryService(
   serviceName: string,
   authoredRef: string,
-  platform: { os: string; architecture: string } | null,
+  platformRead: NodePlatformRead,
   resolvedAt: number,
 ): Promise<ServiceResolveResult> {
+  // A platform that could not be read is labelled as absent rather than guessed,
+  // and which failure class it produces is decided below.
+  const platform = platformRead.status === 'ok' ? platformRead.platform : null;
   const referenceKind = classifyReferenceKind(authoredRef);
   if (referenceKind === 'digest_pinned') {
     const match = authoredRef.match(DIGEST_PIN_RE);
@@ -133,7 +136,9 @@ async function resolveRegistryService(
         serviceName,
         authoredRef,
         source: 'registry',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: digest,
         platformDigest: digest,
         buildContextFingerprint: null,
@@ -163,6 +168,12 @@ async function resolveRegistryService(
     };
   }
   if (!platform) {
+    // Two different situations, and they must not share a class. `route_missing`
+    // is a leaf older than this hub: the route does not exist there and will not
+    // appear on its own, so the answer is permanent and the retry stops.
+    // Anything else is a daemon that could not answer this time, which is the
+    // transient case the retry exists for, and calling it permanent switched the
+    // retry off for every remote target until the next redeploy.
     return {
       qualification: 'unavailable',
       evidence: {
@@ -174,7 +185,9 @@ async function resolveRegistryService(
         platformDigest: null,
         buildContextFingerprint: null,
         producedImageId: null,
-        failureClass: 'platform_ambiguity',
+        failureClass: platformRead.status === 'route_missing'
+          ? 'platform_ambiguity'
+          : 'platform_unavailable',
         resolvedAt,
       },
     };
@@ -227,7 +240,7 @@ async function resolveRegistryService(
 
 async function resolveOneService(
   spec: EffectiveServiceSpec,
-  platform: { os: string; architecture: string } | null,
+  platformRead: NodePlatformRead,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
 ): Promise<ServiceResolveResult> {
@@ -238,7 +251,9 @@ async function resolveOneService(
         serviceName: spec.name,
         authoredRef: spec.declaredImage,
         source: 'build',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: null,
         platformDigest: null,
         buildContextFingerprint: buildContextFingerprint(spec.name, buildContexts),
@@ -266,7 +281,7 @@ async function resolveOneService(
     };
   }
   try {
-    return await resolveRegistryService(spec.name, spec.declaredImage, platform, resolvedAt);
+    return await resolveRegistryService(spec.name, spec.declaredImage, platformRead, resolvedAt);
   } catch (error) {
     console.error(
       `[GitOpsArtifactResolve] Registry resolve failed for ${spec.name}:`,
@@ -278,7 +293,9 @@ async function resolveOneService(
         serviceName: spec.name,
         authoredRef: spec.declaredImage,
         source: 'registry',
-        platform: platform ? `${platform.os}/${platform.architecture}` : null,
+        platform: platformRead.status === 'ok' && platformRead.platform
+          ? `${platformRead.platform.os}/${platformRead.platform.architecture}`
+          : null,
         indexDigest: null,
         platformDigest: null,
         buildContextFingerprint: null,
@@ -296,6 +313,17 @@ function isNodePlatform(value: unknown): value is NodePlatform {
     && value.os.length > 0
     && typeof value.architecture === 'string'
     && value.architecture.length > 0;
+}
+
+/**
+ * A platform payload from a leaf, translated to the OCI names the digest
+ * resolver compares. A leaf older than this build still reports the raw
+ * docker-info spelling, so the hub translates at this boundary rather than
+ * failing every resolve against it.
+ */
+function decodeNodePlatform(value: unknown): NodePlatform | null {
+  if (!isNodePlatform(value)) return null;
+  return canonicalNodePlatform({ os: value.os, architecture: value.architecture });
 }
 
 function isEffectiveServiceSpec(value: unknown): value is EffectiveServiceSpec {
@@ -329,52 +357,55 @@ export async function fetchRemoteEffectiveArtifactContext(
   nodeId: number,
   stackName: string,
 ): Promise<EffectiveArtifactContext | null> {
-  const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
-  if (!target) {
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: `/api/stacks/${encodeURIComponent(stackName)}/effective-artifact-context`,
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: `remote effective-artifact-context for ${sanitizeForLog(stackName)}`,
+  });
+  if (read.kind !== 'ok') return null;
+  if (!isEffectiveArtifactContext(read.data)) {
     console.warn(
-      '[GitOpsArtifactResolve] No proxy target for remote effective-artifact-context on node %s (%s)',
-      nodeId,
+      '[GitOpsArtifactResolve] Remote effective-artifact-context invalid shape for %s on node %s',
       sanitizeForLog(stackName),
+      nodeId,
     );
     return null;
   }
-  const proxy = LicenseService.getInstance().getProxyHeaders();
-  const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(stackName)}/effective-artifact-context`;
+  return {
+    ...read.data,
+    platform: read.data.platform ? canonicalNodePlatform(read.data.platform) : null,
+  };
+}
+
+/**
+ * Ask the leaf what it is actually running, over the node proxy.
+ * A remote node's Docker is not reachable from here, so the identity can only
+ * come from the leaf's own runtime-artifact-identity route. Returns null when
+ * the leaf cannot answer, so the caller records an explicit unavailable rather
+ * than a hub-local guess.
+ */
+export async function fetchRemoteRuntimeArtifactIdentity(
+  nodeId: number,
+  stackName: string,
+): Promise<ObservedArtifactIdentity | null> {
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: `/api/stacks/${encodeURIComponent(stackName)}/runtime-artifact-identity`,
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: `remote runtime identity for ${sanitizeForLog(stackName)}`,
+  });
+  if (read.kind !== 'ok') return null;
+  // A leaf that answers with something this module cannot read is no
+  // evidence. Decoding separately keeps an unreadable payload distinguishable
+  // in the log from a leaf that could not be reached at all.
   try {
-    const res = await axios.get(url, {
-      ...safeAxiosTransport(target.trustedLoopback),
-      headers: {
-        Authorization: `Bearer ${target.apiToken}`,
-        [PROXY_TIER_HEADER]: proxy.tier,
-        'Content-Type': 'application/json',
-      },
-      timeout: REMOTE_RESOLVE_TIMEOUT_MS,
-      validateStatus: () => true,
-    });
-    if (res.status !== 200) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote effective-artifact-context returned %s for %s on node %s',
-        res.status,
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-    if (!isEffectiveArtifactContext(res.data)) {
-      console.warn(
-        '[GitOpsArtifactResolve] Remote effective-artifact-context invalid shape for %s on node %s',
-        sanitizeForLog(stackName),
-        nodeId,
-      );
-      return null;
-    }
-    return res.data;
-  } catch (err) {
+    return decodeObservedArtifactIdentity(JSON.stringify(read.data));
+  } catch {
     console.warn(
-      '[GitOpsArtifactResolve] Remote effective-artifact-context failed for %s on node %s: %s',
+      '[GitOpsArtifactResolve] Remote runtime-artifact-identity invalid shape for %s on node %s',
       sanitizeForLog(stackName),
       nodeId,
-      sanitizeForLog(err instanceof Error ? err.message : String(err)),
     );
     return null;
   }
@@ -403,7 +434,16 @@ async function resolveServices(
   nodeId: number,
   buildContexts: readonly BuildContextPlan[],
   resolvedAt: number,
+  approvedServices?: readonly EffectiveServiceSpec[],
 ): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
+  // The platform always comes from the node, including on the approved-intent
+  // path: which manifest child is correct is a property of the machine, not of
+  // the intent. Only the service specs come from the intent.
+  const platform = await readPlatformForNode(nodeId);
+  if (approvedServices) {
+    return resolveAgainstSpecs(approvedServices, platform, buildContexts, resolvedAt);
+  }
+
   const context = await loadArtifactContextForNode(nodeId, stackName);
   if (context && !context.renderable) {
     console.warn(
@@ -421,16 +461,80 @@ async function resolveServices(
     };
   }
 
-  const platform = context.platform;
-  const resolved = await Promise.all(
-    context.services.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
+  // The rendered path already read the platform as part of loading the context,
+  // so a 404 on the platform route cannot arise here: the older-leaf case only
+  // exists on the path that asks for the platform by itself.
+  return resolveAgainstSpecs(
+    context.services,
+    { status: 'ok', platform: context.platform },
+    buildContexts,
+    resolvedAt,
   );
-  const serviceQuals = resolved.map((entry) => entry.qualification);
-  const services = resolved.map((entry) => entry.evidence);
+}
 
-  const qualification = weakestQualification(serviceQuals);
-  const evidence = buildArtifactEvidence(qualification, services);
-  return { services, qualification, evidence };
+/** Resolve each spec against the node's platform and reduce to one qualification. */
+async function resolveAgainstSpecs(
+  specs: readonly EffectiveServiceSpec[],
+  platform: NodePlatformRead,
+  buildContexts: readonly BuildContextPlan[],
+  resolvedAt: number,
+): Promise<{ services: ServiceArtifactEvidence[]; qualification: ArtifactQualification; evidence: ArtifactEvidenceJson }> {
+  const entries = await Promise.all(
+    specs.map((spec) => resolveOneService(spec, platform, buildContexts, resolvedAt)),
+  );
+  const services = entries.map((entry) => entry.evidence);
+  const qualification = weakestQualification(entries.map((entry) => entry.qualification));
+  return { services, qualification, evidence: buildArtifactEvidence(qualification, services) };
+}
+
+/**
+ * How the node's platform read went.
+ *
+ * The distinction exists because the two failure modes deserve opposite
+ * treatment. A leaf that cannot answer the platform route is a leaf older than
+ * this hub, and it will not start answering on its own, so retrying it forever is
+ * pure cost. A daemon that is unreachable, a timeout, or a 5xx is exactly the
+ * transient case the retry exists for, and treating those the same silently
+ * switched the retry off for every remote target until the next redeploy.
+ */
+type NodePlatformRead =
+  | { status: 'ok'; platform: NodePlatform | null }
+  | { status: 'route_missing' };
+
+async function readPlatformForNode(nodeId: number): Promise<NodePlatformRead> {
+  const node = DatabaseService.getInstance().getNode(nodeId);
+  if (!node) return { status: 'ok', platform: null };
+  if (node.type === 'remote') {
+    return fetchRemotePlatform(nodeId);
+  }
+  // A local daemon that cannot answer is transient by definition: the same call
+  // works once it is back.
+  return { status: 'ok', platform: await readNodePlatform(nodeId) };
+}
+
+/**
+ * A remote node's Docker platform, read from the leaf's own daemon.
+ *
+ * Its own route rather than the effective-artifact-context one, because that one
+ * also renders the stack. The leaf answers from `docker info` alone and never
+ * reads a compose file, which is the property that makes it safe to call from a
+ * path that is deliberately not reading the node's compose directory.
+ *
+ * A 404 is reported as `route_missing` and everything else as a readable-but-null
+ * platform, which is what separates "this leaf is too old to be asked" from "this
+ * leaf could not answer right now".
+ */
+async function fetchRemotePlatform(nodeId: number): Promise<NodePlatformRead> {
+  const read = await readNodeProxyJson({
+    nodeId,
+    path: '/api/stacks/platform/docker-context',
+    timeoutMs: REMOTE_RESOLVE_TIMEOUT_MS,
+    logLabel: 'remote platform read',
+  });
+  if (read.kind === 'route_missing') return { status: 'route_missing' };
+  if (read.kind !== 'ok') return { status: 'ok', platform: null };
+  const data = isRecord(read.data) ? read.data : {};
+  return { status: 'ok', platform: decodeNodePlatform(data.platform) };
 }
 
 function buildArtifactEvidence(
@@ -481,6 +585,21 @@ function recordResolvedEvidence(args: {
   });
 }
 
+/**
+ * Resolve the artifact set for a generation and record it.
+ *
+ * `approvedServices` pins what is being resolved. Supplying it makes this a
+ * resolve of *approved intent* rather than of whatever is on the node's disk,
+ * which is the only form a caller may use outside the deploy that just wrote
+ * the compose: the node's directory is observable state that a later tick, a
+ * hand edit, or a restored backup can put out of step with what was approved,
+ * and recording that as the approved identity would let a local change become
+ * fleet intent. Callers that omit it are resolving immediately after their own
+ * deploy, where disk and intent are the same bytes by construction.
+ *
+ * Omitted, the node's rendered model supplies the specs, which is what the
+ * deploy-time freeze and the Direct apply paths want.
+ */
 export async function resolveAndRecordArtifactSet(args: {
   stackName: string;
   nodeId: number;
@@ -488,6 +607,11 @@ export async function resolveAndRecordArtifactSet(args: {
   generationId: string;
   buildContexts: readonly BuildContextPlan[];
   envelope: EventEnvelope;
+  /**
+   * Service specs from the approved intent, resolved against this node's
+   * platform. Omit only on a path that wrote the compose itself.
+   */
+  approvedServices?: readonly EffectiveServiceSpec[];
 }): Promise<void> {
   try {
     const resolvedAt = args.envelope.at;
@@ -496,6 +620,7 @@ export async function resolveAndRecordArtifactSet(args: {
       args.nodeId,
       args.buildContexts,
       resolvedAt,
+      args.approvedServices,
     );
     recordResolvedEvidence({
       applicationId: args.applicationId,
@@ -505,6 +630,11 @@ export async function resolveAndRecordArtifactSet(args: {
       envelope: args.envelope,
     });
   } catch (error) {
+    // A failed resolve is recorded as its own evidence rather than raised: the
+    // caller has already applied or written something, and losing the evidence
+    // row must not turn that into a reported failure. The `unavailable` row this
+    // writes is what the retry gate reads, so it is also what starts the clock
+    // for the next attempt.
     console.error(
       `[GitOpsArtifactResolve] Resolution failed for ${args.applicationId}/${args.generationId}:`,
       error instanceof Error ? error.message : String(error),
@@ -517,6 +647,27 @@ export async function resolveAndRecordArtifactSet(args: {
       envelope: args.envelope,
     });
   }
+}
+
+/**
+ * Whether both sides describe the same set of services, by name and by kind.
+ *
+ * `observationMatchesExpected` only walks the expected services and weighs the
+ * registry ones, so it cannot tell an extra service, a rename, or a service that
+ * swapped a local build for a published image from an unchanged set. The probe
+ * resolves the live stack rather than the staged candidate, so a stack edited out
+ * of band can carry a different set than the one that was frozen, and that is a
+ * moved identity rather than a matching one.
+ */
+function sameServiceSet(
+  expected: readonly ServiceArtifactEvidence[],
+  observed: readonly ServiceArtifactEvidence[],
+): boolean {
+  const identityOf = (service: ServiceArtifactEvidence): string =>
+    `${service.serviceName}:${service.source}`;
+  const expectedIdentities = new Set(expected.map(identityOf));
+  if (expectedIdentities.size !== expected.length) return false;
+  return observed.every((service) => expectedIdentities.has(identityOf(service)));
 }
 
 export async function probeStaleArtifactEvidence(args: {
@@ -540,6 +691,7 @@ export async function probeStaleArtifactEvidence(args: {
   }
   const expectedIdentity = 'identity' in expectedEvidence ? expectedEvidence.identity : null;
   if (!expectedIdentity) return;
+  const expectedServices = 'services' in expectedEvidence ? expectedEvidence.services : undefined;
 
   try {
     const resolvedAt = args.envelope.at;
@@ -552,6 +704,19 @@ export async function probeStaleArtifactEvidence(args: {
     const latestIdentity = 'identity' in evidence ? evidence.identity : null;
     if (!latestIdentity || latestIdentity === expectedIdentity) return;
     if (qualification === 'unresolved' || qualification === 'unavailable') return;
+    // The set fingerprint pins one platform child per service, so a target on a
+    // different architecture resolves a different fingerprint for the same
+    // multi-arch tag, and the fingerprint alone would report a moved identity.
+    // Membership is the test the Blueprint drift path applies: this platform's
+    // child is one of the expected set's own variants, so nothing moved. It
+    // answers only the digest question, so it is asked when both sides hold the
+    // same services; a set that grew, shrank, or changed what a service is, and
+    // an expected set that recorded no per-service evidence, all keep the
+    // fingerprint verdict.
+    if (expectedServices?.length
+      && evidence.services?.length
+      && sameServiceSet(expectedServices, evidence.services)
+      && observationMatchesExpected(expectedServices, evidence.services)) return;
     recordResolvedEvidence({
       applicationId: args.applicationId,
       generationId: args.generationId,
@@ -670,6 +835,10 @@ function recordRuntimeObservation(
  * Observe the running image identity for a stack on a node.
  * Does not require a GitOps application or generation; callers record when they have one.
  * Compose project labels use the lowercase stack name (Docker Compose convention).
+ *
+ * A remote node is asked over the proxy before anything is rendered or read
+ * here: a hub-local model of a remote stack and a hub-local Docker socket are
+ * both the wrong answer, and the second one throws.
  */
 export async function observeStackRuntimeArtifact(args: {
   stackName: string;
@@ -677,6 +846,13 @@ export async function observeStackRuntimeArtifact(args: {
   observedAt?: number;
 }): Promise<ObservedArtifactIdentity> {
   const observedAt = args.observedAt ?? Date.now();
+  const node = DatabaseService.getInstance().getNode(args.nodeId);
+  if (node?.type === 'remote') {
+    // The leaf's observedAt is authoritative: that is when it actually looked.
+    // The caller's timestamp belongs to the hub's envelope, not to this read.
+    const remote = await fetchRemoteRuntimeArtifactIdentity(args.nodeId, args.stackName);
+    return remote ?? { kind: 'unavailable' };
+  }
   const projectName = args.stackName.toLowerCase();
   try {
     const model = await buildEffectiveServiceModel(args.nodeId, args.stackName);

@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { WITHHELD_DECRYPTED_RENDER_OUTPUT } from '../helpers/decryptedComposeOutput';
 
 const mockRenderConfig = vi.fn();
 const mockGetDependencySnapshot = vi.fn();
@@ -143,6 +144,36 @@ describe('resolveMissingExternalNetworks render failures', () => {
 
     expect(result.status).toBe('render_unavailable');
     expect(result.renderError).toContain('ENOENT');
+  });
+
+  it('renders the project the deploy it gates will run Compose in', async () => {
+    mockRenderConfig.mockResolvedValue({
+      rendered: JSON.stringify({ name: 'my-stack', services: {}, networks: {}, volumes: {} }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    });
+    const overlayDir = '/data/git-secrets/1/my-stack/op-1';
+
+    const result = await resolveMissingExternalNetworks(1, 'my-stack', { stackDirOverride: overlayDir });
+
+    expect(mockRenderConfig).toHaveBeenCalledWith('my-stack', { stackDirOverride: overlayDir });
+    expect(result.status).toBe('ok');
+  });
+
+  it('reports the withheld text, not Compose words, when the render read decrypted files', async () => {
+    mockRenderConfig.mockResolvedValue({
+      rendered: null,
+      stderr: '',
+      code: 1,
+      timedOut: false,
+      withheld: true,
+    });
+
+    const result = await resolveMissingExternalNetworks(1, 'my-stack');
+
+    expect(result.status).toBe('render_unavailable');
+    expect(result.renderError).toBe(WITHHELD_DECRYPTED_RENDER_OUTPUT);
   });
 
   it('still reports ok when the model renders and nothing is missing', async () => {

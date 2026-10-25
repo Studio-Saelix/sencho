@@ -161,6 +161,7 @@ export function buildDirectApplicationRow(args: {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: policy,
     // A Direct application has no Blueprint placement, so its placement policy
