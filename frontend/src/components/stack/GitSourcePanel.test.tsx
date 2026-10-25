@@ -1226,7 +1226,24 @@ describe('GitSourcePanel controller controls', () => {
         await settle();
 
         expect(retryButton()).toBeInTheDocument();
+        expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
         expect(toast.error).not.toHaveBeenCalled();
+      });
+
+      it('leaves the form of a new source alone when the stack gets linked elsewhere', async () => {
+        vi.mocked(apiFetch)
+          .mockResolvedValueOnce(jsonRes({ linked: false }))
+          .mockResolvedValue(jsonRes(failed()));
+        render(panel());
+        const url = await screen.findByLabelText(/repository url/i);
+        fireEvent.change(url, { target: { value: 'https://github.com/org/new.git' } });
+
+        announce({ stackName: 'web' });
+        await waitFor(() => expect(reads()).toBe(2));
+        await settle();
+
+        expect(screen.getByLabelText(/repository url/i)).toHaveValue('https://github.com/org/new.git');
+        expect(screen.queryByRole('tab', { name: 'Overview' })).not.toBeInTheDocument();
       });
 
       it('coalesces a burst of announcements into one read', async () => {
