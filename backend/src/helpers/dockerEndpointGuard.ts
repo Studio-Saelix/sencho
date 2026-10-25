@@ -9,11 +9,7 @@ import {
 } from '../services/DockerEndpointProvider';
 import { getRuntimeContainerIdCandidates, matchesContainerId, workingDirMatchesStack } from './selfStackGuard';
 import { getErrorMessage } from '../utils/errors';
-import {
-  DOCKER_ENDPOINT_PROTECTED_CODE,
-  type DockerEndpointRefusal,
-  type EndpointRefusalReason,
-} from './dockerEndpointError';
+import type { DockerEndpointRefusal } from './dockerEndpointError';
 
 /**
  * Guard for lifecycle operations that would stop or recreate the container
@@ -267,6 +263,12 @@ function isProviderContainer(
     && container.Labels?.['com.docker.compose.service'] === provider.service;
 }
 
+/** Matches a caller-supplied reference (full or short id, or container name) to the provider without inspecting it. */
+function namesProviderContainer(reference: string, provider: DockerEndpointContainer): boolean {
+  return matchesContainerId(provider.containerId, reference)
+    || provider.containerName.replace(/^\//, '') === reference.replace(/^\//, '');
+}
+
 function sharesSenchoNetwork(
   networks: Record<string, { NetworkID?: string } | null> | undefined,
   self: SelfIdentityService,
@@ -478,7 +480,7 @@ export async function evaluateDockerEndpointContainer(
     // resolved provider or Sencho matched by id is refused, and so is anything
     // that cannot be told apart while the provider or Sencho is unresolved. An
     // ordinary container is not held hostage by a proxy that denies inspect.
-    if (provider.state === 'resolved' && isProviderContainer({ Id: containerId }, provider.provider)) {
+    if (provider.state === 'resolved' && namesProviderContainer(containerId, provider.provider)) {
       return refusalFor('provider', provider.provider.service ?? provider.provider.containerName, provider.provider, self.getIdentity().composeProjectName);
     }
     if (self.isOwnContainer(containerId)) {

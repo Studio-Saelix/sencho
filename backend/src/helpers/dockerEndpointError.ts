@@ -30,3 +30,20 @@ export class DockerEndpointProtectedError extends Error {
 export function isDockerEndpointProtectedError(error: unknown): error is DockerEndpointProtectedError {
   return error instanceof DockerEndpointProtectedError;
 }
+
+/**
+ * Recognises a refusal wherever it came from: raised in this process, or
+ * answered by a remote node's own guard (a 409 carrying the same code, which
+ * `remoteStackError` surfaces with the remote's message and reason). Returns
+ * the text to show and the reason, or null for any other error.
+ */
+export function dockerEndpointRefusalOf(error: unknown): { message: string; reason: string | null } | null {
+  if (isDockerEndpointProtectedError(error)) return { message: error.message, reason: error.reason };
+  if (!(error instanceof Error)) return null;
+  const remote = error as Error & { code?: unknown; httpStatus?: unknown; remoteError?: unknown; remoteReason?: unknown };
+  if (remote.code !== DOCKER_ENDPOINT_PROTECTED_CODE || remote.httpStatus !== 409) return null;
+  return {
+    message: typeof remote.remoteError === 'string' && remote.remoteError ? remote.remoteError : error.message,
+    reason: typeof remote.remoteReason === 'string' ? remote.remoteReason : null,
+  };
+}

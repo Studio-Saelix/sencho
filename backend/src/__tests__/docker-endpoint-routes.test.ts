@@ -268,6 +268,102 @@ describe('a refusal that the delete and rollback paths meet after the route chec
   });
 });
 
+describe('a file-backup rollback whose redeploy the guard refuses', () => {
+  const spies: Array<{ mockRestore: () => void }> = [];
+  afterEach(() => {
+    while (spies.length) spies.pop()?.mockRestore();
+    mockDeployStack.mockReset();
+  });
+
+  async function arrangeFileBackupRollback() {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const policyGate = await import('../helpers/policyGate');
+    mockEvaluate.mockResolvedValue(null);
+    const restore = vi.spyOn(FileSystemService.prototype, 'restoreStackFiles').mockResolvedValue(undefined);
+    const revert = vi.fn();
+    spies.push(
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getCurrent').mockReturnValue(undefined),
+      vi.spyOn(FileSystemService.prototype, 'getBackupInfo').mockResolvedValue({ exists: true } as never),
+      restore,
+      vi.spyOn(FileSystemService.prototype, 'snapshotStackFiles').mockResolvedValue(revert),
+      vi.spyOn(policyGate, 'runPolicyGate').mockResolvedValue(true),
+    );
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockDeployStack.mockRejectedValue(new DockerEndpointProtectedError(refusal));
+    return { restore, revert };
+  }
+
+  it('answers 409 and puts the restored files back, since compose never ran', async () => {
+    const { restore, revert } = await arrangeFileBackupRollback();
+    revert.mockResolvedValue(undefined);
+
+    const res = await request(app).post('/api/stacks/infra/rollback').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+    expect(restore).toHaveBeenCalledTimes(1);
+    expect(revert).toHaveBeenCalledTimes(1);
+  });
+
+  it('still answers 409 and raises an alert when putting the files back fails', async () => {
+    const { revert } = await arrangeFileBackupRollback();
+    revert.mockRejectedValue(new Error('disk full'));
+    const { NotificationService } = await import('../services/NotificationService');
+
+    const res = await request(app).post('/api/stacks/infra/rollback').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('docker_endpoint_protected');
+    expect(revert).toHaveBeenCalledTimes(1);
+    expect(NotificationService.getInstance().dispatchAlert).toHaveBeenCalled();
+  });
+});
+
+describe('a service-scoped update or restore refused after the route check', () => {
+  const spies: Array<{ mockRestore: () => void }> = [];
+  afterEach(() => {
+    while (spies.length) spies.pop()?.mockRestore();
+  });
+
+  const routes = [
+    ['update', '/api/stacks/infra/services/web/update'],
+    ['restore', '/api/stacks/infra/services/web/restore'],
+  ] as const;
+
+  it.each(routes)('maps a refused %s the orchestrator reports to 409 with the guard code', async (_name, url) => {
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    mockEvaluate.mockResolvedValue(null);
+    spies.push(vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockResolvedValue({
+      kind: 'service_failed',
+      code: 'docker_endpoint_protected',
+      error: refusal.message,
+      serviceName: 'web',
+    }));
+
+    const res = await request(app).post(url).set('Cookie', authCookie).send({ recoveryId: 'rec-1' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', error: refusal.message });
+  });
+
+  it.each(routes)('maps a refusal thrown inside the %s to 409, not a generic 500', async (_name, url) => {
+    const { StackUpdateOrchestrator } = await import('../services/StackUpdateOrchestrator');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockEvaluate.mockResolvedValue(null);
+    spies.push(
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      vi.spyOn(StackUpdateOrchestrator.getInstance(), 'execute').mockRejectedValue(new DockerEndpointProtectedError(refusal)),
+    );
+
+    const res = await request(app).post(url).set('Cookie', authCookie).send({ recoveryId: 'rec-1' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+  });
+});
+
 describe('POST /api/stacks/bulk', () => {
   it('reports a per-stack refusal and still runs the stacks that are fine', async () => {
     writeStack('blog');

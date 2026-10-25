@@ -1300,12 +1300,12 @@ export class StackUpdateRecoveryService {
       // function saw a clean return: the live files may be a mix of the
       // generation and the pre-restore snapshot, so the failure has to hold.
       const revertFailed = (error as { restoreRevertFailed?: unknown }).restoreRevertFailed === true;
-      const failureClass = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
-      gitopsRecovery?.failed(failureClass);
-      if (typeof error === 'object' && error !== null) {
-        Object.assign(error, { failureClass });
-      }
-      let filesRevertedClean = !filesRestored || !generationContentPath;
+      let failureClass: 'pre_mutation' | 'post_mutation' = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
+      // Whether the live files are back as they were before this restore began.
+      // With nothing restored there is nothing to revert; with files restored,
+      // only a completed revert counts, and a restore without a generation
+      // content path has none.
+      let filesRevertedClean = !filesRestored;
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
@@ -1321,15 +1321,20 @@ export class StackUpdateRecoveryService {
           );
         }
       }
-      if (code === 'ROLLBACK_PROHIBITED') {
-        throw error;
-      }
       // The Docker endpoint guard refused the restore's compose up before it ran,
       // and the files are back where they were: nothing moved, and the recovery
       // point is still intact for a restore from the host, so it is neither
       // marked recovery_required nor flattened into a failed restore.
-      if (isDockerEndpointProtectedError(error) && !revertFailed) {
-        Object.assign(error, { failureClass: filesRevertedClean ? 'pre_mutation' : 'post_mutation' });
+      const refusedBeforeAnyMovement = isDockerEndpointProtectedError(error) && !revertFailed && filesRevertedClean;
+      if (refusedBeforeAnyMovement) failureClass = 'pre_mutation';
+      gitopsRecovery?.failed(failureClass);
+      if (typeof error === 'object' && error !== null) {
+        Object.assign(error, { failureClass });
+      }
+      if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
+      if (refusedBeforeAnyMovement) {
         throw error;
       }
       console.error(

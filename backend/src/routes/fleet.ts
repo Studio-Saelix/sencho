@@ -24,7 +24,7 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
-import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -2859,6 +2859,8 @@ interface RemoteProxyContext {
 async function remoteStackError(action: string, res: Awaited<ReturnType<typeof fetch>>): Promise<Error> {
   let detail = '';
   let code: string | undefined;
+  let remoteError: string | undefined;
+  let remoteReason: string | undefined;
   try {
     const raw = (await res.text()).trim();
     detail = raw.slice(0, 300);
@@ -2866,12 +2868,18 @@ async function remoteStackError(action: string, res: Awaited<ReturnType<typeof f
     if (typeof parsed === 'object' && parsed !== null && 'code' in parsed && typeof parsed.code === 'string') {
       code = parsed.code;
     }
+    if (typeof parsed === 'object' && parsed !== null && 'error' in parsed && typeof parsed.error === 'string') {
+      remoteError = parsed.error;
+    }
+    if (typeof parsed === 'object' && parsed !== null && 'reason' in parsed && typeof parsed.reason === 'string') {
+      remoteReason = parsed.reason;
+    }
   } catch {
     // Body missing or not JSON; status (and any truncated text) still name the failure.
   }
   return Object.assign(
     new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`),
-    { code, httpStatus: res.status },
+    { code, httpStatus: res.status, remoteError, remoteReason },
   );
 }
 
@@ -3137,11 +3145,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
       return;
     }
-    if (isDockerEndpointProtectedError(error)) {
+    const endpointRefusal = dockerEndpointRefusalOf(error);
+    if (endpointRefusal) {
       res.status(409).json({
-        error: `The snapshot files were restored, but the stack was not redeployed. ${error.message}`,
-        code: error.code,
-        reason: error.reason,
+        error: `The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`,
+        code: DOCKER_ENDPOINT_PROTECTED_CODE,
+        reason: endpointRefusal.reason,
       });
       return;
     }
@@ -3162,7 +3171,7 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
-  /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
+  /** Machine-readable refusal code (registry delivery or Docker endpoint guard), when the redeploy failed on one. */
   code?: string;
 }
 
@@ -3257,8 +3266,12 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
           try {
             await redeploySnapshotStack(node, group.stackName);
           } catch (redeployError) {
-            if (isDockerEndpointProtectedError(redeployError)) {
-              throw new Error(`The snapshot files were restored, but the stack was not redeployed. ${redeployError.message}`);
+            const endpointRefusal = dockerEndpointRefusalOf(redeployError);
+            if (endpointRefusal) {
+              throw Object.assign(
+                new Error(`The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`),
+                { code: DOCKER_ENDPOINT_PROTECTED_CODE, httpStatus: 409, cause: redeployError },
+              );
             }
             throw redeployError;
           }
@@ -3266,7 +3279,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code ?? (dockerEndpointRefusalOf(e) ? DOCKER_ENDPOINT_PROTECTED_CODE : undefined) });
       }
     }
 

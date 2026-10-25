@@ -28,6 +28,7 @@ vi.mock('../services/DockerEndpointProvider', () => ({
 }));
 
 import SelfIdentityService from '../services/SelfIdentityService';
+import { DockerEndpointProtectedError, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
 import {
   evaluateDockerEndpointContainer,
   evaluateDockerEndpointGuard,
@@ -628,6 +629,18 @@ describe('evaluateDockerEndpointContainer', () => {
     expect(await evaluate(WEB_ID, 'stop', denied)).toMatchObject({ reason: 'unresolved' });
   });
 
+  it('refuses the proxy by short id or name when the proxy denies inspect, without catching a similar name', async () => {
+    const denied = dockerFor(new Error('403 forbidden'));
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+    expect(await evaluate(PROXY_ID.slice(0, 12), 'stop', denied)).toMatchObject({ reason: 'provider' });
+    expect(await evaluate(PROXY_ID.slice(0, 12), 'restart', denied)).toMatchObject({ reason: 'provider' });
+    expect(await evaluate('socket-proxy', 'stop', denied)).toMatchObject({ reason: 'provider' });
+    expect(await evaluate('/socket-proxy', 'restart', denied)).toMatchObject({ reason: 'provider' });
+    expect(await evaluate('socket-proxy-2', 'stop', denied)).toBeNull();
+    expect(await evaluate('c'.repeat(12), 'stop', denied)).toBeNull();
+  });
+
   it('refuses a container whose own label is invalid, as a protected container', async () => {
     specs[WEB_ID].labels = { ...specs[WEB_ID].labels, 'io.sencho.infrastructure': 'maybe' };
     try {
@@ -655,5 +668,45 @@ describe('evaluateDockerEndpointContainer', () => {
     expect(await evaluate(WEB_ID, 'stop', dockerFor(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })))).toBeNull();
     mockResolveProvider.mockResolvedValue({ state: 'unresolved', reason: 'dns' });
     expect(await evaluate(WEB_ID, 'stop', dockerFor(new Error('403 forbidden')))).toMatchObject({ reason: 'unresolved' });
+  });
+});
+
+describe('dockerEndpointRefusalOf', () => {
+  const remote = (over: Record<string, unknown> = {}) => Object.assign(new Error('Failed to redeploy stack on remote node (409): {...}'), {
+    code: 'docker_endpoint_protected',
+    httpStatus: 409,
+    remoteError: 'Service "socket-proxy" carries the Docker connection.',
+    remoteReason: 'provider',
+    ...over,
+  });
+
+  it('recognises a refusal raised in this process', () => {
+    const error = new DockerEndpointProtectedError({ reason: 'sencho', service: 'sencho', message: 'would stop Sencho' });
+
+    expect(dockerEndpointRefusalOf(error)).toEqual({ message: 'would stop Sencho', reason: 'sencho' });
+  });
+
+  it('recognises a remote node\'s 409 and prefers the remote\'s own message over the raw body', () => {
+    expect(dockerEndpointRefusalOf(remote())).toEqual({
+      message: 'Service "socket-proxy" carries the Docker connection.',
+      reason: 'provider',
+    });
+  });
+
+  it('falls back to the error text when the remote body carried no message or reason', () => {
+    expect(dockerEndpointRefusalOf(remote({ remoteError: undefined, remoteReason: undefined }))).toEqual({
+      message: 'Failed to redeploy stack on remote node (409): {...}',
+      reason: null,
+    });
+  });
+
+  it.each([
+    ['a different code', remote({ code: 'stack_op_in_progress' })],
+    ['a status other than 409', remote({ httpStatus: 500 })],
+    ['no status (a plain coded error)', remote({ httpStatus: undefined })],
+    ['a non-error', { code: 'docker_endpoint_protected', httpStatus: 409 }],
+    ['null', null],
+  ])('does not treat %s as a refusal', (_name, value) => {
+    expect(dockerEndpointRefusalOf(value)).toBeNull();
   });
 });

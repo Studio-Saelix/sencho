@@ -336,10 +336,12 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
             .set('Cookie', adminCookie)
             .send({ redeploy: true });
         expect(res.status).toBe(200);
-        const rows = res.body.results as Array<{ stackName: string; success: boolean; error?: string }>;
+        const rows = res.body.results as Array<{ stackName: string; success: boolean; error?: string; code?: string }>;
         const refused = rows.find(r => r.stackName === 'refusedall-a');
         expect(refused?.success).toBe(false);
         expect(refused?.error).toContain('The snapshot files were restored, but the stack was not redeployed. carries the Docker connection');
+        expect(refused?.code).toBe('docker_endpoint_protected');
+        expect(rows.find(r => r.stackName === 'refusedall-b')).not.toHaveProperty('code', 'docker_endpoint_protected');
         expect(rows.find(r => r.stackName === 'refusedall-b')?.success).toBe(true);
     });
 
@@ -1528,5 +1530,92 @@ describe('Fleet snapshot restore: registry delivery refusal codes', () => {
         expect(row?.error).toBe('Registry credentials unavailable for challenged image hosts');
         expect(row?.code).toBe('REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE');
         expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('Fleet snapshot restore: remote node refuses the redeploy to protect its Docker connection', () => {
+    const REMOTE_REFUSAL = {
+        error: 'Service "socket-proxy" carries the Docker connection.',
+        code: 'docker_endpoint_protected',
+        reason: 'provider',
+    };
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+    });
+
+    // The file-apply POST succeeds; the deploy POST is answered with the remote's 409.
+    function stubRemoteDeployRefusal() {
+        const fetchMock = vi.fn(async (url: string) => (
+            /\/deploy$/.test(url)
+                ? new Response(JSON.stringify(REMOTE_REFUSAL), { status: 409 })
+                : new Response('{}', { status: 200 })
+        ));
+        vi.stubGlobal('fetch', fetchMock);
+        return fetchMock;
+    }
+
+    async function seedRemoteSnapshot(name: string, stackName: string): Promise<number> {
+        const db = DatabaseService.getInstance();
+        const remoteId = db.addNode({ name, type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+        const snapId = db.createSnapshot(name, 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(snapId, [
+            { nodeId: remoteId, nodeName: name, stackName, filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        vi.mocked(outbound.prepareOutboundRegistryDeliveryBody).mockResolvedValueOnce({ ok: true, body: {}, augmented: false });
+        return snapId;
+    }
+
+    it('answers a single restore with 409 and the remote reason instead of a generic 500', async () => {
+        const snapId = await seedRemoteSnapshot('remote-endpoint-single', 'rproxy');
+        const remoteId = DatabaseService.getInstance().getSnapshotFiles(snapId)[0].node_id;
+        stubRemoteDeployRefusal();
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rproxy', redeploy: true });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+        expect(res.body.error).toBe(`The snapshot files were restored, but the stack was not redeployed. ${REMOTE_REFUSAL.error}`);
+    });
+
+    it('records the refusal code on the failed restore-all row for that remote stack', async () => {
+        const snapId = await seedRemoteSnapshot('remote-endpoint-all', 'rproxyall');
+        stubRemoteDeployRefusal();
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true });
+
+        expect(res.status).toBe(200);
+        expect(res.body.failed).toBe(1);
+        const row = (res.body.results as Array<{ stackName: string; success: boolean; error?: string; code?: string }>)
+            .find(r => r.stackName === 'rproxyall');
+        expect(row?.success).toBe(false);
+        expect(row?.code).toBe('docker_endpoint_protected');
+        expect(row?.error).toBe(`The snapshot files were restored, but the stack was not redeployed. ${REMOTE_REFUSAL.error}`);
+    });
+
+    it('does not treat a remote 409 with a different code as a Docker endpoint refusal', async () => {
+        const snapId = await seedRemoteSnapshot('remote-endpoint-other', 'rother');
+        const remoteId = DatabaseService.getInstance().getSnapshotFiles(snapId)[0].node_id;
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => (
+            /\/deploy$/.test(url)
+                ? new Response(JSON.stringify({ error: 'busy', code: 'stack_op_in_progress' }), { status: 409 })
+                : new Response('{}', { status: 200 })
+        )));
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${snapId}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: remoteId, stackName: 'rother', redeploy: true });
+
+        expect(res.body.code).not.toBe('docker_endpoint_protected');
     });
 });

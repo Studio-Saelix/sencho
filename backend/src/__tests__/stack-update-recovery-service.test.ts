@@ -297,45 +297,102 @@ describe('StackUpdateRecoveryService', () => {
     );
   });
 
-  it('rethrows a Docker endpoint guard refusal of the restore up, without marking the generation recovery_required', async () => {
-    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
-    const row = {
-      id: 'gen-endpoint',
-      node_id: 1,
-      stack_name: 'my-stack',
-      status: 'active' as const,
-      phase: 'reconciling' as const,
-      is_current: 1,
-      backup_slot_id: 'b1',
-      content_path: null,
-      operation_kind: null,
-      override_path: '/test/compose/my-stack/.sencho-recovery-cccccccccccc.yml',
-      services_json: '[]',
-      health_gate_id: null,
-      gate_retain_until: null,
-      artifact_expires_at: null,
-      operation_lease_expires_at: null,
-      created_at: Date.now(),
-      updated_at: Date.now(),
-      created_by: null,
-      artifacts_retired: 0,
-      released_at: null,
-      released_by: null,
-    };
-    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
-    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
-      .mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  describe('a Docker endpoint guard refusal of the restore up', () => {
+    const genId = '77777777-7777-4777-8777-777777777777';
 
-    await expect(
-      StackUpdateRecoveryService.getInstance().compensateWithCandidate(
-        'gen-endpoint',
+    async function refuseRestoreUp(opts: { contentPath: string | null; revert?: 'clean' | 'fails' }) {
+      const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+      const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+      const context = {
+        validateForMutation: vi.fn().mockResolvedValue(undefined),
+        backupFromContext: vi.fn().mockResolvedValue(genId),
+        restoreFromContext: vi.fn().mockResolvedValue(undefined),
+        nodeId: 1,
+        stackName: 'my-stack',
+        stackDir: '/test/compose/my-stack',
+        backupSlotId: genId,
+        toComposeArgs: vi.fn(),
+        resolveServiceImageMap: vi.fn(),
+      } as never;
+      vi.mocked(resolveComposeProjectContext).mockResolvedValue(context);
+      vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue(context);
+
+      if (opts.contentPath) mockAccess.mockResolvedValue(undefined);
+      const { RollbackGenerationStore } = await import('../services/RollbackGenerationStore');
+      // The first call is the pre-compensate reconcile; the second is the revert after the failure.
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockReset();
+      vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockResolvedValueOnce(false);
+      if (opts.revert === 'fails') {
+        vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockRejectedValueOnce(new Error('revert failed'));
+      } else {
+        vi.mocked(RollbackGenerationStore.reconcileInterruptedRestore).mockResolvedValue(true);
+      }
+
+      vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue({
+        id: genId,
+        node_id: 1,
+        stack_name: 'my-stack',
+        status: 'active',
+        phase: 'reconciling',
+        is_current: 1,
+        backup_slot_id: genId,
+        content_path: opts.contentPath,
+        operation_kind: opts.contentPath ? 'update' : null,
+        override_path: '/test/compose/my-stack/.sencho-recovery-cccccccccccc.yml',
+        services_json: '[]',
+        health_gate_id: null,
+        gate_retain_until: null,
+        artifact_expires_at: null,
+        operation_lease_expires_at: null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        created_by: null,
+        artifacts_retired: 0,
+        released_at: null,
+        released_by: null,
+      } as never);
+      const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+        .mockImplementation(() => undefined);
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failed = vi.fn();
+      vi.spyOn(StackUpdateRecoveryService.prototype as unknown as { beginGitOpsRecovery: () => unknown }, 'beginGitOpsRecovery')
+        .mockReturnValue({ failed, succeeded: vi.fn() });
+
+      const outcome = StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(
+        genId,
         async () => {
           throw new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
         },
-      ),
-    ).rejects.toMatchObject({ code: 'docker_endpoint_protected', failureClass: 'pre_mutation' });
-    expect(update).not.toHaveBeenCalledWith('gen-endpoint', expect.objectContaining({ status: 'recovery_required' }));
+      );
+      return { outcome, update, failed };
+    }
+
+    it('rethrows it as pre_mutation, unmarked and recorded as such, when the restored files were reverted cleanly', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'clean' });
+
+      await expect(outcome).rejects.toMatchObject({ code: 'docker_endpoint_protected', failureClass: 'pre_mutation' });
+      expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+      // The class recorded for the recovery is the one the caller receives.
+      expect(failed).toHaveBeenCalledTimes(1);
+      expect(failed).toHaveBeenCalledWith('pre_mutation');
+    });
+
+    it('holds as post_mutation and marks recovery_required when the revert of the restored files fails', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, revert: 'fails' });
+
+      await expect(outcome).resolves.toEqual({ rolledBack: false, failureClass: 'post_mutation' });
+      expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+      expect(failed).toHaveBeenCalledTimes(1);
+      expect(failed).toHaveBeenCalledWith('post_mutation');
+    });
+
+    it('holds as post_mutation when files were restored but there is no generation content to revert them from', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: null });
+
+      await expect(outcome).resolves.toEqual({ rolledBack: false, failureClass: 'post_mutation' });
+      expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
+      expect(failed).toHaveBeenCalledWith('post_mutation');
+    });
   });
 
   it('throws HELD_IMAGE_MISSING when compensation compose-up cannot find the hold tag', async () => {

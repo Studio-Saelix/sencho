@@ -3251,4 +3251,45 @@ describe('ComposeService - updateStack safe ordering', () => {
     expect(mockHandoff).toHaveBeenCalled();
     expect(mockRemoveContainers).toHaveBeenCalledWith(['orphan-1']);
   });
+
+  describe('when the Docker endpoint guard steps in after handoff', () => {
+    const refusalMessage = 'Service "socket-proxy" carries the Docker connection.';
+
+    it('names the guard\'s reason when it refuses to remove an orphan container', async () => {
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['proxy-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'proxy-1', success: false, error: refusalMessage, refused: true }]);
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(refusalMessage);
+    });
+
+    it('keeps the update error and says why when the guard refused the rollback', async () => {
+      const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['orphan-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'orphan-1', success: false, error: 'removal failed' }]);
+      mockCompensateWithCandidate.mockRejectedValueOnce(
+        new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: refusalMessage }),
+      );
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(`The rollback did not run: ${refusalMessage}`);
+      expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+    });
+  });
 });
