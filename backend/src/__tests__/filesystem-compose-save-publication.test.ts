@@ -193,7 +193,7 @@ describe('compose save publication', () => {
             // belongs to another one, so its group bits would apply to the
             // wrong principals. The handle reports a different group and
             // refuses the chown, as a non-root process would see it.
-            function refuseHandOver(): void {
+            function refuseHandOver(sameGroup = false): void {
                 const realOpen = fsp.open.bind(fsp);
                 vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
                     const fh = await realOpen(...args);
@@ -204,7 +204,7 @@ describe('compose save publication', () => {
                     const realStat = fh.stat.bind(fh);
                     fh.stat = (async (...statArgs: Parameters<typeof fh.stat>) => {
                         const st = await realStat(...statArgs);
-                        return { ...st, gid: Number(st.gid) + 1 };
+                        return sameGroup ? { ...st, uid: Number(st.uid) + 1 } : { ...st, gid: Number(st.gid) + 1 };
                     }) as typeof fh.stat;
                     return fh;
                 }) as typeof fsp.open);
@@ -225,6 +225,28 @@ describe('compose save publication', () => {
                 expect(published.mode).toBe(after);
                 expect(published.content).toContain(MARKER);
                 expect(stagingFiles()).toEqual([]);
+            });
+
+            it('keeps the group bits when the staging file is already in the file\'s group', async () => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, 0o664);
+                refuseHandOver(true);
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().saveStackContent(STACK, composeContent(['web', 'db']));
+
+                expect(modeAndContent(target).mode).toBe(0o664);
+            });
+
+            it('applies an explicit mode with the group bits dropped', async () => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, 0o600);
+                refuseHandOver();
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().writeStackFile(STACK, 'compose.yaml', composeContent(['web']), { mode: 0o640 });
+
+                expect(modeAndContent(target).mode).toBe(0o600);
             });
 
             it('drops the group bits of a mode carried over from the replaced file', async () => {

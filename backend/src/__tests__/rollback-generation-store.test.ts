@@ -197,7 +197,7 @@ describe('RollbackGenerationStore', () => {
       expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
     });
 
-    it('is whole once the transaction is committed even when removing the leftovers fails', async () => {
+    it('is whole once the transaction is committed even when removing the snapshot fails', async () => {
       const { FileSystemService } = await import('../services/FileSystemService');
       const stackName = 'bracket-commit-cleanup';
       const { generationId } = await twoLayerGeneration(stackName);
@@ -211,6 +211,46 @@ describe('RollbackGenerationStore', () => {
         return realRm(target, ...rest);
       });
       await expect(RollbackGenerationStore.commitRestoreTransaction(NODE, stackName, generationId)).rejects.toThrow('busy');
+
+      expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(false);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays open for the revert when the intent cannot be removed at commit', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-commit-intent';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+
+      const realRm = fsPromises.rm.bind(fsPromises);
+      const rm = vi.spyOn(fsPromises, 'rm').mockImplementation(async (target, ...rest) => {
+        if (String(target).endsWith('restore-intent.json')) throw Object.assign(new Error('read-only'), { code: 'EROFS' });
+        return realRm(target, ...rest);
+      });
+      await expect(RollbackGenerationStore.commitRestoreTransaction(NODE, stackName, generationId)).rejects.toThrow('read-only');
+      expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(true);
+      expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+
+      rm.mockRestore();
+      await expect(RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId)).resolves.toBe(true);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is not in flight when the intent cannot be written', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-intent-write';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      const realWrite = fsPromises.writeFile.bind(fsPromises);
+      vi.spyOn(fsPromises, 'writeFile').mockImplementation(async (target, ...rest) => {
+        if (String(target).endsWith('restore-intent.json')) throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+        return realWrite(target, ...rest);
+      });
+
+      await expect(
+        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']),
+      ).rejects.toThrow('no space');
 
       expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(false);
       expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();

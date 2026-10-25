@@ -2588,7 +2588,10 @@ export class FileSystemService {
           // other bits stay, so a file that was world-readable still is and no
           // group gains access it did not have.
           const held = await fh.stat();
-          const handedOver = owner !== undefined && held.uid === owner.uid && held.gid === owner.gid;
+          // Group bits are about the group alone: a process that cannot take
+          // the file over still holds it in the right group when the directory
+          // or its own membership put it there.
+          const handedOver = owner !== undefined && held.gid === owner.gid;
           const finalMode = handedOver ? handoverMode : handoverMode & 0o707;
           if (!handedOver) {
             console.warn(
@@ -2599,7 +2602,7 @@ export class FileSystemService {
             await fh.chmod(finalMode);
           } catch (err: unknown) {
             const code = (err as NodeJS.ErrnoException).code;
-            // An explicit mode must land. A mode carried over from the replaced
+            // An explicit mode that the filesystem refuses is an error. A mode carried over from the replaced
             // file may be refused by a filesystem that cannot set modes, which
             // leaves the staging file owner-only, the narrower outcome.
             if (opts.mode !== undefined || (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP')) throw err;
@@ -2646,8 +2649,10 @@ export class FileSystemService {
 
   /**
    * Write `content` to a stack-relative path. `mode`, when given, is set on the
-   * staging file before promotion, so the target lands with exactly that mode
-   * instead of the process umask's creation mode.
+   * staging file before promotion, so the target lands with that mode
+   * instead of the process umask's creation mode. When the replaced file
+   * belongs to another owner and the process cannot hand the new file over,
+   * the group bits are dropped.
    */
   async writeStackFile(
     stackName: string,

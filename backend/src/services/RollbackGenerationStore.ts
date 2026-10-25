@@ -605,16 +605,19 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
+    // While the intent exists the transaction can still be reverted, so a
+    // failure to drop it leaves the bracket pending for that revert to settle.
+    if (intentPath.startsWith(genResolved + path.sep)) {
+      await fsPromises.rm(intentPath, { force: true });
+    }
     try {
-      if (intentPath.startsWith(genResolved + path.sep)) {
-        await fsPromises.rm(intentPath, { force: true });
-      }
       if (preRoot.startsWith(genResolved + path.sep)) {
         await fsPromises.rm(preRoot, { recursive: true, force: true });
       }
     } finally {
-      // The restored files and Git side agree whether or not the leftovers
-      // could be removed, so a failed cleanup must not hold the stack unknown.
+      // With the intent gone the restored files and Git side agree whether or
+      // not the snapshot could be removed, so a failed cleanup must not hold
+      // the stack unknown.
       this.settleRestoreBracket(restoreBracketKey(nodeId, stackName, generationId), true);
     }
   }
@@ -812,14 +815,25 @@ export class RollbackGenerationStore {
         managedManifestBefore: transactionMeta.managedManifestBefore,
       };
     }
-    await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
-
     // The restore rewrites several layers one at a time. The bracket keeps the
     // mesh declaration reader from trusting the mixture; it ends with the
-    // restore transaction, whole when it is committed or reverted.
+    // restore transaction, whole when it is committed or reverted. It opens
+    // before the intent exists, so no reader of the intent (the periodic
+    // sweep) can see a restore that is not yet marked in flight.
     const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
-    const publication = pendingRestoreBrackets.get(bracketKey) ?? fsSvc.beginDeclarationSetPublication(stackName);
+    const carried = pendingRestoreBrackets.get(bracketKey);
+    const publication = carried ?? fsSvc.beginDeclarationSetPublication(stackName);
     pendingRestoreBrackets.set(bracketKey, publication);
+    try {
+      await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
+    } catch (e) {
+      // Nothing has been rewritten yet.
+      if (!carried) {
+        pendingRestoreBrackets.delete(bracketKey);
+        publication.skip();
+      }
+      throw e;
+    }
     try {
       for (const item of restores) {
         await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
@@ -1328,7 +1342,8 @@ export class RollbackGenerationStore {
       // permissions in one atomic promotion. A permission failure therefore
       // leaves the preimage untouched and this revert throwing, which keeps the
       // snapshot and restore-intent.json for a retry instead of reporting a
-      // compensation that only put the bytes back.
+      // compensation that only put the bytes back. (A process that cannot hand
+      // the file back to its owner publishes it without the group bits.)
       const mode = this.preRestoreWriteMode(rel, entry.mode);
       await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
     }
