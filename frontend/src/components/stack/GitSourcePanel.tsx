@@ -394,13 +394,7 @@ export function GitSourcePanel({
   useEffect(() => {
     if (!open) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const onInvalidate = (e: Event) => {
-      const detail = (e as CustomEvent<{ scope?: string; nodeId?: unknown; stackName?: unknown }>).detail;
-      if (detail?.scope !== 'gitops') return;
-      // Events that name another node or stack are not about this sheet. One that
-      // names neither (a controller action raised from another surface) might be.
-      if (typeof detail.nodeId === 'number' && panelNodeId !== null && detail.nodeId !== panelNodeId) return;
-      if (typeof detail.stackName === 'string' && detail.stackName !== stackName) return;
+    const refreshSoon = () => {
       if (timer) clearTimeout(timer);
       // The opening read may predate this announcement, so it earns one more
       // read when it lands instead of racing it.
@@ -413,11 +407,19 @@ export function GitSourcePanel({
         void load('background');
       }, INVALIDATE_DEBOUNCE_MS);
     };
+    const onInvalidate = (e: Event) => {
+      const detail = (e as CustomEvent<{ scope?: string; nodeId?: unknown; stackName?: unknown }>).detail;
+      if (detail?.scope !== 'gitops') return;
+      // Events that name another node or stack are not about this sheet. One that
+      // names neither (a controller action raised from another surface) might be.
+      if (typeof detail.nodeId === 'number' && panelNodeId !== null && detail.nodeId !== panelNodeId) return;
+      if (typeof detail.stackName === 'string' && detail.stackName !== stackName) return;
+      refreshSoon();
+    };
     // Announcements sent while the socket was down are gone, so a reconnect is
     // itself a reason to look again.
     const onConnection = (e: Event) => {
-      if (!(e as CustomEvent<{ connected?: boolean }>).detail?.connected) return;
-      onInvalidate(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
+      if ((e as CustomEvent<{ connected?: boolean }>).detail?.connected) refreshSoon();
     };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
     window.addEventListener('sencho:notifications-connection', onConnection);
