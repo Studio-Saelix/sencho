@@ -70,10 +70,11 @@ export function resetDockerEndpointProviderCache(): void {
 }
 
 /**
- * `none` and `resolved` answers are reused briefly so a burst of lifecycle
- * calls (a bulk update, a scheduled run) lists containers once, and concurrent
- * callers share one lookup. An `unresolved` answer is never reused: the next
- * call tries again.
+ * `none` and `resolved` answers are remembered for at most 15 s so a burst of
+ * lifecycle calls (a bulk update, a scheduled run) lists containers once, and
+ * concurrent callers share one lookup. A recreate of the provider inside that
+ * window can briefly leave a stale container id. An `unresolved` answer is
+ * never reused: the next call tries again.
  */
 export async function resolveDockerEndpointProvider(): Promise<DockerEndpointProvider> {
   const endpoint = process.env.DOCKER_HOST;

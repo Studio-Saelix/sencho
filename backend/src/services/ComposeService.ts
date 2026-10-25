@@ -275,8 +275,12 @@ export class ComposeService {
   /**
    * The refusal for `mutation` when it would stop or recreate the container that
    * carries this node's Docker API (Sencho itself or its socket proxy), else
-   * null. Routes call this for a clean 409 before they take a lock; every
-   * mutating entry point below calls it again through `assertDockerEndpointSafe`.
+   * null. Routes call this for a clean 409 before they take a lock; deploy,
+   * update, stop/restart/down, and the service-scoped operations call it again
+   * through `assertDockerEndpointSafe`. Two entry points are deliberately not
+   * guarded: `start` (it stops nothing) and `composeUpWithRecoveryOverride`
+   * (compensation for an operation this guard already admitted; the manual
+   * rollback route checks before it calls it).
    */
   public evaluateDockerEndpoint(
     stackName: string,
