@@ -121,6 +121,8 @@ Every linked source inherits the interval, and there is no per-source interval. 
 
 **Retry** is offered when the last attempt failed, a retry is already scheduled, or the deployed commit failed its health check, and not while the source is suspended. When a newer commit is waiting, the Overview offers **Review update** instead. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry, and neither does a **Manual** source; use **Retry** after you fix the cause.
 
+After a failed health check, **Retry** redeploys the commit that is already applied without fetching again, and the new health verdict replaces the failed one. It is offered only while **Observe health after updates** is on for the node ([Health-gated updates](/features/health-gated-updates#tuning-or-disabling-the-gate)). With the gate off, a redeploy records no new verdict, so the old failure would never clear and **Retry** would keep coming back; Sencho does not offer it for a health failure.
+
 ## Pulling and reviewing changes
 
 Click **Pull now** to fetch the latest commit on the configured branch, tag, or commit.
