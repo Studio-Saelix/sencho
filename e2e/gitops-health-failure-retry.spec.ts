@@ -31,7 +31,6 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
 
   let server: { url: string; close: () => void };
   let stackName: string;
-  let previousGate: { health_gate_enabled: string; health_gate_window_seconds: string } | null = null;
 
   test.beforeAll(async () => {
     server = await serveRepos({ unhealthy: buildFixtureRepo({ 'compose.yaml': EXITING_COMPOSE }) });
@@ -72,7 +71,7 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
     const current = await api(page, '/api/settings');
     expect(current.status).toBe(200);
     const settings = current.json as { health_gate_enabled: string; health_gate_window_seconds: string };
-    previousGate = {
+    const previousGate = {
       health_gate_enabled: settings.health_gate_enabled,
       health_gate_window_seconds: settings.health_gate_window_seconds,
     };
@@ -126,10 +125,8 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
     } finally {
       await api(page, `/api/stacks/${stackName}/git-source`, { method: 'DELETE' }).catch(() => {});
       await api(page, `/api/stacks/${stackName}`, { method: 'DELETE' }).catch(() => {});
-      if (previousGate) {
-        const restored = await api(page, '/api/settings', { method: 'PATCH', body: previousGate });
-        expect(restored.status, 'the health gate settings are put back').toBe(200);
-      }
+      const restored = await api(page, '/api/settings', { method: 'PATCH', body: previousGate });
+      expect(restored.status, 'the health gate settings are put back').toBe(200);
     }
   });
 });

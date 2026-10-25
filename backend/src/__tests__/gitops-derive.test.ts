@@ -1560,8 +1560,9 @@ describe('gitops derivation', () => {
       const f = fixture();
       seed(f);
       DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
-      expect(projectionFor(f, true).availableActions).not.toContain('retry');
-      expect(projectionFor(f, true).availableActions).toContain('suspend');
+      const { availableActions } = projectionFor(f, true);
+      expect(availableActions).not.toContain('retry');
+      expect(availableActions).toContain('suspend');
     });
 
     it.each([
