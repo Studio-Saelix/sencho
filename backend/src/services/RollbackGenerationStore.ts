@@ -1342,8 +1342,8 @@ export class RollbackGenerationStore {
       // permissions in one atomic promotion. A permission failure therefore
       // leaves the preimage untouched and this revert throwing, which keeps the
       // snapshot and restore-intent.json for a retry instead of reporting a
-      // compensation that only put the bytes back. (A process that cannot hand
-      // the file back to its owner publishes it without the group bits.)
+      // compensation that only put the bytes back. (A process that cannot put
+      // the file back in its group publishes it without the group bits.)
       const mode = this.preRestoreWriteMode(rel, entry.mode);
       await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
     }

@@ -2581,10 +2581,10 @@ export class FileSystemService {
         }
         await chownStaged(fh, owner);
         if (handoverMode !== undefined) {
-          // The published mode, applied only once the intended owner holds the
-          // staging file: a process that could not hand the file over would
+          // The published mode, applied only once the staging file is in the
+          // intended group: a process that could not hand the file over would
           // otherwise publish group-readable bits for a group that is not the
-          // file's. Without the hand-off the group bits are dropped and the
+          // file's. When the group differs the group bits are dropped and the
           // other bits stay, so a file that was world-readable still is and no
           // group gains access it did not have.
           const held = await fh.stat();
@@ -2602,9 +2602,10 @@ export class FileSystemService {
             await fh.chmod(finalMode);
           } catch (err: unknown) {
             const code = (err as NodeJS.ErrnoException).code;
-            // An explicit mode that the filesystem refuses is an error. A mode carried over from the replaced
-            // file may be refused by a filesystem that cannot set modes, which
-            // leaves the staging file owner-only, the narrower outcome.
+            // An explicit mode that the filesystem refuses is an error. A mode
+            // carried over from the replaced file may be refused by a
+            // filesystem that cannot set modes, which leaves the staging file
+            // owner-only, the narrower outcome.
             if (opts.mode !== undefined || (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP')) throw err;
             console.warn(
               `[FileSystemService] Could not restore mode ${finalMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
@@ -2651,7 +2652,7 @@ export class FileSystemService {
    * Write `content` to a stack-relative path. `mode`, when given, is set on the
    * staging file before promotion, so the target lands with that mode
    * instead of the process umask's creation mode. When the replaced file
-   * belongs to another owner and the process cannot hand the new file over,
+   * belongs to another group and the process cannot hand the new file over,
    * the group bits are dropped.
    */
   async writeStackFile(
