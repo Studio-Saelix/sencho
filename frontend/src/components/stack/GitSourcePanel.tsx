@@ -37,6 +37,9 @@ import type {
   GitOpsSourceStatus,
 } from '@/types/gitops';
 
+// Matches the other GitOps views: one operation commits several transitions in a row.
+const INVALIDATE_DEBOUNCE_MS = 250;
+
 export interface GitSource {
   id: number;
   stack_name: string;
@@ -221,8 +224,13 @@ export function GitSourcePanel({
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
+  // Whether the sheet shows a linked source, so a background read never turns
+  // the form a new source is being typed into into someone else's link.
+  const hasSource = useRef(false);
+
   const resetToUnlinked = useCallback(() => {
     setSource(null);
+    hasSource.current = false;
     setRepoUrl('');
     setBranch('main');
     setComposePaths(['compose.yaml']);
@@ -258,7 +266,11 @@ export function GitSourcePanel({
   // Only the latest request may touch state, so a slow answer for the stack the
   // sheet just left cannot overwrite the one it is now showing.
   const loadSeq = useRef(0);
+  const backgroundSeq = useRef(0);
   const loadedForOpen = useRef(false);
+  // An announcement that arrived while the opening read was still in flight: that
+  // read may predate it, so one more read follows once the sheet has loaded.
+  const refreshQueued = useRef(false);
 
   /**
    * Read the source and its status.
@@ -270,10 +282,19 @@ export function GitSourcePanel({
    * what is on screen on failure instead of turning a linked stack into an empty
    * form, and `refresh` leaves unsaved edits alone, so a pull or a suspend does
    * not throw away a change the operator is still making.
+   *
+   * `background` is `refresh` for a change nobody on this sheet asked for (a
+   * health verdict arriving while it sits open): it applies a linked source and
+   * says nothing otherwise, so a failed poll or a source that vanished mid-edit
+   * neither raises a toast nor wipes the form.
    */
-  const load = useCallback(async (mode: 'open' | 'save' | 'refresh' = 'open') => {
-    const seq = ++loadSeq.current;
-    const current = () => seq === loadSeq.current;
+  const load = useCallback(async (mode: 'open' | 'save' | 'refresh' | 'background' = 'open') => {
+    // A background read never supersedes one the operator is waiting on (an
+    // open or a save); it is the one that gives way.
+    const background = mode === 'background';
+    const seq = background ? loadSeq.current : ++loadSeq.current;
+    const bgSeq = background ? ++backgroundSeq.current : 0;
+    const current = () => seq === loadSeq.current && (!background || bgSeq === backgroundSeq.current);
     const fresh = mode === 'open';
     if (fresh) {
       setLoading(true);
@@ -281,6 +302,7 @@ export function GitSourcePanel({
       loadedForOpen.current = false;
     }
     const fail = (message: string) => {
+      if (mode === 'background') return;
       if (!fresh) {
         toast.error('Could not refresh the sheet. Reopen it to see the current state.');
         return;
@@ -299,14 +321,17 @@ export function GitSourcePanel({
         setRevision(data.gitopsRevision);
         // An existing stack with no Git source attached answers 200 { linked: false }.
         if ('linked' in data) {
-          resetToUnlinked();
-        } else {
+          if (mode !== 'background') resetToUnlinked();
+        } else if (mode !== 'background' || hasSource.current) {
           setSource(data);
-          if (mode !== 'refresh') fillForm(data);
+          hasSource.current = true;
+          if (mode === 'open' || mode === 'save') fillForm(data);
         }
       } else if (res.status === 404) {
-        resetToUnlinked();
-        setRevision(null);
+        if (mode !== 'background') {
+          resetToUnlinked();
+          setRevision(null);
+        }
       } else if (res.status === 403) {
         fail('You do not have permission to view this stack\'s Git source.');
       } else {
@@ -332,9 +357,46 @@ export function GitSourcePanel({
       // Drop whatever the sheet held for another stack or an earlier visit before reading afresh.
       resetToUnlinked();
       setRevision(null);
-      void load('open');
+      void load('open').then(() => {
+        // A superseded read leaves the flag to the read that replaced it.
+        if (!refreshQueued.current || !loadedForOpen.current) return;
+        refreshQueued.current = false;
+        void load('background');
+      });
     }
   }, [open, load, resetToUnlinked]);
+
+  // The health verdict lands after the deploy that started it, usually with the
+  // sheet still open, and the server offers Retry only once it has failed. The
+  // GitOps announcement is the trigger, as for every other GitOps view.
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onInvalidate = (e: Event) => {
+      const detail = (e as CustomEvent<{ scope?: string; nodeId?: unknown; stackName?: unknown }>).detail;
+      if (detail?.scope !== 'gitops') return;
+      // Events that name another node or stack are not about this sheet. One that
+      // names neither (a controller action raised from another surface) might be.
+      if (typeof detail.nodeId === 'number' && panelNodeId !== null && detail.nodeId !== panelNodeId) return;
+      if (typeof detail.stackName === 'string' && detail.stackName !== stackName) return;
+      if (timer) clearTimeout(timer);
+      // The opening read may predate this announcement, so it earns one more
+      // read when it lands instead of racing it.
+      if (!loadedForOpen.current) {
+        refreshQueued.current = true;
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void load('background');
+      }, INVALIDATE_DEBOUNCE_MS);
+    };
+    window.addEventListener('sencho:state-invalidate', onInvalidate);
+    return () => {
+      window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      if (timer) clearTimeout(timer);
+    };
+  }, [open, panelNodeId, stackName, load]);
 
   const buildSaveBody = useCallback(() => {
     const autoApply = applyMode === 'auto-write' || applyMode === 'auto-deploy';

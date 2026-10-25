@@ -104,6 +104,18 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
       // Before anything is applied there is nothing to retry.
       expect(await availableActions(page)).not.toContain('retry');
 
+      // Open the sheet first and leave it open: the verdict arrives minutes after
+      // the deploy, and the sheet has to pick it up without being reopened.
+      await page.reload();
+      await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
+      await page.getByText(stackName).first().click();
+      const gitButton = page.getByRole('button', { name: /Git Source/i });
+      await expect(gitButton).toBeVisible({ timeout: 10_000 });
+      await gitButton.click();
+      const sheet = page.getByRole('dialog');
+      await expect(sheet.getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
+      await expect(sheet.getByRole('button', { name: /^retry$/i })).toHaveCount(0);
+
       const applied = await api(page, `/api/stacks/${stackName}/git-source/apply`, {
         method: 'POST',
         body: { commitSha, planFingerprint, deploy: true },
@@ -113,15 +125,7 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
       // The workload crashes inside the gate's window, so the gate finalizes as failed.
       await expect.poll(() => availableActions(page), { timeout: 120_000, intervals: [2_000] }).toContain('retry');
 
-      await page.reload();
-      await expect(page.locator('[data-stacks-loaded="true"]')).toBeAttached({ timeout: 15_000 });
-      await page.getByText(stackName).first().click();
-      const gitButton = page.getByRole('button', { name: /Git Source/i });
-      await expect(gitButton).toBeVisible({ timeout: 10_000 });
-      await gitButton.click();
-      await expect(page.getByRole('dialog').getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
-
-      await expect(page.getByRole('dialog').getByRole('button', { name: /^retry$/i })).toBeVisible({ timeout: 10_000 });
+      await expect(sheet.getByRole('button', { name: /^retry$/i })).toBeVisible({ timeout: 15_000 });
     } finally {
       await api(page, `/api/stacks/${stackName}/git-source`, { method: 'DELETE' }).catch(() => {});
       await api(page, `/api/stacks/${stackName}`, { method: 'DELETE' }).catch(() => {});
