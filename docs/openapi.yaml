@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sencho API
-  version: 0.97.1 # x-release-please-version
+  version: 0.98.1 # x-release-please-version
   description: |
     REST API for Sencho, a self-hosted Docker Compose management dashboard.
 
