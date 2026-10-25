@@ -83,30 +83,25 @@ function seedLastKnown(
 }
 
 /**
- * Write a stack file so the refresh reads a real declaration. Only the
- * service names matter here; the override generator has its own coverage for
- * network shape.
+ * Write a stack file the way a completed Sencho save does, through the atomic
+ * publisher. The declaration reader releases a saved claim only on a layer
+ * Sencho published whole, so this is what an authored removal looks like.
+ * Only the service names matter here; the override generator has its own
+ * coverage for network shape.
  */
-function writeRawComposeFile(stack: string, contents: string, fileName = 'compose.yaml'): void {
-    writeRawComposeFileNow(stack, contents, fileName);
-    settleComposeFile(stack, fileName);
+async function writeRawComposeFile(stack: string, contents: string, fileName = 'compose.yaml'): Promise<void> {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    fsSync.mkdirSync(path.join(process.env.COMPOSE_DIR as string, stack), { recursive: true });
+    await FileSystemService.getInstance().writeStackFile(stack, fileName, contents);
 }
 
 /**
- * A file written moments ago may be the visible prefix of a save that is still
- * in progress, so the declaration reader does not trust it as evidence of a
- * service removal. Tests that model a completed save backdate the mtime, which
- * is what a file at rest looks like on a live node.
+ * Write a stack file in place, as an external editor does. Nothing marks the
+ * document finished, so it can be the visible prefix of a save that has
+ * paused, and the reader must not release a claim on it.
  */
-function settleComposeFile(stack: string, fileName = 'compose.yaml'): void {
-    const file = path.join(process.env.COMPOSE_DIR as string, stack, fileName);
-    const past = new Date(Date.now() - 60_000);
-    fsSync.utimesSync(file, past, past);
-}
-
-function writeRawComposeFileNow(stack: string, contents: string, fileName = 'compose.yaml'): void {
-    const composeDir = process.env.COMPOSE_DIR as string;
-    const dir = path.join(composeDir, stack);
+function writeExternalComposeFile(stack: string, contents: string, fileName = 'compose.yaml'): void {
+    const dir = path.join(process.env.COMPOSE_DIR as string, stack);
     fsSync.mkdirSync(dir, { recursive: true });
     fsSync.writeFileSync(path.join(dir, fileName), contents, 'utf8');
 }
@@ -115,13 +110,8 @@ function composeYaml(services: string[]): string {
     return `services:\n${services.map((svc) => `  ${svc}:\n    image: busybox:latest`).join('\n')}\n`;
 }
 
-function writeComposeFile(stack: string, services: string[], fileName = 'compose.yaml'): void {
-    writeRawComposeFile(stack, composeYaml(services), fileName);
-}
-
-/** Model the visible prefix of an in-place save: valid, complete-looking, fresh. */
-function writeUnsettledComposeFile(stack: string, services: string[], fileName = 'compose.yaml'): void {
-    writeRawComposeFileNow(stack, composeYaml(services), fileName);
+async function writeComposeFile(stack: string, services: string[], fileName = 'compose.yaml'): Promise<void> {
+    await writeRawComposeFile(stack, composeYaml(services), fileName);
 }
 
 /**
@@ -462,7 +452,7 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['db', 'web']);
+        await writeComposeFile(stack, ['db', 'web']);
 
         // Docker removed db before web: web is the only container left.
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
@@ -519,7 +509,7 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -543,7 +533,7 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
 
         await withLocalDocker(async () => [
             container('db', 'exited'),
@@ -572,7 +562,7 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
 
         await withLocalDocker(async () => []);
         const svc = MeshService.getInstance();
@@ -596,8 +586,8 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        writeComposeFile(stack, ['db'], 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['db'], 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -623,7 +613,7 @@ describe('partial container removal keeps still-declared claims', () => {
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeRawComposeFile(stack, 'include:\n  - shared.yml\nservices:\n  web:\n    image: busybox:latest\n');
+        await writeRawComposeFile(stack, 'include:\n  - shared.yml\nservices:\n  web:\n    image: busybox:latest\n');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -702,7 +692,7 @@ describe('declaration reconciliation trusts only readable compose content', () =
     async function expectInvalidDeclarationKeepsClaim(stack: string, contents: string): Promise<void> {
         const localNode = seedClaim(stack, [{ service: 'db', ports: [5432] }]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeRawComposeFile(stack, contents);
+        await writeRawComposeFile(stack, contents);
 
         await withLocalDocker(async () => []);
         const svc = MeshService.getInstance();
@@ -745,9 +735,9 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
-        writeComposeFile(stack, ['db'], 'db.yaml');
-        writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:db.yaml\n', '.env');
+        await writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['db'], 'db.yaml');
+        await writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:db.yaml\n', '.env');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -769,8 +759,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, 'COMPOSE_DISABLE_ENV_FILE=maybe\n', '.env');
+        await writeComposeFile(stack, ['web']);
+        await writeRawComposeFile(stack, 'COMPOSE_DISABLE_ENV_FILE=maybe\n', '.env');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -794,9 +784,9 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'queue', ports: [6379] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        writeComposeFile(stack, ['queue'], 'queue.yaml');
-        writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:queue.yaml\n', '.env');
+        await writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['queue'], 'queue.yaml');
+        await writeRawComposeFile(stack, 'COMPOSE_FILE=compose.yaml:queue.yaml\n', '.env');
         vi.spyOn(db, 'getGitSource').mockReturnValue({
             applied_deploy_spec: { files: ['compose.yaml', 'queue.yaml'], contextDir: null },
         } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
@@ -826,8 +816,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, override, 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeRawComposeFile(stack, override, 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -849,8 +839,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        writeComposeFile(stack, ['db'], 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['db'], 'compose.override.yml');
         vi.spyOn(db, 'getGitSource').mockReturnValue({
             applied_deploy_spec: { files: ['compose.yaml'], contextDir: null },
         } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
@@ -875,8 +865,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, contents, 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeRawComposeFile(stack, contents, 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -898,8 +888,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, 'null\n', 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeRawComposeFile(stack, 'null\n', 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -921,8 +911,8 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
-        writeRawComposeFile(stack, 'services:\n  - db\n', 'compose.override.yml');
+        await writeComposeFile(stack, ['web']);
+        await writeRawComposeFile(stack, 'services:\n  - db\n', 'compose.override.yml');
 
         await withLocalDocker(async () => [container('web', 'running', [8080])]);
         const svc = MeshService.getInstance();
@@ -939,47 +929,54 @@ describe('declaration reconciliation trusts only readable compose content', () =
      * A save that has not finished still looks like a valid document on disk:
      * an editor truncates the file and writes the new text, so a reader can
      * catch a prefix that parses and simply omits the services not written
-     * yet. Treating that prefix as an authored removal would release the exact
-     * reservation this feature exists to keep, permanently.
+     * yet. A writer that has paused looks exactly like one that finished, no
+     * matter how long the file has sat, so elapsed time is not evidence. Only
+     * a document Sencho published whole releases a claim. Treating the prefix
+     * as an authored removal would release the exact reservation this feature
+     * exists to keep, permanently.
      */
-    it('keeps both saved claims while a save is still in progress', async () => {
+    it('keeps both saved claims while an external save is paused mid-write', async () => {
         const stack = 'interrupted-save-stack';
         const localNode = seedClaim(stack, [
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web', 'db']);
+        await writeComposeFile(stack, ['web', 'db']);
         await withLocalDocker(async () => []);
         const svc = MeshService.getInstance();
         await svc.refreshAliasCache();
 
-        // The visible prefix of the save: valid YAML that does not mention db.
-        // Freeze the clock around this read so the assertion measures the
-        // settle rule, not how fast the test host ran.
-        const frozenNow = Date.now();
-        const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(frozenNow);
-        writeUnsettledComposeFile(stack, ['web']);
-        await svc.refreshAliasCache();
-        nowSpy.mockRestore();
+        // An external editor truncates the file and writes a valid prefix that
+        // does not mention db, then stays open. The mtime is pushed far past
+        // any settle interval to model a long pause.
+        const file = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.yaml');
+        const writer = await fs.open(file, 'w');
+        try {
+            await writer.writeFile(composeYaml(['web']));
+            const past = new Date(Date.now() - 600_000);
+            await writer.utimes(past, past);
+            await svc.refreshAliasCache();
 
-        expectBothClaims(localNode.id, stack);
-        expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
+            expectBothClaims(localNode.id, stack);
+            expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
 
-        await withLocalDocker(async (opts) => (
-            stackFromFilter(opts) === 'taker' ? [container('taker', 'running', [5432])] : []
-        ));
-        vi.spyOn(
-            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
-            'regenerateOverridesAcrossFleet',
-        ).mockResolvedValue(undefined);
-        await expect(svc.optInStack(localNode.id, 'taker', 'tester'))
-            .rejects.toThrow(`port 5432 is already claimed by ${host}`);
+            await withLocalDocker(async (opts) => (
+                stackFromFilter(opts) === 'taker' ? [container('taker', 'running', [5432])] : []
+            ));
+            vi.spyOn(
+                svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+                'regenerateOverridesAcrossFleet',
+            ).mockResolvedValue(undefined);
+            await expect(svc.optInStack(localNode.id, 'taker', 'tester'))
+                .rejects.toThrow(`port 5432 is already claimed by ${host}`);
 
-        // The save completes. The claim never left, so it is still there once
-        // the file has been at rest and the declaration reads normally again.
-        writeUnsettledComposeFile(stack, ['web', 'db']);
-        settleComposeFile(stack);
+            // The save completes while the stack is still stopped.
+            await writer.truncate(0);
+            await writer.writeFile(composeYaml(['web', 'db']));
+        } finally {
+            await writer.close();
+        }
         await withLocalDocker(async () => []);
         await svc.refreshAliasCache();
 
@@ -997,6 +994,26 @@ describe('declaration reconciliation trusts only readable compose content', () =
         expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe(host);
     });
 
+    it('keeps the saved claim when an external edit follows a Sencho publication', async () => {
+        const stack = 'edited-after-publish-stack';
+        const localNode = seedClaim(stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        await writeComposeFile(stack, ['web', 'db']);
+        const svc = MeshService.getInstance();
+        expect((await svc.getLocalDeclaredServiceNames(stack))?.sort()).toEqual(['db', 'web']);
+
+        // The same inode, rewritten in place: the publication no longer
+        // describes what is on disk.
+        writeExternalComposeFile(stack, composeYaml(['web']));
+        await withLocalDocker(async () => []);
+        await svc.refreshAliasCache();
+
+        expect(await svc.getLocalDeclaredServiceNames(stack)).toBeNull();
+        expectBothClaims(localNode.id, stack);
+    });
+
     it('keeps the saved claim when a discovered override links outside the compose root', async () => {
         // The canonical compose guard refuses a link that leaves the compose
         // root. The declaration reader must apply the same rule instead of
@@ -1007,7 +1024,7 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
         const outside = path.join(tmpDir, 'outside');
         fsSync.mkdirSync(outside, { recursive: true });
         fsSync.writeFileSync(
@@ -1038,7 +1055,7 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'web', ports: [8080] },
         ]);
         const host = `db.${stack}.${localNode.name}.sencho`;
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
         const outside = path.join(tmpDir, 'outside-git');
         fsSync.mkdirSync(outside, { recursive: true });
         fsSync.writeFileSync(
@@ -1074,7 +1091,7 @@ describe('declaration reconciliation trusts only readable compose content', () =
             ]);
             const host = `db.${stack}.${localNode.name}.sencho`;
             const neighbourHost = `api.neighbour-stack.${localNode.name}.sencho`;
-            writeComposeFile(stack, ['web']);
+            await writeComposeFile(stack, ['web']);
             const fifo = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.override.yml');
             execFileSync('mkfifo', [fifo]);
             db.insertMeshStack(localNode.id, 'neighbour-stack', 'tester');
@@ -1103,13 +1120,10 @@ describe('declaration reconciliation trusts only readable compose content', () =
             { service: 'db', ports: [5432] },
             { service: 'web', ports: [8080] },
         ]);
-        writeComposeFile(stack, ['web']);
-        const shared = path.join(process.env.COMPOSE_DIR as string, 'shared-overrides');
-        fsSync.mkdirSync(shared, { recursive: true });
-        fsSync.writeFileSync(path.join(shared, 'base.yml'), composeYaml(['db']), 'utf8');
+        await writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['db'], 'shared-db.yml');
         const link = path.join(process.env.COMPOSE_DIR as string, stack, 'compose.override.yml');
-        fsSync.symlinkSync(path.join(shared, 'base.yml'), link);
-        settleComposeFile(stack, 'compose.override.yml');
+        fsSync.symlinkSync('shared-db.yml', link);
 
         const svc = MeshService.getInstance();
         expect((await svc.getLocalDeclaredServiceNames(stack))?.sort()).toEqual(['db', 'web']);
@@ -1297,7 +1311,7 @@ describe('opt-in keeps its first observation', () => {
         const localNode = db.getDefaultNode();
         if (!localNode) throw new Error('missing default node');
         const stack = 'optin-first-observation';
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
         const svc = MeshService.getInstance();
         const internals = svc as unknown as OptInInternals;
         let inspections = 0;
@@ -1331,7 +1345,7 @@ describe('opt-in keeps its first observation', () => {
         const localNode = db.getDefaultNode();
         if (!localNode) throw new Error('missing default node');
         const stack = 'optin-seed-failure';
-        writeComposeFile(stack, ['web']);
+        await writeComposeFile(stack, ['web']);
         const svc = MeshService.getInstance();
         const internals = svc as unknown as OptInInternals;
         vi.spyOn(internals, 'inspectStackServices')

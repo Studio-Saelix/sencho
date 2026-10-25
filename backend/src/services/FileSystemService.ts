@@ -51,6 +51,57 @@ function getBackupBaseDir(): string {
 
 import { isDebugEnabled } from '../utils/debug';
 
+/**
+ * Identity of a file as it was published: the inode and mtime a staged file
+ * carries through the rename that publishes it. An in-place writer changes the
+ * mtime or size of whatever it touches, so a file that still matches was not
+ * modified after Sencho published it.
+ */
+interface PublishedFileIdentity {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * Files Sencho published whole through the stage-and-rename helper, by real
+ * path. A reader that must tell a finished document from the visible prefix of
+ * someone else's in-progress write cannot do it from the file alone: a writer
+ * that has paused looks exactly like one that has finished. A publication
+ * Sencho made is the one case where completion is known. In memory by design:
+ * after a restart no file counts as published until it is saved again, which
+ * errs toward keeping whatever the file's readers were protecting.
+ */
+const MAX_TRACKED_PUBLICATIONS = 4096;
+const atomicPublications = new Map<string, PublishedFileIdentity>();
+
+async function recordAtomicPublication(
+  publishedPath: string,
+  staged: { ino: number; size: number; mtimeMs: number },
+): Promise<void> {
+  try {
+    const realPath = await fsPromises.realpath(publishedPath);
+    atomicPublications.delete(realPath);
+    atomicPublications.set(realPath, { ino: staged.ino, size: staged.size, mtimeMs: staged.mtimeMs });
+    if (atomicPublications.size > MAX_TRACKED_PUBLICATIONS) {
+      const oldest = atomicPublications.keys().next().value;
+      if (oldest !== undefined) atomicPublications.delete(oldest);
+    }
+  } catch {
+    // An unrecorded publication only withholds the completion evidence.
+  }
+}
+
+/** Mode of a regular file at `filePath`, or undefined for anything else. */
+async function existingFileMode(filePath: string): Promise<number | undefined> {
+  try {
+    const stat = await fsPromises.lstat(filePath);
+    return stat.isFile() ? stat.mode & 0o777 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const PROTECTED_STACK_FILES = new Set([
   'compose.yaml',
   'compose.yml',
@@ -683,7 +734,10 @@ export class FileSystemService {
    * `COMPOSE_LAYER_UNSTABLE`. Callers that release a saved claim must treat any
    * throw as unknown and keep the claim.
    */
-  async readComposeLayer(stackName: string, relFile: string): Promise<{ content: string; mtimeMs: number }> {
+  async readComposeLayer(
+    stackName: string,
+    relFile: string,
+  ): Promise<{ content: string; mtimeMs: number; publishedBySencho: boolean }> {
     if (relFile === '' || !isValidRelativeStackPath(relFile)) {
       throw Object.assign(new Error('Invalid compose layer path'), { code: 'INVALID_PATH' });
     }
@@ -724,7 +778,12 @@ export class FileSystemService {
           { code: 'COMPOSE_LAYER_UNSTABLE' },
         );
       }
-      return { content, mtimeMs: after.mtimeMs };
+      const published = atomicPublications.get(realLayerPath);
+      const publishedBySencho = published !== undefined
+        && published.ino === after.ino
+        && published.size === after.size
+        && published.mtimeMs === after.mtimeMs;
+      return { content, mtimeMs: after.mtimeMs, publishedBySencho };
     } finally {
       await fh.close();
     }
@@ -2336,13 +2395,20 @@ export class FileSystemService {
     // can drop leading zeros which narrows entropy unpredictably.
     const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
+    // The staging file is created with the mode the published file will have,
+    // so restricted content (a 0600 compose file holding credentials) is never
+    // readable through the sibling while it is being written. Without an
+    // explicit mode, a replaced regular file's own mode caps the staging
+    // creation mode for the same reason (the umask can only narrow it); a new
+    // file takes the process default, as a direct create would.
+    const creationMode = opts.mode ?? await existingFileMode(safePath) ?? 0o666;
     let stagedTmp = false;
     try {
       if (data instanceof Readable) {
         // Stream a temp-file source (an upload spooled to disk) into the staging
         // file without buffering it in memory. 'wx' exclusively creates the
         // staging file; the random suffix already guarantees a fresh name.
-        const ws = createWriteStream(tmpPath, { flags: 'wx' });
+        const ws = createWriteStream(tmpPath, { flags: 'wx', mode: creationMode });
         stagedTmp = true;
         await pipeline(data, ws);
         const synced = await fsPromises.open(tmpPath, 'r+');
@@ -2353,7 +2419,7 @@ export class FileSystemService {
           await synced.close();
         }
       } else {
-        const fh = await fsPromises.open(tmpPath, 'wx');
+        const fh = await fsPromises.open(tmpPath, 'wx', creationMode);
         stagedTmp = true;
         try {
           await fh.writeFile(data);
@@ -2388,8 +2454,10 @@ export class FileSystemService {
           throw err;
         }
       } else {
+        const staged = await fsPromises.stat(tmpPath);
         await fsPromises.rename(tmpPath, safePath);
         stagedTmp = false;
+        await recordAtomicPublication(safePath, staged);
       }
     } finally {
       if (stagedTmp) {

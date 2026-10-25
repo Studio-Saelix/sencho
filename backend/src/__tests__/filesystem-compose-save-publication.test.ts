@@ -76,4 +76,83 @@ describe('compose save publication', () => {
         expect(fsSync.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe(previous);
         expect(fsSync.readdirSync(stackDir).filter((name) => name.includes('sencho-tmp'))).toEqual([]);
     });
+
+    describe('restricted targets', () => {
+        const MARKER = 'POSTGRES_PASSWORD: hunter2-marker';
+        const stagingFiles = () => fsSync.readdirSync(stackDir).filter((name) => name.includes('sencho-tmp'));
+
+        it('never exposes restricted content through the staging file', async () => {
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o600);
+            const openedModes: number[] = [];
+            const realOpen = fsp.open.bind(fsp);
+            vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                const fh = await realOpen(...args);
+                const file = String(args[0]);
+                if (!file.includes('sencho-tmp')) return fh;
+                const realWrite = fh.writeFile.bind(fh);
+                // Sample the staging file's mode the moment its content lands.
+                fh.writeFile = (async (...writeArgs: Parameters<typeof fh.writeFile>) => {
+                    await realWrite(...writeArgs);
+                    openedModes.push(fsSync.statSync(file).mode & 0o777);
+                }) as typeof fh.writeFile;
+                return fh;
+            }) as typeof fsp.open);
+            const svc = FileSystemService.getInstance();
+            const before = await svc.getStackContentWithMtime(STACK);
+
+            await svc.saveStackContentIfUnchanged(
+                STACK,
+                `${composeContent(['web'])}# ${MARKER}\n`,
+                before.mtimeMs,
+                'compose.yaml',
+            );
+
+            expect(openedModes).toHaveLength(1);
+            expect(openedModes[0] & 0o077).toBe(0);
+            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+            expect(fsSync.readFileSync(target, 'utf8')).toContain(MARKER);
+            expect(stagingFiles()).toEqual([]);
+        });
+
+        it('keeps a restricted target restricted when an upload replaces it', async () => {
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o600);
+            const upload = path.join(path.dirname(stackDir), 'upload-spool.bin');
+            fsSync.writeFileSync(upload, `${composeContent(['web'])}# ${MARKER}\n`);
+            const stagedModes: number[] = [];
+            const realRename = fsp.rename.bind(fsp);
+            vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+                stagedModes.push(fsSync.statSync(String(from)).mode & 0o777);
+                return realRename(from, to);
+            });
+
+            await FileSystemService.getInstance().writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
+
+            expect(stagedModes).toHaveLength(1);
+            expect(stagedModes[0] & 0o077).toBe(0);
+            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+            expect(fsSync.readFileSync(target, 'utf8')).toContain(MARKER);
+            expect(stagingFiles()).toEqual([]);
+        });
+
+        it('removes the staging file when restricted content fails to publish', async () => {
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o600);
+            vi.spyOn(fsp, 'rename').mockRejectedValue(new Error('rename failed'));
+            const svc = FileSystemService.getInstance();
+            const before = await svc.getStackContentWithMtime(STACK);
+
+            await expect(svc.saveStackContentIfUnchanged(
+                STACK,
+                `${composeContent(['web'])}# ${MARKER}\n`,
+                before.mtimeMs,
+                'compose.yaml',
+            )).rejects.toThrow('rename failed');
+
+            expect(fsSync.readFileSync(target, 'utf8')).not.toContain(MARKER);
+            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+            expect(stagingFiles()).toEqual([]);
+        });
+    });
 });

@@ -92,23 +92,19 @@ describe('GET /api/mesh/local-services/:stackName', () => {
  * list that would look like one.
  */
 describe('GET /api/mesh/local-declared-services/:stackName', () => {
-    function writeComposeFile(stack: string): void {
-        const dir = path.join(process.env.COMPOSE_DIR as string, stack);
-        fsSync.mkdirSync(dir, { recursive: true });
-        const file = path.join(dir, 'compose.yaml');
-        fsSync.writeFileSync(
-            file,
-            'services:\n  db:\n    image: busybox:latest\n  web:\n    image: busybox:latest\n',
-            'utf8',
-        );
-        // The declaration reader only trusts a layer that has been at rest, so
-        // a completed save is modelled with an older mtime.
-        const past = new Date(Date.now() - 60_000);
-        fsSync.utimesSync(file, past, past);
+    const TWO_SERVICES = 'services:\n  db:\n    image: busybox:latest\n  web:\n    image: busybox:latest\n';
+    const ONE_SERVICE = 'services:\n  web:\n    image: busybox:latest\n';
+
+    async function writeComposeFile(stack: string, contents = TWO_SERVICES): Promise<void> {
+        fsSync.mkdirSync(path.join(process.env.COMPOSE_DIR as string, stack), { recursive: true });
+        // The declaration reader only trusts a layer Sencho published whole,
+        // so a completed save goes through the atomic publisher.
+        const { FileSystemService } = await import('../services/FileSystemService');
+        await FileSystemService.getInstance().writeStackFile(stack, 'compose.yaml', contents);
     }
 
     it('answers 200 with the declared service names', async () => {
-        writeComposeFile('declared-stack');
+        await writeComposeFile('declared-stack');
 
         const res = await request(app)
             .get('/api/mesh/local-declared-services/declared-stack')
@@ -127,13 +123,30 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
         expect(res.body.error).toMatch(/declaration is unreadable/i);
     });
 
+    it('answers 503 for a compose file Sencho did not publish whole', async () => {
+        // A file written in place by another process may be the prefix of a
+        // save that has paused, however long ago it was last touched.
+        const stack = 'external-declared-stack';
+        const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+        fsSync.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, 'compose.yaml');
+        fsSync.writeFileSync(file, ONE_SERVICE, 'utf8');
+        const past = new Date(Date.now() - 600_000);
+        fsSync.utimesSync(file, past, past);
+
+        const res = await request(app)
+            .get(`/api/mesh/local-declared-services/${stack}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+
+        expect(res.status).toBe(503);
+        expect(res.body.error).toMatch(/declaration is unreadable/i);
+    });
+
     it('answers 503 when services is not a service mapping', async () => {
         // An editor can save invalid content. Returning 200 with the array
         // indexes would let central treat "0" as a service name and release a
         // real reservation, so the route reports unknown instead.
-        const dir = path.join(process.env.COMPOSE_DIR as string, 'invalid-declared-stack');
-        fsSync.mkdirSync(dir, { recursive: true });
-        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  - web\n', 'utf8');
+        await writeComposeFile('invalid-declared-stack', 'services:\n  - web\n');
 
         const res = await request(app)
             .get('/api/mesh/local-declared-services/invalid-declared-stack')
@@ -148,9 +161,8 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
         // its service names as a declaration would release claims from a file
         // the compose root does not own.
         const stack = 'outside-link-declared-stack';
+        await writeComposeFile(stack, ONE_SERVICE);
         const dir = path.join(process.env.COMPOSE_DIR as string, stack);
-        fsSync.mkdirSync(dir, { recursive: true });
-        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: busybox:latest\n', 'utf8');
         const tmpDir = path.dirname(process.env.COMPOSE_DIR as string);
         const outside = path.join(tmpDir, 'outside-declaration');
         fsSync.mkdirSync(outside, { recursive: true });
@@ -168,9 +180,8 @@ describe('GET /api/mesh/local-declared-services/:stackName', () => {
 
     it.skipIf(process.platform === 'win32')('answers 503 for a special file instead of blocking', async () => {
         const stack = 'fifo-declared-stack';
+        await writeComposeFile(stack, ONE_SERVICE);
         const dir = path.join(process.env.COMPOSE_DIR as string, stack);
-        fsSync.mkdirSync(dir, { recursive: true });
-        fsSync.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: busybox:latest\n', 'utf8');
         execFileSync('mkfifo', [path.join(dir, 'compose.override.yml')]);
 
         const deadline = new Promise<'timeout'>((resolve) => {

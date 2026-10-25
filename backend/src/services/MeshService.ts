@@ -34,14 +34,6 @@ import {
 
 const ACTIVITY_BUFFER_SIZE = 1000;
 const ALIAS_REFRESH_INTERVAL_MS = 60_000;
-/**
- * A compose layer written moments ago may be the visible prefix of a save that
- * is still in progress. The declaration is the only evidence that releases a
- * saved port claim, so a layer that has not been at rest for this long is
- * reported as unknown and the claim stays. Supported compose saves publish by
- * rename, so this window covers writers Sencho does not control.
- */
-const DECLARATION_SETTLE_MS = 5_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const DEFAULT_MESH_SUBNET = '172.30.0.0/24';
@@ -2719,11 +2711,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 // file, or a layer that changed mid-read is refused, and a
                 // refused layer keeps every saved claim.
                 const layer = await fsSvc.readComposeLayer(stackName, relFile);
-                // A save that started moments ago can expose a valid prefix
-                // that omits services not written yet. It is not authored
-                // evidence of a removal until it has been at rest.
-                if (Date.now() - layer.mtimeMs < DECLARATION_SETTLE_MS) {
-                    this.logDiag('compose declaration layer not settled', { stackName, relFile });
+                // The declaration is the only evidence that releases a saved
+                // claim, and a file read from disk cannot say whether its
+                // writer has finished: an external save that pauses mid-write
+                // looks the same as one that completed, however long it has
+                // sat. Only a layer Sencho published whole, by rename, is
+                // known to be a finished document. Any other layer keeps every
+                // claim.
+                if (!layer.publishedBySencho) {
+                    this.logDiag('compose declaration layer not published by Sencho', { stackName, relFile });
                     return null;
                 }
                 content = layer.content;
