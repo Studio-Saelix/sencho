@@ -538,11 +538,18 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     if (!intentPath.startsWith(genResolved + path.sep)) return false;
+    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
     let intentRaw: string;
     try {
       intentRaw = await fsPromises.readFile(intentPath, 'utf8');
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        // No intent means the transaction already ended: a commit that failed
+        // after dropping it still leaves files and Git side in agreement.
+        this.settleRestoreBracket(bracketKey, true);
+        return false;
+      }
+      this.settleRestoreBracket(bracketKey, false);
       throw e;
     }
 
@@ -550,13 +557,13 @@ export class RollbackGenerationStore {
     try {
       intent = JSON.parse(intentRaw) as RollbackRestoreIntent;
     } catch (e) {
+      this.settleRestoreBracket(bracketKey, false);
       throw new Error(
         `Corrupt restore-intent.json for generation ${generationId}: ${(e as Error).message}`,
         { cause: e },
       );
     }
 
-    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
     try {
       await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
       await this.restoreGitSideStateFromIntent(stackName, intent);
@@ -567,6 +574,11 @@ export class RollbackGenerationStore {
     }
     this.settleRestoreBracket(bracketKey, true);
     return true;
+  }
+
+  /** Whether a restore of this generation has rewritten the live files and not yet been committed or reverted by this process. */
+  static isRestoreInFlight(nodeId: number, stackName: string, generationId: string): boolean {
+    return pendingRestoreBrackets.has(restoreBracketKey(nodeId, stackName, generationId));
   }
 
   /** End a restore transaction's bracket: whole when its files and Git side agree, unknown otherwise. */
@@ -593,13 +605,18 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
-    if (intentPath.startsWith(genResolved + path.sep)) {
-      await fsPromises.rm(intentPath, { force: true });
+    try {
+      if (intentPath.startsWith(genResolved + path.sep)) {
+        await fsPromises.rm(intentPath, { force: true });
+      }
+      if (preRoot.startsWith(genResolved + path.sep)) {
+        await fsPromises.rm(preRoot, { recursive: true, force: true });
+      }
+    } finally {
+      // The restored files and Git side agree whether or not the leftovers
+      // could be removed, so a failed cleanup must not hold the stack unknown.
+      this.settleRestoreBracket(restoreBracketKey(nodeId, stackName, generationId), true);
     }
-    if (preRoot.startsWith(genResolved + path.sep)) {
-      await fsPromises.rm(preRoot, { recursive: true, force: true });
-    }
-    this.settleRestoreBracket(restoreBracketKey(nodeId, stackName, generationId), true);
   }
 
   /**

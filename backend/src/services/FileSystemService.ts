@@ -552,7 +552,13 @@ export class FileSystemService {
       publication.abandon();
       throw err;
     }
-    const settlement = settle(result);
+    let settlement: DeclarationSetSettlement;
+    try {
+      settlement = settle(result);
+    } catch (err) {
+      publication.abandon();
+      throw err;
+    }
     if (settlement === 'whole') publication.complete();
     else if (settlement === 'partial') publication.abandon();
     else publication.skip();
@@ -2574,31 +2580,35 @@ export class FileSystemService {
           await fh.writeFile(data);
         }
         await chownStaged(fh, owner);
-        if (opts.mode !== undefined) {
-          await fh.chmod(opts.mode);
-        } else if (handoverMode !== undefined) {
-          // The mode the replaced file already had, applied only once the
-          // intended owner holds the staging file: a process that could not
-          // hand the file over would otherwise publish group-readable bits for
-          // a group that is not the file's. A filesystem that cannot set modes
-          // leaves the staging file owner-only, which is the narrower outcome,
-          // so only a refusal to set the mode is tolerated, and it is logged.
+        if (handoverMode !== undefined) {
+          // The published mode, applied only once the intended owner holds the
+          // staging file: a process that could not hand the file over would
+          // otherwise publish group-readable bits for a group that is not the
+          // file's. Without the hand-off the group bits are dropped and the
+          // other bits stay, so a file that was world-readable still is and no
+          // group gains access it did not have.
           const held = await fh.stat();
-          if (owner && held.uid === owner.uid && held.gid === owner.gid) {
-            try {
-              await fh.chmod(handoverMode);
-            } catch (err: unknown) {
-              const code = (err as NodeJS.ErrnoException).code;
-              if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
-              console.warn(
-                `[FileSystemService] Could not restore mode ${handoverMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
-              );
-            }
-          } else {
+          const handedOver = owner !== undefined && held.uid === owner.uid && held.gid === owner.gid;
+          const finalMode = handedOver ? handoverMode : handoverMode & 0o707;
+          if (!handedOver) {
             console.warn(
-              `[FileSystemService] Could not hand ${sanitizeForLog(path.basename(safePath))} to its owner; the file stays owner-only`,
+              `[FileSystemService] Could not hand ${sanitizeForLog(path.basename(safePath))} to its owner; its group permissions are dropped`,
             );
           }
+          try {
+            await fh.chmod(finalMode);
+          } catch (err: unknown) {
+            const code = (err as NodeJS.ErrnoException).code;
+            // An explicit mode must land. A mode carried over from the replaced
+            // file may be refused by a filesystem that cannot set modes, which
+            // leaves the staging file owner-only, the narrower outcome.
+            if (opts.mode !== undefined || (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP')) throw err;
+            console.warn(
+              `[FileSystemService] Could not restore mode ${finalMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
+            );
+          }
+        } else if (opts.mode !== undefined) {
+          await fh.chmod(opts.mode);
         }
         await fh.sync();
         staged = await fh.stat();

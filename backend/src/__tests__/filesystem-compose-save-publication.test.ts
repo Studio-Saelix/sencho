@@ -188,6 +188,57 @@ describe('compose save publication', () => {
             expect(stagingFiles()).toEqual([]);
         });
 
+        describe('when the staging file cannot be handed to the intended owner', () => {
+            // The staging file stays in the process's group while the target
+            // belongs to another one, so its group bits would apply to the
+            // wrong principals. The handle reports a different group and
+            // refuses the chown, as a non-root process would see it.
+            function refuseHandOver(): void {
+                const realOpen = fsp.open.bind(fsp);
+                vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                    const fh = await realOpen(...args);
+                    if (!String(args[0]).includes('sencho-tmp')) return fh;
+                    fh.chown = (async () => {
+                        throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+                    }) as typeof fh.chown;
+                    const realStat = fh.stat.bind(fh);
+                    fh.stat = (async (...statArgs: Parameters<typeof fh.stat>) => {
+                        const st = await realStat(...statArgs);
+                        return { ...st, gid: Number(st.gid) + 1 };
+                    }) as typeof fh.stat;
+                    return fh;
+                }) as typeof fsp.open);
+            }
+
+            it.each([
+                ['a compose save', 0o640, 0o600],
+                ['a compose save of a world-readable file', 0o644, 0o604],
+            ])('drops the group bits for %s', async (_label, before, after) => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, before);
+                refuseHandOver();
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().saveStackContent(STACK, `${composeContent(['web'])}# ${MARKER}\n`);
+
+                const published = modeAndContent(target);
+                expect(published.mode).toBe(after);
+                expect(published.content).toContain(MARKER);
+                expect(stagingFiles()).toEqual([]);
+            });
+
+            it('drops the group bits of a mode carried over from the replaced file', async () => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, 0o640);
+                refuseHandOver();
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().writeStackFile(STACK, 'compose.yaml', composeContent(['web', 'db']));
+
+                expect(modeAndContent(target).mode).toBe(0o600);
+            });
+        });
+
         it('keeps a restricted target restricted when an upload replaces it', async () => {
             const target = path.join(stackDir, 'compose.yaml');
             fsSync.chmodSync(target, 0o600);
@@ -339,6 +390,17 @@ describe('declaration set publication', () => {
         expect(fresh(name)).toBeNull();
 
         await fsSvc.publishDeclarationSet(name, async () => 'rewrote the layers');
+        expect(fresh(name)).not.toBeNull();
+    });
+
+    it('abandons the bracket when classifying the result throws', async () => {
+        const fsSvc = FileSystemService.getInstance();
+        const name = 'declaration-set-settle-throws';
+        await expect(
+            fsSvc.publishDeclarationSet(name, async () => 1, () => { throw new Error('cannot classify'); }),
+        ).rejects.toThrow('cannot classify');
+        expect(fresh(name)).toBeNull();
+        await fsSvc.publishDeclarationSet(name, async () => 1);
         expect(fresh(name)).not.toBeNull();
     });
 

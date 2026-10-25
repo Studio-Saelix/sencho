@@ -197,6 +197,52 @@ describe('RollbackGenerationStore', () => {
       expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
     });
 
+    it('is whole once the transaction is committed even when removing the leftovers fails', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-commit-cleanup';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+      expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(true);
+
+      const realRm = fsPromises.rm.bind(fsPromises);
+      vi.spyOn(fsPromises, 'rm').mockImplementation(async (target, ...rest) => {
+        if (String(target).endsWith('pre-restore')) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+        return realRm(target, ...rest);
+      });
+      await expect(RollbackGenerationStore.commitRestoreTransaction(NODE, stackName, generationId)).rejects.toThrow('busy');
+
+      expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(false);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is whole when reconciliation finds the intent already gone', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-intent-gone';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+      const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+      await fsPromises.rm(path.join(genDir, 'restore-intent.json'));
+
+      await expect(RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId)).resolves.toBe(false);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays unknown when the restore intent cannot be read', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-intent-corrupt';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+      const genDir = RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId);
+      await fsPromises.writeFile(path.join(genDir, 'restore-intent.json'), '{not json', 'utf8');
+
+      await expect(RollbackGenerationStore.reconcileInterruptedRestore(NODE, stackName, generationId)).rejects.toThrow('Corrupt');
+      expect(RollbackGenerationStore.isRestoreInFlight(NODE, stackName, generationId)).toBe(false);
+      expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+    });
+
     it('is whole again when a failed restore is reverted', async () => {
       const { FileSystemService } = await import('../services/FileSystemService');
       const stackName = 'bracket-revert';

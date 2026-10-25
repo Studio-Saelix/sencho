@@ -1475,6 +1475,40 @@ describe('a multi-file publication in progress does not release claims', () => {
         expect((MeshService.getInstance() as unknown as Internals).reservedPorts.has(5432)).toBe(false);
     });
 
+    it('discards a read that a whole publication overlapped', async () => {
+        const localNode = await stoppedStack();
+        const svc = MeshService.getInstance();
+        // db starts in the auxiliary layer, published whole by Sencho.
+        await materialize([
+            { path: 'compose.yaml', content: composeYaml(['web']) },
+            { path: 'aux.yaml', content: composeYaml(['db']) },
+        ]);
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const realRead = FileSystemService.prototype.readComposeLayer;
+        let layersRead = 0;
+        vi.spyOn(FileSystemService.prototype, 'readComposeLayer').mockImplementation(async function (
+            this: InstanceType<typeof FileSystemService>,
+            ...args: Parameters<typeof realRead>
+        ) {
+            layersRead += 1;
+            // The primary layer was read before the move, the auxiliary layer
+            // after it: together they miss db although no set ever did.
+            if (layersRead === 2) {
+                await materialize([
+                    { path: 'compose.yaml', content: composeYaml(['web', 'db']) },
+                    { path: 'aux.yaml', content: 'networks:\n  front:\n    driver: bridge\n' },
+                ]);
+            }
+            return realRead.apply(this, args);
+        });
+
+        await svc.refreshAliasCache();
+
+        expect(layersRead).toBeGreaterThanOrEqual(2);
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(true);
+    });
+
     it('keeps the claim after a publication fails between layers, until a later one completes', async () => {
         const localNode = await stoppedStack();
         const { FileSystemService } = await import('../services/FileSystemService');
