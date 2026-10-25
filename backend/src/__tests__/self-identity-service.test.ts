@@ -228,6 +228,8 @@ describe('SelfIdentityService.initialize', () => {
     expect(await SelfIdentityService.readContainerIdFromCgroup(noMatch)).toBeNull();
 
     expect(await SelfIdentityService.readContainerIdFromCgroup(path.join(dir, 'does-not-exist'))).toBeNull();
+    // A directory is a read error, not "not found": it must surface.
+    await expect(SelfIdentityService.readContainerIdFromCgroup(dir)).rejects.toThrow();
 
     await fsp.rm(dir, { recursive: true, force: true });
   });
@@ -276,6 +278,21 @@ describe('SelfIdentityService.initialize', () => {
     expect(svc.getState()).toBe('resolved');
     expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
     expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
+  });
+
+  it('is unresolved, retried, and not cached as "not in Docker" when the cgroup cannot be read', async () => {
+    process.env.HOSTNAME = 'sencho';
+    mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
+    const cgroup = vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup')
+      .mockRejectedValueOnce(Object.assign(new Error('input/output error'), { code: 'EIO' }))
+      .mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    expect(await svc.ensureResolved()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('cgroup read failed');
+    expect(await svc.ensureResolved()).toBe('none');
+    expect(cgroup).toHaveBeenCalledTimes(2);
   });
 
   it('is unresolved, retried, and not cached as "not in Docker" when mountinfo cannot be read', async () => {

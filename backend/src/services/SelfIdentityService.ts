@@ -186,9 +186,10 @@ class SelfIdentityService {
   }
 
   /**
-   * Probes HOSTNAME, then the cgroup id. A 404 on a probe means "that is not a
-   * container", which is a real answer; any other failure means Docker did not
-   * answer, so the next probe still runs and, if nothing resolves, the result is
+   * Probes HOSTNAME, then the cgroup id, then the container id in the engine's
+   * mount entries. A 404 on a probe means "that is not a container", which is a
+   * real answer; any other failure (Docker did not answer, or /proc could not be
+   * read) lets the next probe still run and, if nothing resolves, the result is
    * `unresolved` rather than `none`.
    */
   private async resolveSelfInspect(
@@ -213,7 +214,13 @@ class SelfIdentityService {
       if (info) return { state: 'resolved', info };
     }
 
-    const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    let cgroupId: string | null = null;
+    try {
+      cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    } catch (err) {
+      failure = `cgroup read failed: ${(err as Error)?.message || String(err)}`;
+      console.warn('[SelfIdentity] cgroup read failed:', (err as Error)?.message || String(err));
+    }
     if (cgroupId) {
       const info = await attempt(cgroupId, 'cgroup');
       if (info) return { state: 'resolved', info };
@@ -448,14 +455,17 @@ class SelfIdentityService {
   // (`0::/system.slice/docker-<64hex>.scope`, also podman's
   // `libpod-<64hex>.scope`) embed the full container ID as a 64-hex run.
   // Matching the longest such run survives kernel + runtime variation.
+  // A missing file means "not found"; any other read error throws, as for mountinfo.
   static async readContainerIdFromCgroup(path = '/proc/self/cgroup'): Promise<string | null> {
+    let contents: string;
     try {
-      const contents = await fs.readFile(path, 'utf8');
-      const matches = contents.match(/[a-f0-9]{64}/gi);
-      return matches && matches.length > 0 ? matches[matches.length - 1].toLowerCase() : null;
-    } catch {
-      return null;
+      contents = await fs.readFile(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      throw err;
     }
+    const matches = contents.match(/[a-f0-9]{64}/gi);
+    return matches && matches.length > 0 ? matches[matches.length - 1].toLowerCase() : null;
   }
 }
 

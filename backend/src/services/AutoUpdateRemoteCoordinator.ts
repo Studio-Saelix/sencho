@@ -111,7 +111,7 @@ export class AutoUpdateRemoteCoordinator {
         if (attempt === 0) continue;
         return `Stack "${stack}": observation changed twice; skipped auto-update.`;
       }
-      // Reported as a failed stack, as the refusal was before the checked contract carried it.
+      // A refusal fails the run for this stack, with the target's reason, so it is not mistaken for a skipped update.
       if (result.endpointRefusal) return `Stack "${stack}" failed: ${result.endpointRefusal}`;
       if (!response.ok || !result.applied) return `Stack "${stack}": ${result.result}; skipped auto-update.`;
       const verification = await awaitHubPostUpdateVerification({

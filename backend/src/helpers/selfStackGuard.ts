@@ -33,8 +33,12 @@ export async function getRuntimeContainerIdCandidates(): Promise<string[]> {
   const candidates = new Set<string>();
   const hostname = process.env.HOSTNAME?.trim();
   if (hostname && isHexId(hostname)) candidates.add(hostname);
-  const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
-  if (cgroupId) candidates.add(cgroupId);
+  try {
+    const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    if (cgroupId) candidates.add(cgroupId);
+  } catch (error) {
+    console.warn('[SelfStackGuard] Could not read /proc/self/cgroup:', getErrorMessage(error, 'read failed'));
+  }
   try {
     const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
     if (mountId) candidates.add(mountId);

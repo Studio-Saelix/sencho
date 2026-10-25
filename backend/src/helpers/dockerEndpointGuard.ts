@@ -88,7 +88,8 @@ export interface EndpointGuardInput {
 }
 
 type ProtectedRole = 'sencho' | 'provider' | 'unknown_provider' | 'mislabeled';
-type Protected = { containers: ListedContainer[]; role: ProtectedRole };
+/** `via` names the protected service when these containers are only protected because it runs in their namespace. */
+type Protected = { containers: ListedContainer[]; role: ProtectedRole; via?: string };
 
 /** What Sencho knows about the provider after resolution. */
 type ProviderView =
@@ -115,8 +116,14 @@ type RenderedService = {
   pullPolicy: string | undefined;
   /** Services whose recreate Compose follows with a recreate or restart of this one. */
   linkedServices: string[];
-  /** Services whose network, pid, or ipc namespace this one runs in; stopping either breaks the other. */
+  /** Services whose network, pid, or ipc namespace this one runs in; stopping or recreating one of them takes this one down. */
   namespaceServices: string[];
+  /**
+   * The container's `config-hash` label never equals `docker compose config --hash`
+   * for a service that resolves a `service:` namespace mode or `volumes_from` to
+   * a container id, so a mismatch says nothing about whether `up` would recreate it.
+   */
+  hashUnreliable: boolean;
 };
 
 type RenderedServiceDocument = {
@@ -141,7 +148,7 @@ function serviceNamed(mode: unknown): string | null {
  * with `restart: true` all make Compose recreate or restart it when the other
  * service is recreated; a plain `depends_on` does not.
  */
-function wiringOf(service: RenderedServiceDocument | undefined): { linked: string[]; namespace: string[] } {
+function wiringOf(service: RenderedServiceDocument | undefined): { linked: string[]; namespace: string[]; hashUnreliable: boolean } {
   const namespace = new Set<string>();
   for (const mode of [service?.network_mode, service?.pid, service?.ipc]) {
     const name = serviceNamed(mode);
@@ -154,15 +161,18 @@ function wiringOf(service: RenderedServiceDocument | undefined): { linked: strin
       if ((condition as { restart?: unknown } | null)?.restart === true) linked.add(name);
     }
   }
-  for (const list of [service?.volumes_from, service?.links]) {
+  let hasVolumesFrom = false;
+  for (const [key, list] of [['volumes_from', service?.volumes_from], ['links', service?.links]] as const) {
     if (!Array.isArray(list)) continue;
     for (const entry of list) {
       if (typeof entry !== 'string' || entry.startsWith('container:')) continue;
       const name = entry.split(':')[0];
-      if (name) linked.add(name);
+      if (!name) continue;
+      linked.add(name);
+      if (key === 'volumes_from') hasVolumesFrom = true;
     }
   }
-  return { linked: [...linked], namespace: [...namespace] };
+  return { linked: [...linked], namespace: [...namespace], hashUnreliable: namespace.size > 0 || hasVolumesFrom };
 }
 
 /** The label value and image of every service in rendered Compose YAML. Throws on YAML that does not parse. */
@@ -188,6 +198,7 @@ function readRenderedServices(renderedYaml: string): Map<string, RenderedService
       pullPolicy: typeof service?.pull_policy === 'string' ? service.pull_policy : undefined,
       linkedServices: wiring.linked,
       namespaceServices: wiring.namespace,
+      hashUnreliable: wiring.hashUnreliable,
     });
   }
   return out;
@@ -281,11 +292,21 @@ function refusalFor(
   }
 }
 
-function unknownRecreateRefusal(role: ProtectedRole, service: string): DockerEndpointRefusal {
+/** A service that owns a namespace the protected service `via` runs in: stopping or recreating it takes `via` down. */
+function namespaceOwnerRefusal(role: ProtectedRole, service: string, via: string): DockerEndpointRefusal {
+  return {
+    reason: role === 'sencho' ? 'sencho' : 'provider',
+    service,
+    message: `Service "${service}" owns a network, pid, or ipc namespace that service "${via}" runs in, and "${via}" ${carriesClause(role)}. `
+      + `This operation would stop or recreate "${service}" and cut that connection. Recreate it from the host (docker compose up -d) while Sencho is idle.`,
+  };
+}
+
+function unknownRecreateRefusal(role: ProtectedRole, service: string, via?: string): DockerEndpointRefusal {
   return {
     reason: 'unresolved',
     service,
-    message: `Sencho could not tell whether this operation would recreate service "${service}", which ${carriesClause(role)} `
+    message: `Sencho could not tell whether this operation would recreate service "${service}", which ${via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role)} `
       + '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can replace the image). '
       + 'It is refused rather than guessed; '
       + (role === 'sencho'
@@ -334,28 +355,22 @@ function sharesSenchoNetwork(
     self.isOwnNetwork(name) || (!!network?.NetworkID && self.isOwnNetwork(network.NetworkID)));
 }
 
-/** Every service reachable from `services` through shared network, pid, or ipc namespaces, in either direction. */
-function namespaceRelatives(services: Array<string | null>, rendered: Map<string, RenderedService>): Set<string> {
-  const edges = new Map<string, Set<string>>();
-  const link = (a: string, b: string): void => {
-    if (!edges.has(a)) edges.set(a, new Set());
-    edges.get(a)?.add(b);
-  };
-  for (const [name, view] of rendered) {
-    for (const other of view.namespaceServices) {
-      link(name, other);
-      link(other, name);
-    }
-  }
+/**
+ * The services whose network, pid, or ipc namespace `services` run in,
+ * transitively: stopping or recreating one of them takes the service down with
+ * it. Services that merely share an owner with it, or run in its own namespace,
+ * are not included: stopping those cannot stop it.
+ */
+function namespaceOwners(services: Array<string | null>, rendered: Map<string, RenderedService>): Set<string> {
   const reached = new Set<string>();
-  const queue = services.filter((s): s is string => s !== null);
-  const roots = new Set(queue);
+  const roots = new Set(services.filter((s): s is string => s !== null));
+  const queue = [...roots];
   while (queue.length > 0) {
     const name = queue.shift() as string;
-    for (const next of edges.get(name) ?? []) {
-      if (reached.has(next) || roots.has(next)) continue;
-      reached.add(next);
-      queue.push(next);
+    for (const owner of rendered.get(name)?.namespaceServices ?? []) {
+      if (reached.has(owner) || roots.has(owner)) continue;
+      reached.add(owner);
+      queue.push(owner);
     }
   }
   return reached;
@@ -386,7 +401,10 @@ async function ownRecreate(
   if (!hash) return 'unknown';
   const existing = stackContainers.filter(container => serviceOf(container) === service);
   if (existing.length === 0) return 'no';
-  if (existing.some(container => container.Labels?.['com.docker.compose.config-hash'] !== hash)) return 'yes';
+  if (existing.some(container => container.Labels?.['com.docker.compose.config-hash'] !== hash)) {
+    // The label of a service that resolves a namespace or volumes_from reference never equals the rendered hash.
+    return rendered?.hashUnreliable ? 'unknown' : 'yes';
+  }
   if (rendered?.image) {
     const image = await input.probes.localImage(rendered.image);
     if (image.state === 'unknown') return 'unknown';
@@ -399,8 +417,8 @@ async function ownRecreate(
 /**
  * Whether `compose up -d` would stop or recreate `service`: its own recreate
  * decision, or that of anything it is wired to, because Compose recreates or
- * restarts a service when a service it depends on, shares a network namespace
- * with, or mounts volumes from is recreated.
+ * restarts a service when a service it links to, mounts volumes from, runs in
+ * the namespace of, or lists in `depends_on` with `restart: true` is recreated.
  */
 async function wouldRecreate(
   input: EndpointGuardInput,
@@ -482,7 +500,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
         reason: 'unresolved',
         service: null,
         message: `Sencho could not identify its own container (${self.getUnresolvedReason() ?? 'Docker did not answer'}), so it cannot tell whether "${stackName}" is the stack it runs in. `
-          + 'Check that the Docker endpoint allows container inspect requests, then retry.',
+          + 'Check the reason above (for example that the Docker endpoint allows container inspect requests, and that /proc is readable), then retry.',
       };
     }
   }
@@ -522,17 +540,19 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   });
   if (mislabeled.length > 0) found.push({ containers: mislabeled, role: 'mislabeled' });
 
-  // A service that runs in a protected service's network, pid, or ipc namespace,
-  // or whose namespace a protected service runs in, goes down with it: stopping
-  // or restarting either one cuts the connection. This also covers a proxy that
-  // shares the network of the container that owns the endpoint address.
+  // The service whose network, pid, or ipc namespace Sencho or the provider
+  // runs in is protected too: stopping, restarting, or recreating it takes the
+  // protected container down with it. (A service that merely runs in the same
+  // namespace, or in the provider's own, cannot stop it and is left alone.)
   for (const entry of [...found]) {
-    const related = namespaceRelatives(entry.containers.map(serviceOf), rendered);
+    if (entry.role !== 'sencho' && entry.role !== 'provider') continue;
+    const protectedServices = entry.containers.map(serviceOf);
+    const owners = namespaceOwners(protectedServices, rendered);
     const extra = stackContainers.filter(c => {
       const service = serviceOf(c);
-      return service !== null && related.has(service) && !entry.containers.includes(c);
+      return service !== null && owners.has(service) && !entry.containers.includes(c);
     });
-    if (extra.length > 0) found.push({ containers: extra, role: entry.role === 'sencho' ? 'provider' : entry.role });
+    if (extra.length > 0) found.push({ containers: extra, role: entry.role, via: protectedServices.find((s): s is string => s !== null) });
   }
 
   const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] ?? null;
@@ -545,13 +565,15 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
-      if (restartsSelf && entry.role === 'sencho') continue;
+      if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
       if (mutation.kind === 'up') {
         const recreate = await wouldRecreate(input, stackContainers, service, rendered);
         if (recreate === 'no') continue;
-        if (recreate === 'unknown') return unknownRecreateRefusal(entry.role, service);
+        if (recreate === 'unknown') return unknownRecreateRefusal(entry.role, service, entry.via);
       }
-      return refusalFor(entry.role, service, providerInfo, selfProject, providerReason);
+      return entry.via
+        ? namespaceOwnerRefusal(entry.role, service, entry.via)
+        : refusalFor(entry.role, service, providerInfo, selfProject, providerReason);
     }
   }
   return null;
@@ -645,7 +667,7 @@ export async function evaluateDockerEndpointContainer(
         reason: 'unresolved',
         service: null,
         message: `Sencho could not identify its own container (${self.getUnresolvedReason() ?? 'Docker did not answer'}), so it cannot tell whether this is the container it runs in. `
-          + 'Check that the Docker endpoint allows container inspect requests, then retry.',
+          + 'Check the reason above (for example that the Docker endpoint allows container inspect requests, and that /proc is readable), then retry.',
       };
     }
     isSelf = candidates.some(id => matchesContainerId(fullId, id));
@@ -655,8 +677,17 @@ export async function evaluateDockerEndpointContainer(
     return refusalFor('sencho', self.getComposeLocation().service ?? 'sencho', null, null);
   }
 
-  if (provider.state === 'resolved' && await providerRunsInNamespaceOf(docker, provider.provider, fullId)) {
-    return refusalFor('provider', service, provider.provider, selfProject);
+  if (provider.state === 'resolved') {
+    const owns = await providerRunsInNamespaceOf(docker, provider.provider, fullId, info.Name);
+    if (owns === 'yes') return refusalFor('provider', service, provider.provider, selfProject);
+    if (owns === 'unknown') {
+      return {
+        reason: 'unresolved',
+        service,
+        message: `Sencho could not inspect the container that carries its Docker connection, so it cannot tell whether "${service}" owns a namespace that container runs in. `
+          + 'Check that the Docker endpoint allows container inspect requests, then retry.',
+      };
+    }
   }
 
   if (provider.state === 'unresolved' && (selfState !== 'resolved' || sharesSenchoNetwork(info.NetworkSettings?.Networks, self))) {
@@ -666,25 +697,40 @@ export async function evaluateDockerEndpointContainer(
 }
 
 /**
- * Whether the provider runs in a network, pid, or ipc namespace owned by
- * `ownerId` (Compose `network_mode: service:x`, `pid`, `ipc`): stopping the
- * owner then takes the provider down with it. A provider that cannot be
- * inspected is not held against the owner, since the inspect of the owner
- * itself already worked.
+ * Whether the provider runs in a network, pid, or ipc namespace owned by the
+ * container `ownerId` (Compose `network_mode`, `pid`, or `ipc` set to
+ * `service:x`): stopping the owner then takes the provider down with it. The
+ * provider is inspected by id and, when a recreate changed the id since it was
+ * resolved, by name. A provider that cannot be inspected is `unknown`: the
+ * owner's own inspect worked, so a failure here is not a reason to let it pass.
  */
 async function providerRunsInNamespaceOf(
   docker: InspectsContainers,
   provider: DockerEndpointContainer,
   ownerId: string,
-): Promise<boolean> {
+  ownerName: string | undefined,
+): Promise<'yes' | 'no' | 'unknown'> {
+  type NamespaceModes = { HostConfig?: { NetworkMode?: string; PidMode?: string; IpcMode?: string } };
+  const inspect = async (reference: string): Promise<NamespaceModes | null> => {
+    try {
+      return await docker.getContainer(reference).inspect() as NamespaceModes;
+    } catch (error) {
+      if ((error as { statusCode?: number } | null)?.statusCode === 404) return null;
+      throw error;
+    }
+  };
+  const ownerNames = [ownerName?.replace(/^\//, '')].filter((n): n is string => !!n);
   try {
-    const info = await docker.getContainer(provider.containerId).inspect() as {
-      HostConfig?: { NetworkMode?: string; PidMode?: string; IpcMode?: string };
-    };
-    return [info.HostConfig?.NetworkMode, info.HostConfig?.PidMode, info.HostConfig?.IpcMode].some(mode =>
-      typeof mode === 'string' && mode.startsWith('container:') && matchesContainerId(ownerId, mode.slice('container:'.length)));
+    const info = await inspect(provider.containerId) ?? await inspect(provider.containerName);
+    if (!info) return 'no';
+    const runsInOwner = [info.HostConfig?.NetworkMode, info.HostConfig?.PidMode, info.HostConfig?.IpcMode].some(mode => {
+      if (typeof mode !== 'string' || !mode.startsWith('container:')) return false;
+      const target = mode.slice('container:'.length);
+      return matchesContainerId(ownerId, target) || ownerNames.includes(target);
+    });
+    return runsInOwner ? 'yes' : 'no';
   } catch (error) {
     console.warn('[DockerEndpointGuard] Could not inspect the Docker endpoint container to check its shared namespaces:', getErrorMessage(error, 'inspect failed'));
-    return false;
+    return 'unknown';
   }
 }

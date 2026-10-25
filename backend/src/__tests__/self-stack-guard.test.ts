@@ -91,12 +91,16 @@ describe('isSelfStack', () => {
 
 describe('getRuntimeContainerIdCandidates', () => {
   it('includes the id named by the engine mounts, and survives an unreadable mountinfo', async () => {
-    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    delete process.env.HOSTNAME;
+    const cgroup = vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
     const mountinfo = vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue('c'.repeat(64));
     expect(await getRuntimeContainerIdCandidates()).toEqual(['c'.repeat(64)]);
 
     mountinfo.mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
     process.env.HOSTNAME = 'd'.repeat(12);
+    expect(await getRuntimeContainerIdCandidates()).toEqual(['d'.repeat(12)]);
+
+    cgroup.mockRejectedValue(Object.assign(new Error('io error'), { code: 'EIO' }));
     expect(await getRuntimeContainerIdCandidates()).toEqual(['d'.repeat(12)]);
   });
 });

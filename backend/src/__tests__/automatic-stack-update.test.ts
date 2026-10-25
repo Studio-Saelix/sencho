@@ -70,6 +70,7 @@ describe('automatic stack apply pipeline', () => {
     expect(mocks.endpoint).toHaveBeenCalledWith('web', { kind: 'update' });
     expect(result).toMatchObject({ result: 'rejected', applied: false, healthGateId: null });
     expect(result.message).toContain('carries the Docker connection');
+    expect(result.endpointRefusal).toBe('Service "socket-proxy" carries the Docker connection Sencho is using.');
     expect(consume).not.toHaveBeenCalled();
     expect(mocks.execute).not.toHaveBeenCalled();
     expect(mocks.beginStack).not.toHaveBeenCalled();
