@@ -1107,7 +1107,7 @@ describe('evaluateDockerEndpointContainer', () => {
   });
 
   it('does not hold an ordinary container hostage when the proxy denies inspect, but still refuses what it can prove', async () => {
-    const denied = dockerFor(new Error('403 forbidden'));
+    const denied = dockerFor(Object.assign(new Error('403 forbidden'), { statusCode: 403 }));
     mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
 
     expect(await evaluate(WEB_ID, 'stop', denied)).toBeNull();
@@ -1120,7 +1120,7 @@ describe('evaluateDockerEndpointContainer', () => {
   });
 
   it('refuses the proxy by short id or name when the proxy denies inspect, without catching a similar name', async () => {
-    const denied = dockerFor(new Error('403 forbidden'));
+    const denied = dockerFor(Object.assign(new Error('403 forbidden'), { statusCode: 403 }));
     mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
 
     expect(await evaluate(PROXY_ID.slice(0, 12), 'stop', denied)).toMatchObject({ reason: 'provider' });
@@ -1157,13 +1157,18 @@ describe('evaluateDockerEndpointContainer', () => {
   it('lets the operation fail on its own for a missing container, and refuses on other inspect errors', async () => {
     expect(await evaluate('no-such', 'stop')).toBeNull();
     mockResolveProvider.mockResolvedValue({ state: 'unresolved', reason: 'dns' });
-    expect(await evaluate(WEB_ID, 'stop', dockerFor(new Error('403 forbidden')))).toMatchObject({ reason: 'unresolved' });
+    expect(await evaluate(WEB_ID, 'stop', dockerFor(Object.assign(new Error('403 forbidden'), { statusCode: 403 })))).toMatchObject({ reason: 'unresolved' });
   });
 
   describe.each([
     ['ECONNREFUSED', Object.assign(new Error('connect ECONNREFUSED 10.0.0.2:2375'), { code: 'ECONNREFUSED' })],
     ['a missing docker.sock', Object.assign(new Error('connect ENOENT /var/run/docker.sock'), { code: 'ENOENT' })],
     ['an unreachable daemon', new Error('Cannot connect to the Docker daemon at tcp://socket-proxy:2375')],
+    ['ECONNRESET', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })],
+    ['ETIMEDOUT', Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' })],
+    ['EPIPE', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })],
+    ['EAI_AGAIN', Object.assign(new Error('getaddrinfo EAI_AGAIN socket-proxy'), { code: 'EAI_AGAIN' })],
+    ['a missing non-docker socket', Object.assign(new Error('connect ENOENT /run/podman/podman.sock'), { code: 'ENOENT' })],
   ])('when Docker is unreachable (%s)', (_name, error) => {
     it.each(['stop', 'restart'] as const)('refuses a %s of an ordinary container, since the connection can recover before the mutation', async (action) => {
       mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));

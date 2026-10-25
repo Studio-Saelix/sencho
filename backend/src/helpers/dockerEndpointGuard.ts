@@ -101,15 +101,6 @@ function serviceOf(container: ListedContainer): string | null {
   return container.Labels?.['com.docker.compose.service'] ?? null;
 }
 
-function isDockerUnavailable(error: unknown): boolean {
-  const err = error as NodeJS.ErrnoException;
-  const message = String(err?.message ?? '').toLowerCase();
-  return err?.code === 'ECONNREFUSED'
-    || (err?.code === 'ENOENT' && /docker\.sock/i.test(err.message ?? ''))
-    || message.includes('econnrefused')
-    || message.includes('cannot connect to the docker daemon');
-}
-
 type RenderedService = {
   infrastructure: string | undefined;
   image: string | undefined;
@@ -709,8 +700,9 @@ export async function evaluateDockerEndpointContainer(
     if (self.isOwnContainer(containerId)) {
       return action === 'stop' ? refusalFor('sencho', self.getComposeLocation().service ?? 'sencho', null, null) : null;
     }
-    // Docker being unreachable is no proof either: it can recover before the mutation runs.
-    if (isDockerUnavailable(error) || provider.state === 'unresolved' || selfState === 'unresolved') {
+    // A transport failure (no HTTP status: refused, reset, timed out, no socket) is no proof either:
+    // the connection can recover before the mutation runs. Only an HTTP deny passes through.
+    if (typeof status !== 'number' || provider.state === 'unresolved' || selfState === 'unresolved') {
       return {
         reason: 'unresolved',
         service: null,
