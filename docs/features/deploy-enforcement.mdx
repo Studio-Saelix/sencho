@@ -72,7 +72,7 @@ Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the se
 
 A block policy can only block on what it managed to find out. When the scanner could not run, or a scan did not finish, Sencho has no finding to evaluate, and that is a different situation from "every image was scanned and nothing matched."
 
-**Evidence availability** on the **Policies** tab decides what a deploy gate may do in those situations. Each row shows the active setting and the shipped default:
+**Evidence availability** on the **Policies** tab decides what a deploy gate may do in those situations. The settings belong to the node that runs the deploy, so select the node in the node switcher before you read or change them; a change on one node does not carry over to the others. Each row shows the active setting and the shipped default:
 
 | Setting | Applies when | Default | Allow | Warn | Block |
 |---|---|---|---|---|---|
@@ -132,7 +132,7 @@ The auto-update scheduler runs deploys without an interactive user, so the bypas
 
 ## Fleet policy replication
 
-Scan policies are evaluated on the node that runs the deploy, so the **Policies** tab always manages the local Sencho instance. When you view a remote node's Security page through the fleet hub, the Policies section shows a "Managed on the local instance" notice; switch to that node's own UI to manage its policies.
+Scan policies are evaluated on the node that runs the deploy, so the **Policies** tab always manages the local Sencho instance. When you view a remote node's Security page through the fleet hub, the Policies section shows a "Managed on the local instance" notice; switch to that node's own UI to manage its policies. The **Evidence availability** settings are the exception: they follow the node selected in the node switcher, so you can view and change them for a remote or Pilot node from the same tab.
 
 When a node joins [Fleet Federation](/features/fleet-federation) as a replica, its scan policies and CVE suppressions are mirrored from the control node. The Policies tab on a replica shows a **Managed by control node** banner in place of the **Add policy** button. Admins can view the replicated policies for audit but cannot edit them directly; edits must be made on the control node, where they propagate to all replicas.
 
@@ -156,7 +156,7 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
   <Accordion title="The gate let a deploy through even though I have a block policy">
     Check the following in order:
 
-    1. Open the **Security** page → **Scanner setup** tab on the target node and confirm Trivy is installed. When Trivy is missing, Sencho dispatches a warning alert and allows the deploy, because a missing tool should not lock you out of deploying. You can change that to block or to warn-and-continue on the **Policies** tab, under **Evidence availability**. [Install Trivy](/operations/trivy-setup) to make the policy enforceable.
+    1. Open the **Security** page → **Scanner setup** tab on the target node and confirm Trivy is installed. When Trivy is missing, Sencho dispatches a warning alert and allows the deploy, because a missing tool should not lock you out of deploying. You can change that to block or to warn-and-continue on the **Policies** tab, under **Evidence availability**, with that node selected. [Install Trivy](/operations/trivy-setup) to make the policy enforceable.
     2. Confirm the policy is enabled and the stack pattern matches the stack name. `prod-*` matches `prod-api` but not `production-api`. An empty pattern matches every stack on the node.
     3. Check the latest scan for each image against the policy's block conditions. If no image carried a known-exploited CVE, a fixable Critical/High finding, or (when the severity threshold is on) a finding at or above the threshold, the gate correctly allowed the deploy.
     4. If a scan could not be completed, check **Evidence availability** on the **Policies** tab. A scan that started and did not finish blocks the deploy by default, so a scanner that is failing rather than missing stops the deploy through that setting.

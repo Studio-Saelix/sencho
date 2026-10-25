@@ -67,6 +67,8 @@ describe('PolicyBlockDialog evidence', () => {
   it('points at the place to change it', () => {
     renderDialog(unavailablePayload);
     expect(screen.getByText(/Policies tab, under Evidence availability/i)).toBeInTheDocument();
+    // The setting is per node, so the pointer must say which node's it is.
+    expect(screen.getByText(/belongs to the node that ran this deploy, so select that node first/i)).toBeInTheDocument();
   });
 
   it('shows no evidence section for a genuine policy match', () => {

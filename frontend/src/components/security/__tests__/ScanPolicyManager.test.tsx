@@ -113,3 +113,80 @@ it('blocks a save that turns on block-on-deploy with no active input', async () 
   expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/at least one input/i));
   expect(mockedFetch.mock.calls.some(([url, opts]) => url === '/security/policies' && opts?.method === 'POST')).toBe(false);
 });
+
+const evidenceBody = (scannerUnavailable: string) => ({
+  policy: { scannerUnavailable, scanFailure: 'block', candidateUnproven: 'block', isDefault: scannerUnavailable === 'allow' },
+  defaults: { scannerUnavailable: 'allow', scanFailure: 'block', candidateUnproven: 'block', isDefault: true },
+  outcomes: ['allow', 'warn', 'block'],
+});
+
+function useNode(node: { type: string; id: number; name: string }) {
+  vi.mocked(NodeContext.useNodes).mockReturnValue({ activeNode: node } as unknown as ReturnType<typeof NodeContext.useNodes>);
+}
+
+it('shows the evidence policy on a remote node and reads it from that node, not the local one', async () => {
+  setup();
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  mockedFetch.mockImplementation((url: string) =>
+    Promise.resolve(url === '/security/evidence-policy' ? jsonResponse(200, evidenceBody('block')) : jsonResponse(200, [])),
+  );
+  render(<ScanPolicyManager />);
+
+  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
+  // Scan policies stay local-only: the remote banner shows and they are not fetched.
+  expect(screen.getByText('Managed on the local instance')).toBeInTheDocument();
+  expect(mockedFetch.mock.calls.some(([url]) => url === '/security/policies')).toBe(false);
+  // The evidence read must reach the active node, so it must not be pinned local.
+  const call = mockedFetch.mock.calls.find(([url]) => url === '/security/evidence-policy');
+  expect(call).toBeTruthy();
+  expect(call![1]?.localOnly).toBeUndefined();
+  expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' }))
+    .toHaveAttribute('aria-checked', 'true');
+});
+
+it('saves the evidence policy to the active remote node without pinning the write local', async () => {
+  setup();
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  mockedFetch.mockImplementation((url: string, opts?: { method?: string }) =>
+    Promise.resolve(
+      url === '/security/evidence-policy'
+        ? jsonResponse(200, opts?.method === 'PUT' ? { policy: evidenceBody('block').policy } : evidenceBody('allow'))
+        : jsonResponse(200, []),
+    ),
+  );
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
+
+  fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' }));
+
+  await waitFor(() => {
+    const put = mockedFetch.mock.calls.find(([url, opts]) => url === '/security/evidence-policy' && opts?.method === 'PUT');
+    expect(put).toBeTruthy();
+    expect(put![1].localOnly).toBeUndefined();
+    expect(JSON.parse(put![1].body)).toEqual({ scannerUnavailable: 'block' });
+  });
+});
+
+it('does not carry one node\'s evidence policy over to the next node selected', async () => {
+  setup();
+  useNode({ type: 'local', id: 1, name: 'local' });
+  const byNode: Record<number, string> = { 1: 'block', 12: 'allow' };
+  let current = 1;
+  mockedFetch.mockImplementation((url: string) =>
+    Promise.resolve(url === '/security/evidence-policy' ? jsonResponse(200, evidenceBody(byNode[current])) : jsonResponse(200, [])),
+  );
+  const { rerender } = render(<ScanPolicyManager />);
+  await waitFor(() =>
+    expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' }))
+      .toHaveAttribute('aria-checked', 'true'),
+  );
+
+  current = 12;
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  rerender(<ScanPolicyManager />);
+
+  await waitFor(() =>
+    expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Allow' }))
+      .toHaveAttribute('aria-checked', 'true'),
+  );
+});

@@ -55,7 +55,9 @@ const EMPTY_FORM: PolicyFormState = {
  * honor-suppressions toggle, and the replica "managed by control" state. This
  * is the governance surface for the Security page Policies tab. Policies are
  * control-governed: fetched localOnly and shown only on the local node,
- * mirroring how the rest of the fleet-governance UI behaves.
+ * mirroring how the rest of the fleet-governance UI behaves. The evidence
+ * availability panel is the exception: it configures the node that deploys, so
+ * it follows the active node.
  */
 export function ScanPolicyManager() {
   const { isAdmin, can } = useAuth();
@@ -284,7 +286,7 @@ export function ScanPolicyManager() {
           <div className="text-sm">
             <div className="font-medium">Managed on the local instance</div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Scan policies are managed on the local Sencho instance. Switch to the local node to manage them.
+              Scan policies are managed on the local Sencho instance. Switch to the local node to manage them. Evidence availability below belongs to this node and can be changed here.
             </p>
           </div>
         </div>
@@ -436,7 +438,10 @@ export function ScanPolicyManager() {
         </div>
       )}
 
-      {!isRemote && <EvidencePolicyPanel />}
+      {/* Per-node setting, so it is shown on a remote node too (the read and write
+          are proxied to the active node), and keyed so a node switch never
+          shows the previous node's values. */}
+      <EvidencePolicyPanel key={activeNode?.id ?? 'none'} />
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader

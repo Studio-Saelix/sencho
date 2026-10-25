@@ -244,7 +244,7 @@ export function PolicyBlockDialog({
             </ul>
             {governedBySetting && (
               <p className="text-xs text-muted-foreground mt-2">
-                Change this on the Security page &rarr; Policies tab, under Evidence availability.
+                Change this on the Security page &rarr; Policies tab, under Evidence availability. The setting belongs to the node that ran this deploy, so select that node first.
               </p>
             )}
           </div>
