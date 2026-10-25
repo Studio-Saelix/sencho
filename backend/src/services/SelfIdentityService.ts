@@ -202,8 +202,9 @@ class SelfIdentityService {
       } catch (err) {
         const e = err as { statusCode?: number; message?: string };
         if (e?.statusCode === 404) return null;
-        failure = `${label} inspect failed: ${e?.message || String(err)}`;
-        console.warn(`[SelfIdentity] ${label} inspect failed:`, e?.message || String(err));
+        const detail = e?.message || String(err);
+        failure = `${label} inspect failed: ${detail}`;
+        console.warn(`[SelfIdentity] ${label} inspect failed:`, detail);
         return null;
       }
     };
@@ -218,8 +219,9 @@ class SelfIdentityService {
     try {
       cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
     } catch (err) {
-      failure = `cgroup read failed: ${(err as Error)?.message || String(err)}`;
-      console.warn('[SelfIdentity] cgroup read failed:', (err as Error)?.message || String(err));
+      const detail = (err as Error)?.message || String(err);
+      failure = `cgroup read failed: ${detail}`;
+      console.warn('[SelfIdentity] cgroup read failed:', detail);
     }
     if (cgroupId) {
       const info = await attempt(cgroupId, 'cgroup');
@@ -233,8 +235,9 @@ class SelfIdentityService {
     try {
       mountId = await SelfIdentityService.readContainerIdFromMountinfo();
     } catch (err) {
-      failure = `mountinfo read failed: ${(err as Error)?.message || String(err)}`;
-      console.warn('[SelfIdentity] mountinfo read failed:', (err as Error)?.message || String(err));
+      const detail = (err as Error)?.message || String(err);
+      failure = `mountinfo read failed: ${detail}`;
+      console.warn('[SelfIdentity] mountinfo read failed:', detail);
     }
     if (mountId && mountId !== cgroupId) {
       const info = await attempt(mountId, 'mountinfo');

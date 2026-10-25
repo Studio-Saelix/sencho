@@ -162,19 +162,16 @@ function wiringOf(service: RenderedServiceDocument | undefined): { linked: strin
       if ((condition as { restart?: unknown } | null)?.restart === true) linked.add(name);
     }
   }
-  let hasVolumesFrom = false;
-  for (const [key, list] of [['volumes_from', service?.volumes_from], ['links', service?.links]] as const) {
-    if (!Array.isArray(list)) continue;
-    for (const entry of list) {
-      if (typeof entry !== 'string') continue;
-      // A volumes_from entry naming a container is resolved to an id as well, so its hash is unreliable too.
-      if (key === 'volumes_from') hasVolumesFrom = true;
-      if (entry.startsWith('container:')) continue;
-      const name = entry.split(':')[0];
-      if (name) linked.add(name);
-    }
+  const stringEntries = (list: unknown): string[] =>
+    Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === 'string') : [];
+  const volumesFrom = stringEntries(service?.volumes_from);
+  for (const entry of [...volumesFrom, ...stringEntries(service?.links)]) {
+    if (entry.startsWith('container:')) continue;
+    const name = entry.split(':')[0];
+    if (name) linked.add(name);
   }
-  return { linked: [...linked], namespace: [...namespace], hashUnreliable: namespace.size > 0 || hasVolumesFrom };
+  // A volumes_from entry naming a container is resolved to an id as well, so its hash is unreliable too.
+  return { linked: [...linked], namespace: [...namespace], hashUnreliable: namespace.size > 0 || volumesFrom.length > 0 };
 }
 
 /** The label value and image of every service in rendered Compose YAML. Throws on YAML that does not parse. */
@@ -309,15 +306,16 @@ function unknownRecreateRefusal(role: ProtectedRole, service: string, via?: stri
   const cause = hashUnreliable
     ? '(the service, or a service it is wired to, uses volumes_from or a service: network, pid, or ipc mode, and the configuration hash Docker records for such a service never equals the one Compose renders, so the two cannot be compared). '
     : '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can replace the image). ';
+  const remedy = role === 'sencho' && !via
+    ? `use Reapply in ${REAPPLY_PATH} to recreate Sencho on purpose.`
+    : 'recreate the service from the host (docker compose up -d) while Sencho is idle.';
   return {
     reason: 'unresolved',
     service,
     message: `Sencho could not tell whether this operation would recreate service "${service}", which ${subject} `
       + cause
       + 'It is refused rather than guessed; '
-      + (role === 'sencho' && !via
-        ? `use Reapply in ${REAPPLY_PATH} to recreate Sencho on purpose.`
-        : 'recreate the service from the host (docker compose up -d) while Sencho is idle.'),
+      + remedy,
   };
 }
 
@@ -573,13 +571,13 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] ?? null;
   const providerInfo = provider.state === 'resolved' ? provider.provider : null;
   const providerReason = provider.state === 'unresolved' ? provider.reason : null;
+  const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
   for (const entry of found) {
     // A protected container without a Compose service label (a stale or hand-made
     // container carrying the stack label) is still protected, under its name.
     const services = [...new Set(entry.containers.map(c => serviceOf(c) ?? c.Names?.[0]?.replace(/^\//, '') ?? c.Id ?? 'unknown'))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
-      const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
       if (mutation.kind === 'up') {
         const recreate = await wouldRecreate(input, stackContainers, service, rendered);
