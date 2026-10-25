@@ -186,6 +186,20 @@ describe('a refused lifecycle request', () => {
     expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
   });
 
+  it('checks the container batch once and lets each container skip its own check', async () => {
+    mockEvaluate.mockResolvedValue(null);
+
+    const stop = await request(app).post('/api/stacks/infra/stop').set('Cookie', authCookie);
+    const restart = await request(app).post('/api/stacks/infra/restart').set('Cookie', authCookie);
+
+    expect(stop.status).toBe(200);
+    expect(restart.status).toBe(200);
+    expect(mockAssertNoEndpointContainers).toHaveBeenNthCalledWith(1, ['c1'], 'stop');
+    expect(mockAssertNoEndpointContainers).toHaveBeenNthCalledWith(2, ['c1'], 'restart');
+    expect(mockStopContainer).toHaveBeenCalledWith('c1', { allowEndpointContainer: true });
+    expect(mockRestartContainer).toHaveBeenCalledWith('c1', { allowEndpointContainer: true });
+  });
+
   it('does not consult the guard for start, which never stops anything', async () => {
     mockEvaluate.mockResolvedValue(refusal);
 
@@ -214,6 +228,43 @@ describe('a refused lifecycle request', () => {
 
     expect(res.status).toBe(200);
     expect(mockUpdateStack).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a refusal that the delete and rollback paths meet after the route check', () => {
+  it('maps a refused teardown during DELETE to 409 and keeps the stack', async () => {
+    const { DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService');
+    mockEvaluate.mockResolvedValue(null);
+    const del = vi.spyOn(DeployedStackDeletionService.prototype, 'deleteDeployedStack').mockResolvedValue({
+      ok: false,
+      code: 'docker_endpoint_protected',
+      error: refusal.message,
+    });
+
+    const res = await request(app).delete('/api/stacks/infra').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', error: refusal.message });
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(process.env.COMPOSE_DIR!, 'infra', 'compose.yaml'))).toBe(true);
+    del.mockRestore();
+  });
+
+  it('answers a refused recovery restore with 409 and carries the failure class the hub needs', async () => {
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockEvaluate.mockResolvedValue(null);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-1', gitops_generation_id: null } as never);
+    vi.spyOn(recovery, 'compensateWithCandidateOutcome').mockRejectedValue(
+      Object.assign(new DockerEndpointProtectedError(refusal), { failureClass: 'pre_mutation' }),
+    );
+
+    const res = await request(app).post('/api/stacks/infra/rollback').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', failureClass: 'pre_mutation' });
   });
 });
 
@@ -295,9 +346,37 @@ describe('container stop and restart routes', () => {
 
     const res = await request(app).post('/api/stacks/infra/stop').set('Cookie', authCookie);
 
-    expect(res.status).not.toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider', error: refusal.message });
     expect(mockAssertNoEndpointContainers).toHaveBeenCalledWith(['c1', 'c2'], 'stop');
     expect(mockStopContainer).not.toHaveBeenCalled();
+  });
+
+  it('reports a refused container batch in a bulk request as refused, not as a failed operation', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockEvaluate.mockResolvedValue(null);
+    mockAssertNoEndpointContainers.mockRejectedValue(new DockerEndpointProtectedError(refusal));
+
+    const res = await request(app)
+      .post('/api/stacks/bulk')
+      .set('Cookie', authCookie)
+      .send({ action: 'stop', stackNames: ['infra'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ stackName: 'infra', ok: false, code: 'docker_endpoint_protected', error: refusal.message });
+    expect(mockStopContainer).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 when a service action is refused after the route check passed', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockEvaluate.mockResolvedValue(null);
+    mockStopContainer.mockRejectedValue(new DockerEndpointProtectedError(refusal));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const res = await request(app).post('/api/stacks/infra/services/web/stop').set('Cookie', authCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
   });
 
   it('still reports an ordinary Docker failure as 500', async () => {

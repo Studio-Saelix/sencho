@@ -39,7 +39,15 @@ export async function refuseIfDockerEndpoint(
 export function sendIfDockerEndpointProtected(res: Response, error: unknown): boolean {
   if (!isDockerEndpointProtectedError(error)) return false;
   if (!res.headersSent) {
-    res.status(409).json({ error: error.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: error.reason });
+    // A restore through this node (the hub rolling a rollout back) needs to know
+    // whether anything moved before the refusal.
+    const failureClass = (error as { failureClass?: unknown }).failureClass;
+    res.status(409).json({
+      error: error.message,
+      code: DOCKER_ENDPOINT_PROTECTED_CODE,
+      reason: error.reason,
+      ...(failureClass === 'pre_mutation' || failureClass === 'post_mutation' ? { failureClass } : {}),
+    });
   }
   return true;
 }

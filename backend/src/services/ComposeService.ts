@@ -122,8 +122,11 @@ export class ComposeRollbackError extends Error {
    */
   public gitopsDeployOperationId?: string;
 
-  constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean) {
-    super(getErrorMessage(originalError, 'Compose operation failed'));
+  constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean, rollbackRefusal?: string) {
+    super(
+      getErrorMessage(originalError, 'Compose operation failed')
+      + (rollbackRefusal ? ` The rollback did not run: ${rollbackRefusal}` : ''),
+    );
     this.name = 'ComposeRollbackError';
     this.rollbackAttempted = rollbackAttempted;
     this.rolledBack = rolledBack;
@@ -144,10 +147,20 @@ function isNonFatalCompensationError(error: unknown): boolean {
   return code === 'HELD_IMAGE_MISSING' || code === 'RECOVERY_PROBE_FAILED';
 }
 
-async function compensateOrSwallow(compensate: () => Promise<boolean>): Promise<boolean> {
+async function compensateOrSwallow(
+  compensate: () => Promise<boolean>,
+  onRefused?: (message: string) => void,
+): Promise<boolean> {
   try {
     return await compensate();
   } catch (compError) {
+    // The Docker endpoint guard refused the recovery up before it ran: the
+    // failed operation's own error is what the caller must see, with the reason
+    // the rollback did not happen.
+    if (compError instanceof DockerEndpointProtectedError) {
+      onRefused?.(compError.message);
+      return false;
+    }
     if (!isNonFatalCompensationError(compError)) throw compError;
     return false;
   }
@@ -1655,6 +1668,7 @@ export class ComposeService {
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
+        let rollbackRefusal: string | undefined;
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
@@ -1666,8 +1680,12 @@ export class ComposeService {
               overlay,
             ),
           ),
+          (message) => {
+            rollbackRefusal = message;
+            sendOutput(`\n=== Rollback refused: ${message} ===\n`);
+          },
         );
-        const wrapped = new ComposeRollbackError(deployError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(deployError, true, rolledBack, rollbackRefusal);
         if (gitopsDeploy) {
           wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
         }
@@ -2605,8 +2623,10 @@ export class ComposeService {
         const results = await dockerController.removeContainers(classified.ids);
         const failed = results.filter((r) => !r.success);
         if (failed.length > 0) {
+          const refused = failed.find((r) => r.refused);
           throw new Error(
-            `Failed to remove ${failed.length} legacy orphan container(s) after handoff`,
+            `Failed to remove ${failed.length} legacy orphan container(s) after handoff`
+            + (refused?.error ? `: ${refused.error}` : ''),
           );
         }
       }
@@ -2700,6 +2720,7 @@ export class ComposeService {
       if (handedOff && recoveryId) {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
+        let rollbackRefusal: string | undefined;
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
@@ -2711,8 +2732,12 @@ export class ComposeService {
               overlay,
             ),
           ),
+          (message) => {
+            rollbackRefusal = message;
+            sendOutput(`\n=== Rollback refused: ${message} ===\n`);
+          },
         );
-        const wrapped = new ComposeRollbackError(updateError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(updateError, true, rolledBack, rollbackRefusal);
         if (gitopsDeploy) {
           wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
         }

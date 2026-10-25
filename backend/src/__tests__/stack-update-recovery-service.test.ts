@@ -297,6 +297,47 @@ describe('StackUpdateRecoveryService', () => {
     );
   });
 
+  it('rethrows a Docker endpoint guard refusal of the restore up, without marking the generation recovery_required', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    const row = {
+      id: 'gen-endpoint',
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active' as const,
+      phase: 'reconciling' as const,
+      is_current: 1,
+      backup_slot_id: 'b1',
+      content_path: null,
+      operation_kind: null,
+      override_path: '/test/compose/my-stack/.sencho-recovery-cccccccccccc.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    };
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue(row);
+    const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+        'gen-endpoint',
+        async () => {
+          throw new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected', failureClass: 'pre_mutation' });
+    expect(update).not.toHaveBeenCalledWith('gen-endpoint', expect.objectContaining({ status: 'recovery_required' }));
+  });
+
   it('throws HELD_IMAGE_MISSING when compensation compose-up cannot find the hold tag', async () => {
     const servicesJson = JSON.stringify([{
       serviceName: 'web',

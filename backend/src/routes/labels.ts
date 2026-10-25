@@ -285,10 +285,11 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                     `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
                   );
                 }
+                // The batch was just checked as a whole, so each container skips its own check.
                 if (action === 'stop') {
-                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id, { allowEndpointContainer: true })));
                 } else {
-                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id, { allowEndpointContainer: true })));
                 }
               },
             );

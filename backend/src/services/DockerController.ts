@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -332,7 +333,9 @@ export interface LabelInventoryRow {
 export interface ContainerOpOptions {
   /**
    * Skip the Docker endpoint guard. For automation that restarts an unhealthy
-   * container on purpose (Auto-Heal), where bouncing the container is the fix.
+   * container on purpose (Auto-Heal), where bouncing the container is the fix,
+   * and for a caller that has just checked the whole batch with
+   * `assertNoDockerEndpointContainers` and must not pay for every check twice.
    */
   allowEndpointContainer?: boolean;
 }
@@ -3187,7 +3190,7 @@ class DockerController {
   }
 
   /**
-   * Refuses to stop or restart the container that carries this node's Docker
+   * Refuses to stop, restart, or remove the container that carries this node's Docker
    * API (the socket proxy Sencho reaches Docker through, or Sencho itself on a
    * stop). The Docker endpoint guard is imported lazily: it reads container and
    * identity state through this class.
@@ -3276,7 +3279,7 @@ class DockerController {
 
   public async removeContainers(containerIds: string[]) {
     if (isDebugEnabled()) console.debug('[Resources:debug] removeContainers', { count: containerIds.length });
-    const results = [];
+    const results: Array<{ id: string; success: boolean; error?: string; refused?: true }> = [];
     for (const id of containerIds) {
       try {
         // Removal is a stop that cannot be undone: the Docker endpoint container is refused.
@@ -3286,7 +3289,12 @@ class DockerController {
         results.push({ id, success: true });
       } catch (error: any) {
         console.error('Failed to remove container %s:', sanitizeForLog(id), sanitizeForLog(error.message));
-        results.push({ id, success: false, error: error.message });
+        results.push({
+          id,
+          success: false,
+          error: error.message,
+          ...(error instanceof DockerEndpointProtectedError ? { refused: true as const } : {}),
+        });
       }
     }
     return results;

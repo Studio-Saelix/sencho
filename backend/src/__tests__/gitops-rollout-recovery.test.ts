@@ -480,6 +480,42 @@ describe('restoreTargetToGeneration on a local node', () => {
     expect(compensate).not.toHaveBeenCalled();
     expect(restoreFailureMutated(outcome as { code: string; failureClass?: 'pre_mutation' })).toBe(false);
   });
+
+  it('classifies a refusal raised inside the restore as nothing moved, with the node\'s own failure class', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    const nodeId = DatabaseService.getInstance().getNodes().find(node => node.type === 'local')!.id;
+    const { app: seeded } = seedApplication({ nodeIds: [nodeId], stackName: 'bp-stack-2' });
+    const app = GitOpsStore.getInstance().getApplication(seeded.id)!;
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-2', gitops_generation_id: 'gen-restore' } as never);
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+    vi.spyOn(recovery, 'compensateWithCandidateOutcome').mockRejectedValue(
+      Object.assign(
+        new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }),
+        { failureClass: 'pre_mutation' },
+      ),
+    );
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack-2',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'docker_endpoint_protected',
+      error: 'carries the Docker connection',
+      failureClass: 'pre_mutation',
+    });
+  });
 });
 
 describe('restoreFailureMutated', () => {

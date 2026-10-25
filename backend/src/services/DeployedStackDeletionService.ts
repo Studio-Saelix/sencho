@@ -24,7 +24,7 @@ import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
   BLUEPRINT_MARKER_FILENAME,

@@ -596,7 +596,7 @@ describe('SchedulerService - executeRestart', () => {
     await svc.triggerTask(61, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockRestartContainer).toHaveBeenCalledTimes(1);
-    expect(mockRestartContainer).toHaveBeenCalledWith('c1');
+    expect(mockRestartContainer).toHaveBeenCalledWith('c1', { allowEndpointContainer: true });
   });
 
   it('ends the gate of every named service, not just the first', async () => {

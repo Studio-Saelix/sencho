@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';

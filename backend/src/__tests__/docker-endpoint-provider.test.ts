@@ -192,6 +192,23 @@ describe('resolveDockerEndpointProvider', () => {
     expect(mockListContainers).toHaveBeenCalledTimes(2);
   });
 
+  it('re-resolves after the 15 s window, so a recreated proxy is found', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+      vi.setSystemTime(Date.now() + 14_000);
+      await resolveDockerEndpointProvider();
+      expect(mockListContainers).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 2_000);
+      await resolveDockerEndpointProvider();
+
+      expect(mockListContainers).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not remember an unmatched tcp endpoint, so a proxy that comes up later is found', async () => {
     mockLookup.mockResolvedValueOnce([{ address: '192.168.1.50', family: 4 }]);
 

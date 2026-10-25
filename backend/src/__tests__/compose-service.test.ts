@@ -1648,6 +1648,30 @@ describe('ComposeService - deployStack', () => {
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 
+  it('keeps the original error and says why when the Docker endpoint guard refused the rollback', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockCompensateWithCandidate.mockRejectedValueOnce(
+      new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection.' }),
+    );
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).toContain('The rollback did not run: Service "socket-proxy" carries the Docker connection.');
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
   it('does not roll back when atomic=false', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([{

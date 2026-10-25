@@ -141,7 +141,7 @@ describe('Stack Labels bulk actions', () => {
       { stackName: 'alpha', success: true },
       { stackName: 'beta', success: false, error: 'socket permission denied' },
     ]);
-    expect(stopContainer).toHaveBeenCalledWith('alpha-1');
+    expect(stopContainer).toHaveBeenCalledWith('alpha-1', { allowEndpointContainer: true });
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
   });
 
@@ -163,8 +163,8 @@ describe('Stack Labels bulk actions', () => {
       { stackName: 'beta', success: true },
     ]);
     expect(assertNoDockerEndpointContainers).toHaveBeenCalledWith(['alpha-1', 'alpha-proxy'], 'stop');
-    expect(stopContainer).not.toHaveBeenCalledWith('alpha-1');
-    expect(stopContainer).toHaveBeenCalledWith('beta-1');
+    expect(stopContainer).not.toHaveBeenCalledWith('alpha-1', expect.anything());
+    expect(stopContainer).toHaveBeenCalledWith('beta-1', { allowEndpointContainer: true });
   });
 
   it('rejects a second bulk action while the node lock is held', async () => {

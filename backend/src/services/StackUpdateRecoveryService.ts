@@ -61,6 +61,7 @@ import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationS
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 
 export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
 export { parseServicesJsonStrict } from './recoveryServicesJson';
@@ -1304,6 +1305,7 @@ export class StackUpdateRecoveryService {
       if (typeof error === 'object' && error !== null) {
         Object.assign(error, { failureClass });
       }
+      let filesRevertedClean = !filesRestored || !generationContentPath;
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
@@ -1311,6 +1313,7 @@ export class StackUpdateRecoveryService {
             row.stack_name,
             generationContentPath,
           );
+          filesRevertedClean = true;
         } catch (revertErr) {
           console.error(
             '[StackUpdateRecovery] Failed to revert files after compensation error: %s',
@@ -1319,6 +1322,14 @@ export class StackUpdateRecoveryService {
         }
       }
       if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
+      // The Docker endpoint guard refused the restore's compose up before it ran,
+      // and the files are back where they were: nothing moved, and the recovery
+      // point is still intact for a restore from the host, so it is neither
+      // marked recovery_required nor flattened into a failed restore.
+      if (isDockerEndpointProtectedError(error) && !revertFailed) {
+        Object.assign(error, { failureClass: filesRevertedClean ? 'pre_mutation' : 'post_mutation' });
         throw error;
       }
       console.error(

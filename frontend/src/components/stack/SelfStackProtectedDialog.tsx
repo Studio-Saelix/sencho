@@ -6,10 +6,11 @@ interface SelfStackProtectedDialogProps {
   onOpenChange: (open: boolean) => void;
   /**
    * Present only for a caller who can reapply: confirming reapplies Sencho from
-   * its current Compose configuration. The handler closes the dialog itself, so
-   * a confirmation it cannot act on yet (the node is not ready) stays open.
+   * its current Compose configuration. The handler is async, which keeps the
+   * dialog open until it closes it, so a confirmation it cannot act on yet (the
+   * node is not ready) stays open and can be retried.
    */
-  onReapply?: () => void;
+  onReapply?: () => Promise<void>;
   /** When true (and the caller cannot reapply), the primary action routes to Fleet node updates. */
   canOpenFleetUpdates: boolean;
   onOpenFleetUpdates?: () => void;

@@ -12,9 +12,9 @@ import { getErrorMessage } from '../utils/errors';
  * container is the connection: stopping or recreating it cuts the API Sencho is
  * using to do the work, and the rollback that follows dies the same way.
  *
- * The answer is re-resolved at most every 15 s, and callers also match the
- * provider by its Compose project and service, because a recreate changes the
- * container id. A `unix://` endpoint or a direct socket mount is `none`;
+ * A `resolved` or settled `none` answer is reused for up to 15 s (see
+ * `resolveDockerEndpointProvider`), and callers also match the provider by its
+ * Compose project and service, because a recreate changes the container id. A `unix://` endpoint or a direct socket mount is `none`;
  * mounting the socket does not make a container this node's connection.
  */
 export type DockerEndpointProvider =

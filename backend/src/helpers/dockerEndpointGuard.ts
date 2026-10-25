@@ -9,6 +9,11 @@ import {
 } from '../services/DockerEndpointProvider';
 import { getRuntimeContainerIdCandidates, matchesContainerId, workingDirMatchesStack } from './selfStackGuard';
 import { getErrorMessage } from '../utils/errors';
+import {
+  DOCKER_ENDPOINT_PROTECTED_CODE,
+  type DockerEndpointRefusal,
+  type EndpointRefusalReason,
+} from './dockerEndpointError';
 
 /**
  * Guard for lifecycle operations that would stop or recreate the container
@@ -20,15 +25,23 @@ import { getErrorMessage } from '../utils/errors';
  * It refuses when the provider or Sencho's own identity cannot be resolved
  * (for the stacks that could hold the provider), when a container list or
  * inspect fails, and when Compose's recreate decision cannot be predicted. It
- * lets an operation through only when Docker is unreachable (the operation then
- * fails by itself with its own error) or the stack provably holds neither.
+ * otherwise lets the operation through: when the stack provably holds neither
+ * protected container, for a remote node (its own Sencho guards it), for a
+ * restart of Sencho itself, and when Docker is unreachable (the operation then
+ * fails by itself with its own error).
  *
  * One evaluator, two call sites: the mutating Compose entry points
  * (`ComposeService`) and container stop/restart/removal (`DockerController`).
  * Scheduler, webhook, GitOps, Blueprint, mesh, and bulk update all reach one of
  * the two.
  */
-export const DOCKER_ENDPOINT_PROTECTED_CODE = 'docker_endpoint_protected';
+export {
+  DOCKER_ENDPOINT_PROTECTED_CODE,
+  DockerEndpointProtectedError,
+  isDockerEndpointProtectedError,
+  type DockerEndpointRefusal,
+  type EndpointRefusalReason,
+} from './dockerEndpointError';
 
 /** Label that marks a service as carrying this node's Docker connection when detection misses it. */
 export const INFRASTRUCTURE_LABEL = 'io.sencho.infrastructure';
@@ -48,32 +61,6 @@ export type EndpointMutation =
   | { kind: 'restart' }
   /** A service-scoped operation: refused only when it targets a protected service. */
   | { kind: 'service'; service: string; restart?: boolean };
-
-export type EndpointRefusalReason = 'sencho' | 'provider' | 'invalid_label' | 'unresolved';
-
-export interface DockerEndpointRefusal {
-  reason: EndpointRefusalReason;
-  service: string | null;
-  message: string;
-}
-
-export class DockerEndpointProtectedError extends Error {
-  readonly code = DOCKER_ENDPOINT_PROTECTED_CODE;
-  readonly reason: EndpointRefusalReason;
-  readonly service: string | null;
-
-  constructor(refusal: DockerEndpointRefusal) {
-    super(refusal.message);
-    this.name = 'DockerEndpointProtectedError';
-    this.reason = refusal.reason;
-    this.service = refusal.service;
-    Object.setPrototypeOf(this, DockerEndpointProtectedError.prototype);
-  }
-}
-
-export function isDockerEndpointProtectedError(error: unknown): error is DockerEndpointProtectedError {
-  return error instanceof DockerEndpointProtectedError;
-}
 
 type ListedContainer = {
   Id?: string;
@@ -103,7 +90,7 @@ export interface EndpointGuardInput {
   probes: EndpointGuardProbes;
 }
 
-type ProtectedRole = 'sencho' | 'provider' | 'unknown_provider';
+type ProtectedRole = 'sencho' | 'provider' | 'unknown_provider' | 'mislabeled';
 type Protected = { containers: ListedContainer[]; role: ProtectedRole };
 
 /** What Sencho knows about the provider after resolution. */
@@ -125,12 +112,12 @@ function isDockerUnavailable(error: unknown): boolean {
     || message.includes('cannot connect to the docker daemon');
 }
 
-type RenderedService = { infrastructure: string | undefined; image: string | undefined };
+type RenderedService = { infrastructure: string | undefined; image: string | undefined; pullPolicy: string | undefined };
 
 /** The label value and image of every service in rendered Compose YAML. Throws on YAML that does not parse. */
 function readRenderedServices(renderedYaml: string): Map<string, RenderedService> {
   const out = new Map<string, RenderedService>();
-  const parsed = parseYaml(renderedYaml) as { services?: Record<string, { labels?: unknown; image?: unknown }> } | null;
+  const parsed = parseYaml(renderedYaml) as { services?: Record<string, { labels?: unknown; image?: unknown; pull_policy?: unknown }> } | null;
   const services = parsed?.services;
   if (!services || typeof services !== 'object') return out;
   for (const [name, service] of Object.entries(services)) {
@@ -143,12 +130,20 @@ function readRenderedServices(renderedYaml: string): Map<string, RenderedService
       const raw = (labels as Record<string, unknown>)[INFRASTRUCTURE_LABEL];
       if (raw !== undefined && raw !== null) infrastructure = String(raw);
     }
-    out.set(name, { infrastructure, image: typeof service?.image === 'string' ? service.image : undefined });
+    out.set(name, {
+      infrastructure,
+      image: typeof service?.image === 'string' ? service.image : undefined,
+      pullPolicy: typeof service?.pull_policy === 'string' ? service.pull_policy : undefined,
+    });
   }
   return out;
 }
 
-/** Services whose label value is exactly "true" are marked; any other value is invalid. */
+/**
+ * Services whose label value is exactly "true" are marked; any other value is
+ * invalid. The guard itself reads the same data through `readRenderedServices`;
+ * this is the focused form its tests pin.
+ */
 export function readInfrastructureLabels(renderedYaml: string): { marked: string[]; invalid: Array<{ service: string; value: string }> } {
   const marked: string[] = [];
   const invalid: Array<{ service: string; value: string }> = [];
@@ -170,6 +165,20 @@ function invalidLabelRefusal(service: string, value: string): DockerEndpointRefu
   };
 }
 
+/** Why a service might carry the connection, worded for the role that put it on the list. */
+function carriesClause(role: ProtectedRole): string {
+  switch (role) {
+    case 'sencho': return 'is the running Sencho instance';
+    case 'unknown_provider': return 'shares a network with Sencho and may carry its Docker connection';
+    case 'provider':
+    case 'mislabeled': return 'carries the Docker connection Sencho is using';
+    default: {
+      const unreachable: never = role;
+      throw new Error(`Unhandled protected role: ${String(unreachable)}`);
+    }
+  }
+}
+
 function refusalFor(
   role: ProtectedRole,
   service: string,
@@ -177,42 +186,58 @@ function refusalFor(
   selfProject: string | null,
   providerUnresolvedReason: string | null = null,
 ): DockerEndpointRefusal {
-  if (role === 'sencho') {
-    return {
-      reason: 'sencho',
-      service,
-      message: `Service "${service}" is the running Sencho instance, and this operation would stop or recreate it. `
-        + `Use Reapply in ${REAPPLY_PATH} to recreate Sencho from its current Compose configuration.`,
-    };
+  switch (role) {
+    case 'sencho':
+      return {
+        reason: 'sencho',
+        service,
+        message: `Service "${service}" is the running Sencho instance, and this operation would stop or recreate it. `
+          + `Use Reapply in ${REAPPLY_PATH} to recreate Sencho from its current Compose configuration.`,
+      };
+    case 'unknown_provider':
+      return {
+        reason: 'unresolved',
+        service,
+        message: `Sencho could not determine which container carries its Docker connection (${providerUnresolvedReason ?? 'Docker did not answer'}), `
+          + `so it cannot tell whether this operation would stop or recreate service "${service}", which shares a network with Sencho. `
+          + 'Check that the Docker endpoint allows container list and inspect requests, then retry.',
+      };
+    case 'mislabeled':
+      return {
+        reason: 'invalid_label',
+        service,
+        message: `Service "${service}" is deployed with ${INFRASTRUCTURE_LABEL} set to a value other than "true", so Sencho treats it as carrying its Docker connection, `
+          + 'and this operation would stop or recreate it. Correct the label and recreate the service from the host (docker compose up -d) while Sencho is idle.',
+      };
+    case 'provider': {
+      const shared = provider?.project != null && provider.project === selfProject;
+      const how = shared
+        ? 'It is in the same Compose project as Sencho: recreate it from the host (docker compose up -d) while Sencho is idle.'
+        : 'Recreate it from the host (docker compose up -d) while Sencho is idle.';
+      return {
+        reason: 'provider',
+        service,
+        message: `Service "${service}" carries the Docker connection Sencho is using, and this operation would stop or recreate it. `
+          + `Sencho would lose its Docker API mid-operation and its rollback could not reach Docker. ${how}`,
+      };
+    }
+    default: {
+      const unreachable: never = role;
+      throw new Error(`Unhandled protected role: ${String(unreachable)}`);
+    }
   }
-  if (role === 'unknown_provider') {
-    return {
-      reason: 'unresolved',
-      service,
-      message: `Sencho could not determine which container carries its Docker connection (${providerUnresolvedReason ?? 'Docker did not answer'}), `
-        + `so it cannot tell whether this operation would stop or recreate service "${service}", which shares a network with Sencho. `
-        + 'Check that the Docker endpoint allows container list and inspect requests, then retry.',
-    };
-  }
-  const shared = provider?.project != null && provider.project === selfProject;
-  const how = shared
-    ? 'It is in the same Compose project as Sencho: recreate it from the host (docker compose up -d) while Sencho is idle.'
-    : 'Recreate it from the host (docker compose up -d) while Sencho is idle.';
-  return {
-    reason: 'provider',
-    service,
-    message: `Service "${service}" carries the Docker connection Sencho is using, and this operation would stop or recreate it. `
-      + `Sencho would lose its Docker API mid-operation and its rollback could not reach Docker. ${how}`,
-  };
 }
 
-function unknownRecreateRefusal(service: string): DockerEndpointRefusal {
+function unknownRecreateRefusal(role: ProtectedRole, service: string): DockerEndpointRefusal {
   return {
     reason: 'unresolved',
     service,
-    message: `Sencho could not tell whether this operation would recreate service "${service}", which carries its Docker connection `
-      + '(Compose did not report its configuration hash, or its image could not be inspected). It is refused rather than guessed; '
-      + 'recreate the service from the host (docker compose up -d) while Sencho is idle.',
+    message: `Sencho could not tell whether this operation would recreate service "${service}", which ${carriesClause(role)} `
+      + '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can replace the image). '
+      + 'It is refused rather than guessed; '
+      + (role === 'sencho'
+        ? `use Reapply in ${REAPPLY_PATH} to recreate Sencho on purpose.`
+        : 'recreate the service from the host (docker compose up -d) while Sencho is idle.'),
   };
 }
 
@@ -252,6 +277,9 @@ function sharesSenchoNetwork(
 
 type Recreate = 'yes' | 'no' | 'unknown';
 
+/** Compose pull policies that can fetch a newer image on `up`. */
+const PULLING_POLICY = /^(always|refresh|daily|weekly|every_.+)$/i;
+
 /**
  * Whether `compose up -d` would recreate `service`: a different config hash, a
  * different local image id behind its tag (a pull that landed outside Sencho),
@@ -261,20 +289,23 @@ async function wouldRecreate(
   input: EndpointGuardInput,
   stackContainers: ListedContainer[],
   service: string,
-  renderedImage: string | undefined,
+  rendered: RenderedService | undefined,
 ): Promise<Recreate> {
   const mutation = input.mutation;
   if (mutation.kind === 'up' && mutation.pinnedServices?.includes(service)) return 'yes';
+  // A pull policy that can fetch a newer image on `up` can replace the container
+  // behind a hash and a local image id that both still match.
+  if (rendered?.pullPolicy && PULLING_POLICY.test(rendered.pullPolicy)) return 'unknown';
   const hash = await input.probes.configHash(service);
   if (!hash) return 'unknown';
-  const running = stackContainers.filter(container => serviceOf(container) === service);
-  if (running.length === 0) return 'no';
-  if (running.some(container => container.Labels?.['com.docker.compose.config-hash'] !== hash)) return 'yes';
-  if (renderedImage) {
-    const image = await input.probes.localImage(renderedImage);
+  const existing = stackContainers.filter(container => serviceOf(container) === service);
+  if (existing.length === 0) return 'no';
+  if (existing.some(container => container.Labels?.['com.docker.compose.config-hash'] !== hash)) return 'yes';
+  if (rendered?.image) {
+    const image = await input.probes.localImage(rendered.image);
     if (image.state === 'unknown') return 'unknown';
     const wanted = image.id.replace(/^sha256:/, '');
-    if (running.some(container => (container.ImageID ?? '').replace(/^sha256:/, '') !== wanted)) return 'yes';
+    if (existing.some(container => (container.ImageID ?? '').replace(/^sha256:/, '') !== wanted)) return 'yes';
   }
   return 'no';
 }
@@ -355,26 +386,30 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   // and from the rendered file (what the next deploy would deploy), so removing
   // it from the file does not unprotect a container that still carries it.
   const rendered = await readRendered(input.probes);
-  for (const container of stackContainers) {
-    const value = container.Labels?.[INFRASTRUCTURE_LABEL];
-    const service = serviceOf(container);
-    if (value !== undefined && value !== 'true' && service) return invalidLabelRefusal(service, value);
-  }
+  // An invalid value in the file refuses before anything runs, so it can be
+  // fixed by editing the file. An invalid value on a running container cannot
+  // be fixed from here without recreating it, so that container is protected
+  // like a labeled one instead of locking the whole stack.
   for (const [service, view] of rendered) {
     if (view.infrastructure !== undefined && view.infrastructure !== 'true') return invalidLabelRefusal(service, view.infrastructure);
   }
-  const labeledContainers = stackContainers.filter(c => {
-    const service = serviceOf(c);
-    return c.Labels?.[INFRASTRUCTURE_LABEL] === 'true' || (service !== null && rendered.get(service)?.infrastructure === 'true');
-  });
   const alreadyProvider = new Set(found.filter(f => f.role === 'provider').flatMap(f => f.containers));
-  const labeledOnly = labeledContainers.filter(c => !alreadyProvider.has(c));
+  const labeledOnly = stackContainers.filter(c => {
+    const service = serviceOf(c);
+    const deployed = c.Labels?.[INFRASTRUCTURE_LABEL];
+    return !alreadyProvider.has(c)
+      && (deployed === 'true' || (service !== null && rendered.get(service)?.infrastructure === 'true'));
+  });
   if (labeledOnly.length > 0) found.push({ containers: labeledOnly, role: 'provider' });
+  const mislabeled = stackContainers.filter(c => {
+    const deployed = c.Labels?.[INFRASTRUCTURE_LABEL];
+    return deployed !== undefined && deployed !== 'true' && !alreadyProvider.has(c) && !labeledOnly.includes(c);
+  });
+  if (mislabeled.length > 0) found.push({ containers: mislabeled, role: 'mislabeled' });
 
   const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] ?? null;
   const providerInfo = provider.state === 'resolved' ? provider.provider : null;
   const providerReason = provider.state === 'unresolved' ? provider.reason : null;
-  const seen = new Set<string>();
   for (const entry of found) {
     const services = [...new Set(entry.containers.map(serviceOf).filter((s): s is string => s !== null))];
     for (const service of services) {
@@ -382,13 +417,10 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
       const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
       if (restartsSelf && entry.role === 'sencho') continue;
       if (mutation.kind === 'up') {
-        const recreate = await wouldRecreate(input, stackContainers, service, rendered.get(service)?.image);
+        const recreate = await wouldRecreate(input, stackContainers, service, rendered.get(service));
         if (recreate === 'no') continue;
-        if (recreate === 'unknown') return unknownRecreateRefusal(service);
+        if (recreate === 'unknown') return unknownRecreateRefusal(entry.role, service);
       }
-      const key = `${entry.role}:${service}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
       return refusalFor(entry.role, service, providerInfo, selfProject, providerReason);
     }
   }
@@ -419,7 +451,8 @@ export interface InspectsContainers {
 }
 
 /**
- * Container-level guard for stop, restart, and removal. It mirrors the stack
+ * Container-level guard for stop, restart, and removal (removal is evaluated as
+ * a stop). It mirrors the stack
  * level: the provider (by id, by Compose service, or by label) is always
  * refused; a container that may be the provider when it cannot be told apart is
  * refused; the Sencho container is refused on stop and removal only (a restart
@@ -428,7 +461,7 @@ export interface InspectsContainers {
 export async function evaluateDockerEndpointContainer(
   containerId: string,
   action: 'stop' | 'restart',
-  docker: InspectsContainers = DockerController.getInstance().getDocker(),
+  docker: InspectsContainers,
 ): Promise<DockerEndpointRefusal | null> {
   const self = SelfIdentityService.getInstance();
   const selfState = await self.ensureResolved();
@@ -441,11 +474,24 @@ export async function evaluateDockerEndpointContainer(
     const status = (error as { statusCode?: number } | null)?.statusCode;
     // No such container, or Docker unreachable: the operation fails by itself.
     if (status === 404 || isDockerUnavailable(error)) return null;
-    return {
-      reason: 'unresolved',
-      service: null,
-      message: `Sencho could not inspect container "${containerId}" (${getErrorMessage(error, 'Docker error')}), so it cannot tell whether this operation would stop the container that carries its Docker connection.`,
-    };
+    // Inspect is denied or failing. What is known without it still applies: a
+    // resolved provider or Sencho matched by id is refused, and so is anything
+    // that cannot be told apart while the provider or Sencho is unresolved. An
+    // ordinary container is not held hostage by a proxy that denies inspect.
+    if (provider.state === 'resolved' && isProviderContainer({ Id: containerId }, provider.provider)) {
+      return refusalFor('provider', provider.provider.service ?? provider.provider.containerName, provider.provider, self.getIdentity().composeProjectName);
+    }
+    if (self.isOwnContainer(containerId)) {
+      return action === 'stop' ? refusalFor('sencho', self.getComposeLocation().service ?? 'sencho', null, null) : null;
+    }
+    if (provider.state === 'unresolved' || selfState === 'unresolved') {
+      return {
+        reason: 'unresolved',
+        service: null,
+        message: `Sencho could not inspect container "${containerId}" (${getErrorMessage(error, 'Docker error')}), so it cannot tell whether this operation would stop the container that carries its Docker connection.`,
+      };
+    }
+    return null;
   }
 
   const fullId = info.Id ?? containerId;
@@ -459,7 +505,7 @@ export async function evaluateDockerEndpointContainer(
   }
   const labelValue = labels[INFRASTRUCTURE_LABEL];
   if (labelValue === 'true') return refusalFor('provider', service, null, selfProject);
-  if (labelValue !== undefined) return invalidLabelRefusal(service, labelValue);
+  if (labelValue !== undefined) return refusalFor('mislabeled', service, null, selfProject);
 
   let isSelf = self.isOwnContainer(fullId) || self.isOwnContainer(containerId);
   if (!isSelf && selfState === 'unresolved') {

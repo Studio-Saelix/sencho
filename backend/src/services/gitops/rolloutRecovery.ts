@@ -14,7 +14,7 @@
  * generation-selection contract, so both paths enforce identical evidence
  * rules.
  */
-import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointGuard';
+import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointError';
 import axios from 'axios';
 import type { PermissionAction } from '../../middleware/permissions';
 import { DatabaseService } from '../DatabaseService';

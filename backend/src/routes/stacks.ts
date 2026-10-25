@@ -650,6 +650,9 @@ async function runStackBulkOp(
       if (outcome.kind === 'no-containers') {
         return { stackName, ok: false, error: 'No containers found for this stack', code: 'no_containers' };
       }
+      if (outcome.kind === 'endpoint-protected') {
+        return { stackName, ok: false, error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+      }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
         return { stackName, ok: false, error: outcome.message, code: 'op_failed' };
@@ -2397,6 +2400,8 @@ export type ContainerActionOutcome =
   | { kind: 'ok'; count: number }
   | { kind: 'no-containers' }
   | { kind: 'docker-unavailable'; message: string }
+  /** The Docker endpoint guard refused the batch before any container was touched. */
+  | { kind: 'endpoint-protected'; message: string; reason: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2444,13 +2449,17 @@ export async function containerActionForStack(
         `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
       );
     }
+    // The batch was just checked as a whole, so each container skips its own check.
     const op =
-      action === 'restart' ? (id: string) => dockerController.restartContainer(id)
-        : action === 'stop' ? (id: string) => dockerController.stopContainer(id)
+      action === 'restart' ? (id: string) => dockerController.restartContainer(id, { allowEndpointContainer: true })
+        : action === 'stop' ? (id: string) => dockerController.stopContainer(id, { allowEndpointContainer: true })
           : (id: string) => dockerController.startContainer(id);
     await Promise.all(containers.map(c => op(c.Id)));
     return { kind: 'ok', count: containers.length };
   } catch (error: unknown) {
+    if (isDockerEndpointProtectedError(error)) {
+      return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
+    }
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2485,6 +2494,10 @@ async function bulkContainerOp(
       console.error('[Stacks] %s failed: docker unavailable for %s', sanitizeForLog(titleCase), sanitizeForLog(stackName));
       if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), req.user?.username ?? 'system');
       res.status(503).json({ error: outcome.message, code: 'docker_unavailable' });
+      return;
+    }
+    if (outcome.kind === 'endpoint-protected') {
+      res.status(409).json({ error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: outcome.reason });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2601,6 +2614,7 @@ function serviceFailureStatus(code: string): number {
     case 'policy_blocked':
     case 'recovery_not_restorable':
     case 'recovery_claim_failed':
+    case DOCKER_ENDPOINT_PROTECTED_CODE:
       return 409;
     default:
       // Compose, retag, inspect, and replica-divergence failures are server-side.

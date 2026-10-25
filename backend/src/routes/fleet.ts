@@ -24,6 +24,7 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -3136,6 +3137,14 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
       return;
     }
+    if (isDockerEndpointProtectedError(error)) {
+      res.status(409).json({
+        error: `The snapshot files were restored, but the stack was not redeployed. ${error.message}`,
+        code: error.code,
+        reason: error.reason,
+      });
+      return;
+    }
     console.error('[Fleet Snapshot] Restore error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to restore stack from snapshot' });
   }
@@ -3245,7 +3254,14 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         let redeployed = false;
         if (redeploy) {
           if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
-          await redeploySnapshotStack(node, group.stackName);
+          try {
+            await redeploySnapshotStack(node, group.stackName);
+          } catch (redeployError) {
+            if (isDockerEndpointProtectedError(redeployError)) {
+              throw new Error(`The snapshot files were restored, but the stack was not redeployed. ${redeployError.message}`);
+            }
+            throw redeployError;
+          }
           redeployed = true;
         }
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });

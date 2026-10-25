@@ -210,14 +210,15 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
 
   it('refuses to remove the protected container and removes the rest', async () => {
     const guard = await import('../helpers/dockerEndpointGuard');
-    vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
+    const guardSpy = vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
     const remove = vi.fn().mockResolvedValue(undefined);
     mockDocker.getContainer.mockReturnValue({ remove });
 
     const results = await DockerController.getInstance(1).removeContainers(['proxy', 'orphan']);
 
-    expect(results[0]).toMatchObject({ id: 'proxy', success: false });
+    expect(results[0]).toMatchObject({ id: 'proxy', success: false, refused: true, error: refusal.message });
     expect(results[1]).toEqual({ id: 'orphan', success: true });
+    expect(guardSpy).toHaveBeenCalledWith('proxy', 'stop', expect.anything());
     expect(remove).toHaveBeenCalledTimes(1);
   });
 

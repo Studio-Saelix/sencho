@@ -128,10 +128,14 @@ export function ShellOverlays({
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
         onOpenChange={setSelfStackProtectedOpen}
-        onReapply={reapplySelfTarget ? () => {
+        onReapply={reapplySelfTarget ? async () => {
           // Same readiness and single-flight checks as the Save & Reapply
-          // confirm: readiness loss keeps the dialog open with nothing sent.
-          if (!hydrationReady()) return;
+          // confirm. Returning a promise is what keeps the dialog open: readiness
+          // loss says so and sends nothing, and the confirm can be retried.
+          if (!hydrationReady()) {
+            toast.error('Status data unavailable. Refresh and try again.');
+            return;
+          }
           setSelfStackProtectedOpen(false);
           if (composeReapply.dispatching) return;
           void composeReapply.runReapply(reapplySelfTarget);

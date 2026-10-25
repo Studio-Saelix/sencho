@@ -6,7 +6,7 @@ function renderDialog(over: Partial<React.ComponentProps<typeof SelfStackProtect
   const props = {
     open: true,
     onOpenChange: vi.fn(),
-    onReapply: undefined as (() => void) | undefined,
+    onReapply: undefined as (() => Promise<void>) | undefined,
     canOpenFleetUpdates: false,
     onOpenFleetUpdates: vi.fn(),
     ...over,
@@ -17,7 +17,7 @@ function renderDialog(over: Partial<React.ComponentProps<typeof SelfStackProtect
 
 describe('SelfStackProtectedDialog', () => {
   it('is the Reapply confirm when the caller can reapply, without a trip to Fleet', () => {
-    const onReapply = vi.fn();
+    const onReapply = vi.fn().mockResolvedValue(undefined);
     const props = renderDialog({ onReapply, canOpenFleetUpdates: true });
 
     expect(screen.getByRole('heading', { name: 'Reapply Sencho' })).toBeInTheDocument();
@@ -25,6 +25,18 @@ describe('SelfStackProtectedDialog', () => {
 
     expect(onReapply).toHaveBeenCalledTimes(1);
     expect(props.onOpenFleetUpdates).not.toHaveBeenCalled();
+  });
+
+  it('stays open after confirming until the handler closes it, so a not-ready node can be retried', async () => {
+    const onReapply = vi.fn().mockResolvedValue(undefined);
+    const props = renderDialog({ onReapply });
+
+    fireEvent.click(screen.getByRole('button', { name: /Reapply & restart/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Reapply & restart/ }));
+
+    expect(onReapply).toHaveBeenCalledTimes(2);
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Reapply Sencho' })).toBeInTheDocument();
   });
 
   it('does not reapply when the dialog is cancelled', () => {

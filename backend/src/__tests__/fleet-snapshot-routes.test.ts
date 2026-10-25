@@ -293,6 +293,56 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(res.status).toBe(409);
     });
 
+    it('answers 409 docker_endpoint_protected when the redeploy is refused, and says the files were restored', async () => {
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+        vi.spyOn(policyGate, 'runPolicyGate').mockResolvedValue(true);
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+            new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection.' }),
+        );
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-refused', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'refused-web', filename: 'compose.yaml', content: 'services:\n  proxied: {}\n' },
+        ]);
+        seedStackDir('refused-web');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'refused-web', redeploy: true });
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+        expect(res.body.error).toContain('The snapshot files were restored, but the stack was not redeployed.');
+        expect(fs.readFileSync(composePath('refused-web'), 'utf-8')).toContain('proxied');
+    });
+
+    it('restore-all reports a refused redeploy on that row only', async () => {
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockImplementation(async (stackName: string) => {
+            if (stackName === 'refusedall-a') {
+                throw new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
+            }
+            return { recoveryId: null, deployedGenerationId: null, gitopsOperationId: null };
+        });
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-all-refused', 'admin', 1, 2, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'refusedall-a', filename: 'compose.yaml', content: 'services: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'refusedall-b', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        seedStackDir('refusedall-a');
+        seedStackDir('refusedall-b');
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true });
+        expect(res.status).toBe(200);
+        const rows = res.body.results as Array<{ stackName: string; success: boolean; error?: string }>;
+        const refused = rows.find(r => r.stackName === 'refusedall-a');
+        expect(refused?.success).toBe(false);
+        expect(refused?.error).toContain('The snapshot files were restored, but the stack was not redeployed. carries the Docker connection');
+        expect(rows.find(r => r.stackName === 'refusedall-b')?.success).toBe(true);
+    });
+
     it('returns 409 SNAPSHOT_FILE_UNAVAILABLE and does not mutate live files', async () => {
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-corrupt', 'admin', 1, 1, '[]', '[]');

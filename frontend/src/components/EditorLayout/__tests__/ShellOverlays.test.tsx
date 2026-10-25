@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import * as toastStore from '@/components/ui/toast-store';
 
 beforeEach(() => {
   onConfirmMock.mockReset();
@@ -29,7 +30,7 @@ vi.mock('@/components/stack/PreDeployScanDialog', () => ({ PreDeployScanDialog: 
 vi.mock('@/components/stack/MissingExternalNetworksDialog', () => ({ MissingExternalNetworksDialog: () => null }));
 vi.mock('@/components/stack/PolicyBlockDialog', () => ({ PolicyBlockDialog: () => null }));
 vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({
-  SelfStackProtectedDialog: (props: { onReapply?: () => void }) =>
+  SelfStackProtectedDialog: (props: { onReapply?: () => Promise<void> }) =>
     props.onReapply ? <button type="button" onClick={() => props.onReapply?.()}>self-reapply</button> : <span>self-info-only</span>,
 }));
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
@@ -211,15 +212,17 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     expect(screen.getByText('self-info-only')).toBeInTheDocument();
   });
 
-  it('keeps the dialog open and sends nothing while the node is not ready', () => {
+  it('keeps the dialog open, says why, and sends nothing while the node is not ready', async () => {
     const runReapply = vi.fn();
     const setOpen = vi.fn();
+    const toastError = vi.spyOn(toastStore.toast, 'error').mockImplementation(() => '' as never);
     renderShell(
       makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
       {},
       { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => false },
     );
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    await vi.waitFor(() => expect(toastError).toHaveBeenCalledWith('Status data unavailable. Refresh and try again.'));
     expect(setOpen).not.toHaveBeenCalled();
     expect(runReapply).not.toHaveBeenCalled();
   });
