@@ -8,12 +8,14 @@
  * those signals honest.
  *
  * Reads structural fields (service keys, ports, volumes, restart, network keys)
- * plus the allowlisted `io.sencho.*` labels (application and named links, display
- * order, hidden flag), and only link values that are http(s) URLs with no userinfo. It never reads `environment`, `command`,
- * `entrypoint`, other label values, `secrets`, or `configs`, so a secret
- * INJECTED through those fields can never reach this payload. The exception is
- * a secret interpolated INTO a structural field or into the allowlisted label
- * (a bind path, network name, published port, or URL built from a `${VAR}`):
+ * plus the registered `io.sencho.*` labels (`helpers/senchoLabels.ts`). Of those,
+ * only link values leave the model, and only as http(s) URLs with no userinfo;
+ * order and hidden values are parsed and only their results are returned. It
+ * never reads `environment`, `command`, `entrypoint`, other label values,
+ * `secrets`, or `configs`, so a secret INJECTED through those fields can never
+ * reach this payload. The exception is a secret interpolated INTO a structural
+ * field or into a link label (a bind path, network name, published port, or URL
+ * built from a `${VAR}`):
  * `docker compose config` resolves it before this parse, leaving no provenance
  * to distinguish it, so the resolved value is returned. That value is already
  * readable at the same `stack:read` scope via the stack's files, so this is a
@@ -175,9 +177,11 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
   }
 
   const senchoLabels = resolveSenchoLabels(parsed);
-  for (const name of serviceNames) {
-    const application = senchoLabels.services[name]?.links.find(link => link.name === null);
-    if (application) serviceUrls[name] = application.url;
+  if (senchoLabels.renderable) {
+    for (const name of serviceNames) {
+      const application = senchoLabels.services[name]?.links.find(link => link.name === null);
+      if (application) serviceUrls[name] = application.url;
+    }
   }
 
   if (root.networks && typeof root.networks === 'object' && !Array.isArray(root.networks)) {

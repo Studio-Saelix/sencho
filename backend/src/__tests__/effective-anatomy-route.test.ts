@@ -72,6 +72,43 @@ describe('effective-anatomy route', () => {
     // A single-file stack has no other file that could shadow the label.
     expect(res.body.serviceUrlEdit).toEqual({ web: 'root' });
     expect(res.body.serviceUrlClear).toEqual({ web: 'root' });
+    // The resolution is always present, and a service without labels resolves to no metadata.
+    expect(res.body.senchoLabels).toMatchObject({ renderable: true, entries: [] });
+    expect(res.body.senchoLabels.services.web).toEqual({ links: [], order: null, hidden: false });
+  });
+
+  it('serves the resolved io.sencho labels, with interpolation already applied and diagnostics free of values', async () => {
+    // Compose has already interpolated ${DOCS_HOST:-docs.example.com} when it renders the model.
+    stubRender(JSON.stringify({
+      name: STACK,
+      services: {
+        web: { image: 'nginx', labels: { 'io.sencho.url': 'https://app.example.com', 'io.sencho.url.docs': 'https://docs.example.com/x', 'io.sencho.order': '2' } },
+        job: { image: 'busybox', labels: { 'io.sencho.hidden': 'true', 'io.sencho.order': 'soon' } },
+      },
+    }));
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.serviceUrls).toEqual({ web: 'https://app.example.com' });
+    expect(res.body.senchoLabels.services.web.links).toEqual([
+      { name: null, url: 'https://app.example.com' },
+      { name: 'docs', url: 'https://docs.example.com/x' },
+    ]);
+    expect(res.body.senchoLabels.services.job.hidden).toBe(true);
+    expect(res.body.senchoLabels.services.web.order).toBe(2);
+    expect(res.body.senchoLabels.services.job.order).toBeNull();
+    const bad = (res.body.senchoLabels.entries as Array<{ key: string; state: string; reason?: string }>).find(e => e.key === 'io.sencho.order' && e.state === 'invalid');
+    expect(bad?.reason).toBe('Use a whole number such as 10.');
+    expect(JSON.stringify(res.body.senchoLabels)).not.toContain('soon');
+  });
+
+  it('fails closed with an unrenderable resolution when the model cannot be rendered', async () => {
+    stubRender(null, 'error');
+    const res = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(res.body.senchoLabels).toEqual({ renderable: false });
+    stubRender('this is not json {');
+    const garbled = await request(app).get(`/api/stacks/${STACK}/effective-anatomy`).set('Authorization', authHeader);
+    expect(garbled.body.senchoLabels.renderable).toBe(false);
+    expect(garbled.body.senchoLabels).toEqual({ renderable: false });
   });
 
   it('surfaces a structural error and never raw stderr on render failure', async () => {

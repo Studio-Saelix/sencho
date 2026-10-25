@@ -264,6 +264,7 @@ components:
         value: { type: string }
         source: { $ref: "#/components/schemas/LabelSource" }
         redacted: { type: boolean }
+        behavior: { $ref: "#/components/schemas/LabelBehavior" }
         containers:
           type: array
           items: { $ref: "#/components/schemas/LabelIndexContainerRef" }

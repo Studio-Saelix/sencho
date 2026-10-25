@@ -1,9 +1,9 @@
-import { parseSenchoUrl, SENCHO_URL_LABEL } from './senchoLabels';
+import { parseLabelEntries, parseSenchoUrl, parseSenchoUrlLabel, SENCHO_URL_LABEL } from './senchoLabels';
 
 /**
- * The application link label, the first allowlisted Compose label whose value
- * may leave the rendered model (the named links share its validation). Every
- * other label stays key-only, because label values can carry secrets.
+ * The application link label. Its value, like the named links' (`senchoLabels.ts`
+ * extracts those too), may leave the rendered model once validated. Every other
+ * label stays key-only, because label values can carry secrets.
  */
 export const SERVICE_URL_LABEL = SENCHO_URL_LABEL;
 
@@ -13,22 +13,10 @@ export function serviceUrlFromLabelValue(raw: string): string | null {
   return parsed.ok ? parsed.value : null;
 }
 
-/** The validated URL from a rendered label map or `key=value` list, else null. */
+/** The validated URL from a rendered label map or `key=value` list, else null. Reads labels the way the resolver does. */
 export function serviceUrlFromLabels(labels: unknown): string | null {
-  if (Array.isArray(labels)) {
-    for (const entry of labels) {
-      if (typeof entry !== 'string') continue;
-      const eq = entry.indexOf('=');
-      if (eq <= 0) continue;
-      if (entry.slice(0, eq) !== SERVICE_URL_LABEL) continue;
-      return serviceUrlFromLabelValue(entry.slice(eq + 1));
-    }
-    return null;
-  }
-  if (labels && typeof labels === 'object') {
-    const raw = (labels as Record<string, unknown>)[SERVICE_URL_LABEL];
-    if (typeof raw !== 'string') return null;
-    return serviceUrlFromLabelValue(raw);
-  }
-  return null;
+  const raw = parseLabelEntries(labels).get(SERVICE_URL_LABEL);
+  if (raw === undefined) return null;
+  const parsed = parseSenchoUrlLabel(raw);
+  return parsed.ok ? parsed.value : null;
 }

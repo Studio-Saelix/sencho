@@ -7,13 +7,17 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 
 import { apiFetch } from '@/lib/api';
 
+/** A current node's io.sencho.* answer for a stack with no labels. Nodes without one are unsupported as a whole. */
+const CONTRACT = { renderable: true, services: {}, entries: [] };
+
 const fetchMock = vi.mocked(apiFetch);
 
-function anatomy(url: string): Response {
+function anatomy(url: string, resolution: unknown = CONTRACT): Response {
   return {
     ok: true,
     json: async () => ({
       renderable: true,
+      senchoLabels: resolution,
       serviceUrls: { web: url },
       ports: { web: [{ host: '8080', proto: 'tcp' }] },
     }),
@@ -83,6 +87,29 @@ describe('useServiceUrls', () => {
     expect(result.current.entry?.serviceUrls.web).toBe('https://b.example.com');
   });
 
+  it('keeps the previous hidden and order metadata while a reload is in flight, then replaces it', async () => {
+    const hiddenWeb = { renderable: true, entries: [], services: { web: { links: [], order: 1, hidden: true } } };
+    const shownWeb = { renderable: true, entries: [], services: { web: { links: [], order: 2, hidden: false } } };
+    fetchMock.mockResolvedValueOnce(anatomy('https://a.example.com', hiddenWeb));
+    const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
+    await waitFor(() => expect(result.current.entry?.status).toBe('ready'));
+
+    let release: (response: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    let pending: Promise<unknown> = Promise.resolve();
+    act(() => {
+      pending = result.current.refresh();
+    });
+    const during = result.current.entry?.senchoLabels;
+    expect(during && during.renderable ? during.services.web.hidden : null).toBe(true);
+    await act(async () => {
+      release(anatomy('https://a.example.com', shownWeb));
+      await pending;
+    });
+    const after = result.current.entry?.senchoLabels;
+    expect(after && after.renderable ? [after.services.web.hidden, after.services.web.order] : null).toEqual([false, 2]);
+  });
+
   it('keeps the last URL when a refresh request fails and returns the failure to the caller', async () => {
     fetchMock.mockResolvedValueOnce(anatomy('https://a.example.com'));
     const { result } = renderHook(() => useServiceUrls(1, 'web.yaml'));
@@ -139,7 +166,7 @@ describe('useServiceUrls', () => {
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ renderable: false, serviceUrls: {}, ports: {} }),
+      json: async () => ({ renderable: false, senchoLabels: { renderable: false }, serviceUrls: {}, ports: {} }),
     } as Response);
     let blocked: string | null = null;
     await act(async () => {

@@ -1,6 +1,8 @@
+import type { SenchoLabelState } from './senchoLabels';
+
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
-export type LabelBehaviorState = 'active' | 'invalid' | 'unsupported' | 'inert';
+export type LabelBehaviorState = SenchoLabelState | 'inert';
 
 /** Whether Sencho acts on an `io.sencho.*` label. Absent for every other label and on older nodes. */
 export interface LabelBehavior {
@@ -99,7 +101,61 @@ export const BEHAVIOR_LABELS: Record<LabelBehaviorState, string> = {
 };
 
 export const SENCHO_LABELS_NODE_COPY =
-  'This node does not apply io.sencho.* labels. Upgrade the node to use them.';
+  'This node does not apply io.sencho.* labels. Update the node to use them.';
+
+export const SENCHO_LABEL_NOT_REPORTED_COPY =
+  'This node does not report whether Sencho acts on this label.';
+
+const SENCHO_NAMESPACE = 'io.sencho.';
+const UNREADABLE_BEHAVIOR_REASON = 'The node reported a label status this version of Sencho cannot read.';
+const MAX_BEHAVIOR_TEXT = 240;
+
+export function isSenchoLabelKey(key: string): boolean {
+  return key.startsWith(SENCHO_NAMESPACE);
+}
+
+/**
+ * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
+ * stays absent (an older node). Anything unreadable becomes `unsupported` with a
+ * fixed reason, and only the declared Compose copy of a label can be anything but
+ * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
+ */
+export function readLabelBehavior(source: LabelSource, raw: unknown): LabelBehavior | undefined {
+  if (raw === undefined) return undefined;
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)
+    ? o.state as LabelBehaviorState
+    : null;
+  if (!o || !state || (o.reason !== undefined && typeof o.reason !== 'string') || (o.summary !== undefined && typeof o.summary !== 'string')) {
+    return { state: 'unsupported', reason: UNREADABLE_BEHAVIOR_REASON };
+  }
+  const reason = typeof o.reason === 'string' ? o.reason.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
+  const summary = typeof o.summary === 'string' ? o.summary.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
+  return {
+    state: source === 'compose' ? state : 'inert',
+    ...(reason ? { reason } : {}),
+    ...(summary ? { summary } : {}),
+  };
+}
+
+function readLabelValues(labels: LabelValue[]): LabelValue[] {
+  return labels.map(({ behavior, ...rest }) => {
+    const read = readLabelBehavior(rest.source, behavior);
+    return read ? { ...rest, behavior: read } : rest;
+  });
+}
+
+/** A stack inventory with every `behavior` read defensively. The stack route is proxied to the node unchecked. */
+export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInventory {
+  return {
+    ...inventory,
+    services: inventory.services.map(svc => ({
+      ...svc,
+      declaredLabels: readLabelValues(svc.declaredLabels),
+      replicas: svc.replicas.map(rep => ({ ...rep, runtimeLabels: readLabelValues(rep.runtimeLabels) })),
+    })),
+  };
+}
 
 export const LABEL_DISAMBIGUATION_COPY =
   'Docker labels are metadata declared on Compose services or attached to running containers. Labels in the io.sencho.* namespace, when declared in the Compose file, tell Sencho how to present a service. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';

@@ -22,6 +22,18 @@ import { buildServiceUrl } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 import { parse, parseDocument } from 'yaml';
 
+/**
+ * Parse an answer from a current node: one that reports its URL map also reports the
+ * io.sencho.* resolution (here, a stack with no labels). Answers without a URL map
+ * stay as they are, so the older-node cases keep their meaning.
+ */
+function parseCurrent(nodeId: number | null, stackName: string, ok: boolean, body: unknown): ServiceUrlEntry {
+  const current = ok && body && typeof body === 'object' && 'serviceUrls' in body && !('senchoLabels' in body)
+    ? { ...body, senchoLabels: { renderable: true, services: {}, entries: [] } }
+    : body;
+  return parseServiceUrlResponse(nodeId, stackName, ok, current);
+}
+
 const ready: ServiceUrlEntry = {
   status: 'ready',
   nodeId: 1,
@@ -294,7 +306,7 @@ describe('resolvePublishedPortClick', () => {
   });
 
   it('keeps a remote generated link when anatomy has no service URL field', () => {
-    const entry = parseServiceUrlResponse(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
+    const entry = parseCurrent(2, 'web', true, { renderable: true, ports: { web: [{ host: '8080', proto: 'tcp' }] } });
     expect(entry.status).toBe('unsupported');
     const click = resolvePublishedPortClick({
       entry,
@@ -356,7 +368,7 @@ describe('resolvePublishedPortClick', () => {
   it('audit F02: a published zero opens the named service URL at its assigned port', () => {
     // The rendered anatomy for `ports: ["0:80"]` keeps the Compose wire value
     // `published: "0"`; Docker then assigns the host port (here 49152).
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       services: ['web', 'api'],
       serviceUrls: { web: 'https://app.example.com', api: 'https://api.example.com' },
@@ -797,7 +809,7 @@ describe('resolveOpenAppTarget', () => {
 
 describe('parseServiceUrlResponse', () => {
   it('drops a URL the allowlist rejects', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       serviceUrls: { web: 'javascript:alert(1)', api: 'https://api.example.com' },
       renderable: true,
       ports: {},
@@ -807,7 +819,7 @@ describe('parseServiceUrlResponse', () => {
   });
 
   it('keeps dossier facts when an older node omits service URLs', () => {
-    const entry = parseServiceUrlResponse(2, 'web', true, {
+    const entry = parseCurrent(2, 'web', true, {
       renderable: true,
       services: ['web', 'api'],
       ports: { web: [{ host: '8080', proto: 'tcp' }] },
@@ -2049,7 +2061,7 @@ describe('patchServiceUrlLabel', () => {
   it('parses and resolves with no URL and no ownership metadata for the open file', () => {
     // The ownership decision now comes from the backend's `serviceUrlEdit`; the
     // editor no longer infers it from the label value or its absence.
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other' },
@@ -2092,7 +2104,7 @@ describe('service URL maps are safe for every legal service name', () => {
 
   function parseWith(serviceUrlsJson: string, portsJson: string): ServiceUrlEntry {
     // JSON.parse, like the /effective-anatomy response, keeps `__proto__` as an own key.
-    return parseServiceUrlResponse(1, 'web', true, JSON.parse(
+    return parseCurrent(1, 'web', true, JSON.parse(
       `{"renderable":true,"services":[],"serviceUrls":${serviceUrlsJson},"serviceUrlEdit":{},"ports":${portsJson}}`,
     ) as unknown);
   }
@@ -2119,14 +2131,14 @@ describe('service URL maps are safe for every legal service name', () => {
   });
 
   it('exposes null-prototype lookups so nothing inherited can masquerade as a URL', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, { renderable: true, serviceUrls: {}, serviceUrlEdit: {}, ports: {} });
+    const entry = parseCurrent(1, 'web', true, { renderable: true, serviceUrls: {}, serviceUrlEdit: {}, ports: {} });
     expect(serviceKeyGet(entry.serviceUrls, 'constructor')).toBeUndefined();
     expect(serviceKeyGet(entry.ports, 'toString')).toBeUndefined();
     expect(serviceKeyGet(entry.serviceUrlEdit, 'hasOwnProperty')).toBeUndefined();
   });
 
   it('reads one service state through an own-property lookup', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: JSON.parse('{"constructor":"other","__proto__":"unknown"}') as Record<string, string>,
@@ -2141,7 +2153,7 @@ describe('service URL maps are safe for every legal service name', () => {
   });
 
   it('reads the clear state through an own-property lookup too', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: {},
@@ -2157,7 +2169,7 @@ describe('service URL maps are safe for every legal service name', () => {
 
 describe('service URL editability metadata', () => {
   it('locks only the services a later compose file shadows, with a reason', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other', api: 'unknown', db: 'root' },
@@ -2175,7 +2187,7 @@ describe('service URL editability metadata', () => {
   });
 
   it('audit F01: refuses the save and the clear the interpolated-key metadata marks unknown', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://later.example.com' },
       serviceUrlEdit: { web: 'unknown' },
@@ -2192,7 +2204,7 @@ describe('service URL editability metadata', () => {
   });
 
   it('ignores unknown states and non-object payloads from an older or broken node', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'somewhere-else', api: 42 },
@@ -2206,7 +2218,7 @@ describe('service URL editability metadata', () => {
 
 describe('service URL clear authority', () => {
   it('refuses the clear only when another contribution would survive it', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'root', api: 'root', db: 'other' },
@@ -2228,7 +2240,7 @@ describe('service URL clear authority', () => {
 
   it('treats a response without clear states as unverifiable for clearing', () => {
     // A node that predates the clear authority still reports set editability.
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://app.example.com' },
       serviceUrlEdit: { web: 'root' },
@@ -2241,7 +2253,7 @@ describe('service URL clear authority', () => {
   });
 
   it('picks the guard for the requested operation', () => {
-    const entry = parseServiceUrlResponse(1, 'web', true, {
+    const entry = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: { web: 'https://app.example.com' },
       serviceUrlEdit: { web: 'root' },
@@ -2253,7 +2265,7 @@ describe('service URL clear authority', () => {
     expect(serviceUrlSaveBlockedMessage(entry, 'web', null))
       .toBe('This URL is also set in another compose file, so clearing it here cannot take effect.');
 
-    const shadowed = parseServiceUrlResponse(1, 'web', true, {
+    const shadowed = parseCurrent(1, 'web', true, {
       renderable: true,
       serviceUrls: {},
       serviceUrlEdit: { web: 'other' },

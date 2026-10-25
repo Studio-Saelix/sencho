@@ -3,6 +3,7 @@ import {
   applicationLink,
   ignoredLabels,
   namedLinks,
+  unverifiedLinkCount,
   type SenchoLabelResolution,
 } from '@/lib/senchoLabels';
 
@@ -19,7 +20,7 @@ function hostOf(url: string): string {
 interface ServiceSenchoLinksProps {
   resolution: SenchoLabelResolution | null | undefined;
   service: string | undefined;
-  /** The card already opens the application link through its published-port link. */
+  /** A published-port link already opens the application link, so it is not repeated. */
   applicationLinkShown: boolean;
 }
 
@@ -33,7 +34,9 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }
   const application = applicationLinkShown ? undefined : applicationLink(resolution, service);
   const named = namedLinks(resolution, service);
   const ignored = ignoredLabels(resolution, service);
-  if (!application && named.length === 0 && ignored.length === 0) return null;
+  const unverified = unverifiedLinkCount(resolution, service);
+  const notShown = ignored.length + unverified;
+  if (!application && named.length === 0 && notShown === 0) return null;
 
   return (
     <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px]" data-testid="service-sencho-links">
@@ -49,13 +52,16 @@ export function ServiceSenchoLinks({ resolution, service, applicationLinkShown }
           <ArrowUpRight className="h-3 w-3 shrink-0" strokeWidth={1.5} />
         </a>
       ))}
-      {ignored.length > 0 && (
+      {notShown > 0 && (
         <span
           className="text-warning"
-          title={ignored.map(entry => `${entry.key}: ${entry.reason ?? 'ignored'}`).join('\n')}
+          title={[
+            ...ignored.map(entry => `${entry.key}: ${entry.reason ?? 'ignored'}`),
+            ...(unverified > 0 ? [`${unverified} link${unverified === 1 ? '' : 's'} this version of Sencho could not verify`] : []),
+          ].join('\n')}
           data-testid="service-sencho-ignored"
         >
-          {ignored.length} Sencho label{ignored.length === 1 ? '' : 's'} ignored
+          {notShown} Sencho label{notShown === 1 ? '' : 's'} ignored
         </span>
       )}
     </div>
