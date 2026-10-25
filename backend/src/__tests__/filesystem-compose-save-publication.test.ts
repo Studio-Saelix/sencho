@@ -21,6 +21,16 @@ function composeContent(services: string[]): string {
     return `services:\n${services.map((svc) => `  ${svc}:\n    image: busybox:latest`).join('\n')}\n`;
 }
 
+/** Mode and content of a file read through one descriptor, so the two cannot describe different files. */
+function modeAndContent(file: string): { mode: number; content: string } {
+    const fd = fsSync.openSync(file, 'r');
+    try {
+        return { mode: fsSync.fstatSync(fd).mode & 0o777, content: fsSync.readFileSync(fd, 'utf8') };
+    } finally {
+        fsSync.closeSync(fd);
+    }
+}
+
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ FileSystemService } = await import('../services/FileSystemService'));
@@ -113,8 +123,9 @@ describe('compose save publication', () => {
 
             expect(openedModes).toHaveLength(1);
             expect(openedModes[0] & 0o077).toBe(0);
-            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
-            expect(fsSync.readFileSync(target, 'utf8')).toContain(MARKER);
+            const published = modeAndContent(target);
+            expect(published.mode).toBe(0o600);
+            expect(published.content).toContain(MARKER);
             expect(stagingFiles()).toEqual([]);
         });
 
@@ -134,8 +145,9 @@ describe('compose save publication', () => {
 
             expect(stagedModes).toHaveLength(1);
             expect(stagedModes[0] & 0o077).toBe(0);
-            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
-            expect(fsSync.readFileSync(target, 'utf8')).toContain(MARKER);
+            const published = modeAndContent(target);
+            expect(published.mode).toBe(0o600);
+            expect(published.content).toContain(MARKER);
             expect(stagingFiles()).toEqual([]);
         });
 
@@ -149,8 +161,9 @@ describe('compose save publication', () => {
 
             await FileSystemService.getInstance().writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
 
-            expect(fsSync.readFileSync(target, 'utf8')).toBe(composeContent(['web', 'db']));
-            expect(fsSync.statSync(target).mode & 0o222).toBe(0);
+            const replaced = modeAndContent(target);
+            expect(replaced.content).toBe(composeContent(['web', 'db']));
+            expect(replaced.mode & 0o222).toBe(0);
             expect(stagingFiles()).toEqual([]);
         });
 
@@ -209,8 +222,9 @@ describe('compose save publication', () => {
 
             await FileSystemService.getInstance().writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
 
-            expect(fsSync.statSync(victim).mode & 0o777).toBe(0o600);
-            expect(fsSync.readFileSync(victim, 'utf8')).toBe('untouched');
+            const untouched = modeAndContent(victim);
+            expect(untouched.mode).toBe(0o600);
+            expect(untouched.content).toBe('untouched');
         });
 
         it('releases the upload source when the staging file cannot be created', async () => {
@@ -245,8 +259,9 @@ describe('compose save publication', () => {
                 'compose.yaml',
             )).rejects.toThrow('rename failed');
 
-            expect(fsSync.readFileSync(target, 'utf8')).not.toContain(MARKER);
-            expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
+            const kept = modeAndContent(target);
+            expect(kept.content).not.toContain(MARKER);
+            expect(kept.mode).toBe(0o600);
             expect(stagingFiles()).toEqual([]);
         });
     });
