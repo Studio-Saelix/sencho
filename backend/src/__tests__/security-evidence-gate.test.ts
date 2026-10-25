@@ -51,6 +51,7 @@ vi.mock('../services/FleetSyncService', () => ({ FleetSyncService: { getSelfIden
 import {
     _resetTrivyMissingNotificationStateForTests,
     enforcePolicyForImageRefs,
+    enforcePolicyPreDeploy,
     evaluateCandidatePolicy,
 } from '../services/PolicyEnforcement';
 
@@ -589,5 +590,140 @@ describe('evidence the gate records', () => {
             { bypass: false, actor: 'admin' },
         );
         expect(gate.evidence?.records.map((r) => r.target)).toEqual(['nginx:1.27', 'redis:7']);
+    });
+});
+
+describe('an allowed decision keeps the evidence it was allowed on', () => {
+    // The distinction the whole feature exists for: an operation allowed on a
+    // missing scanner or a failed scan must stay distinguishable, afterwards,
+    // from one allowed on current, clean evidence. The result object alone is
+    // not enough, because the callers that proceed discard it.
+    const auditSummaries = (): string[] =>
+        dbStub.insertAuditLog.mock.calls.map((c) => (c[0] as { summary: string }).summary);
+
+    it('writes an audit row when the scanner is missing and the setting allows it', async () => {
+        trivyStub.isTrivyAvailable.mockReturnValue(false);
+        composeStub.listStackImages.mockResolvedValue(['nginx:1.27']);
+        const gate = await enforcePolicyPreDeploy('web', 1, {
+            bypass: false, actor: 'scheduler:auto-update', auditMethod: 'POST', auditPath: '/scheduler/auto-update',
+        });
+        expect(gate.ok).toBe(true);
+        expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
+        const entry = dbStub.insertAuditLog.mock.calls[0][0] as { summary: string; username: string; path: string; node_id: number };
+        expect(entry.username).toBe('scheduler:auto-update');
+        expect(entry.path).toBe('/scheduler/auto-update');
+        expect(entry.node_id).toBe(1);
+        expect(entry.summary).toContain('policy.evidence_allowed');
+        expect(entry.summary).toContain('stack="web"');
+        expect(entry.summary).toContain('policy="block-high"');
+        expect(entry.summary).toContain('scanner_availability:unavailable:(node)');
+        expect(entry.summary).toContain('security_scanner_unavailable=allow');
+    });
+
+    it('writes an audit row naming the image and rule when a failed scan is allowed', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        expect(gate.ok).toBe(true);
+        const [summary] = auditSummaries();
+        expect(summary).toContain('policy.evidence_allowed');
+        expect(summary).toContain('vulnerability_scan:failed:nginx:1.27');
+        expect(summary).toContain('security_scan_failure=allow@nginx:1.27');
+        expect(summary).toContain('evidence_outcome=allow');
+    });
+
+    it('records the outcome as warn, and still alerts once, when a failed scan is warned about', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'warn' });
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        expect(auditSummaries()).toHaveLength(1);
+        expect(auditSummaries()[0]).toContain('evidence_outcome=warn');
+        expect(notificationStub.dispatchAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('records partial-only evidence, which has no rule application', async () => {
+        composeStub.listStackImages.mockResolvedValue(['nginx:1.27']);
+        // A severity-only policy that is not honoring suppressions never reads the
+        // detail rows, so partial evidence needs a KEV input to be produced.
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 1, block_on_kev: 1, max_severity: 'CRITICAL' }));
+        trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ total_vulnerabilities: 3, highest_severity: 'LOW' }));
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([]);
+        const gate = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'admin' });
+        // The KEV input fails closed on truncated findings, so this blocks and
+        // writes nothing: an allow-audit is only for decisions that allowed.
+        expect(gate.ok).toBe(false);
+        expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 1, block_on_kev: 0, max_severity: 'CRITICAL' }));
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+        const allowed = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'admin' });
+        expect(allowed.ok).toBe(true);
+        expect(auditSummaries()).toHaveLength(1);
+        expect(auditSummaries()[0]).toContain('vulnerability_scan:partial:nginx:1.27');
+    });
+
+    it('writes nothing for a clean pass', async () => {
+        composeStub.listStackImages.mockResolvedValue(['nginx:1.27']);
+        primeCleanScan();
+        const gate = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'admin' });
+        expect(gate.ok).toBe(true);
+        expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing for a block, which the caller reports as a refusal', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        expect(gate.ok).toBe(false);
+        expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('carries the evidence on the one bypass row instead of writing a second', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin' });
+        expect(gate.bypassed).toBe(true);
+        const summaries = auditSummaries();
+        expect(summaries).toHaveLength(1);
+        expect(summaries[0]).toContain('policy.bypass');
+        expect(summaries[0]).toContain('vulnerability_scan:failed:nginx:1.27');
+        expect(summaries[0]).toContain('security_scan_failure=block@nginx:1.27');
+    });
+
+    it('does not write a row for a read-only probe that allowed nothing', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], {
+            bypass: false, actor: 'rollback-eligibility', recordAllowedEvidence: false,
+        });
+        expect(gate.ok).toBe(true);
+        expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('does not write a deploy-shaped row for a candidate, which persists its own decision', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow', security_candidate_unproven: 'allow' });
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        expect(candidate.status).toBe('allowed');
+        expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+    });
+
+    it('strips control characters and credentials from a target before it reaches the row', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('boom'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        await enforcePolicyForImageRefs('web', 1, ['user:s3cretpass@registry.example.com/team/app:1'], { bypass: false, actor: 'admin' });
+        const [summary] = auditSummaries();
+        expect(summary).toContain('policy.evidence_allowed');
+        expect(summary).not.toContain('s3cretpass');
+        expect(summary).not.toMatch(/[\r\n]/);
+    });
+
+    it('survives an audit write that throws', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        dbStub.insertAuditLog.mockImplementation(() => { throw new Error('disk full'); });
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        expect(gate.ok).toBe(true);
+        expect(errors).toHaveBeenCalled();
+        errors.mockRestore();
     });
 });

@@ -1,5 +1,10 @@
 import type { Request, Response } from 'express';
-import { enforcePolicyPreDeploy, type PolicyEnforcementOptions, type PolicyViolation } from '../services/PolicyEnforcement';
+import {
+  enforcePolicyPreDeploy,
+  type PolicyEnforcementOptions,
+  type PolicyEnforcementResult,
+  type PolicyViolation,
+} from '../services/PolicyEnforcement';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import type { ScanPolicy } from '../services/DatabaseService';
@@ -8,7 +13,7 @@ import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
-import { NODE_WIDE_EVIDENCE_TARGET, type EvidenceGateDecision } from '../services/securityEvidence';
+import { isCleanEvidenceDecision, NODE_WIDE_EVIDENCE_TARGET, type EvidenceGateDecision } from '../services/securityEvidence';
 
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
@@ -159,20 +164,64 @@ export function buildSystemPolicyGateOptions(
   };
 }
 
+/**
+ * What an allowed operation reports about the evidence it was allowed on. Only
+ * present when that evidence was not a clean pass; a clean allow has nothing to
+ * report. The same decision is written to the audit log by the gate itself, so
+ * this is the response-side half of one record, not a second source of truth.
+ */
+export interface AllowedPolicyEvidence {
+  policy: { id: number; name: string };
+  /** True when an authorized bypass was used to proceed. */
+  bypassed: boolean;
+  evidence: EvidenceGateDecision;
+}
+
+/** The optional response field for an allowed gate result; empty on a clean pass. */
+export function allowedPolicyEvidence(
+  gate: PolicyEnforcementResult,
+): { policyEvidence?: AllowedPolicyEvidence } {
+  if (!gate.ok || !gate.policy || !gate.evidence || isCleanEvidenceDecision(gate.evidence)) return {};
+  return {
+    policyEvidence: {
+      policy: { id: gate.policy.id, name: gate.policy.name },
+      bypassed: gate.bypassed,
+      evidence: gate.evidence,
+    },
+  };
+}
+
+/**
+ * Spread into the success body of a handler that called `runPolicyGate`, so the
+ * caller of an operation that proceeded on incomplete evidence can see that it did.
+ */
+export function policyEvidenceFor(res: Response): { policyEvidence?: AllowedPolicyEvidence } {
+  const policyEvidence = res.locals.policyEvidence as AllowedPolicyEvidence | undefined;
+  return policyEvidence ? { policyEvidence } : {};
+}
+
+/**
+ * Throws when the gate blocks. Returns what the operation was allowed on, for
+ * callers that report it; the unattended ones rely on the audit row the gate
+ * writes and may ignore the return value.
+ */
 export async function assertPolicyGateAllows(
   stackName: string,
   nodeId: number,
   options: PolicyEnforcementOptions,
-): Promise<void> {
+): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
   const gate = await enforcePolicyPreDeploy(stackName, nodeId, options);
   if (!gate.ok) {
     throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
   }
+  return allowedPolicyEvidence(gate);
 }
 
 /**
  * Returns true if the deploy may proceed. Returns false after sending a 409,
- * in which case the caller must return immediately.
+ * in which case the caller must return immediately. When it proceeds on
+ * incomplete evidence the decision is kept on `res.locals` for
+ * `policyEvidenceFor` to add to the success response.
  */
 export async function runPolicyGate(
   req: Request,
@@ -200,6 +249,7 @@ export async function runPolicyGate(
     });
     return false;
   }
+  res.locals.policyEvidence = allowedPolicyEvidence(gate).policyEvidence;
   return true;
 }
 

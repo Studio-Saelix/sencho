@@ -158,19 +158,30 @@ function storedCandidateContentSha256(raw: string | null): string | null {
  * generation recorded for one of them when the other is re-polled, leaving the
  * attribution column describing a decision this poll did not reach.
  *
- * The application list is sorted before it is compared, because the order the
- * evaluator happens to produce is not part of the decision. Two polls that reach
- * the same set of rules in a different order describe the same outcome, and
- * treating them as different would mint a replacement generation for it.
+ * The records are part of it too, because the applications alone cannot tell a
+ * clean acceptance from one made on partial evidence: partial evidence has no
+ * application (no setting governs it), so a partial-only allow and a clean allow
+ * would otherwise compare equal and the older clean record would be reused for
+ * a candidate it no longer describes. Only the records that are not `current`
+ * are compared, and only by source, state and target. Collection time, digest
+ * and reason text are left out on purpose: a re-run that rescans an unchanged
+ * candidate changes them, and treating that as a different decision would mint
+ * a generation per poll.
  *
- * Both evidence fields are normalized for a column written before they existed,
+ * The application and record lists are sorted before they are compared, because
+ * the order the evaluator happens to produce is not part of the decision. Two
+ * polls that reach the same set of rules in a different order describe the same
+ * outcome, and treating them as different would mint a replacement generation
+ * for it.
+ *
+ * The evidence fields are normalized for a column written before they existed,
  * so the first poll after an upgrade reuses its generation rather than minting a
  * replacement for every existing source on an unchanged verdict. An absent list
  * normalizes to empty and an absent outcome to `allow`, which is what
  * `mostRestrictiveOutcome` returns for no applications at all, so a legacy clean
  * acceptance and a freshly recorded one compare equal. That cannot hide a change:
- * any outcome other than `allow`, or any rule that acted, differs from both
- * defaults and replaces the row. An unparseable or absent column yields null,
+ * any outcome other than `allow`, any rule that acted, or any record that is not
+ * `current` differs from the defaults and replaces the row. An unparseable or absent column yields null,
  * which never matches, so auto-accept re-evaluates and writes a fresh row instead
  * of reusing an unreadable one.
  */
@@ -184,12 +195,19 @@ function securityPolicyDecision(raw: string | null): string | null {
     }
     if (!isRecord(decoded)) return null;
     const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
-    const ordered = [...applications].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const byContent = (a: unknown, b: unknown): number => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    const ordered = [...applications].sort(byContent);
+    const records = Array.isArray(decoded.evidenceRecords) ? decoded.evidenceRecords : [];
+    const unproven = records
+        .filter((r): r is Record<string, unknown> => isRecord(r) && r.state !== 'current')
+        .map((r) => ({ source: r.source ?? null, state: r.state ?? null, target: r.target ?? null }))
+        .sort(byContent);
     return JSON.stringify({
         status: decoded.status ?? null,
         policyId: decoded.policyId ?? null,
         evidenceOutcome: decoded.evidenceOutcome ?? 'allow',
         evidenceApplications: ordered,
+        evidenceRecords: unproven,
     });
 }
 
@@ -4810,12 +4828,15 @@ export class GitSourceService {
             // column is the only place an unattended acceptance on unproven
             // evidence stays attributable.
             //
-            // The applications rather than the whole decision, deliberately: the
-            // records carry scan timestamps, and a re-run that rescans the same
-            // candidate would then produce different JSON, append a generation
-            // for an unchanged verdict, and defeat the reuse comparison below.
+            // The records are stored too, since a partial-only acceptance has no
+            // application and would otherwise read as clean. They carry scan
+            // timestamps, so the reuse comparison below looks at a projection of
+            // them (see securityPolicyDecision), not at this text: a re-run that
+            // rescans the same candidate must not append a generation for an
+            // unchanged decision.
             evidenceOutcome: evaluation.evidence?.outcome ?? null,
             evidenceApplications: evaluation.evidence?.applications ?? null,
+            evidenceRecords: evaluation.evidence?.records ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson

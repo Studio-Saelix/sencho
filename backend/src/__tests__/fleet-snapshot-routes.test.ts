@@ -870,6 +870,7 @@ describe('Restore-all', () => {
         const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockImplementation(async (stackName: string) => {
             if (stackName === 'blocked-web') throw new Error('Policy "block-criticals" blocked deploy: 1 image(s) exceed high');
+            return {};
         });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-all-policy', 'admin', 1, 2, '[]', '[]');

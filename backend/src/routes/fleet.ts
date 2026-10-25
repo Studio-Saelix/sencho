@@ -24,7 +24,7 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
-import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
+import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
@@ -3053,7 +3053,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
-    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError });
+    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError, ...policyEvidenceFor(res) });
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
@@ -3090,6 +3090,8 @@ interface SnapshotRestoreResult {
   notesError?: string;
   /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
   code?: string;
+  /** Set when the redeploy proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -3178,12 +3180,13 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
 
         let redeployed = false;
+        let policyEvidence: AllowedPolicyEvidence | undefined;
         if (redeploy) {
-          if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
+          if (node.type === 'local') ({ policyEvidence } = await assertPolicyGateAllows(group.stackName, node.id, policyOptions));
           await redeploySnapshotStack(node, group.stackName);
           redeployed = true;
         }
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError, ...(policyEvidence ? { policyEvidence } : {}) });
       } catch (e) {
         results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
       }

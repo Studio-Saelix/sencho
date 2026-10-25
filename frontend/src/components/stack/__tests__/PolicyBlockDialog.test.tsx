@@ -82,11 +82,11 @@ describe('PolicyBlockDialog evidence', () => {
   });
 
   it('claims the whole block was a scan failure only when it was', () => {
-    // The gate: "the deploy was blocked because the scan did not complete" is a
-    // claim about the entire block. On a payload where an image matched on the
-    // merits, the scan is not why the deploy stopped, and the sentence would send
-    // the operator to fix a scan that was fine. Reverting the gate must fail
-    // here.
+    // The gate: "the deploy was blocked because the images above could not be
+    // evaluated" is a claim about the entire block. On a payload where an image
+    // matched on the merits, evaluation is not why the deploy stopped, and the
+    // sentence would send the operator to fix something that was fine. Reverting
+    // the gate must fail here.
     const mixed: PolicyBlockPayload = {
       ...unavailablePayload,
       violations: [...unavailablePayload.violations, publicPayload.violations[0]],
@@ -94,7 +94,7 @@ describe('PolicyBlockDialog evidence', () => {
     const { unmount } = render(
       <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
-    expect(screen.queryByText(/blocked because the scan did not complete/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/blocked because the images above could not be evaluated/i)).not.toBeInTheDocument();
     // And the replacement still tells the operator the failed image needs
     // resolving, so the gate does not cost them the recovery path.
     expect(screen.getByText(/Some images could not be evaluated\./i)).toBeInTheDocument();
@@ -107,7 +107,32 @@ describe('PolicyBlockDialog evidence', () => {
     render(
       <PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
-    expect(screen.getByText(/blocked because the scan did not complete/i)).toBeInTheDocument();
+    expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
+  });
+
+  it('does not claim the scan failed when it completed and evaluation threw', () => {
+    // A completed scan whose policy evaluation threw is an evaluation failure.
+    // The row says so; a banner saying the scan did not complete beside it sends
+    // the operator to the scanner and contradicts the row.
+    const evaluationFailed: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: Date.now(), reason: 'Policy evaluation failed: boom' },
+        ],
+        applications: [],
+      },
+    };
+    renderDialog(evaluationFailed);
+    expect(screen.getByText('Policy evaluation failed: boom')).toBeInTheDocument();
+    expect(screen.queryByText(/scan did not complete/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
   });
 
   it('explains both problems when one image is stale and its findings incomplete', () => {

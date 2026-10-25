@@ -148,6 +148,7 @@ async function checkSecurityPostureBlocked(
       actor: 'rollback-eligibility',
       auditMethod: 'GET',
       auditPath: '/api/stacks/rollback-eligibility',
+      recordAllowedEvidence: false,
     });
     return !gate.ok;
   } catch (error) {

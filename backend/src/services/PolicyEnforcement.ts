@@ -13,7 +13,7 @@ import { DatabaseService } from './DatabaseService';
 import type { ScanPolicy, VulnSeverity, VulnerabilityScan, VulnerabilityDetail } from './DatabaseService';
 import { FleetSyncService } from './FleetSyncService';
 import { NotificationService } from './NotificationService';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import TrivyService from './TrivyService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { applySuppressions } from '../utils/suppression-filter';
@@ -32,6 +32,7 @@ import {
     classifyScanEvidence,
     classifyScannerEvidence,
     decideEvidenceGate,
+    isCleanEvidenceDecision,
     NODE_WIDE_EVIDENCE_TARGET,
     summarizeEvidenceApplications,
     type EvidenceAvailabilityOutcome,
@@ -80,6 +81,13 @@ export interface PolicyEnforcementOptions {
      * instead of the live database-derived args.
      */
     composeInvocation?: RollbackInvocationRecord | null;
+    /**
+     * Leave an audit row when the gate allows on evidence that was not a clean
+     * pass. Defaults to on. A read-only probe that asks "would this be allowed"
+     * (rollback eligibility, polled by the UI) sets it to false: it allowed
+     * nothing, and a row per poll would bury the rows for real operations.
+     */
+    recordAllowedEvidence?: boolean;
 }
 
 export interface PolicyEnforcementResult {
@@ -279,7 +287,7 @@ function decideScannerUnavailable(
             // is the same event here as anywhere else, and the reason it was
             // needed (no scanner on this node) is exactly what an incident
             // review will want to see.
-            recordBypassAudit(stackName, nodeId, policy, [], opts);
+            recordBypassAudit(stackName, nodeId, policy, [], opts, decision);
             return { ok: true, bypassed: true, policy, violations: [], trivyMissing: true, evidence: decision };
         }
         console.warn(
@@ -453,6 +461,66 @@ function evaluateImageRisk(
 }
 
 /**
+ * The evidence half of an audit summary: the outcome, each record that was not
+ * `current`, and the configured rule that acted on each. Empty for a clean pass,
+ * so a row that has nothing to say about evidence reads exactly as it did before.
+ *
+ * Targets are image references taken from a compose file, so they are stripped of
+ * control characters and credentials before they reach a row an operator reads.
+ */
+function describeEvidenceForAudit(evidence: EvidenceGateDecision | undefined): string {
+    if (!evidence || isCleanEvidenceDecision(evidence)) return '';
+    const clean = (value: string): string => redactSensitiveText(sanitizeForLog(value));
+    const unproven = evidence.records
+        .filter((r) => r.state !== 'current')
+        .map((r) => `${r.source}:${r.state}:${clean(r.target)}`);
+    const rules = evidence.applications.map((a) => `${a.rule}${a.target ? `@${clean(a.target)}` : ''}`);
+    return ` evidence_outcome=${evidence.outcome} unproven=[${unproven.join(',')}] rules=[${rules.join(',')}]`;
+}
+
+/**
+ * Record an allowed decision whose evidence was not a clean pass.
+ *
+ * The gate's result is returned to its caller, but a caller that proceeds has no
+ * reason to keep it, and the unattended ones (scheduler, auto-update, webhooks,
+ * Git sources, rollback) have nowhere to put it. Without this row an operation
+ * allowed on a failed scan or a missing scanner is indistinguishable afterwards
+ * from one allowed on current, clean evidence. It names the actor and trigger
+ * (the audit entry's username, method and path), the policy, and what the
+ * evidence was and which configured rule let it through. Written here, once, so
+ * no caller has to remember to.
+ *
+ * A bypassed decision is not written again: its `policy.bypass` row already
+ * names the exception and carries the same evidence clause.
+ */
+function recordAllowedEvidenceAudit(
+    result: PolicyEnforcementResult,
+    stackName: string,
+    nodeId: number,
+    opts: PolicyEnforcementOptions,
+): void {
+    if (opts.recordAllowedEvidence === false || result.bypassed) return;
+    const { evidence, policy } = result;
+    if (!result.ok || !policy) return;
+    const clause = describeEvidenceForAudit(evidence);
+    if (clause === '') return;
+    try {
+        DatabaseService.getInstance().insertAuditLog({
+            timestamp: Date.now(),
+            username: opts.actor,
+            method: opts.auditMethod ?? 'POST',
+            path: opts.auditPath ?? `/api/stacks/${stackName}/deploy`,
+            status_code: 200,
+            node_id: nodeId,
+            ip_address: opts.ip ?? '',
+            summary: `policy.evidence_allowed stack="${stackName}" policy="${policy.name}"${clause}`,
+        });
+    } catch (err) {
+        console.error('[Policy] Failed to record evidence decision audit entry:', err);
+    }
+}
+
+/**
  * Record an authorized bypass.
  *
  * Shared by every refusal this evaluator can return, because a bypass is the
@@ -466,6 +534,7 @@ function recordBypassAudit(
     policy: ScanPolicy,
     images: string[],
     opts: PolicyEnforcementOptions,
+    evidence?: EvidenceGateDecision,
 ): void {
     try {
         DatabaseService.getInstance().insertAuditLog({
@@ -476,7 +545,7 @@ function recordBypassAudit(
             status_code: 200,
             node_id: nodeId,
             ip_address: opts.ip ?? '',
-            summary: `policy.bypass stack="${stackName}" policy="${policy.name}" violations=${images.length} images=[${images.join(',')}]`,
+            summary: `policy.bypass stack="${stackName}" policy="${policy.name}" violations=${images.length} images=[${images.join(',')}]${describeEvidenceForAudit(evidence)}`,
         });
     } catch (err) {
         console.error('[Policy] Failed to record bypass audit entry:', err);
@@ -521,6 +590,16 @@ export async function enforcePolicyPreDeploy(
     nodeId: number,
     opts: PolicyEnforcementOptions,
 ): Promise<PolicyEnforcementResult> {
+    const result = await evaluatePreDeploy(stackName, nodeId, opts);
+    recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
+    return result;
+}
+
+async function evaluatePreDeploy(
+    stackName: string,
+    nodeId: number,
+    opts: PolicyEnforcementOptions,
+): Promise<PolicyEnforcementResult> {
     const db = DatabaseService.getInstance();
     const policy = db.getMatchingPolicy(nodeId, stackName, FleetSyncService.getSelfIdentity());
 
@@ -560,10 +639,29 @@ export async function enforcePolicyPreDeploy(
         };
     }
 
-    return enforcePolicyForImageRefs(stackName, nodeId, imageRefs, opts, policy);
+    return evaluateImageRefs(stackName, nodeId, imageRefs, opts, policy);
 }
 
 export async function enforcePolicyForImageRefs(
+    stackName: string,
+    nodeId: number,
+    imageRefs: string[],
+    opts: PolicyEnforcementOptions,
+    matchedPolicy?: ScanPolicy,
+    failClosedInvalidRefs = false,
+): Promise<PolicyEnforcementResult> {
+    const result = await evaluateImageRefs(stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs);
+    recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
+    return result;
+}
+
+/**
+ * The evaluator both public entry points and the candidate path share. It does
+ * not write the allowed-evidence audit row: a candidate is not an operation, its
+ * decision is persisted with the generation it describes, and a deploy-shaped
+ * row for it would attribute an acceptance to a deploy that never happened.
+ */
+async function evaluateImageRefs(
     stackName: string,
     nodeId: number,
     imageRefs: string[],
@@ -782,7 +880,7 @@ export async function enforcePolicyForImageRefs(
     }
 
     if (opts.bypass) {
-        recordBypassAudit(stackName, nodeId, policy, violations.map((v) => v.imageRef), opts);
+        recordBypassAudit(stackName, nodeId, policy, violations.map((v) => v.imageRef), opts, evidence);
         if (debug) {
             console.log(
                 '[Policy:debug] Bypass for "%s" (%d violation(s))',
@@ -812,10 +910,10 @@ export async function evaluateCandidatePolicy(
     imageRefs: string[],
     opts: PolicyEnforcementOptions,
 ): Promise<CandidatePolicyEvaluation> {
-    const result = await enforcePolicyForImageRefs(stackName, nodeId, imageRefs, {
+    const result = await evaluateImageRefs(stackName, nodeId, imageRefs, {
         ...opts,
         // Undefaulted, these attribute the audit row to a deploy path
-        // (enforcePolicyForImageRefs's own default), which never happened
+        // (the evaluator's own default), which never happened
         // for a pre-acceptance candidate.
         auditMethod: opts.auditMethod ?? 'POST',
         auditPath: opts.auditPath ?? `/api/stacks/${stackName}/git-source/candidate`,

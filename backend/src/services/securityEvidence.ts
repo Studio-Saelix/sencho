@@ -381,3 +381,12 @@ export function decideEvidenceGate(
     const outcome = mostRestrictiveOutcome(applications.map((a) => a.outcome));
     return { outcome, records: [...records], applications: [...applications], summary: summarizeEvidenceApplications(applications) };
 }
+
+/**
+ * Whether every record behind a decision is `current`, so the decision rested on
+ * fresh, complete evidence. The inverse is the case an allowed operation must
+ * leave a trace of: it went through, but something it relied on was unproven.
+ */
+export function isCleanEvidenceDecision(decision: EvidenceGateDecision): boolean {
+    return decision.records.every((r) => supportsCleanClaim(r.state));
+}

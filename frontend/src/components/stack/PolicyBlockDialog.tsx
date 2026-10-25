@@ -210,7 +210,10 @@ export function PolicyBlockDialog({
                 // scan failure would point at the wrong thing. The recovery hint
                 // still applies either way.
                 'Some images could not be evaluated. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
-              : 'The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
+              : // "Evaluated" rather than "scanned" for the same reason as the mixed
+              // branch: a row here can be a scan that completed and a policy
+              // evaluation that threw, and each row above states its own cause.
+              'The deploy was blocked because the images above could not be evaluated. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
           </p>
         )}
         {evidenceLines.length > 0 && (

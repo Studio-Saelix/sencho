@@ -817,6 +817,99 @@ describe('SourceController automatic acceptance', () => {
         expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-order')).toHaveLength(1);
     });
 
+    describe('partial evidence in a candidate decision', () => {
+        // Partial evidence has no rule application (no setting governs it), so a
+        // partial-only allow carries the same status, policy and outcome as a
+        // clean one. Only the records tell them apart.
+        const partialRecord = (collectedAt: number) => ({
+            source: 'vulnerability_scan' as const,
+            state: 'partial' as const,
+            target: 'nginx:1.27',
+            collectedAt,
+            digest: null,
+            reason: 'The stored findings do not cover every vulnerability in this scan',
+        });
+        const partialEvaluation = (collectedAt: number) => ({
+            status: 'allowed' as const,
+            policy: policyRow(),
+            evidence: {
+                outcome: 'allow' as const,
+                records: [partialRecord(collectedAt)],
+                applications: [],
+                summary: 'No security evidence was required for this decision',
+            },
+        });
+
+        it('stores the records and replaces a clean generation instead of reusing it', async () => {
+            const cleanJson = JSON.stringify({
+                status: 'allowed',
+                policyId: 7,
+                evidenceOutcome: 'allow',
+                evidenceApplications: [],
+                evidenceRecords: [{ source: 'vulnerability_scan', state: 'current', target: 'nginx:1.27', collectedAt: 1 }],
+            });
+            stageCandidate('app-ev-partial', 'ev-partial-web', 'gen-ev-partial', 'automatic', {
+                securityEvidence: cleanJson,
+            });
+            mockDue([armDuePoll('app-ev-partial')]);
+            evaluateCandidatePolicy.mockResolvedValue(partialEvaluation(Date.now()));
+            spyOnReconcile().mockResolvedValue(okResult);
+            spyOnDispatch();
+
+            controller.start();
+            await advanceOneTick();
+
+            const acceptedId = getApp('app-ev-partial').accepted_generation_id;
+            expect(acceptedId).not.toBeNull();
+            expect(acceptedId).not.toBe('gen-ev-partial');
+            const persisted = JSON.parse(
+                GitOpsStore.getInstance().getGeneration(acceptedId!)!.security_policy_evidence_json!,
+            );
+            expect(persisted.evidenceRecords).toEqual([expect.objectContaining({ state: 'partial', target: 'nginx:1.27' })]);
+        });
+
+        it('replaces a legacy generation that predates the records field', async () => {
+            // A column written before records were stored cannot be shown to have
+            // been a partial-only decision, and it never recorded one, so the new
+            // partial state must not be absorbed into it.
+            stageCandidate('app-ev-partial-legacy', 'ev-pl-web', 'gen-ev-partial-legacy', 'automatic', {
+                securityEvidence: JSON.stringify({ status: 'allowed', policyId: 7 }),
+            });
+            mockDue([armDuePoll('app-ev-partial-legacy')]);
+            evaluateCandidatePolicy.mockResolvedValue(partialEvaluation(Date.now()));
+            spyOnReconcile().mockResolvedValue(okResult);
+            spyOnDispatch();
+
+            controller.start();
+            await advanceOneTick();
+
+            expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-partial-legacy')).toHaveLength(2);
+        });
+
+        it('still reuses the generation when only the collection time and reason text moved', async () => {
+            const storedJson = JSON.stringify({
+                status: 'allowed',
+                policyId: 7,
+                evidenceOutcome: 'allow',
+                evidenceApplications: [],
+                evidenceRecords: [{ ...partialRecord(1_000), reason: 'an older wording of the same limitation' }],
+            });
+            stageCandidate('app-ev-partial-same', 'ev-ps-web', 'gen-ev-partial-same', 'automatic', {
+                securityEvidence: storedJson,
+            });
+            mockDue([armDuePoll('app-ev-partial-same')]);
+            evaluateCandidatePolicy.mockResolvedValue(partialEvaluation(Date.now()));
+            spyOnReconcile().mockResolvedValue(okResult);
+            spyOnDispatch();
+
+            controller.start();
+            await advanceOneTick();
+
+            expect(getApp('app-ev-partial-same').accepted_generation_id).toBe('gen-ev-partial-same');
+            expect(GitOpsStore.getInstance().listGenerationsForApplication('app-ev-partial-same')).toHaveLength(1);
+        });
+    });
+
     it('does not accept when the application fingerprint changed after candidate creation', async () => {
         stageCandidate('app-fp-changed', 'fp-changed-web', 'gen-fp-changed');
         DatabaseService.getInstance().getDb().prepare(
