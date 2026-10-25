@@ -15,13 +15,13 @@ import { test, expect, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
 import { gitAvailable, buildFixtureRepo, serveRepos } from './gitServer.helper';
 
-// The post-deploy probe looks 3 seconds after compose up and fails the deploy
+// The post-deploy probe looks 3 seconds after compose up (ComposeService) and fails the deploy
 // itself on a container that has already crashed. This one survives that look,
 // so the deploy succeeds and the health gate is what judges it.
 const EXITING_COMPOSE = `services:
   web:
     image: alpine:3
-    command: ["sh", "-c", "sleep 8; exit 1"]
+    command: ["sh", "-c", "sleep 10; exit 1"]
 `;
 
 test.describe('Git source Retry after a health-gate failure (local git server)', () => {
@@ -31,7 +31,7 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
 
   let server: { url: string; close: () => void };
   let stackName: string;
-  let previousGate: { health_gate_enabled?: string; health_gate_window_seconds?: string } = {};
+  let previousGate: { health_gate_enabled: string; health_gate_window_seconds: string } | null = null;
 
   test.beforeAll(async () => {
     server = await serveRepos({ unhealthy: buildFixtureRepo({ 'compose.yaml': EXITING_COMPOSE }) });
@@ -57,7 +57,9 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
 
   async function availableActions(page: Page): Promise<string[]> {
     const res = await api(page, `/api/stacks/${stackName}/git-source`);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
     const revision = (res.json as { gitopsRevision?: { availableActions?: string[] } } | null)?.gitopsRevision;
+    expect(revision, 'the git-source response carries the GitOps projection').toBeTruthy();
     return revision?.availableActions ?? [];
   }
 
@@ -67,14 +69,16 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
 
     // Gate the deploy on a short window, and put the settings back afterwards
     // so the scenario never changes the box it ran on.
-    const settings = (await api(page, '/api/settings')).json as typeof previousGate;
+    const current = await api(page, '/api/settings');
+    expect(current.status).toBe(200);
+    const settings = current.json as { health_gate_enabled: string; health_gate_window_seconds: string };
     previousGate = {
       health_gate_enabled: settings.health_gate_enabled,
       health_gate_window_seconds: settings.health_gate_window_seconds,
     };
     expect((await api(page, '/api/settings', {
       method: 'PATCH',
-      body: { health_gate_enabled: '1', health_gate_window_seconds: '15' },
+      body: { health_gate_enabled: '1', health_gate_window_seconds: '20' },
     })).status).toBe(200);
 
     try {
@@ -98,7 +102,7 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
       expect(pulled.status, JSON.stringify(pulled.json)).toBe(200);
       const { commitSha, planFingerprint } = pulled.json as { commitSha: string; planFingerprint: string };
 
-      // Until the deploy has been judged there is nothing to retry.
+      // Before anything is applied there is nothing to retry.
       expect(await availableActions(page)).not.toContain('retry');
 
       const applied = await api(page, `/api/stacks/${stackName}/git-source/apply`, {
@@ -122,13 +126,10 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
     } finally {
       await api(page, `/api/stacks/${stackName}/git-source`, { method: 'DELETE' }).catch(() => {});
       await api(page, `/api/stacks/${stackName}`, { method: 'DELETE' }).catch(() => {});
-      await api(page, '/api/settings', {
-        method: 'PATCH',
-        body: {
-          health_gate_enabled: previousGate.health_gate_enabled ?? '0',
-          health_gate_window_seconds: previousGate.health_gate_window_seconds ?? '60',
-        },
-      }).catch(() => {});
+      if (previousGate) {
+        const restored = await api(page, '/api/settings', { method: 'PATCH', body: previousGate });
+        expect(restored.status, 'the health gate settings are put back').toBe(200);
+      }
     }
   });
 });

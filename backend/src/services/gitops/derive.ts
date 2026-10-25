@@ -141,7 +141,7 @@ export function deriveGitOpsRevision(
     .map((target) => deriveTarget(app, acceptedIntent, target, facts.healthDisabled, limitations, confirmationExpected));
   const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
-  const availableActions = deriveActions(app, source, placement, targets, facts.targets);
+  const availableActions = deriveActions(app, source, placement, targets, facts.targets, facts.healthDisabled);
   return {
     schemaVersion: 1,
     targetMode: app.target_mode,
@@ -2663,14 +2663,26 @@ function targetDeployLegal(app: GitOpsApplicationRow, target: GitOpsTargetProjec
  * columns, because the deploy itself succeeded, so no source status offers
  * `retry` for it. The retry still has somewhere to go: it resumes the deploy
  * alone against the applied generation. This mirrors the evidence that
- * decides that arm (the active Direct target applied exactly the accepted
- * generation, carries no other failure, and the stack's latest stack-scoped
- * health run is a `failed` verdict bound to it), plus the states in which
- * retry defers to the real state instead of starting work. A
- * service-scoped run, an observing or unknown run, or a run bound to another
- * generation is not a failure claim about the applied generation.
+ * decides that arm in `GitSourceService` (the default node's active target
+ * applied exactly the accepted generation, carries no other failure, and the
+ * stack's latest stack-scoped health run is a `failed` verdict bound to it),
+ * plus the states in which retry defers to the real state instead of starting
+ * work (an operation in flight, an unfinished recovery, an interruption;
+ * suspension is excluded by the caller). A service-scoped run, an observing
+ * or unknown run, or a run bound to another generation is not a failure claim
+ * about the applied generation. Only Direct applications reach this.
+ *
+ * With health gates off the verdict is stale: a successful deploy retry opens
+ * no new gate run, so the failure would stay the latest and the button would
+ * come back after every redeploy. The API still resumes the deploy; the sheet
+ * just stops advertising it.
  */
-function healthFailedDeployRetryLegal(app: GitOpsApplicationRow, rawTargets: GitOpsTargetCurrentRow[]): boolean {
+function healthFailedDeployRetryLegal(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  healthDisabled: boolean,
+): boolean {
+  if (healthDisabled) return false;
   const generationId = app.accepted_generation_id;
   const stackName = app.stack_name;
   if (!generationId || !stackName) return false;
@@ -2678,12 +2690,12 @@ function healthFailedDeployRetryLegal(app: GitOpsApplicationRow, rawTargets: Git
   if (app.recovery_phase !== null && app.recovery_phase !== 'complete') return false;
   const store = GitOpsStore.getInstance();
   if (!store.getGeneration(generationId)) return false;
-  return rawTargets.some((target) => {
-    if (target.target_status !== 'active') return false;
-    if (target.applied_generation_id !== generationId || target.failure_stage !== null) return false;
-    const run = store.getLatestStackHealthRun(target.node_id, stackName);
-    return run !== undefined && run.status === 'failed' && run.deployed_generation_id === generationId;
-  });
+  const defaultNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+  const target = rawTargets.find((row) => row.node_id === defaultNodeId);
+  if (!target || target.target_status !== 'active') return false;
+  if (target.applied_generation_id !== generationId || target.failure_stage !== null) return false;
+  const run = store.getLatestStackHealthRun(target.node_id, stackName);
+  return run !== undefined && run.status === 'failed' && run.deployed_generation_id === generationId;
 }
 
 function deriveActions(
@@ -2692,6 +2704,7 @@ function deriveActions(
   placement: PlacementFacet,
   targets: GitOpsTargetProjection[],
   rawTargets: GitOpsTargetCurrentRow[],
+  healthDisabled: boolean,
 ): GitOpsAvailableAction[] {
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
@@ -2758,7 +2771,7 @@ function deriveActions(
       if (
         source.status === 'source_failed'
         || source.status === 'source_retry_scheduled'
-        || healthFailedDeployRetryLegal(app, rawTargets)
+        || healthFailedDeployRetryLegal(app, rawTargets, healthDisabled)
       ) {
         actions.add('retry');
       }

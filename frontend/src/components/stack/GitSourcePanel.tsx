@@ -675,9 +675,9 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
-  // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit.
+  // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes.
   let statusAction: ReactNode;
-  if (offerRetry) {
+  if (offerRetry && !showPendingReview) {
     statusAction = (
       <BusyButton
         size="sm"

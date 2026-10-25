@@ -109,7 +109,6 @@ import {
   plainSource,
   sourceIdentity,
   sourceRevision,
-  target,
 } from '@/__tests__/gitopsFixtures';
 import { ARTIFACT_STATE, SOURCE_STATE } from '@/lib/gitopsState';
 import type { GitOpsAvailableAction } from '@/types/gitops';
@@ -1054,16 +1053,42 @@ describe('GitSourcePanel controller controls', () => {
     expect(screen.getByRole('button', { name: /^suspend$/i })).toBeInTheDocument();
   });
 
-  it('shows Retry when the applied generation failed its health gate and no source status failed', async () => {
-    vi.mocked(apiFetch).mockResolvedValue(
-      jsonRes(linkedWith(liveRevision({
-        availableActions: ['retry', 'suspend'],
-        facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
-        targets: [target({ runtime: { status: 'fully_deployed_health_pending' } })],
-      }))),
-    );
-    render(panel());
-    expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+  describe('Retry offered by the projection with no failed source status', () => {
+    const settled = (availableActions: GitOpsAvailableAction[]) => liveRevision({
+      availableActions,
+      facets: facets({ source: plainSource('application_generation_accepted', { candidateGenerationId: null }) }),
+    });
+
+    it('shows Retry when the projection offers it', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(settled(['retry', 'suspend']))));
+      render(panel());
+      expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+    });
+
+    it('shows no Retry when the projection does not offer it', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(settled(['suspend']))));
+      render(panel());
+      await screen.findByTestId('gitops-source');
+      expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+    });
+
+    it('hides it from an account that cannot edit the stack', async () => {
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(settled(['retry', 'suspend']))));
+      render(<GitSourcePanel open onOpenChange={vi.fn()} stackName="web" canEdit={false} isDarkMode={false} />);
+      await screen.findByTestId('gitops-source');
+      expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+    });
+
+    it('keeps Review update ahead of Retry while a newer commit is waiting', async () => {
+      // Retry would redeploy the generation the waiting commit supersedes.
+      vi.mocked(apiFetch).mockResolvedValue(jsonRes(linkedWith(liveRevision({
+        availableActions: ['retry', 'apply', 'suspend'],
+        facets: facets({ source: plainSource('candidate_ready') }),
+      }))));
+      render(panel());
+      expect(await screen.findByRole('button', { name: 'Review update' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^retry$/i })).not.toBeInTheDocument();
+    });
   });
 
   it('hides Retry when the source-controller capability is missing', async () => {
