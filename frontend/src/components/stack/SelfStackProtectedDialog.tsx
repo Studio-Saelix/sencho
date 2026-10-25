@@ -4,8 +4,11 @@ import { ConfirmModal } from '@/components/ui/modal';
 interface SelfStackProtectedDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** When true, confirming reapplies Sencho from its current Compose configuration. */
-  canReapply: boolean;
+  /**
+   * Present only for a caller who can reapply: confirming reapplies Sencho from
+   * its current Compose configuration. The handler closes the dialog itself, so
+   * a confirmation it cannot act on yet (the node is not ready) stays open.
+   */
   onReapply?: () => void;
   /** When true (and the caller cannot reapply), the primary action routes to Fleet node updates. */
   canOpenFleetUpdates: boolean;
@@ -15,12 +18,11 @@ interface SelfStackProtectedDialogProps {
 export function SelfStackProtectedDialog({
   open,
   onOpenChange,
-  canReapply,
   onReapply,
   canOpenFleetUpdates,
   onOpenFleetUpdates,
 }: SelfStackProtectedDialogProps) {
-  if (canReapply && onReapply) {
+  if (onReapply) {
     return (
       <ConfirmModal
         open={open}
@@ -33,16 +35,15 @@ export function SelfStackProtectedDialog({
             Reapply &amp; restart
           </>
         }
-        onConfirm={() => {
-          onOpenChange(false);
-          onReapply();
-        }}
+        onConfirm={onReapply}
       >
         <p className="text-sm text-stat-subtitle">
-          This stack is the running Sencho instance, so Deploy, Stop, and Update are
+          This stack is the running Sencho instance, so anything that would stop
+          or recreate it (Deploy, Update, Stop, Take down, Delete, Rollback) is
           blocked on it. Reapply recreates Sencho from its current Compose
-          configuration. The dashboard briefly disconnects and reconnects
-          automatically when the restart completes.
+          configuration. No newer version is selected and the configured image
+          reference is not rewritten. The dashboard briefly disconnects and
+          reconnects automatically when the restart completes.
         </p>
       </ConfirmModal>
     );

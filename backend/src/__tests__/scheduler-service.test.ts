@@ -14,7 +14,7 @@ const {
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockMarkStaleScansAsFailed, mockDeleteOldScans,
   mockGetTier, mockGetProxyHeaders,
-  mockGetContainersByStack, mockRestartContainer, mockFindContainerByName,
+  mockGetContainersByStack, mockRestartContainer, mockAssertNoEndpointContainers, mockFindContainerByName,
   mockStartContainer, mockStopContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
@@ -53,6 +53,7 @@ const {
   mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid' }),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockRestartContainer: vi.fn().mockResolvedValue(undefined),
+  mockAssertNoEndpointContainers: vi.fn().mockResolvedValue(undefined),
   mockFindContainerByName: vi.fn().mockResolvedValue(null),
   mockStartContainer: vi.fn().mockResolvedValue(undefined),
   mockStopContainer: vi.fn().mockResolvedValue(undefined),
@@ -132,6 +133,7 @@ vi.mock('../services/DockerController', () => ({
     getInstance: () => ({
       getContainersByStack: mockGetContainersByStack,
       restartContainer: mockRestartContainer,
+      assertNoDockerEndpointContainers: mockAssertNoEndpointContainers,
       findContainerByName: mockFindContainerByName,
       startContainer: mockStartContainer,
       stopContainer: mockStopContainer,
@@ -544,6 +546,32 @@ describe('SchedulerService - executeRestart', () => {
     await svc.triggerTask(60, { userId: 1, username: 'admin', role: 'admin' } as const);
 
     expect(mockRestartContainer).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses the whole scheduled restart before restarting any sibling of the Docker endpoint container', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 62,
+      name: 'restart-with-proxy',
+      action: 'restart',
+      cron_expression: '*/5 * * * *',
+      enabled: true,
+      target_id: 'my-stack',
+      node_id: 1,
+      target_services: null,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Service: 'web' },
+      { Id: 'c2', Service: 'socket-proxy' },
+    ]);
+    mockAssertNoEndpointContainers.mockRejectedValueOnce(new Error('carries the Docker connection'));
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(62, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockAssertNoEndpointContainers).toHaveBeenCalledWith(['c1', 'c2'], 'restart');
+    expect(mockRestartContainer).not.toHaveBeenCalled();
   });
 
   it('restarts only specified services when target_services set', async () => {

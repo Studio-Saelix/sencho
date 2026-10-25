@@ -91,7 +91,13 @@ class SelfIdentityService {
     // An unresolved identity is retried by readers, but not on every call: the
     // hot read paths call initialize() per request.
     if (this.state === 'unresolved' && Date.now() - this.lastAttemptAt < UNRESOLVED_RETRY_MS) return;
-    this.initializePromise = this.initializeInternal().finally(() => {
+    this.initializePromise = this.initializeInternal().catch((err: unknown) => {
+      // An identity that failed to settle must read as "could not tell", never
+      // as the "not in a container" default the guard would then trust.
+      this.state = 'unresolved';
+      this.unresolvedReason = `Self identification failed: ${err instanceof Error ? err.message : String(err)}`;
+      console.warn('[SelfIdentity] initialization failed:', this.unresolvedReason);
+    }).finally(() => {
       this.initialized = this.state !== 'unresolved';
       this.initializePromise = null;
     });

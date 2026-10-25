@@ -376,6 +376,36 @@ describe('SelfIdentityService identity state', () => {
     expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
   });
 
+  it('is unresolved, not none, when HOSTNAME is not a container and the cgroup id inspect fails', async () => {
+    process.env.HOSTNAME = 'custom-hostname';
+    mockContainer.inspect
+      .mockRejectedValueOnce(Object.assign(new Error('no such container'), { statusCode: 404 }))
+      .mockRejectedValueOnce(new Error('403 forbidden'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('cgroup inspect failed');
+  });
+
+  it('is unresolved, never the "not a container" default, when identification itself throws, and recovers', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValue(inspectResult);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cgroup = vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockRejectedValueOnce(new Error('proc unreadable'));
+    mockContainer.inspect.mockRejectedValueOnce(Object.assign(new Error('no such container'), { statusCode: 404 }));
+
+    const svc = SelfIdentityService.getInstance();
+    expect(await svc.ensureResolved()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('proc unreadable');
+
+    cgroup.mockResolvedValue(FULL_CONTAINER_ID);
+    expect(await svc.ensureResolved()).toBe('resolved');
+  });
+
   it('does not cache a failure: ensureResolved retries at once and recovers', async () => {
     process.env.HOSTNAME = 'sencho-1';
     mockContainer.inspect

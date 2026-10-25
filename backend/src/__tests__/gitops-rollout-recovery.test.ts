@@ -444,12 +444,51 @@ describe('restoreTargetToGeneration on a remote node', () => {
   });
 });
 
+describe('restoreTargetToGeneration on a local node', () => {
+  it('refuses a restore that would recreate the container carrying the Docker connection, before touching the stack', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const nodeId = DatabaseService.getInstance().getNodes().find(node => node.type === 'local')!.id;
+    const { app: seeded } = seedApplication({ nodeIds: [nodeId], stackName: 'bp-stack' });
+    const app = GitOpsStore.getInstance().getApplication(seeded.id)!;
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-1', gitops_generation_id: 'gen-restore' } as never);
+    const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+    const evaluate = vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    });
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(evaluate).toHaveBeenCalledWith('bp-stack', { kind: 'update' });
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'docker_endpoint_protected',
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      failureClass: 'pre_mutation',
+    });
+    expect(compensate).not.toHaveBeenCalled();
+    expect(restoreFailureMutated(outcome as { code: string; failureClass?: 'pre_mutation' })).toBe(false);
+  });
+});
+
 describe('restoreFailureMutated', () => {
   it.each([
     ['NO_RECOVERY_POINT', undefined, false],
     ['RECOVERY_POINT_MISMATCH', undefined, false],
     ['STACK_NOT_FOUND', undefined, false],
     ['self_stack_protected', undefined, false],
+    ['docker_endpoint_protected', undefined, false],
     ['PERMISSION_DENIED', undefined, false],
     // A busy stack means another operation is moving it right now, so the
     // refusal cannot prove the target is unchanged.

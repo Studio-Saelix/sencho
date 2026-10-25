@@ -529,6 +529,10 @@ export class SchedulerService {
             }
         }
 
+        // Refuse the whole batch up front: restarting the siblings of the Docker
+        // endpoint container and then failing on it would leave a half-restart.
+        await docker.assertNoDockerEndpointContainers(filtered.map(c => c.Id), 'restart');
+
         // This path drives the Engine API itself, so it ends the gates itself. A
         // restart runs containers one at a time against a 10s Docker timeout, and
         // a gate poll landing in that window would record the deliberate restart

@@ -28,7 +28,10 @@ vi.mock('@/components/stack/UpdateReadinessDialog', () => ({ UpdateReadinessDial
 vi.mock('@/components/stack/PreDeployScanDialog', () => ({ PreDeployScanDialog: () => null }));
 vi.mock('@/components/stack/MissingExternalNetworksDialog', () => ({ MissingExternalNetworksDialog: () => null }));
 vi.mock('@/components/stack/PolicyBlockDialog', () => ({ PolicyBlockDialog: () => null }));
-vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({ SelfStackProtectedDialog: () => null }));
+vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({
+  SelfStackProtectedDialog: (props: { onReapply?: () => void }) =>
+    props.onReapply ? <button type="button" onClick={() => props.onReapply?.()}>self-reapply</button> : <span>self-info-only</span>,
+}));
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
 vi.mock('../FleetView/ReconnectingOverlay', () => ({ ReconnectingOverlay: () => null }));
 vi.mock('./DeleteStackDialog', () => ({ DeleteStackDialog: () => null }));
@@ -74,7 +77,11 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
 function renderShell(
   overlay: OverlayState,
   stackActions: Partial<StackActionsHook>,
-  over: { hydrationReady?: () => boolean } = {},
+  over: {
+    hydrationReady?: () => boolean;
+    reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null;
+    composeReapply?: { dispatching: boolean; reconnecting?: boolean; runReapply: () => void };
+  } = {},
 ) {
   return render(
     <ShellOverlays
@@ -91,8 +98,8 @@ function renderShell(
       gitSourceOpen={false}
       setGitSourceOpen={() => {}}
       canSelfUpdate={false}
-      reapplySelfTarget={null}
-      composeReapply={{} as never}
+      reapplySelfTarget={(over.reapplySelfTarget ?? null) as never}
+      composeReapply={(over.composeReapply ?? {}) as never}
       canSaveAndReapply={false}
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
@@ -193,5 +200,53 @@ describe('ShellOverlays diff-preview confirmation', () => {
     // afterSave travels with the call: this path saved first too, so a pull that
     // skips has to report itself rather than hide behind the save's own toast.
     expect(pullStackImages).toHaveBeenCalledWith(undefined, { afterSave: true });
+  });
+});
+
+describe('ShellOverlays self-stack Reapply confirmation', () => {
+  const target = { nodeId: 1, type: 'local' as const, name: 'Local' };
+
+  it('offers no Reapply to a caller without a reapply target', () => {
+    renderShell(makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: vi.fn() }), {});
+    expect(screen.getByText('self-info-only')).toBeInTheDocument();
+  });
+
+  it('keeps the dialog open and sends nothing while the node is not ready', () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => false },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    expect(setOpen).not.toHaveBeenCalled();
+    expect(runReapply).not.toHaveBeenCalled();
+  });
+
+  it('closes the dialog and reapplies once the node is ready', () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(runReapply).toHaveBeenCalledWith(target);
+  });
+
+  it('closes the dialog without starting a second reapply while one is in flight', () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: true, runReapply }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(runReapply).not.toHaveBeenCalled();
   });
 });

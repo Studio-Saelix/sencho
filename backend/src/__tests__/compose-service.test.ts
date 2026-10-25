@@ -16,7 +16,7 @@ import { gitSecretsAreaBase } from '../services/gitops/managedPaths';
 const {
   mockSpawn,
   mockGetContainersByStack, mockGetLegacyOrphanContainersByStack, mockRemoveContainers, mockListContainers,
-  mockContainerInspect, mockContainerLogs,
+  mockContainerInspect, mockContainerLogs, mockImageInspect,
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
@@ -57,6 +57,7 @@ const {
   mockRemoveContainers: vi.fn().mockResolvedValue([]),
   mockListContainers: vi.fn().mockResolvedValue([]),
   mockContainerInspect: vi.fn().mockResolvedValue({ State: { ExitCode: 0 } }),
+  mockImageInspect: vi.fn(),
   mockContainerLogs: vi.fn().mockResolvedValue(Buffer.from('')),
   mockGetRegistries: vi.fn().mockReturnValue([]),
   mockResolveDockerConfig: vi.fn().mockResolvedValue({ config: { auths: {} }, warnings: [] }),
@@ -201,6 +202,7 @@ vi.mock('../services/DockerController', () => ({
           inspect: mockContainerInspect,
           logs: mockContainerLogs,
         }),
+        getImage: () => ({ inspect: mockImageInspect }),
       }),
     }),
   },
@@ -520,6 +522,60 @@ describe('ComposeService - Docker endpoint guard', () => {
     const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
     expect(kinds).toEqual(['up', 'update']);
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a recovery up, which pins every service to its rollback tag, as an update of the stack', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(
+      ComposeService.getInstance(1).composeUpWithRecoveryOverride('my-stack', '/tmp/override.yml'),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation)).toEqual([{ kind: 'update' }]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('names the services a digest-pin overlay rewrites, which the config hash cannot see', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const pin = `socket-proxy@sha256:${'a'.repeat(64)}`;
+
+    await expect(
+      ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'blueprint', actor: 'system:blueprint', digestPins: { 'socket-proxy': pin } }),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls[0][0].mutation).toEqual({ kind: 'up', pinnedServices: ['socket-proxy'] });
+  });
+
+  it('computes the hash against the overlay directory a GitOps deploy runs, not the live stack', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' }, '/tmp/overlay-dir');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/overlay-dir' }));
+  });
+
+  it('looks up the local image id for the guard, and reports an uninspectable image as unknown', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const seen: unknown[] = [];
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { localImage(ref: string): Promise<unknown> } }) => {
+      mockImageInspect.mockResolvedValueOnce({ Id: 'sha256:abc' });
+      seen.push(await input.probes.localImage('proxy:latest'));
+      mockImageInspect.mockRejectedValueOnce(new Error('no such image'));
+      seen.push(await input.probes.localImage('proxy:latest'));
+      return null;
+    });
+
+    await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+    expect(seen).toEqual([{ state: 'id', id: 'sha256:abc' }, { state: 'unknown' }]);
   });
 
   it('computes the config hash with the authored invocation and parses `service hash` output', async () => {

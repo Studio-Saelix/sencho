@@ -67,8 +67,12 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  // Container stop, restart, and removal consult the Docker endpoint guard; the
+  // tests that are not about it run with it out of the way.
+  const guard = await import('../helpers/dockerEndpointGuard');
+  vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockResolvedValue(null);
   composeDirRef.current = '/test/compose';
   mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
   // Empty held sets by default so the held-image exclusion paths (getDiskUsage
@@ -200,8 +204,33 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
     const call = action === 'stop' ? dc.stopContainer('abc123') : dc.restartContainer('abc123');
 
     await expect(call).rejects.toMatchObject({ name: 'DockerEndpointProtectedError', code: 'docker_endpoint_protected' });
-    expect(evaluate).toHaveBeenCalledWith('abc123', action);
+    expect(evaluate).toHaveBeenCalledWith('abc123', action, expect.anything());
     expect(op).not.toHaveBeenCalled();
+  });
+
+  it('refuses to remove the protected container and removes the rest', async () => {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
+    const remove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ remove });
+
+    const results = await DockerController.getInstance(1).removeContainers(['proxy', 'orphan']);
+
+    expect(results[0]).toMatchObject({ id: 'proxy', success: false });
+    expect(results[1]).toEqual({ id: 'orphan', success: true });
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a whole batch before touching any container when one of them is protected', async () => {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
+    const stop = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop });
+
+    await expect(
+      DockerController.getInstance(1).assertNoDockerEndpointContainers(['web', 'proxy', 'db'], 'stop'),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it('lets Auto-Heal restart a container on purpose', async () => {

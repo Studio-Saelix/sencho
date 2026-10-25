@@ -1,6 +1,10 @@
 import type { Request, Response } from 'express';
 import { ComposeService } from '../services/ComposeService';
-import { DOCKER_ENDPOINT_PROTECTED_CODE, type EndpointMutation } from './dockerEndpointGuard';
+import {
+  DOCKER_ENDPOINT_PROTECTED_CODE,
+  isDockerEndpointProtectedError,
+  type EndpointMutation,
+} from './dockerEndpointGuard';
 
 /**
  * Route-level front of the Docker endpoint guard: when `mutation` would stop or
@@ -25,4 +29,17 @@ export async function refuseIfDockerEndpoint(
     res.status(500).json({ error: 'Could not verify that this operation keeps the Docker connection safe.' });
     return true;
   }
+}
+
+/**
+ * Answers 409 with the guard's code when `error` is a refusal raised inside the
+ * operation (the in-lock re-check, or a background path that reached it after
+ * the route's own check passed). Returns false for any other error.
+ */
+export function sendIfDockerEndpointProtected(res: Response, error: unknown): boolean {
+  if (!isDockerEndpointProtectedError(error)) return false;
+  if (!res.headersSent) {
+    res.status(409).json({ error: error.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: error.reason });
+  }
+  return true;
 }

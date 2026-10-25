@@ -65,7 +65,7 @@ Reapply:
 
 Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Confirming a remote reapply uses the same required acknowledgement (recreate from current Compose, no newer version, no image rewrite) before the request is sent; Fleet then shows a **Reapplying** badge until the node restarts or the operation fails.
 
-Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. Clicking **Deploy**, **Stop**, or **Update** on Sencho's own stack opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
+Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. Clicking **Deploy**, **Update**, **Stop**, **Take down**, **Delete**, or **Rollback** on Sencho's own stack opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
 
 ## Updating the local (gateway) node
 

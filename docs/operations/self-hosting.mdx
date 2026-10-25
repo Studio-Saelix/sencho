@@ -209,18 +209,19 @@ DISTRIBUTION=0
 
 ### Updating the proxy
 
-When `DOCKER_HOST` points at a proxy container that shares a network with Sencho, that container carries Sencho's Docker connection. Stopping or recreating it from Sencho cuts the connection the operation is using, and the rollback that follows cannot reach Docker either. Sencho therefore refuses a deploy, update, stop, restart, take down, or delete that would stop or recreate the proxy, and says which service it is. A deploy that leaves the proxy unchanged goes through, because Compose does not recreate an unchanged service. Operations on other services in the same stack are not affected.
+When `DOCKER_HOST` points at a proxy container that shares a network with Sencho, that container carries Sencho's Docker connection. Stopping or recreating it from Sencho cuts the connection the operation is using, and the rollback that follows cannot reach Docker either. Sencho therefore refuses a deploy, update, stop, restart, take down, delete, orphan removal, or recovery (rolling a failed change back) that would stop or recreate the proxy, and says which service it is.
 
-- If the proxy is in the same Compose project as Sencho, use **Reapply** (see [Reapply configuration](/features/remote-updates#reapply-configuration)) to recreate that project on purpose.
-- If the proxy is in its own project, recreate it from the host with `docker compose up -d` while Sencho is idle.
-- Sencho finds the proxy by resolving the `DOCKER_HOST` address to a container on a network it shares. If your topology is not detected (for example a proxy that is reached through a published host port), add the label `io.sencho.infrastructure: "true"` to the proxy service. Any other value for that label is refused until it is corrected.
-- While Sencho cannot identify its own container (for example when the proxy denies container inspect requests), it refuses operations on any stack it cannot rule out as its own, and reports the reason. The check is repeated on every operation, so it recovers as soon as Docker answers again.
+- A deploy that leaves the proxy unchanged goes through: Sencho compares the proxy's Compose configuration and local image with what is running, and refuses when either differs or cannot be checked. A stack that holds the proxy refuses stack-wide stop, take down, restart, update, and delete. Service-level operations on other services in that stack are not affected, and Auto-Heal can still restart the proxy when its health check fails.
+- If the proxy is in the same Compose project as Sencho, **Reapply** (see [Reapply configuration](/features/remote-updates#reapply-configuration)) recreates the Sencho service from its current configuration. It recreates a proxy Sencho depends on only when that proxy's configuration changed, and it does not pull a new proxy image.
+- To update the proxy's image or recreate it, run `docker compose pull` and `docker compose up -d` for it from the host while Sencho is idle.
+- Sencho finds the proxy by resolving the `DOCKER_HOST` address to a container on a network it shares. If your topology is not detected (for example a proxy that is reached through a published host port), add the label `io.sencho.infrastructure: "true"` to the proxy service. The label protects the service in stack, service, and container operations. Any other value for that label is refused until it is corrected.
+- While Sencho cannot identify its own container or the proxy (for example when the proxy denies container list or inspect requests), it refuses operations on any stack it cannot rule out: Sencho's own stack and stacks with containers on a network it shares. It reports the reason, repeats the check on every operation, and recovers as soon as Docker answers again.
 
 ### Self-update behind a proxy
 
-Self-update and reapply helpers hardcode the host Unix socket mount into the helper container (`-v /var/run/docker.sock:/var/run/docker.sock`). They do not inherit `DOCKER_HOST`, so in a TCP-only proxy setup the day-to-day Dockerode and Compose traffic works but the update and reapply helpers will not reach the proxy.
+Self-update and reapply helpers hardcode the host Unix socket mount into the helper container (`-v /var/run/docker.sock:/var/run/docker.sock`). They do not inherit `DOCKER_HOST`, so they never go through the proxy: they need the host to provide that socket path. In a TCP-only proxy setup on a host without it, the day-to-day Dockerode and Compose traffic works but the update and reapply helpers cannot run.
 
-If the deployment is behind a TCP-only proxy, use the fleet update or manual upgrade paths that fit the topology, or make sure the helpers still receive a working host socket path. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose.
+If the host has no such socket, use the manual upgrade path that fits the topology, or make sure the helpers still receive a working host socket path. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose.
 
 ---
 

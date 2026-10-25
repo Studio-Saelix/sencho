@@ -12,12 +12,14 @@ import { getErrorMessage } from '../utils/errors';
  * container is the connection: stopping or recreating it cuts the API Sencho is
  * using to do the work, and the rollback that follows dies the same way.
  *
- * The answer is per call, never remembered by container id: a recreate changes
- * the id. A `unix://` endpoint or a direct socket mount is `none`; mounting the
- * socket does not make a container this node's connection.
+ * The answer is re-resolved at most every 15 s, and callers also match the
+ * provider by its Compose project and service, because a recreate changes the
+ * container id. A `unix://` endpoint or a direct socket mount is `none`;
+ * mounting the socket does not make a container this node's connection.
  */
 export type DockerEndpointProvider =
-  | { state: 'none'; reason: string }
+  /** `unmatched` is set when a tcp endpoint was looked up and no container owns it: that answer is not remembered. */
+  | { state: 'none'; reason: string; unmatched?: true }
   | { state: 'resolved'; provider: DockerEndpointContainer }
   | { state: 'unresolved'; reason: string };
 
@@ -70,11 +72,13 @@ export function resetDockerEndpointProviderCache(): void {
 }
 
 /**
- * `none` and `resolved` answers are remembered for at most 15 s so a burst of
- * lifecycle calls (a bulk update, a scheduled run) lists containers once, and
- * concurrent callers share one lookup. A recreate of the provider inside that
- * window can briefly leave a stale container id. An `unresolved` answer is
- * never reused: the next call tries again.
+ * `resolved` and settled `none` answers are remembered for at most 15 s so a
+ * burst of lifecycle calls (a bulk update, a scheduled run) lists containers
+ * once. A recreate of the provider inside that window leaves a stale container
+ * id, which callers cover by also matching Compose project and service.
+ * Concurrent callers share one lookup while it is in flight; once it settles,
+ * an `unresolved` answer, an unmatched tcp endpoint, or a failed lookup is not
+ * reused: the next call tries again.
  */
 export async function resolveDockerEndpointProvider(): Promise<DockerEndpointProvider> {
   const endpoint = process.env.DOCKER_HOST;
@@ -82,8 +86,15 @@ export async function resolveDockerEndpointProvider(): Promise<DockerEndpointPro
   const pending = resolveUncached(endpoint);
   const entry = { endpoint, at: Date.now(), value: pending };
   cached = entry;
-  const value = await pending;
-  if (value.state === 'unresolved' && cached === entry) cached = null;
+  let value: DockerEndpointProvider;
+  try {
+    value = await pending;
+  } catch (error) {
+    if (cached === entry) cached = null;
+    throw error;
+  }
+  const retryNext = value.state === 'unresolved' || (value.state === 'none' && value.unmatched === true);
+  if (retryNext && cached === entry) cached = null;
   return value;
 }
 
@@ -124,7 +135,7 @@ async function resolveUncached(endpoint: string | undefined): Promise<DockerEndp
       && (self.isOwnNetwork(name) || (!!network.NetworkID && self.isOwnNetwork(network.NetworkID))));
   });
   if (!match || typeof match.Id !== 'string') {
-    return { state: 'none', reason: `No container on a network Sencho shares owns the Docker endpoint address for "${parsed.host}".` };
+    return { state: 'none', unmatched: true, reason: `No container on a network Sencho shares owns the Docker endpoint address for "${parsed.host}".` };
   }
 
   const labels = match.Labels ?? {};

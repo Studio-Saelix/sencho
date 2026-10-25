@@ -71,6 +71,7 @@ import {
   evaluateDockerEndpointGuard,
   type DockerEndpointRefusal,
   type EndpointMutation,
+  type LocalImageLookup,
 } from '../helpers/dockerEndpointGuard';
 import type { NotificationCategory } from './NotificationService';
 
@@ -277,10 +278,11 @@ export class ComposeService {
    * carries this node's Docker API (Sencho itself or its socket proxy), else
    * null. Routes call this for a clean 409 before they take a lock; deploy,
    * update, stop/restart/down, and the service-scoped operations call it again
-   * through `assertDockerEndpointSafe`. Two entry points are deliberately not
-   * guarded: `start` (it stops nothing) and `composeUpWithRecoveryOverride`
-   * (compensation for an operation this guard already admitted; the manual
-   * rollback route checks before it calls it).
+   * through `assertDockerEndpointSafe`. This includes
+   * `composeUpWithRecoveryOverride`: a recovery up pins every service to its
+   * rollback tag, which changes the config hash and recreates the protected
+   * service even when the operation it compensates did not. Only `start` is not
+   * guarded (it stops nothing).
    */
   public evaluateDockerEndpoint(
     stackName: string,
@@ -294,6 +296,7 @@ export class ComposeService {
       probes: {
         renderConfig: async () => (await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined)).rendered,
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
+        localImage: (imageRef) => this.localImageLookup(imageRef),
       },
     });
   }
@@ -305,6 +308,17 @@ export class ComposeService {
   ): Promise<void> {
     const refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */
+  private async localImageLookup(imageRef: string): Promise<LocalImageLookup> {
+    try {
+      const info = await DockerController.getInstance(this.nodeId).getDocker().getImage(imageRef).inspect();
+      return info.Id ? { state: 'id', id: info.Id } : { state: 'unknown' };
+    } catch (error) {
+      console.warn('[ComposeService] image %s not inspectable for the Docker endpoint guard:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return { state: 'unknown' };
+    }
   }
 
   /** The hash Compose would assign `service` now; null when it cannot be computed. */
@@ -1486,7 +1500,11 @@ export class ComposeService {
         );
       }
     }
-    await this.assertDockerEndpointSafe(stackName, { kind: 'up' }, ctx?.overlayDir);
+    await this.assertDockerEndpointSafe(
+      stackName,
+      { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
+      ctx?.overlayDir,
+    );
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
@@ -1909,6 +1927,9 @@ export class ComposeService {
         () => this.composeUpWithRecoveryOverride(stackName, overridePath, ws, invocation, overlay),
       );
     }
+    // A recovery up pins every service to its rollback tag, so it recreates a
+    // protected service whether or not the operation it compensates did.
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' }, overlay?.overlayDir);
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }

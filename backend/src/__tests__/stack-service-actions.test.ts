@@ -31,6 +31,7 @@ const {
 
 vi.mock('../helpers/dockerEndpointRoute', () => ({
   refuseIfDockerEndpoint: async () => false,
+  sendIfDockerEndpointProtected: () => false,
 }));
 
 vi.mock('../services/DockerController', async () => {
@@ -45,6 +46,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        assertNoDockerEndpointContainers: vi.fn().mockResolvedValue(undefined),
         startContainer: mockStartContainer,
       }),
     },

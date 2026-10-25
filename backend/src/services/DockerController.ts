@@ -3199,8 +3199,23 @@ class DockerController {
   ): Promise<void> {
     if (options?.allowEndpointContainer) return;
     const { evaluateDockerEndpointContainer, DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
-    const refusal = await evaluateDockerEndpointContainer(containerId, action);
+    const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker);
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * Checks every container before any of them is touched, so a batch that
+   * contains the Docker endpoint container is refused whole rather than stopping
+   * its siblings first and failing on the one that matters.
+   */
+  public async assertNoDockerEndpointContainers(
+    containerIds: string[],
+    action: 'stop' | 'restart',
+    options?: ContainerOpOptions,
+  ): Promise<void> {
+    for (const id of containerIds) {
+      await this.assertNotDockerEndpointContainer(id, action, options);
+    }
   }
 
   // State-safe: silently ignores 304 "already stopped" errors
@@ -3264,6 +3279,8 @@ class DockerController {
     const results = [];
     for (const id of containerIds) {
       try {
+        // Removal is a stop that cannot be undone: the Docker endpoint container is refused.
+        await this.assertNotDockerEndpointContainer(id, 'stop');
         const container = this.docker.getContainer(id);
         await container.remove({ force: true });
         results.push({ id, success: true });

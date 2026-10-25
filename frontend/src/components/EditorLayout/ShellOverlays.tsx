@@ -128,12 +128,14 @@ export function ShellOverlays({
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
         onOpenChange={setSelfStackProtectedOpen}
-        canReapply={reapplySelfTarget !== null}
-        onReapply={() => {
-          // Same readiness and single-flight checks as the Save & Reapply confirm.
-          if (!reapplySelfTarget || !hydrationReady() || composeReapply.dispatching) return;
+        onReapply={reapplySelfTarget ? () => {
+          // Same readiness and single-flight checks as the Save & Reapply
+          // confirm: readiness loss keeps the dialog open with nothing sent.
+          if (!hydrationReady()) return;
+          setSelfStackProtectedOpen(false);
+          if (composeReapply.dispatching) return;
           void composeReapply.runReapply(reapplySelfTarget);
-        }}
+        } : undefined}
         canOpenFleetUpdates={canSelfUpdate}
         onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />

@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
@@ -218,18 +219,25 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       if (shouldRollback) {
         let dockerDownCompleted = true;
         let fileDeleteCompleted = true;
+        let dockerDownRefused = false;
         try {
           await ComposeService.getInstance(req.nodeId).downStack(stackName, { removeVolumes: true });
         } catch (downErr) {
           dockerDownCompleted = false;
+          dockerDownRefused = isDockerEndpointProtectedError(downErr);
           console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
         }
 
-        try {
-          await fsService.deleteStack(stackName);
-        } catch (fsErr) {
+        // A refused down leaves containers running; their files must stay.
+        if (!dockerDownRefused) {
+          try {
+            await fsService.deleteStack(stackName);
+          } catch (fsErr) {
+            fileDeleteCompleted = false;
+            console.error("[Templates] Rollback Stage 2 (File deletion) failed:", fsErr);
+          }
+        } else {
           fileDeleteCompleted = false;
-          console.error("[Templates] Rollback Stage 2 (File deletion) failed:", fsErr);
         }
         rolledBack = dockerDownCompleted && fileDeleteCompleted;
       }

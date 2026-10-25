@@ -14,6 +14,7 @@
  * generation-selection contract, so both paths enforce identical evidence
  * rules.
  */
+import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointGuard';
 import axios from 'axios';
 import type { PermissionAction } from '../../middleware/permissions';
 import { DatabaseService } from '../DatabaseService';
@@ -80,6 +81,7 @@ const PRE_MUTATION_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'RECOVERY_POINT_MISMATCH',
   'STACK_NOT_FOUND',
   'self_stack_protected',
+  DOCKER_ENDPOINT_PROTECTED_CODE,
   'PERMISSION_DENIED',
 ]);
 
@@ -324,6 +326,18 @@ function restoreLocal(args: {
         };
       }
       try {
+        // A restore pins every service to its recovery tag, which recreates the
+        // container carrying this node's Docker API when the stack holds it.
+        const endpointRefusal = await ComposeService.getInstance(args.nodeId)
+          .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+        if (endpointRefusal) {
+          return {
+            ok: false as const,
+            code: DOCKER_ENDPOINT_PROTECTED_CODE,
+            error: endpointRefusal.message,
+            failureClass: 'pre_mutation' as const,
+          };
+        }
         const compensation = await recovery.compensateWithCandidateOutcome(
           current.id,
           (overridePath, invocation, overlay) => ComposeService.getInstance(args.nodeId)

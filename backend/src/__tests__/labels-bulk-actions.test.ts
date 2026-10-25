@@ -8,6 +8,7 @@ const deployStack = vi.fn();
 const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
 const restartContainer = vi.fn();
+const assertNoDockerEndpointContainers = vi.fn();
 const enforcePolicyPreDeploy = vi.fn();
 const invalidateNodeCaches = vi.fn();
 
@@ -31,6 +32,7 @@ vi.mock('../services/DockerController', () => ({
       getContainersByStack,
       stopContainer,
       restartContainer,
+      assertNoDockerEndpointContainers,
     })),
   },
 }));
@@ -77,6 +79,7 @@ beforeEach(() => {
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
+  assertNoDockerEndpointContainers.mockResolvedValue(undefined);
   enforcePolicyPreDeploy.mockResolvedValue({ ok: true });
   activeBulkActions.clear();
   StackOpLockService.resetForTests();
@@ -140,6 +143,28 @@ describe('Stack Labels bulk actions', () => {
     ]);
     expect(stopContainer).toHaveBeenCalledWith('alpha-1');
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
+  });
+
+  it('refuses a stack whose containers include the Docker endpoint container before stopping any of them', async () => {
+    const label = await createAssignedLabel(['alpha', 'beta']);
+    getContainersByStack.mockImplementation(async (stackName: string) => [{ Id: `${stackName}-1` }, { Id: `${stackName}-proxy` }]);
+    assertNoDockerEndpointContainers.mockImplementation(async (ids: string[]) => {
+      if (ids.includes('alpha-proxy')) throw new Error('Service "socket-proxy" carries the Docker connection Sencho is using.');
+    });
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'stop' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: false, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+      { stackName: 'beta', success: true },
+    ]);
+    expect(assertNoDockerEndpointContainers).toHaveBeenCalledWith(['alpha-1', 'alpha-proxy'], 'stop');
+    expect(stopContainer).not.toHaveBeenCalledWith('alpha-1');
+    expect(stopContainer).toHaveBeenCalledWith('beta-1');
   });
 
   it('rejects a second bulk action while the node lock is held', async () => {

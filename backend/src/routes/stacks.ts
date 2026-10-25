@@ -103,8 +103,8 @@ import {
   refuseIfSelfStack,
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
-import { refuseIfDockerEndpoint } from '../helpers/dockerEndpointRoute';
-import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../helpers/dockerEndpointGuard';
+import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -587,11 +587,17 @@ async function runStackBulkOp(
     }
   }
   if (action !== 'start') {
-    const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(
-      stackName,
-      action === 'update' ? { kind: 'update' } : { kind: action },
-    );
-    if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    try {
+      const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(
+        stackName,
+        action === 'update' ? { kind: 'update' } : { kind: action },
+      );
+      if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    } catch (error) {
+      // An error here is not a pass: the stack is reported refused and the batch carries on.
+      console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
+      return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    }
   }
 
   const user = req.user?.username ?? 'system';
@@ -1404,6 +1410,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     }
     if (result.code === 'source_claimed_by_blueprint') {
       res.status(409).json({ error: result.error, code: result.code });
+      return;
+    }
+    if (result.code === 'docker_endpoint_protected') {
+      res.status(409).json({ error: result.error, code: DOCKER_ENDPOINT_PROTECTED_CODE });
       return;
     }
     if (result.code === 'fs_failed') {
@@ -2225,6 +2235,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
@@ -2347,6 +2358,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     res.json({ status: 'Command started' });
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
@@ -2424,6 +2436,8 @@ export async function containerActionForStack(
     // concurrently against a 10s Docker timeout, and a gate poll landing in that
     // window would record the deliberate stop as a failed update.
     if (action !== 'start') {
+      // Refuse the whole batch before anything is touched or any gate ends.
+      await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
       HealthGateService.getInstance().supersedeForContainerOp(
         nodeId,
         stackName,
@@ -2561,6 +2575,7 @@ async function handleServiceAction(
     });
   } catch (error: unknown) {
     console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(action), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   }
 }
@@ -2703,6 +2718,7 @@ async function handleServiceScopedMutation(
       sanitizeForLog(serviceName),
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
@@ -2967,6 +2983,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const rollbackInfo = getComposeRollbackInfo(error);
     const rolledBack = rollbackInfo?.rolledBack ?? false;
     if (rolledBack) {
@@ -3185,6 +3202,19 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    if (isDockerEndpointProtectedError(error)) {
+      // Refused before compose ran, so the restored files are put back.
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a refused rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+        }
+      }
+      sendIfDockerEndpointProtected(res, error);
+      return;
+    }
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       if (revertRestore) {

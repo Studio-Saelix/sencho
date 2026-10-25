@@ -192,6 +192,21 @@ describe('resolveDockerEndpointProvider', () => {
     expect(mockListContainers).toHaveBeenCalledTimes(2);
   });
 
+  it('does not remember an unmatched tcp endpoint, so a proxy that comes up later is found', async () => {
+    mockLookup.mockResolvedValueOnce([{ address: '192.168.1.50', family: 4 }]);
+
+    expect((await resolveDockerEndpointProvider()).state).toBe('none');
+    expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+    expect(mockListContainers).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not keep a failed lookup in the cache, so the next call resolves again', async () => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'ensureResolved').mockRejectedValueOnce(new Error('inspect exploded'));
+
+    await expect(resolveDockerEndpointProvider()).rejects.toThrow('inspect exploded');
+    expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+  });
+
   it('answers for the endpoint in force, not an earlier one', async () => {
     expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
 

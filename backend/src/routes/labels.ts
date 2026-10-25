@@ -276,6 +276,9 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 // failed update. Only when there is something to act on, so a
                 // stack with no containers does not cost a live gate.
                 if (containers.length > 0) {
+                  // Before anything is touched: a batch that holds the Docker
+                  // endpoint container is refused whole, not half-stopped.
+                  await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
                   HealthGateService.getInstance().supersedeForContainerOp(
                     req.nodeId,
                     stackName,

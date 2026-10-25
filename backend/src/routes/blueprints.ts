@@ -682,6 +682,10 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
             });
             return;
         }
+        if (result.code === 'docker_endpoint_protected') {
+            res.status(409).json({ error: result.error, code: result.code });
+            return;
+        }
         res.status(500).json({ error: result.error });
     } catch (error) {
         console.error('[Blueprints] withdraw-local error:', sanitizeForLog(getErrorMessage(error, 'withdraw failed')));

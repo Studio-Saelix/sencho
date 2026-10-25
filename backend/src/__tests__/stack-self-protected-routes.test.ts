@@ -67,6 +67,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         stopContainer: mockStopContainer,
         restartContainer: mockRestartContainer,
+        assertNoDockerEndpointContainers: vi.fn().mockResolvedValue(undefined),
         getBulkStackStatuses: mockGetBulkStackStatuses,
       }),
     },
