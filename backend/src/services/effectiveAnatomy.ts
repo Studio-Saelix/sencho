@@ -8,8 +8,8 @@
  * those signals honest.
  *
  * Reads structural fields (service keys, ports, volumes, restart, network keys)
- * plus one allowlisted label, `sencho.service.url`, and only when that value is
- * an http(s) URL with no userinfo. It never reads `environment`, `command`,
+ * plus the allowlisted `io.sencho.*` labels (application and named links, display
+ * order, hidden flag), and only link values that are http(s) URLs with no userinfo. It never reads `environment`, `command`,
  * `entrypoint`, other label values, `secrets`, or `configs`, so a secret
  * INJECTED through those fields can never reach this payload. The exception is
  * a secret interpolated INTO a structural field or into the allowlisted label
@@ -27,7 +27,7 @@ import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
-import { SERVICE_URL_LABEL, serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
+import { resolveSenchoLabels, unrenderableSenchoLabels, type SenchoLabelResolution } from '../helpers/senchoLabels';
 import { resolveServiceUrlEditState, resolveServiceUrlClearState, chainFilesAroundRoot, type ServiceUrlEditState } from './serviceUrlSource';
 
 const MAX_RENDER_ERROR = 600;
@@ -56,8 +56,10 @@ export interface EffectiveAnatomy {
   volumes: Record<string, EffectiveAnatomyVolume[]>;
   restart: string | null;
   networks: string[];
-  /** Validated `sencho.service.url` values, keyed by service. Omitted services have none. */
+  /** Validated `io.sencho.url` values, keyed by service. Omitted services have none. */
   serviceUrls: Record<string, string>;
+  /** Resolved `io.sencho.*` metadata: links, order, hidden, and per-label diagnostics. */
+  senchoLabels: SenchoLabelResolution;
 }
 
 export interface EffectiveAnatomyResult extends EffectiveAnatomy {
@@ -81,7 +83,7 @@ export interface EffectiveAnatomyResult extends EffectiveAnatomy {
 
 /** Fresh empty anatomy, with fresh maps, so a returned result never shares state. */
 function emptyAnatomy(): EffectiveAnatomy {
-  return { services: [], ports: serviceMap(), volumes: serviceMap(), restart: null, networks: [], serviceUrls: serviceMap() };
+  return { services: [], ports: serviceMap(), volumes: serviceMap(), restart: null, networks: [], serviceUrls: serviceMap(), senchoLabels: unrenderableSenchoLabels() };
 }
 
 function asString(v: unknown): string | undefined {
@@ -135,26 +137,6 @@ function networkKeys(value: unknown): string[] {
   return [];
 }
 
-/** Compose writes a literal `$` as `$$` in rendered config. Undo that once. */
-function unescapeRenderedServiceUrl(labels: unknown): unknown {
-  const unescape = (value: string) => value.replaceAll('$$', '$');
-  if (Array.isArray(labels)) {
-    return labels.map(entry => {
-      if (typeof entry !== 'string') return entry;
-      const eq = entry.indexOf('=');
-      if (eq <= 0 || entry.slice(0, eq) !== SERVICE_URL_LABEL) return entry;
-      return `${SERVICE_URL_LABEL}=${unescape(entry.slice(eq + 1))}`;
-    });
-  }
-  if (labels && typeof labels === 'object') {
-    const copy: Record<string, unknown> = { ...(labels as Record<string, unknown>) };
-    const raw = copy[SERVICE_URL_LABEL];
-    if (typeof raw === 'string') copy[SERVICE_URL_LABEL] = unescape(raw);
-    return copy;
-  }
-  return labels;
-}
-
 /**
  * Map parsed `docker compose config --format json` to the {@link EffectiveAnatomy}
  * shape. Tolerant of missing fields; empty / garbage input yields an empty model
@@ -190,15 +172,19 @@ export function parseEffectiveAnatomy(parsed: unknown): EffectiveAnatomy {
     if (v.length) volumes[name] = v;
     if (restart === null && typeof o.restart === 'string') restart = o.restart;
     for (const n of networkKeys(o.networks)) networks.add(n);
-    const serviceUrl = serviceUrlFromLabels(unescapeRenderedServiceUrl(o.labels));
-    if (serviceUrl) serviceUrls[name] = serviceUrl;
+  }
+
+  const senchoLabels = resolveSenchoLabels(parsed);
+  for (const name of serviceNames) {
+    const application = senchoLabels.services[name]?.links.find(link => link.name === null);
+    if (application) serviceUrls[name] = application.url;
   }
 
   if (root.networks && typeof root.networks === 'object' && !Array.isArray(root.networks)) {
     for (const n of Object.keys(root.networks as Record<string, unknown>)) networks.add(n);
   }
 
-  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks), serviceUrls };
+  return { services: serviceNames, ports, volumes, restart, networks: Array.from(networks), serviceUrls, senchoLabels };
 }
 
 /** One other chain file's label contribution; null content means it could not be read. */

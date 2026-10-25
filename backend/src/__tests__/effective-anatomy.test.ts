@@ -12,7 +12,8 @@ import { parseEffectiveAnatomy } from '../services/effectiveAnatomy';
 
 describe('parseEffectiveAnatomy', () => {
   it('returns an empty model for null / non-object input', () => {
-    const empty = { services: [], ports: {}, volumes: {}, restart: null, networks: [], serviceUrls: {} };
+    const empty = { services: [], ports: {}, volumes: {}, restart: null, networks: [], serviceUrls: {},
+      senchoLabels: { renderable: false, services: {}, entries: [], serviceOrder: [] } };
     expect(parseEffectiveAnatomy(null)).toEqual(empty);
     expect(parseEffectiveAnatomy('nope')).toEqual(empty);
     expect(parseEffectiveAnatomy(42)).toEqual(empty);
@@ -128,16 +129,16 @@ describe('parseEffectiveAnatomy', () => {
     expect(serialized).not.toContain('secret.example.com');
   });
 
-  it('returns only a validated sencho.service.url and drops every other label value', () => {
+  it('returns only a validated io.sencho.url and drops every other label value', () => {
     const anatomy = parseEffectiveAnatomy({
       services: {
         web: {
           labels: {
-            'sencho.service.url': 'https://app.example.com',
+            'io.sencho.url': 'https://app.example.com',
             'traefik.http.routers.web.rule': 'Host(`secret.example.com`)',
           },
         },
-        api: { labels: { 'sencho.service.url': 'https://user:secret@api.example.com' } },
+        api: { labels: { 'io.sencho.url': 'https://user:secret@api.example.com' } },
       },
     });
     expect(anatomy.serviceUrls).toEqual({ web: 'https://app.example.com' });
@@ -145,10 +146,32 @@ describe('parseEffectiveAnatomy', () => {
     expect(JSON.stringify(anatomy)).not.toContain('user:secret');
   });
 
+  it('carries the resolved io.sencho.* metadata beside the application link', () => {
+    const anatomy = parseEffectiveAnatomy({
+      services: {
+        web: {
+          labels: {
+            'io.sencho.url': 'https://app.example.com',
+            'io.sencho.url.docs': 'https://docs.example.com',
+            'io.sencho.order': '5',
+          },
+        },
+        worker: { labels: { 'io.sencho.hidden': 'true', 'io.sencho.url': 'javascript:alert(1)' } },
+      },
+    });
+    expect(anatomy.senchoLabels.renderable).toBe(true);
+    expect(anatomy.senchoLabels.serviceOrder).toEqual(['web', 'worker']);
+    expect(anatomy.senchoLabels.services.web.links.map(l => l.name)).toEqual([null, 'docs']);
+    expect(anatomy.senchoLabels.services.worker.hidden).toBe(true);
+    // An invalid application link is reported, never promoted to the service URL.
+    expect(anatomy.serviceUrls).toEqual({ web: 'https://app.example.com' });
+    expect(anatomy.senchoLabels.entries.find(e => e.service === 'worker' && e.key === 'io.sencho.url')?.state).toBe('invalid');
+  });
+
   it('turns a rendered $$ back into one literal dollar', () => {
     const anatomy = parseEffectiveAnatomy({
       services: {
-        web: { labels: { 'sencho.service.url': 'https://app.example.com/?b=$$x' } },
+        web: { labels: { 'io.sencho.url': 'https://app.example.com/?b=$$x' } },
       },
     });
     expect(anatomy.serviceUrls.web).toBe('https://app.example.com/?b=$x');
@@ -158,10 +181,10 @@ describe('parseEffectiveAnatomy', () => {
     // JSON.parse, like the docker compose render, defines `__proto__` as an own key.
     const rendered = JSON.parse([
       '{"services":{',
-      '"constructor":{"labels":{"sencho.service.url":"https://c.example.com"}},',
+      '"constructor":{"labels":{"io.sencho.url":"https://c.example.com"}},',
       '"toString":{},',
       '"hasOwnProperty":{},',
-      '"__proto__":{"labels":{"sencho.service.url":"https://p.example.com"}}',
+      '"__proto__":{"labels":{"io.sencho.url":"https://p.example.com"}}',
       '}}',
     ].join('')) as unknown;
     const anatomy = parseEffectiveAnatomy(rendered);

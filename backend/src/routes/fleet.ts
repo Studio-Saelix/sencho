@@ -94,6 +94,7 @@ import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { READINESS_DOMAINS, type ReadinessDomainKey } from '../services/readiness/types';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { VALID_LABEL_BEHAVIOR_STATES } from '../helpers/senchoLabels';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -916,13 +917,25 @@ function isLabelIndexContainerRef(v: unknown): boolean {
     && isStringOrNull(o.service);
 }
 
+/** Absent on older nodes and on labels outside `io.sencho.*`; when present it must be well formed. */
+function isOptionalLabelBehavior(v: unknown): boolean {
+  if (v === undefined) return true;
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.state === 'string'
+    && VALID_LABEL_BEHAVIOR_STATES.has(o.state)
+    && (o.reason === undefined || typeof o.reason === 'string')
+    && (o.summary === undefined || typeof o.summary === 'string');
+}
+
 function isLabelValue(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
   return typeof o.key === 'string'
     && typeof o.value === 'string'
     && typeof o.source === 'string'
-    && VALID_LABEL_SOURCES.has(o.source);
+    && VALID_LABEL_SOURCES.has(o.source)
+    && isOptionalLabelBehavior(o.behavior);
 }
 
 function isContainerLabelRow(v: unknown): boolean {
@@ -944,6 +957,7 @@ function isLabelIndexRow(v: unknown): boolean {
     && typeof o.value === 'string'
     && typeof o.source === 'string'
     && VALID_LABEL_SOURCES.has(o.source)
+    && isOptionalLabelBehavior(o.behavior)
     && Array.isArray(o.containers)
     && o.containers.every(isLabelIndexContainerRef);
 }

@@ -1011,7 +1011,7 @@ function hasCustomTag(doc: Parameters<typeof visit>[0]): boolean {
 }
 
 /**
- * Set or remove `sencho.service.url` on one service. Only that label changes in the
+ * Set or remove `io.sencho.url` on one service. Only that label changes in the
  * parsed file. When the edited block is shared through an anchor, whichever side is not
  * edited keeps its values: a consumer of the edited anchor gets its own copy, and an
  * edited alias is replaced by an inline copy. Clearing a service with no URL label returns

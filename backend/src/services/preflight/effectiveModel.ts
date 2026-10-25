@@ -95,7 +95,7 @@ export interface EffService {
   /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
   labelKeys: string[];
   /**
-   * True when `sencho.service.url` is a validated http(s) URL. The URL string
+   * True when `io.sencho.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
    */
   hasServiceUrl?: boolean;

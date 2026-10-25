@@ -2,6 +2,7 @@ import { buildServiceUrl, type ServiceUrlOptions } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 import { interpolatedVariableNames } from './anatomy';
 import type { PortRow } from './anatomyMarkdown';
+import { readSenchoLabels, type SenchoLabelResolution } from './senchoLabels';
 
 export interface AnatomyPortRef {
   /** Published host port, `''` when the saved file omits one, or `'0'` for explicit automatic allocation. */
@@ -43,6 +44,11 @@ export interface ServiceUrlEntry {
   volumes?: Record<string, { host: string; container: string }[]>;
   restart?: string | null;
   networks?: string[];
+  /**
+   * The node's `io.sencho.*` resolution. `null` when the node does not report one
+   * (an older version), so no link, order, or hidden state is applied from it.
+   */
+  senchoLabels?: SenchoLabelResolution | null;
   /** The last refresh failed. This entry is still the previous ready model. */
   refreshFailed?: boolean;
 }
@@ -441,6 +447,7 @@ export function parseServiceUrlResponse(
     serviceUrlClear,
     ports,
     renderable: true,
+    senchoLabels: readSenchoLabels(record.senchoLabels),
     services,
     volumes,
     restart,

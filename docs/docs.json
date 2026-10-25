@@ -122,6 +122,7 @@
                   "features/compose-networking",
                   "features/environment-guardrails",
                   "features/docker-label-audit",
+                  "features/sencho-labels",
                   "features/compose-storage",
                   "features/stack-labels",
                   "features/sidebar"

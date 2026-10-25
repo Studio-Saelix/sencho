@@ -227,6 +227,22 @@ components:
           description: Redacted to `[redacted]` for secret-like keys unless the caller is an admin and passes `reveal=1`.
         source: { $ref: "#/components/schemas/LabelSource" }
         redacted: { type: boolean }
+        behavior: { $ref: "#/components/schemas/LabelBehavior" }
+
+    LabelBehavior:
+      type: object
+      required: [state]
+      description: Whether Sencho acts on an `io.sencho.*` label. Present only on labels in that namespace.
+      properties:
+        state:
+          type: string
+          enum: [active, invalid, unsupported, inert]
+          description: >-
+            `active` is declared in the rendered Compose file and valid. `invalid` is declared but ignored.
+            `unsupported` is an `io.sencho.*` key Sencho does not define. `inert` comes from an image, the running
+            container, or an unrendered model, so it never changes behavior.
+        reason: { type: string, description: Fixed explanation that never repeats the label value. }
+        summary: { type: string, description: What the label does when active. }
 
     LabelIndexContainerRef:
       type: object

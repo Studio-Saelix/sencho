@@ -59,6 +59,7 @@ export const CAPABILITIES = [
   'compose-networking',
   'env-inventory',
   'container-label-inventory',
+  'sencho-labels-v1',
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',

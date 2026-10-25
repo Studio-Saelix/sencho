@@ -19,6 +19,7 @@ import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishe
 import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
+import { presentServices } from '@/lib/senchoLabels';
 import { resolvePublishedPortClick, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
@@ -407,6 +408,11 @@ export default function StackAnatomyPanel({
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
+  const servicePresentation = presentServices(
+    anatomy?.services ?? [],
+    serviceUrlEntry?.renderable ? serviceUrlEntry.senchoLabels ?? null : null,
+  );
+
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
   const verificationError = updatePreview?.summary.verification_error ?? null;
@@ -550,8 +556,15 @@ export default function StackAnatomyPanel({
                 <span className="text-stat-subtitle">none defined</span>
               ) : (
                 <div className="flex flex-wrap gap-1">
-                  {anatomy.services.map(s => (
-                    <span key={s} className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-xs text-brand">
+                  {servicePresentation.order.map(s => (
+                    <span
+                      key={s}
+                      className={cn(
+                        'rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-xs text-brand',
+                        servicePresentation.hidden.has(s) && 'opacity-60',
+                      )}
+                      title={servicePresentation.hidden.has(s) ? 'Hidden from default lists by io.sencho.hidden' : undefined}
+                    >
                       {s}
                     </span>
                   ))}

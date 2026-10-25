@@ -110,7 +110,7 @@ describe('effective-anatomy route', () => {
       services: {
         web: {
           labels: {
-            'sencho.service.url': 'https://app.example.com',
+            'io.sencho.url': 'https://app.example.com',
             'x.secret': LABEL_SECRET,
           },
         },
@@ -126,9 +126,9 @@ describe('effective-anatomy route', () => {
 
   it('marks a URL label set by another compose file as not editable here', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
-      'services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n');
+      'services:\n  web:\n    labels:\n      io.sencho.url: not-a-url\n');
     stubRender(JSON.stringify({
-      services: { web: { labels: { 'sencho.service.url': 'not-a-url' } }, api: { labels: { 'sencho.service.url': 'https://api.example.com' } } },
+      services: { web: { labels: { 'io.sencho.url': 'not-a-url' } }, api: { labels: { 'io.sencho.url': 'https://api.example.com' } } },
       networks: {},
       volumes: {},
     }));
@@ -157,9 +157,9 @@ describe('effective-anatomy route', () => {
 
   it('audit F1: a later bare list label blocks the edit', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
-      'services:\n  web:\n    labels:\n      - sencho.service.url\n');
+      'services:\n  web:\n    labels:\n      - io.sencho.url\n');
     stubRender(JSON.stringify({
-      services: { web: { labels: { 'sencho.service.url': '' } } },
+      services: { web: { labels: { 'io.sencho.url': '' } } },
       networks: {},
       volumes: {},
     }));
@@ -174,7 +174,7 @@ describe('effective-anatomy route', () => {
       'services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n');
     stubRender(JSON.stringify({
       services: {
-        web: { labels: { 'sencho.service.url': 'https://later.example.com' } },
+        web: { labels: { 'io.sencho.url': 'https://later.example.com' } },
         api: { image: 'nginx:latest' },
       },
       networks: {},
@@ -195,7 +195,7 @@ describe('effective-anatomy route', () => {
       'services:',
       '  web:',
       '    labels:',
-      '      - sencho.service.url=https://old.example.com',
+      '      - io.sencho.url=https://old.example.com',
       '      - "${URL_LABEL}=https://winning.example.com"',
       '  api:',
       '    image: nginx:latest',
@@ -203,7 +203,7 @@ describe('effective-anatomy route', () => {
     ].join('\n'));
     stubRender(JSON.stringify({
       services: {
-        web: { labels: { 'sencho.service.url': 'https://winning.example.com' } },
+        web: { labels: { 'io.sencho.url': 'https://winning.example.com' } },
         api: { image: 'nginx:latest' },
       },
       networks: {},
@@ -227,14 +227,14 @@ describe('effective-anatomy route', () => {
 
   it('audit F2: an earlier Git chain file blocks the clear but not the set', async () => {
     fs.writeFileSync(path.join(stackDir, 'base.yaml'),
-      'services:\n  web:\n    labels:\n      sencho.service.url: https://base.example.com\n');
+      'services:\n  web:\n    labels:\n      io.sencho.url: https://base.example.com\n');
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
-      'services:\n  web:\n    labels:\n      sencho.service.url: https://root.example.com\n');
+      'services:\n  web:\n    labels:\n      io.sencho.url: https://root.example.com\n');
     vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
       applied_deploy_spec: { files: ['base.yaml', 'compose.yaml'], contextDir: null },
     } as StackGitSource);
     stubRender(JSON.stringify({
-      services: { web: { labels: { 'sencho.service.url': 'https://root.example.com' } } },
+      services: { web: { labels: { 'io.sencho.url': 'https://root.example.com' } } },
       networks: {},
       volumes: {},
     }));
@@ -266,7 +266,7 @@ describe('effective-anatomy route', () => {
     fs.mkdirSync(sibling);
     fs.writeFileSync(
       path.join(sibling, 'compose.yaml'),
-      'services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      sencho.service.url: https://sibling.example/private\n',
+      'services:\n  other:\n    ports:\n      - "9090:90"\n    labels:\n      io.sencho.url: https://sibling.example/private\n',
     );
     fs.rmSync(path.join(stackDir, 'compose.yaml'));
     fs.symlinkSync(`../${siblingName}/compose.yaml`, path.join(stackDir, 'compose.yaml'));
@@ -274,7 +274,7 @@ describe('effective-anatomy route', () => {
       rendered: JSON.stringify({
         services: {
           other: {
-            labels: { 'sencho.service.url': 'https://sibling.example/private' },
+            labels: { 'io.sencho.url': 'https://sibling.example/private' },
             ports: [{ target: 90, published: '9090', protocol: 'tcp' }],
           },
         },
