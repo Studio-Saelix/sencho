@@ -180,6 +180,7 @@ describe('PolicyBlockDialog evidence', () => {
     };
     renderDialog(allowedPlusFailure);
     expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/stopped because the images could not be evaluated/i)).toBeInTheDocument();
   });
 
   it('explains both problems when one image is stale and its findings incomplete', () => {
