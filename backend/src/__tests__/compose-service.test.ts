@@ -562,6 +562,23 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/overlay-dir' }));
   });
 
+  it('hands the guard the overlay a Git deploy runs, so the hash is computed against it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return { reason: 'provider', service: 'socket-proxy', message: 'refused' };
+    });
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir: '/tmp/ov-guard' });
+    const settled = expect(deploy).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await settled;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/ov-guard' }));
+  });
+
   it('looks up the local image id for the guard, and reports an uninspectable image as unknown', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const seen: unknown[] = [];
