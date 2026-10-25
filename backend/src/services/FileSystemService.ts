@@ -92,6 +92,27 @@ async function recordAtomicPublication(
   }
 }
 
+/**
+ * Keep the original owner on a staging file when the process is allowed to set
+ * it (the common root-in-a-container case). A non-root process cannot hand a
+ * file to another user; the replacement stays owned by the process, which is
+ * the only outcome available to it. The change goes through the open
+ * descriptor: a path-based chown would follow a link swapped in for the
+ * staging name by a container that shares the directory.
+ */
+async function chownStaged(
+  handle: { chown(uid: number, gid: number): Promise<void> },
+  owner: { uid: number; gid: number } | undefined,
+): Promise<void> {
+  if (!owner) return;
+  try {
+    await handle.chown(owner.uid, owner.gid);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+  }
+}
+
 /** Mode and owner of a regular file at `filePath`, or undefined for anything else. */
 async function existingFileIdentity(
   filePath: string,
@@ -2429,6 +2450,7 @@ export class FileSystemService {
         const synced = await fsPromises.open(tmpPath, 'r+');
         try {
           if (publishedMode !== undefined) await synced.chmod(publishedMode);
+          await chownStaged(synced, owner);
           await synced.sync();
         } finally {
           await synced.close();
@@ -2439,21 +2461,10 @@ export class FileSystemService {
         try {
           await fh.writeFile(data);
           if (opts.mode !== undefined) await fh.chmod(opts.mode);
+          await chownStaged(fh, owner);
           await fh.sync();
         } finally {
           await fh.close();
-        }
-      }
-      if (owner) {
-        // Keep the original owner when the process is allowed to set it (the
-        // common root-in-a-container case). A non-root process cannot hand a
-        // file to another user; the replacement stays owned by the process,
-        // which is the only outcome available to it.
-        try {
-          await fsPromises.chown(tmpPath, owner.uid, owner.gid);
-        } catch (err: unknown) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
         }
       }
       if (opts.exclusive) {

@@ -153,10 +153,22 @@ describe('compose save publication', () => {
             expect(stagingFiles()).toEqual([]);
         });
 
-        it('hands the replacement to the owner of the file it replaces', async () => {
+        it('hands the replacement to the owner of the file it replaces, through the open descriptor', async () => {
             const target = path.join(stackDir, 'compose.yaml');
             const { uid, gid } = fsSync.statSync(target);
-            const chown = vi.spyOn(fsp, 'chown');
+            const pathChown = vi.spyOn(fsp, 'chown');
+            const handleChowns: Array<[number, number]> = [];
+            const realOpen = fsp.open.bind(fsp);
+            vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                const fh = await realOpen(...args);
+                if (!String(args[0]).includes('sencho-tmp')) return fh;
+                const realChown = fh.chown.bind(fh);
+                fh.chown = (async (toUid: number, toGid: number) => {
+                    handleChowns.push([toUid, toGid]);
+                    return realChown(toUid, toGid);
+                }) as typeof fh.chown;
+                return fh;
+            }) as typeof fsp.open);
             const upload = path.join(path.dirname(stackDir), 'upload-spool-owner.bin');
             fsSync.writeFileSync(upload, composeContent(['web']));
 
@@ -164,12 +176,10 @@ describe('compose save publication', () => {
             await svc.writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
             await svc.writeStackFile(STACK, 'compose.yaml', composeContent(['web', 'db']));
 
-            const staged = chown.mock.calls.map((call) => [String(call[0]), call[1], call[2]]);
-            expect(staged).toHaveLength(2);
-            for (const [file, toUid, toGid] of staged) {
-                expect(path.basename(file as string)).toContain('sencho-tmp');
-                expect([toUid, toGid]).toEqual([uid, gid]);
-            }
+            // One per write, and never by path, which would follow a link
+            // swapped in for the staging name.
+            expect(handleChowns).toEqual([[uid, gid], [uid, gid]]);
+            expect(pathChown).not.toHaveBeenCalled();
         });
 
         it('removes the staging file when restricted content fails to publish', async () => {
