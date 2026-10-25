@@ -235,3 +235,37 @@ it('reports a rejected write without claiming success', async () => {
   await waitFor(() => expect(toast.error).toHaveBeenCalledWith('scanFailure must be one of: allow, warn, block'));
   expect(toast.success).not.toHaveBeenCalled();
 });
+
+it('names the node the settings belong to, in the card and in the save confirmation', async () => {
+  render(<EvidencePolicyPanel nodeName="pilot-12" />);
+  await waitFor(() => expect(screen.getByText(/These settings belong to pilot-12, not to the whole fleet/)).toBeInTheDocument());
+
+  mockedFetch.mockResolvedValue(
+    jsonResponse(200, {
+      policy: { scannerUnavailable: 'block', scanFailure: 'block', candidateUnproven: 'block', isDefault: false },
+    }),
+  );
+  fireEvent.click(radio('Scanner unavailable', 'Block'));
+  await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Evidence policy updated on pilot-12'));
+});
+
+it('reads the policy back when a save is accepted but the answer cannot be read', async () => {
+  render(<EvidencePolicyPanel />);
+  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
+  const readsBefore = mockedFetch.mock.calls.filter(([, opts]) => !opts?.method).length;
+
+  mockedFetch.mockImplementation((_url: string, opts?: { method?: string }) =>
+    Promise.resolve(
+      opts?.method === 'PUT'
+        ? ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } } as unknown as Response)
+        : jsonResponse(200, payload({ scannerUnavailable: 'block', isDefault: false })),
+    ),
+  );
+  fireEvent.click(radio('Scanner unavailable', 'Block'));
+
+  await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/did not confirm it/)));
+  expect(toast.success).not.toHaveBeenCalled();
+  // The screen shows what the node reports now, not the value from before the save.
+  expect(mockedFetch.mock.calls.filter(([, opts]) => !opts?.method).length).toBeGreaterThan(readsBefore);
+  await waitFor(() => expect(radio('Scanner unavailable', 'Block')).toHaveAttribute('aria-checked', 'true'));
+});

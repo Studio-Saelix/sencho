@@ -124,7 +124,7 @@ function PolicyRow({
   );
 }
 
-export function EvidencePolicyPanel() {
+export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
   const { isAdmin } = useAuth();
   const [state, setState] = useState<EvidencePolicyResponse | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -133,14 +133,10 @@ export function EvidencePolicyPanel() {
 
   /**
    * `isCancelled` lets the mount effect ignore a response that arrives after the
-   * panel has gone: switching to a remote node unmounts it, and a late reply
-   * would otherwise set state on a component that is no longer there. The retry
-   * button passes nothing, because it only runs while mounted.
-   *
-   * Deliberately uncovered by a test. React 18 dropped the setState-after-unmount
-   * warning, so the guard has no observable effect through the UI and any test
-   * asserting one could not fail. It is kept as conformance with the pattern the
-   * sibling panel in this tab already uses.
+   * panel has gone: the panel is keyed by node id, so every node switch remounts
+   * it, and a late reply from the previous node's request must not land in the
+   * new node's panel. The retry button passes nothing, because it only runs
+   * while mounted.
    */
   const load = useCallback(async (isCancelled?: () => boolean) => {
     try {
@@ -151,8 +147,9 @@ export function EvidencePolicyPanel() {
       if (!data) throw new Error('unreadable policy payload');
       setState(data);
       setLoadFailed(false);
-    } catch {
+    } catch (err) {
       if (isCancelled?.()) return;
+      console.error('Failed to load the evidence policy:', err);
       setLoadFailed(true);
     }
   }, []);
@@ -198,17 +195,23 @@ export function EvidencePolicyPanel() {
         }
         // The write answers with the resolved policy alone, not the whole read
         // envelope, so it is parsed on its own terms.
-        const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy));
-        if (!policy) throw new Error('unreadable policy payload');
+        const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy).catch(() => null));
+        if (!policy) {
+          // The node accepted the write but did not answer in a shape this build
+          // can read, so what it now enforces is unknown. Read it back rather than
+          // leave the old value on screen as if the save had not happened.
+          await load();
+          throw new Error('The node accepted the change but did not confirm it. Check the value shown.');
+        }
         setState((prev) => (prev ? { ...prev, policy } : prev));
-        toast.success('Evidence policy updated');
+        toast.success(nodeName ? `Evidence policy updated on ${nodeName}` : 'Evidence policy updated');
       } catch (err) {
         toast.error((err as Error)?.message || 'Failed to update the evidence policy');
       } finally {
         setBusy(false);
       }
     },
-    [],
+    [load, nodeName],
   );
 
   if (loadFailed) {
@@ -217,7 +220,7 @@ export function EvidencePolicyPanel() {
         <Label className="text-sm">Evidence availability</Label>
         <p className="text-xs text-muted-foreground mt-1">
           The policy could not be read, so what this node currently enforces is unknown here. Deploys
-          are unaffected: the gate keeps applying whatever this instance has stored, and only a
+          are unaffected: the gate keeps applying whatever this node has stored, and only a
           failure to read that too would fall back to the shipped defaults, which allow a deploy when
           the scanner is missing and block one whose scan failed.
         </p>
@@ -263,6 +266,7 @@ export function EvidencePolicyPanel() {
         <p className="text-xs text-muted-foreground mt-0.5">
           What a deploy gate may do when it cannot prove the images are safe. Each row shows the
           active setting and the shipped default.
+          {nodeName ? ` These settings belong to ${nodeName}, not to the whole fleet.` : ''}
         </p>
       </div>
 

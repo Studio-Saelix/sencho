@@ -139,7 +139,9 @@ it('shows the evidence policy on a remote node and reads it from that node, not 
   // The evidence read must reach the active node, so it must not be pinned local.
   const call = mockedFetch.mock.calls.find(([url]) => url === '/security/evidence-policy');
   expect(call).toBeTruthy();
-  expect(call![1]?.localOnly).toBeUndefined();
+  // Neither option may pin the read to the hub: `localOnly` or an explicit null node.
+  expect(call![1] ?? {}).not.toHaveProperty('localOnly');
+  expect(call![1] ?? {}).not.toHaveProperty('nodeId');
   expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' }))
     .toHaveAttribute('aria-checked', 'true');
 });
@@ -162,7 +164,8 @@ it('saves the evidence policy to the active remote node without pinning the writ
   await waitFor(() => {
     const put = mockedFetch.mock.calls.find(([url, opts]) => url === '/security/evidence-policy' && opts?.method === 'PUT');
     expect(put).toBeTruthy();
-    expect(put![1].localOnly).toBeUndefined();
+    expect(put![1]).not.toHaveProperty('localOnly');
+    expect(put![1]).not.toHaveProperty('nodeId');
     expect(JSON.parse(put![1].body)).toEqual({ scannerUnavailable: 'block' });
   });
 });
@@ -189,4 +192,66 @@ it('does not carry one node\'s evidence policy over to the next node selected', 
     expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Allow' }))
       .toHaveAttribute('aria-checked', 'true'),
   );
+});
+
+it('keeps the evidence policy read-only for a non-admin on a remote node', async () => {
+  setup();
+  vi.mocked(AuthContext.useAuth).mockReturnValue({ isAdmin: false, can: () => true } as unknown as ReturnType<typeof AuthContext.useAuth>);
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  mockedFetch.mockImplementation((url: string) =>
+    Promise.resolve(url === '/security/evidence-policy' ? jsonResponse(200, evidenceBody('allow')) : jsonResponse(200, [])),
+  );
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText(/read-only for your role/)).toBeInTheDocument());
+
+  const block = within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' });
+  expect(block).toBeDisabled();
+  fireEvent.click(block);
+  expect(mockedFetch.mock.calls.some(([, opts]) => opts?.method === 'PUT')).toBe(false);
+});
+
+it('shows a placeholder, not the previous node\'s values, while the next node is read', async () => {
+  setup();
+  useNode({ type: 'local', id: 1, name: 'local' });
+  let resolveNodeB: (r: Response) => void = () => {};
+  let phase: 'a' | 'b' = 'a';
+  mockedFetch.mockImplementation((url: string) => {
+    if (url !== '/security/evidence-policy') return Promise.resolve(jsonResponse(200, []));
+    return phase === 'a'
+      ? Promise.resolve(jsonResponse(200, evidenceBody('block')))
+      : new Promise<Response>((resolve) => { resolveNodeB = resolve; });
+  });
+  const { rerender } = render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).toBeInTheDocument());
+
+  phase = 'b';
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  rerender(<ScanPolicyManager />);
+  // Node 12's read is still pending: node 1's values must be gone.
+  expect(screen.queryByRole('radiogroup', { name: 'Scanner unavailable' })).not.toBeInTheDocument();
+
+  resolveNodeB(jsonResponse(200, evidenceBody('allow')));
+  await waitFor(() =>
+    expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Allow' }))
+      .toHaveAttribute('aria-checked', 'true'),
+  );
+});
+
+it('does not keep the previous node\'s values when the next node cannot be read', async () => {
+  setup();
+  useNode({ type: 'local', id: 1, name: 'local' });
+  let failing = false;
+  mockedFetch.mockImplementation((url: string) => {
+    if (url !== '/security/evidence-policy') return Promise.resolve(jsonResponse(200, []));
+    return Promise.resolve(failing ? jsonResponse(503, { error: 'Pilot agent is not connected' }) : jsonResponse(200, evidenceBody('block')));
+  });
+  const { rerender } = render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).toBeInTheDocument());
+
+  failing = true;
+  useNode({ type: 'remote', id: 12, name: 'pilot-12' });
+  rerender(<ScanPolicyManager />);
+
+  await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
+  expect(screen.queryByRole('radiogroup', { name: 'Scanner unavailable' })).not.toBeInTheDocument();
 });
