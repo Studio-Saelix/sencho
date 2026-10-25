@@ -764,6 +764,10 @@ export class RollbackGenerationStore {
     }
     await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
 
+    // The restore rewrites several layers one at a time. The bracket keeps the
+    // mesh declaration reader from trusting the mixture; it is whole when the
+    // restore finishes, or when the revert below puts the preimage back.
+    const publication = fsSvc.beginDeclarationSetPublication(stackName);
     try {
       for (const item of restores) {
         await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
@@ -806,15 +810,18 @@ export class RollbackGenerationStore {
         }
       }
 
+      publication.complete();
       // Leave restore-intent.json + pre-restore/ until commitRestoreTransaction
       // so a later policy/compose failure can still revert the managed set.
       return manifest;
     } catch (e) {
       try {
         await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+        publication.complete();
         await this.restoreGitSideStateFromIntent(stackName, intent);
         await fsPromises.rm(intentPath, { force: true });
       } catch (revertErr) {
+        publication.abandon();
         console.error(
           '[RollbackGenerationStore] Failed to revert interrupted restore:',
           (revertErr as Error).message,
@@ -1138,6 +1145,19 @@ export class RollbackGenerationStore {
   }
 
   private static async revertFromPreRestoreSnapshot(
+    nodeId: number,
+    stackName: string,
+    genResolved: string,
+  ): Promise<void> {
+    // Putting the preimage back rewrites layers one at a time, like the
+    // restore it undoes.
+    await FileSystemService.getInstance(nodeId).publishDeclarationSet(
+      stackName,
+      () => this.putBackPreRestoreSnapshot(nodeId, stackName, genResolved),
+    );
+  }
+
+  private static async putBackPreRestoreSnapshot(
     nodeId: number,
     stackName: string,
     genResolved: string,

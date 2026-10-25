@@ -135,6 +135,98 @@ describe('RollbackGenerationStore', () => {
     expect(await fsPromises.readFile(path.join(stackDir, nestedRel), 'utf8')).toBe('services: {}\n');
   });
 
+  describe('declaration set bracket', () => {
+    async function twoLayerGeneration(stackName: string): Promise<{ stackDir: string; generationId: string }> {
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web: {}\n', 'utf8');
+      await fsPromises.writeFile(path.join(stackDir, 'aux.yaml'), 'services:\n  db: {}\n', 'utf8');
+      const generationId = randomUUID();
+      await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId,
+        inventory: inventoryFor(stackName, [
+          { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
+          { relativePath: 'aux.yaml', absolutePath: path.join(stackDir, 'aux.yaml') },
+        ]),
+        operationKind: 'manual_backup',
+      });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  web: {}\n  db: {}\n', 'utf8');
+      await fsPromises.writeFile(path.join(stackDir, 'aux.yaml'), 'services: {}\n', 'utf8');
+      return { stackDir, generationId };
+    }
+
+    it('is open while a restore rewrites the layers and whole once it finishes', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-restore';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      const realWrite = FileSystemService.prototype.writeStackFile;
+      const seen: Array<number | null> = [];
+      vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+        this: InstanceType<typeof FileSystemService>,
+        ...args: Parameters<typeof realWrite>
+      ) {
+        seen.push(fsSvc.declarationSetEpoch(stackName));
+        return realWrite.apply(this, args);
+      });
+
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
+
+      expect(seen).toEqual([null, null]);
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is whole again when a failed restore is reverted', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-revert';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      const realWrite = FileSystemService.prototype.writeStackFile;
+      let calls = 0;
+      vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+        this: InstanceType<typeof FileSystemService>,
+        ...args: Parameters<typeof realWrite>
+      ) {
+        calls += 1;
+        if (calls === 2) throw new Error('disk full');
+        return realWrite.apply(this, args);
+      });
+
+      await expect(
+        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']),
+      ).rejects.toThrow('disk full');
+
+      expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays unknown when a failed restore cannot be reverted', async () => {
+      const { FileSystemService } = await import('../services/FileSystemService');
+      const stackName = 'bracket-stuck';
+      const { generationId } = await twoLayerGeneration(stackName);
+      const fsSvc = FileSystemService.getInstance(NODE);
+      const realWrite = FileSystemService.prototype.writeStackFile;
+      let calls = 0;
+      vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+        this: InstanceType<typeof FileSystemService>,
+        ...args: Parameters<typeof realWrite>
+      ) {
+        calls += 1;
+        if (calls >= 2) throw new Error('disk full');
+        return realWrite.apply(this, args);
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => { /* silence the revert failure log */ });
+
+      await expect(
+        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']),
+      ).rejects.toMatchObject({ restoreRevertFailed: true });
+
+      expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+    });
+  });
+
   it('keeps a live application-data path that the generation records as a tombstone', async () => {
     const stackName = 'protected';
     const stackDir = path.join(composeDir, stackName);

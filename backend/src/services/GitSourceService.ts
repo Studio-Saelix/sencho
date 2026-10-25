@@ -2362,6 +2362,22 @@ export class GitSourceService {
         envContent: string | null,
         prevSpec: GitSourceAppliedSpec | null,
     ): Promise<GitSourceAppliedSpec | null> {
+        // The compose layers land one at a time. The bracket tells the mesh
+        // declaration reader that the set is mid-rewrite, so a service moving
+        // between layers does not read as removed.
+        return FileSystemService.getInstance().publishDeclarationSet(stackName, () => this.writeMaterializedFiles(
+            stackName, composeFiles, contextDir, syncEnv, envContent, prevSpec,
+        ));
+    }
+
+    private async writeMaterializedFiles(
+        stackName: string,
+        composeFiles: ComposeFile[],
+        contextDir: string | null,
+        syncEnv: boolean,
+        envContent: string | null,
+        prevSpec: GitSourceAppliedSpec | null,
+    ): Promise<GitSourceAppliedSpec | null> {
         const fsSvc = FileSystemService.getInstance();
         const localFiles = gitSourceLocalComposeFiles(composeFiles.map(f => f.path));
 

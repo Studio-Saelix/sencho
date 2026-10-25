@@ -19,7 +19,7 @@ import fs from 'fs';
 import { createHash } from 'crypto';
 import YAML from 'yaml';
 import { NodeRegistry } from './NodeRegistry';
-import { FileSystemService } from './FileSystemService';
+import { FileSystemService, type DeclarationSetPublication } from './FileSystemService';
 import { StackFileRootsService } from './StackFileRootsService';
 import { DatabaseService } from './DatabaseService';
 import { ComposeInputDiscoveryService, type ContextCopyPlan, type CopyEntry } from './ComposeInputDiscoveryService';
@@ -981,6 +981,9 @@ export class GitProjectManifestService {
             introduced,
         };
         let liveMutationStarted = false;
+        // Opened with the first live write and closed once the layers are whole
+        // again: the promotion finished, or the previous generation is back.
+        let publication: DeclarationSetPublication | undefined;
 
         try {
             // The candidate must be complete; a partial build is never promoted.
@@ -1027,6 +1030,7 @@ export class GitProjectManifestService {
             // individual operations.
             await this.writeMarker(stackName, { ...markerBase, phase: 'applying' });
             liveMutationStarted = true;
+            publication = FileSystemService.getInstance().beginDeclarationSetPublication(stackName);
 
             // 1. Write every owned file exactly once. Context directory input
             // entries are inventory only; their files are listed explicitly by
@@ -1110,6 +1114,7 @@ export class GitProjectManifestService {
             } catch (e) {
                 console.warn('[GitManifest] committed promotion marker cleanup failed:', (e as Error).message);
             }
+            publication.complete();
         } catch (error) {
             if (!liveMutationStarted) {
                 throw new PromoteGenerationError('pre_mutation', error);
@@ -1126,6 +1131,8 @@ export class GitProjectManifestService {
                 console.error('[GitManifest] promotion failed and recovery restore also failed:', (restoreError as Error).message);
                 restored = false;
             }
+            if (restored) publication?.complete();
+            else publication?.abandon();
             throw new PromoteGenerationError(restored ? 'restored' : 'recovery_required', error);
         }
     }
@@ -1154,6 +1161,19 @@ export class GitProjectManifestService {
      * and the UI flags the stack instead of declaring a false recovery.
      */
     async restorePreviousGeneration(
+        stackName: string,
+        opts: { priorManifest: GitProjectManifest | null; incoming?: RecoveryIncoming | null },
+    ): Promise<boolean> {
+        // Whole only when every step succeeded; a partial restore leaves the
+        // mixture the mesh declaration reader must not trust.
+        return FileSystemService.getInstance().publishDeclarationSet(
+            stackName,
+            () => this.restorePreviousGenerationFiles(stackName, opts),
+            (restored) => restored,
+        );
+    }
+
+    private async restorePreviousGenerationFiles(
         stackName: string,
         opts: { priorManifest: GitProjectManifest | null; incoming?: RecoveryIncoming | null },
     ): Promise<boolean> {
@@ -1488,6 +1508,13 @@ export class GitProjectManifestService {
 
     /** Restore a detach snapshot and remove its marker after every file succeeds. */
     private async restoreDetachRecoveryFromRoot(stackName: string, repoUrl: string, branch: string, root: string): Promise<boolean> {
+        return FileSystemService.getInstance().publishDeclarationSet(
+            stackName,
+            () => this.restoreDetachRecoveryFiles(stackName, repoUrl, branch, root),
+        );
+    }
+
+    private async restoreDetachRecoveryFiles(stackName: string, repoUrl: string, branch: string, root: string): Promise<boolean> {
         const markerPath = path.join(root, DETACH_RECOVERY_MARKER);
         let raw: string;
         try {

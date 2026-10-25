@@ -92,6 +92,65 @@ async function recordAtomicPublication(
 }
 
 /**
+ * Whether the files that together declare one stack are whole. Each file is
+ * published on its own, so a refresh that runs between two publications of a
+ * multi-file operation (a Git apply, a rollback restore) reads a mixture of old
+ * and new layers: a service moved from one layer to another is in neither
+ * layer's union for a moment, and a reader that releases claims on the strength
+ * of that union releases them for good. A writer that touches several layers
+ * brackets the whole operation with a publication. While one is open, or after
+ * one was abandoned and nothing has made the set whole again, the declaration
+ * is unknown. The clock advances whenever a bracket opens or closes, so a read
+ * that spans a whole operation can tell. In memory by design, like the
+ * per-file publication record: after a restart nothing counts as published.
+ */
+interface DeclarationSetState {
+  open: number;
+  incomplete: boolean;
+  tainted: boolean;
+}
+const declarationSets = new Map<string, DeclarationSetState>();
+// Advances whenever any bracket opens or closes. Process-wide on purpose: a
+// false "changed" only makes a reader keep claims it could have released.
+let declarationSetClock = 0;
+
+export interface DeclarationSetPublication {
+  /** The layers are whole again: the operation finished or its writes were undone. */
+  complete(): void;
+  /** The layers may be a mixture. The declaration stays unknown until a later publication completes. */
+  abandon(): void;
+}
+
+function openDeclarationSet(key: string): DeclarationSetPublication {
+  let state = declarationSets.get(key);
+  if (!state) {
+    state = { open: 0, incomplete: false, tainted: false };
+    declarationSets.set(key, state);
+  }
+  const live = state;
+  live.open += 1;
+  declarationSetClock += 1;
+  let closed = false;
+  const close = (whole: boolean): void => {
+    if (closed) return;
+    closed = true;
+    live.open -= 1;
+    declarationSetClock += 1;
+    if (!whole) {
+      live.incomplete = true;
+      live.tainted = true;
+    }
+    if (live.open === 0) {
+      if (!live.tainted) live.incomplete = false;
+      live.tainted = false;
+      // A whole set with no open bracket carries no information to keep.
+      if (!live.incomplete) declarationSets.delete(key);
+    }
+  };
+  return { complete: () => close(true), abandon: () => close(false) };
+}
+
+/**
  * Keep the original owner on a staging file when the process is allowed to set
  * it (the common root-in-a-container case). A non-root process cannot hand a
  * file to another user; the replacement stays owned by the process, which is
@@ -455,6 +514,46 @@ export class FileSystemService {
       }
       return;
     }
+  }
+
+  /**
+   * Open a publication bracket for a writer that touches several of a stack's
+   * compose layers. See `DeclarationSetState`.
+   */
+  beginDeclarationSetPublication(stackName: string): DeclarationSetPublication {
+    return openDeclarationSet(this.resolveStackDir(stackName));
+  }
+
+  /**
+   * Run `write` as one declaration-set publication: whole when it resolves and
+   * `isWhole` (default: always) accepts the result, abandoned when it throws.
+   */
+  async publishDeclarationSet<T>(
+    stackName: string,
+    write: () => Promise<T>,
+    isWhole: (result: T) => boolean = () => true,
+  ): Promise<T> {
+    const publication = this.beginDeclarationSetPublication(stackName);
+    let result: T;
+    try {
+      result = await write();
+    } catch (err) {
+      publication.abandon();
+      throw err;
+    }
+    if (isWhole(result)) publication.complete();
+    else publication.abandon();
+    return result;
+  }
+
+  /**
+   * An opaque marker of the stack's declaration set, or null while the set is
+   * not whole. Equal markers from before and after a read mean no multi-file
+   * publication started, finished, or failed in between.
+   */
+  declarationSetEpoch(stackName: string): number | null {
+    const state = declarationSets.get(this.resolveStackDir(stackName));
+    return state && (state.open > 0 || state.incomplete) ? null : declarationSetClock;
   }
 
   /**

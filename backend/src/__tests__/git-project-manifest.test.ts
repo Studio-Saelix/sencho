@@ -1196,6 +1196,89 @@ describe('FileSystemService interaction', () => {
     });
 });
 
+describe('promoteGeneration declaration set bracket', () => {
+    async function twoFilePromotion(stackName: string) {
+        const svc = GitProjectManifestService.getInstance();
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        writeStackFile(stackName, 'aux.yaml', 'PRIOR-AUX\n');
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'aux.yaml', role: 'compose-override' }),
+        ]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        fs.writeFileSync(path.join(priorAbs, 'aux.yaml'), 'PRIOR-AUX\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+        const clone = makeClone({ 'compose.yaml': 'NEW\n', 'aux.yaml': 'NEW-AUX\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'bracket',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'aux.yaml', destRel: 'aux.yaml' }],
+            [],
+            BOUNDS,
+        );
+        const next = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml', contentSha256: 'x' }),
+            managedEntry({ materializedPath: 'aux.yaml', role: 'compose-override', contentSha256: 'y' }),
+        ], prior);
+        const promote = () => svc.promoteGeneration(stackName, { sha: 'bracket', candidateRelPath: candidateRel, manifest: next, priorManifest: prior });
+        return { promote, fsSvc: FileSystemService.getInstance() };
+    }
+
+    it('is open while the layers are rewritten and whole once the promotion commits', async () => {
+        const stackName = 'bracket-promote';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        const seen: Array<number | null> = [];
+        const realSave = FileSystemService.prototype.saveStackContent;
+        const realWrite = FileSystemService.prototype.writeStackFile;
+        vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(function (this: FileSystemService, ...args: Parameters<typeof realSave>) {
+            seen.push(fsSvc.declarationSetEpoch(stackName));
+            return realSave.apply(this, args);
+        });
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(function (this: FileSystemService, ...args: Parameters<typeof realWrite>) {
+            seen.push(fsSvc.declarationSetEpoch(stackName));
+            return realWrite.apply(this, args);
+        });
+        try {
+            expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+            await promote();
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(seen).toEqual([null, null]);
+        expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is whole again when a failed promotion restores the previous generation', async () => {
+        const stackName = 'bracket-restored';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValueOnce(new Error('simulated disk failure'));
+        try {
+            await expect(promote()).rejects.toMatchObject({ phase: 'restored' });
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays unknown when a failed promotion cannot restore the previous generation', async () => {
+        const stackName = 'bracket-stuck';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the recovery log */ });
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValue(new Error('simulated disk failure'));
+        try {
+            await expect(promote()).rejects.toMatchObject({ phase: 'recovery_required' });
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+    });
+});
+
 describe('promoteGeneration mid-write failure recovery', () => {
     it('restores the previous generation and manifest when a write fails mid-promotion', async () => {
         const svc = GitProjectManifestService.getInstance();

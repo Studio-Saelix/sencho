@@ -1361,6 +1361,154 @@ describe('opt-in keeps its first observation', () => {
     });
 });
 
+describe('a multi-file publication in progress does not release claims', () => {
+    const stack = 'multi-file-stack';
+    type Materialize = (
+        stackName: string,
+        files: Array<{ path: string; content: string }>,
+        contextDir: string | null,
+        syncEnv: boolean,
+        envContent: string | null,
+        prevSpec: { files: string[]; contextDir: string | null } | null,
+    ) => Promise<unknown>;
+
+    async function materialize(files: Array<{ path: string; content: string }>): Promise<void> {
+        const { GitSourceService } = await import('../services/GitSourceService');
+        const git = GitSourceService.getInstance() as unknown as { materialize: Materialize };
+        await git.materialize(stack, files, null, false, null, { files: ['compose.yaml', 'aux.yaml'], contextDir: null });
+    }
+
+    function savedServices(nodeId: number): Array<{ service: string; ports: number[] }> {
+        const row = DatabaseService.getInstance().listMeshStacks(nodeId).find((r) => r.stack_name === stack);
+        return parseLastKnownServices(row?.last_known_services);
+    }
+
+    /** A stopped stack whose db and web are declared across a primary and an auxiliary layer. */
+    async function stoppedStack(): Promise<{ id: number; name: string }> {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, stack, 'tester');
+        seedLastKnown(localNode.id, stack, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        await writeComposeFile(stack, ['db', 'web']);
+        await writeRawComposeFile(stack, 'networks:\n  front:\n    driver: bridge\n', 'aux.yaml');
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml', 'aux.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+        await withLocalDocker(async () => []);
+        return localNode;
+    }
+
+    /** Refresh once the first file of the operation has landed and before the second does. */
+    async function refreshBetweenPublications(): Promise<void> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const svc = MeshService.getInstance();
+        const realWrite = FileSystemService.prototype.writeStackFile;
+        let refreshed = false;
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+            this: InstanceType<typeof FileSystemService>,
+            ...args: Parameters<typeof realWrite>
+        ) {
+            if (!refreshed) {
+                refreshed = true;
+                await svc.refreshAliasCache();
+            }
+            return realWrite.apply(this, args);
+        });
+    }
+
+    it('keeps the claim of a service that moves between layers, through collisions and offline replay', async () => {
+        const localNode = await stoppedStack();
+        const host = `db.${stack}.${localNode.name}.sencho`;
+        await refreshBetweenPublications();
+
+        // db leaves the primary and arrives in the auxiliary layer. A refresh
+        // between the two publications sees it in neither.
+        await materialize([
+            { path: 'compose.yaml', content: composeYaml(['web']) },
+            { path: 'aux.yaml', content: composeYaml(['db']) },
+        ]);
+
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as Internals;
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+        expect(internals.reservedPorts.get(5432)?.host).toBe(host);
+
+        // The completed set declares db, so the next refresh keeps it too.
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+        expect(internals.reservedPorts.get(5432)?.host).toBe(host);
+
+        await withLocalDocker(async (opts) => (
+            stackFromFilter(opts) === 'api' ? [container('taker', 'running', [5432])] : []
+        ));
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        await expect(svc.optInStack(localNode.id, 'api', 'tester'))
+            .rejects.toThrow(`port 5432 is already claimed by ${host}`);
+
+        await withLocalDocker(() => Promise.reject(new Error('docker socket unavailable')));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence the inspection warn */ });
+        await svc.refreshAliasCache();
+        expect(internals.reservedPorts.get(5432)?.host).toBe(host);
+        expect((await svc.listAliases()).map((a) => a.host)).toContain(host);
+    });
+
+    it('still releases a claim once a completed publication no longer declares the service', async () => {
+        const localNode = await stoppedStack();
+        await refreshBetweenPublications();
+
+        await materialize([
+            { path: 'compose.yaml', content: composeYaml(['web']) },
+            { path: 'aux.yaml', content: 'networks:\n  front:\n    driver: bridge\n' },
+        ]);
+        // Mid-operation the declaration was unknown, so nothing was released yet.
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+
+        await MeshService.getInstance().refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual([{ service: 'web', ports: [8080] }]);
+        expect((MeshService.getInstance() as unknown as Internals).reservedPorts.has(5432)).toBe(false);
+    });
+
+    it('keeps the claim after a publication fails between layers, until a later one completes', async () => {
+        const localNode = await stoppedStack();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const realWrite = FileSystemService.prototype.writeStackFile;
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementationOnce(async () => {
+            throw new Error('disk full');
+        });
+
+        // The primary landed without db and the auxiliary layer never arrived.
+        await expect(materialize([
+            { path: 'compose.yaml', content: composeYaml(['web']) },
+            { path: 'aux.yaml', content: composeYaml(['db']) },
+        ])).rejects.toThrow('disk full');
+
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(true);
+
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(function (
+            this: InstanceType<typeof FileSystemService>,
+            ...args: Parameters<typeof realWrite>
+        ) {
+            return realWrite.apply(this, args);
+        });
+        await materialize([
+            { path: 'compose.yaml', content: composeYaml(['web']) },
+            { path: 'aux.yaml', content: composeYaml(['db']) },
+        ]);
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+    });
+});
+
 describe('parseLastKnownServices', () => {
     // A corrupt or hand-edited column must not take the refresh down, and
     // must not silently resurrect nonsense ports. Anything it cannot vouch
