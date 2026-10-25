@@ -2044,10 +2044,11 @@ describe('SchedulerService - lifecycle actions', () => {
       service: 'socket-proxy',
       message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
     });
-    (method === 'runCommand' ? mockRunCommand : mockDeployStack).mockRejectedValueOnce(refusal);
     if (action === 'restart') {
       mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }, { Id: 'c2', Service: 'socket-proxy' }]);
       mockAssertNoEndpointContainers.mockRejectedValueOnce(refusal);
+    } else {
+      (method === 'runCommand' ? mockRunCommand : mockDeployStack).mockRejectedValueOnce(refusal);
     }
 
     await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);

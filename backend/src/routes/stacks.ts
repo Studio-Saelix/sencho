@@ -594,7 +594,7 @@ async function runStackBulkOp(
       );
       if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
     } catch (error) {
-      // An error here is not a pass: the stack is reported refused and the batch carries on.
+      // An error here is not a pass: the stack is reported as failed and the batch carries on.
       console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
       return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: 'op_failed' };
     }

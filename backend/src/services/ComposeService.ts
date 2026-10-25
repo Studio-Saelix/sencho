@@ -114,8 +114,6 @@ export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
   public readonly rolledBack: boolean;
   public readonly originalError: unknown;
-  /** Why the rollback did not run, when the Docker endpoint guard refused it. */
-  public readonly rollbackRefusal?: string;
   /**
    * Canonical GitOps deploy operation id of the failed deploy, stamped by
    * ComposeService's deploy catch before this error is rethrown. Mutable
@@ -124,6 +122,7 @@ export class ComposeRollbackError extends Error {
    */
   public gitopsDeployOperationId?: string;
 
+  /** `rollbackRefusal` is why the Docker endpoint guard refused the rollback; it is part of the message. */
   constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean, rollbackRefusal?: string) {
     super(
       getErrorMessage(originalError, 'Compose operation failed')
@@ -133,7 +132,6 @@ export class ComposeRollbackError extends Error {
     this.rollbackAttempted = rollbackAttempted;
     this.rolledBack = rolledBack;
     this.originalError = originalError;
-    this.rollbackRefusal = rollbackRefusal;
     Object.setPrototypeOf(this, ComposeRollbackError.prototype);
   }
 }

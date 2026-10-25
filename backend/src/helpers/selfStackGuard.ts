@@ -3,6 +3,7 @@ import path from 'path';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import SelfIdentityService from '../services/SelfIdentityService';
+import { getErrorMessage } from '../utils/errors';
 
 export const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
 
@@ -34,8 +35,12 @@ export async function getRuntimeContainerIdCandidates(): Promise<string[]> {
   if (hostname && isHexId(hostname)) candidates.add(hostname);
   const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
   if (cgroupId) candidates.add(cgroupId);
-  const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
-  if (mountId) candidates.add(mountId);
+  try {
+    const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+    if (mountId) candidates.add(mountId);
+  } catch (error) {
+    console.warn('[SelfStackGuard] Could not read /proc/self/mountinfo:', getErrorMessage(error, 'read failed'));
+  }
   return [...candidates];
 }
 

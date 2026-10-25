@@ -423,7 +423,7 @@ describe('POST /api/stacks/bulk', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.results[0]).toMatchObject({ stackName: 'infra', ok: false, code: 'docker_endpoint_protected', error: refusal.message });
-    expect(NotificationService.getInstance().dispatchAlert).not.toHaveBeenCalledWith('error', expect.anything(), expect.stringContaining('infra'), expect.anything());
+    expect(NotificationService.getInstance().dispatchAlert).not.toHaveBeenCalledWith('error', 'deploy_failure', expect.anything(), expect.objectContaining({ stackName: 'infra' }));
   });
 
   it('keeps restart a restart kind, and skips the guard for start', async () => {

@@ -113,8 +113,10 @@ type RenderedService = {
   infrastructure: string | undefined;
   image: string | undefined;
   pullPolicy: string | undefined;
-  /** Services this one is wired to; Compose recreates it when one of them is recreated. */
+  /** Services whose recreate Compose follows with a recreate or restart of this one. */
   linkedServices: string[];
+  /** Services whose network, pid, or ipc namespace this one runs in; stopping either breaks the other. */
+  namespaceServices: string[];
 };
 
 type RenderedServiceDocument = {
@@ -123,21 +125,35 @@ type RenderedServiceDocument = {
   pull_policy?: unknown;
   depends_on?: unknown;
   network_mode?: unknown;
+  pid?: unknown;
+  ipc?: unknown;
   volumes_from?: unknown;
   links?: unknown;
 };
 
-/** Names of the services `service` depends on, shares a network namespace with, or mounts volumes from. */
-function linkedServicesOf(service: RenderedServiceDocument | undefined): string[] {
-  const linked = new Set<string>();
-  const dependsOn = service?.depends_on;
-  if (Array.isArray(dependsOn)) {
-    for (const name of dependsOn) if (typeof name === 'string') linked.add(name);
-  } else if (dependsOn && typeof dependsOn === 'object') {
-    for (const name of Object.keys(dependsOn)) linked.add(name);
+function serviceNamed(mode: unknown): string | null {
+  return typeof mode === 'string' && mode.startsWith('service:') ? mode.slice('service:'.length) || null : null;
+}
+
+/**
+ * The services `service` is wired to. A namespace mode (`network_mode`, `pid`,
+ * `ipc` set to `service:x`), `volumes_from`, `links`, and a `depends_on` entry
+ * with `restart: true` all make Compose recreate or restart it when the other
+ * service is recreated; a plain `depends_on` does not.
+ */
+function wiringOf(service: RenderedServiceDocument | undefined): { linked: string[]; namespace: string[] } {
+  const namespace = new Set<string>();
+  for (const mode of [service?.network_mode, service?.pid, service?.ipc]) {
+    const name = serviceNamed(mode);
+    if (name) namespace.add(name);
   }
-  const networkMode = service?.network_mode;
-  if (typeof networkMode === 'string' && networkMode.startsWith('service:')) linked.add(networkMode.slice('service:'.length));
+  const linked = new Set<string>(namespace);
+  const dependsOn = service?.depends_on;
+  if (dependsOn && typeof dependsOn === 'object' && !Array.isArray(dependsOn)) {
+    for (const [name, condition] of Object.entries(dependsOn)) {
+      if ((condition as { restart?: unknown } | null)?.restart === true) linked.add(name);
+    }
+  }
   for (const list of [service?.volumes_from, service?.links]) {
     if (!Array.isArray(list)) continue;
     for (const entry of list) {
@@ -146,7 +162,7 @@ function linkedServicesOf(service: RenderedServiceDocument | undefined): string[
       if (name) linked.add(name);
     }
   }
-  return [...linked];
+  return { linked: [...linked], namespace: [...namespace] };
 }
 
 /** The label value and image of every service in rendered Compose YAML. Throws on YAML that does not parse. */
@@ -165,11 +181,13 @@ function readRenderedServices(renderedYaml: string): Map<string, RenderedService
       const raw = (labels as Record<string, unknown>)[INFRASTRUCTURE_LABEL];
       if (raw !== undefined && raw !== null) infrastructure = String(raw);
     }
+    const wiring = wiringOf(service);
     out.set(name, {
       infrastructure,
       image: typeof service?.image === 'string' ? service.image : undefined,
       pullPolicy: typeof service?.pull_policy === 'string' ? service.pull_policy : undefined,
-      linkedServices: linkedServicesOf(service),
+      linkedServices: wiring.linked,
+      namespaceServices: wiring.namespace,
     });
   }
   return out;
@@ -314,6 +332,33 @@ function sharesSenchoNetwork(
 ): boolean {
   return Object.entries(networks ?? {}).some(([name, network]) =>
     self.isOwnNetwork(name) || (!!network?.NetworkID && self.isOwnNetwork(network.NetworkID)));
+}
+
+/** Every service reachable from `services` through shared network, pid, or ipc namespaces, in either direction. */
+function namespaceRelatives(services: Array<string | null>, rendered: Map<string, RenderedService>): Set<string> {
+  const edges = new Map<string, Set<string>>();
+  const link = (a: string, b: string): void => {
+    if (!edges.has(a)) edges.set(a, new Set());
+    edges.get(a)?.add(b);
+  };
+  for (const [name, view] of rendered) {
+    for (const other of view.namespaceServices) {
+      link(name, other);
+      link(other, name);
+    }
+  }
+  const reached = new Set<string>();
+  const queue = services.filter((s): s is string => s !== null);
+  const roots = new Set(queue);
+  while (queue.length > 0) {
+    const name = queue.shift() as string;
+    for (const next of edges.get(name) ?? []) {
+      if (reached.has(next) || roots.has(next)) continue;
+      reached.add(next);
+      queue.push(next);
+    }
+  }
+  return reached;
 }
 
 type Recreate = 'yes' | 'no' | 'unknown';
@@ -477,6 +522,19 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   });
   if (mislabeled.length > 0) found.push({ containers: mislabeled, role: 'mislabeled' });
 
+  // A service that runs in a protected service's network, pid, or ipc namespace,
+  // or whose namespace a protected service runs in, goes down with it: stopping
+  // or restarting either one cuts the connection. This also covers a proxy that
+  // shares the network of the container that owns the endpoint address.
+  for (const entry of [...found]) {
+    const related = namespaceRelatives(entry.containers.map(serviceOf), rendered);
+    const extra = stackContainers.filter(c => {
+      const service = serviceOf(c);
+      return service !== null && related.has(service) && !entry.containers.includes(c);
+    });
+    if (extra.length > 0) found.push({ containers: extra, role: entry.role === 'sencho' ? 'provider' : entry.role });
+  }
+
   const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] ?? null;
   const providerInfo = provider.state === 'resolved' ? provider.provider : null;
   const providerReason = provider.state === 'unresolved' ? provider.reason : null;
@@ -597,8 +655,36 @@ export async function evaluateDockerEndpointContainer(
     return refusalFor('sencho', self.getComposeLocation().service ?? 'sencho', null, null);
   }
 
+  if (provider.state === 'resolved' && await providerRunsInNamespaceOf(docker, provider.provider, fullId)) {
+    return refusalFor('provider', service, provider.provider, selfProject);
+  }
+
   if (provider.state === 'unresolved' && (selfState !== 'resolved' || sharesSenchoNetwork(info.NetworkSettings?.Networks, self))) {
     return refusalFor('unknown_provider', service, null, selfProject, provider.reason);
   }
   return null;
+}
+
+/**
+ * Whether the provider runs in a network, pid, or ipc namespace owned by
+ * `ownerId` (Compose `network_mode: service:x`, `pid`, `ipc`): stopping the
+ * owner then takes the provider down with it. A provider that cannot be
+ * inspected is not held against the owner, since the inspect of the owner
+ * itself already worked.
+ */
+async function providerRunsInNamespaceOf(
+  docker: InspectsContainers,
+  provider: DockerEndpointContainer,
+  ownerId: string,
+): Promise<boolean> {
+  try {
+    const info = await docker.getContainer(provider.containerId).inspect() as {
+      HostConfig?: { NetworkMode?: string; PidMode?: string; IpcMode?: string };
+    };
+    return [info.HostConfig?.NetworkMode, info.HostConfig?.PidMode, info.HostConfig?.IpcMode].some(mode =>
+      typeof mode === 'string' && mode.startsWith('container:') && matchesContainerId(ownerId, mode.slice('container:'.length)));
+  } catch (error) {
+    console.warn('[DockerEndpointGuard] Could not inspect the Docker endpoint container to check its shared namespaces:', getErrorMessage(error, 'inspect failed'));
+    return false;
+  }
 }

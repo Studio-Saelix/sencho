@@ -26,6 +26,8 @@ export interface AutomaticStackUpdateResult {
   healthGateId: string | null;
   message: string;
   recheckWarning?: string;
+  /** Why the Docker endpoint guard refused the update, so a remote caller can report it. */
+  endpointRefusal?: string;
 }
 
 /** Shared automatic mutation pipeline. Checked observations are validated under its exact stack lock. */
@@ -45,7 +47,10 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       // later attempt, and the caller is told why instead of seeing a failure.
       const endpointRefusal = await ComposeService.getInstance(nodeId).evaluateDockerEndpoint(stackName, { kind: 'update' });
       if (endpointRefusal) {
-        return { result: 'rejected' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${endpointRefusal.message}` };
+        return {
+          result: 'rejected' as const, applied: false, healthGateId: null,
+          message: `Stack "${stackName}": ${endpointRefusal.message}`, endpointRefusal: endpointRefusal.message,
+        };
       }
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(

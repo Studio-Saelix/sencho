@@ -5,6 +5,7 @@ import {
   isSelfStack,
   isSelfStackByIdentity,
   getSelfStackProjectName,
+  getRuntimeContainerIdCandidates,
   resolveSelfStackIdentity,
   SELF_STACK_PROTECTED_CODE,
   SELF_STACK_PROTECTED_MESSAGE,
@@ -85,6 +86,18 @@ describe('isSelfStack', () => {
     } as unknown as ReturnType<typeof DockerController.getInstance>);
 
     expect(await isSelfStack('sencho')).toBe(true);
+  });
+});
+
+describe('getRuntimeContainerIdCandidates', () => {
+  it('includes the id named by the engine mounts, and survives an unreadable mountinfo', async () => {
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    const mountinfo = vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue('c'.repeat(64));
+    expect(await getRuntimeContainerIdCandidates()).toEqual(['c'.repeat(64)]);
+
+    mountinfo.mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+    process.env.HOSTNAME = 'd'.repeat(12);
+    expect(await getRuntimeContainerIdCandidates()).toEqual(['d'.repeat(12)]);
   });
 });
 

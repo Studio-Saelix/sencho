@@ -249,6 +249,8 @@ describe('SelfIdentityService.initialize', () => {
     await fsp.writeFile(none, '22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n');
     expect(await SelfIdentityService.readContainerIdFromMountinfo(none)).toBeNull();
     expect(await SelfIdentityService.readContainerIdFromMountinfo(path.join(dir, 'does-not-exist'))).toBeNull();
+    // A directory is not "not found": it is a read error and must surface.
+    await expect(SelfIdentityService.readContainerIdFromMountinfo(dir)).rejects.toThrow();
 
     await fsp.rm(dir, { recursive: true, force: true });
   });
@@ -274,6 +276,21 @@ describe('SelfIdentityService.initialize', () => {
     expect(svc.getState()).toBe('resolved');
     expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
     expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
+  });
+
+  it('is unresolved, retried, and not cached as "not in Docker" when mountinfo cannot be read', async () => {
+    process.env.HOSTNAME = 'sencho';
+    mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    const mountinfo = vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo')
+      .mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }))
+      .mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    expect(await svc.ensureResolved()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('mountinfo read failed');
+    expect(await svc.ensureResolved()).toBe('none');
+    expect(mountinfo).toHaveBeenCalledTimes(2);
   });
 
   it('is idempotent: re-initialize is a no-op', async () => {

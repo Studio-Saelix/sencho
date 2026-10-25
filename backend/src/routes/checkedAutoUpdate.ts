@@ -71,7 +71,10 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
       },
     });
     if (result.applied) invalidateFleetUpdateCache();
-    res.json({ ...envelope, result: result.result, applied: result.applied, healthGateId: result.healthGateId });
+    res.json({
+      ...envelope, result: result.result, applied: result.applied, healthGateId: result.healthGateId,
+      ...(result.endpointRefusal ? { endpointRefusal: result.endpointRefusal } : {}),
+    });
   } catch (error) {
     if (error instanceof ImageUpdateObservationError) {
       res.status(error.status).json({ ...envelope, result: error.code === 'IMAGE_UPDATE_OBSERVATION_STALE' ? 'stale_observation' : 'rejected', code: error.code });

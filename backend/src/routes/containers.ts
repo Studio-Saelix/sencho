@@ -6,6 +6,7 @@ import { requirePermission } from '../middleware/permissions';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export const containersRouter = Router();
 
@@ -60,7 +61,7 @@ containersRouter.post('/:id/stop', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
       return;
     }
-    console.error('[Containers] Stop failed:', error);
+    console.error('[Containers] Stop failed for %s:', sanitizeForLog(req.params.id as string), error);
     res.status(500).json({ error: 'Failed to stop container' });
   }
 });
@@ -78,7 +79,7 @@ containersRouter.post('/:id/restart', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
       return;
     }
-    console.error('[Containers] Restart failed:', error);
+    console.error('[Containers] Restart failed for %s:', sanitizeForLog(req.params.id as string), error);
     res.status(500).json({ error: 'Failed to restart container' });
   }
 });

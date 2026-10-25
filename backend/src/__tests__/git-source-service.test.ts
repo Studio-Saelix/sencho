@@ -8574,6 +8574,35 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('names the Docker endpoint refusal, and opens no health gate, when the resumed deploy is refused', async () => {
+            const sha = 't9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9t9';
+            const { svc, deploySpy, promoteSpy } = await appliedWithFailedDeploy('retry-deploy-endpoint-refused', sha);
+            const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack');
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            deploySpy.mockReset();
+            deploySpy.mockRejectedValue(new DockerEndpointProtectedError({
+                reason: 'provider',
+                service: 'socket-proxy',
+                message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+            }));
+
+            try {
+                const result = await svc.retry('retry-deploy-endpoint-refused', { actor: 'tester' });
+
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+                expect(beginSpy).not.toHaveBeenCalled();
+                expect(result.reason).toBe('The source applied, but the deploy failed: Service "socket-proxy" carries the Docker connection Sencho is using.');
+                expect(result.nextAction).toBe('view_target_results');
+            } finally {
+                beginSpy.mockRestore();
+                errorSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
         it('resumes only the deploy when the applied generation\'s deploy failed, without fetching, promoting, or re-binding', async () => {
             const sha = 't8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8t8';
             const { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy } =

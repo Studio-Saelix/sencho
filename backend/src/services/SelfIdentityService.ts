@@ -222,7 +222,13 @@ class SelfIdentityService {
     // A container with its own hostname on a private cgroup namespace shows
     // neither its id in HOSTNAME nor in /proc/self/cgroup; the engine's bind
     // mounts for /etc/hostname and friends still name it.
-    const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+    let mountId: string | null = null;
+    try {
+      mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+    } catch (err) {
+      failure = `mountinfo read failed: ${(err as Error)?.message || String(err)}`;
+      console.warn('[SelfIdentity] mountinfo read failed:', (err as Error)?.message || String(err));
+    }
     if (mountId && mountId !== cgroupId) {
       const info = await attempt(mountId, 'mountinfo');
       if (info) return { state: 'resolved', info };
@@ -421,23 +427,27 @@ class SelfIdentityService {
     return false;
   }
 
+  // The Docker engine bind-mounts /etc/hostname, /etc/hosts, and /etc/resolv.conf
+  // from `<root>/containers/<64hex>/`, which survives a custom hostname and a
+  // private cgroup namespace. A missing file means "not found"; any other read
+  // error throws, so the caller records an unresolved identity instead of
+  // caching "not in Docker".
+  static async readContainerIdFromMountinfo(path = '/proc/self/mountinfo'): Promise<string | null> {
+    let contents: string;
+    try {
+      contents = await fs.readFile(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      throw err;
+    }
+    const match = contents.match(/\/containers\/([a-f0-9]{64})\/(?:hostname|hosts|resolv\.conf)\b/i);
+    return match ? match[1].toLowerCase() : null;
+  }
+
   // Both cgroupv1 (`12:cpuset:/docker/<64hex>`) and cgroupv2
   // (`0::/system.slice/docker-<64hex>.scope`, also podman's
   // `libpod-<64hex>.scope`) embed the full container ID as a 64-hex run.
   // Matching the longest such run survives kernel + runtime variation.
-  // The engine bind-mounts /etc/hostname, /etc/hosts, and /etc/resolv.conf from
-  // `<root>/containers/<64hex>/`, which survives a custom hostname and a private
-  // cgroup namespace.
-  static async readContainerIdFromMountinfo(path = '/proc/self/mountinfo'): Promise<string | null> {
-    try {
-      const contents = await fs.readFile(path, 'utf8');
-      const match = contents.match(/\/containers\/([a-f0-9]{64})\/(?:hostname|hosts|resolv\.conf)\b/i);
-      return match ? match[1].toLowerCase() : null;
-    } catch {
-      return null;
-    }
-  }
-
   static async readContainerIdFromCgroup(path = '/proc/self/cgroup'): Promise<string | null> {
     try {
       const contents = await fs.readFile(path, 'utf8');
