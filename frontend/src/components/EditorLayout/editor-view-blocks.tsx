@@ -40,10 +40,10 @@ import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import type { ServiceUrlEditBlock, ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { resolvePublishedPortClick, senchoLabelsOf, type ServiceUrlEditBlock, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import { ServicePortLink } from './ServicePortLink';
 import { ServiceSenchoLinks } from './ServiceSenchoLinks';
-import { presentServices } from '@/lib/senchoLabels';
+import { applicationLink, presentServices } from '@/lib/senchoLabels';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
 import StructuredLogViewer from '../StructuredLogViewer';
@@ -367,6 +367,61 @@ export interface ContainersHealthProps {
     onRetryServiceUrls?: () => void;
 }
 
+const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
+const IGNORE_PORTS = [1900, 53, 22];
+
+/** The published TCP port a card links, preferring well-known web UI ports. UDP is not browser-openable, so it never backs a link. */
+function pickMainPort(container: ContainerInfo): { publicPort: number; privatePort: number } | null {
+    const tcpPorts = (container.Ports ?? []).filter(p => p.Type !== 'udp');
+    if (tcpPorts.length === 0) return null;
+    let match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
+    if (!match) match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PublicPort));
+    if (!match) match = tcpPorts.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
+    const chosen = match || tcpPorts[0];
+    return { publicPort: chosen.PublicPort, privatePort: chosen.PrivatePort };
+}
+
+/** True when a published-port link on one of these containers already opens the service's `io.sencho.url`. */
+function portLinkOpensApplication(
+    containers: readonly ContainerInfo[],
+    service: string | undefined,
+    entry: ServiceUrlEntry | null,
+    node: Node | null | undefined,
+): boolean {
+    const application = applicationLink(senchoLabelsOf(entry), service);
+    if (!application) return false;
+    return containers.some(container => {
+        const port = pickMainPort(container);
+        if (!port || !port.publicPort || !port.privatePort) return false;
+        const click = resolvePublishedPortClick({
+            entry,
+            serviceName: container.Service,
+            publicPort: port.publicPort,
+            privatePort: port.privatePort,
+            portLabel: '',
+            node,
+        });
+        return click.kind === 'link' && click.href === application.url;
+    });
+}
+
+/**
+ * A hidden helper needs attention when one of its containers is unhealthy,
+ * restarting, dead, or stopped with a failure, or when only some of its
+ * replicas exist. A helper that exited cleanly (a finished one-shot job) and a
+ * service with no containers at all (a stopped stack) do not count.
+ */
+function containerNeedsAttention(container: ContainerInfo): boolean {
+    if (container.healthStatus === 'unhealthy') return true;
+    if (container.State === 'running') return false;
+    return !(container.State === 'exited' && /^exited \(0\)/i.test(container.Status ?? ''));
+}
+
+function hiddenServiceNeedsAttention(group: readonly ContainerInfo[], expectedReplicas: number): boolean {
+    if (group.length === 0) return false;
+    return group.length < expectedReplicas || group.some(containerNeedsAttention);
+}
+
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
 // sparklines. Row action buttons grow to a 44px touch target below md.
 export function ContainersHealth({
@@ -409,17 +464,15 @@ export function ContainersHealth({
     // Helper services the stack marks hidden collapse behind one row; the row keeps
     // their health visible and reveals them in place.
     const [showHidden, setShowHidden] = useState(false);
-    const sencho = serviceUrlEntry?.renderable ? serviceUrlEntry.senchoLabels ?? null : null;
+    const sencho = senchoLabelsOf(serviceUrlEntry);
     const presentation = presentServices(effectiveServices.map(spec => spec.name), sencho);
     const specByName = new Map(effectiveServices.map(spec => [spec.name, spec]));
     const orderedSpecs = presentation.order.flatMap(name => specByName.get(name) ?? []);
     const hiddenSpecs = orderedSpecs.filter(spec => presentation.hidden.has(spec.name));
     const visibleSpecs = showHidden ? orderedSpecs : orderedSpecs.filter(spec => !presentation.hidden.has(spec.name));
-    const hiddenNeedingAttention = hiddenSpecs.filter(spec => {
-        const group = safeContainers.filter(c => c.Service === spec.name);
-        return group.length < spec.expectedReplicas
-            || group.some(c => c.State !== 'running' || c.healthStatus === 'unhealthy');
-    }).length;
+    const hiddenNeedingAttention = hiddenSpecs.filter(spec =>
+        hiddenServiceNeedsAttention(safeContainers.filter(c => c.Service === spec.name), spec.expectedReplicas),
+    ).length;
     // Summary strip + density/expand toggles: multi-container stacks only,
     // whether the body is flat or grouped by declared service.
     const total = safeContainers.length;
@@ -560,23 +613,13 @@ export function ContainersHealth({
         container: ContainerInfo,
         hideServiceMenu: boolean,
         updateAffordance?: ServiceUpdateAffordance,
+        // False on replica cards of a multi-replica service: the service header carries its links once.
+        showSenchoLinks = true,
     ) => {
-                        let mainPort: number | undefined;
-                        let mainPortPrivate: number | undefined;
-                        let mainPortProto: string | undefined;
-                        // UDP ports are not browser-openable, so they never back a link.
-                        const tcpPorts = (container.Ports ?? []).filter(p => p.Type !== 'udp');
-                        if (tcpPorts.length > 0) {
-                            const WEB_UI_PORTS = [32400, 8989, 7878, 9696, 5055, 8080, 80, 443, 3000, 9000];
-                            const IGNORE_PORTS = [1900, 53, 22];
-                            let match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PrivatePort));
-                            if (!match) match = tcpPorts.find(p => WEB_UI_PORTS.includes(p.PublicPort));
-                            if (!match) match = tcpPorts.find(p => !IGNORE_PORTS.includes(p.PrivatePort) && !IGNORE_PORTS.includes(p.PublicPort));
-                            const chosen = match || tcpPorts[0];
-                            mainPort = chosen.PublicPort;
-                            mainPortPrivate = chosen.PrivatePort;
-                            mainPortProto = 'tcp';
-                        }
+                        const mainPortPick = pickMainPort(container);
+                        const mainPort = mainPortPick?.publicPort;
+                        const mainPortPrivate = mainPortPick?.privatePort;
+                        const mainPortProto = mainPortPick ? 'tcp' : undefined;
 
                         const portLabel = mainPort && mainPortPrivate
                             ? `${mainPort} → ${mainPortPrivate}/${mainPortProto}`
@@ -639,11 +682,13 @@ export function ContainersHealth({
                                                     </>
                                                 ) : null}
                                             </div>
-                                            <ServiceSenchoLinks
-                                                resolution={sencho}
-                                                service={composeService}
-                                                applicationLinkShown={Boolean(mainPort && mainPortPrivate)}
-                                            />
+                                            {showSenchoLinks && (
+                                                <ServiceSenchoLinks
+                                                    resolution={sencho}
+                                                    service={composeService}
+                                                    applicationLinkShown={portLinkOpensApplication([container], composeService, serviceUrlEntry, activeNode)}
+                                                />
+                                            )}
                                         </div>
                                     </div>
                                     <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
@@ -872,13 +917,16 @@ export function ContainersHealth({
                                     key={spec.name}
                                     className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-muted/40 px-3 py-2"
                                 >
-                                    <div className="flex min-w-0 items-center gap-2">
-                                        <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
-                                        {hasUpdate && (
-                                            <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
-                                                Update
-                                            </span>
-                                        )}
+                                    <div className="flex min-w-0 flex-col gap-0.5">
+                                        <div className="flex min-w-0 items-center gap-2">
+                                            <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
+                                            {hasUpdate && (
+                                                <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
+                                                    Update
+                                                </span>
+                                            )}
+                                        </div>
+                                        <ServiceSenchoLinks resolution={sencho} service={spec.name} applicationLinkShown={false} />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
@@ -893,16 +941,23 @@ export function ContainersHealth({
                         return (
                             <div key={spec.name} className="flex flex-col gap-2">
                                 <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-muted/40 px-3 py-2">
-                                    <div className="flex min-w-0 items-center gap-2">
-                                        <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
-                                        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
-                                            {runningCount}/{spec.expectedReplicas} running
-                                        </span>
-                                        {hasUpdate && (
-                                            <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
-                                                Update
+                                    <div className="flex min-w-0 flex-col gap-0.5">
+                                        <div className="flex min-w-0 items-center gap-2">
+                                            <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
+                                            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                                                {runningCount}/{spec.expectedReplicas} running
                                             </span>
-                                        )}
+                                            {hasUpdate && (
+                                                <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
+                                                    Update
+                                                </span>
+                                            )}
+                                        </div>
+                                        <ServiceSenchoLinks
+                                            resolution={sencho}
+                                            service={spec.name}
+                                            applicationLinkShown={portLinkOpensApplication(group, spec.name, serviceUrlEntry, activeNode)}
+                                        />
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1">
                                         {renderServiceUpdateButton(updateAffordance)}
@@ -910,7 +965,7 @@ export function ContainersHealth({
                                     </div>
                                 </div>
                                 <div className="ml-2 flex flex-col gap-2 border-l border-hairline pl-3">
-                                    {group.map(container => renderContainerCard(container, true))}
+                                    {group.map(container => renderContainerCard(container, true, undefined, false))}
                                 </div>
                             </div>
                         );
@@ -945,7 +1000,13 @@ export function ContainersHealth({
                 <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
             ) : (
                 <div className="flex flex-col gap-2">
-                    {safeContainers.map(container => renderContainerCard(container, false))}
+                    {safeContainers.map((container, index) => renderContainerCard(
+                        container,
+                        false,
+                        undefined,
+                        // Replicas of one service share its labels; only the first card shows them.
+                        safeContainers.findIndex(c => c.Service === container.Service) === index,
+                    ))}
                 </div>
             )}
 

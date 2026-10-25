@@ -11,12 +11,29 @@ import {
   declaredLabelBehavior,
   findSenchoLabelDefinition,
   inertLabelBehavior,
+  inertOriginOf,
+  mergeLabelBehavior,
   normalizeLinkName,
+  parseLabelEntries,
   parseSenchoUrl,
   resolveSenchoLabels,
+  sanitizeRemoteBehavior,
   unrenderableSenchoLabels,
+  type LabelBehavior,
 } from '../helpers/senchoLabels';
 import { CAPABILITIES } from '../services/CapabilityRegistry';
+import { serviceUrlFromLabels } from '../helpers/serviceUrlLabel';
+import fs from 'fs';
+import path from 'path';
+
+const chr = (code: number): string => String.fromCharCode(code);
+
+/** The resolution of a model that is expected to render; fails the test otherwise. */
+function resolveRendered(rendered: unknown) {
+  const resolved = resolveSenchoLabels(rendered);
+  if (!resolved.renderable) throw new Error('expected a rendered model');
+  return resolved;
+}
 
 function model(services: Record<string, unknown>): unknown {
   return { name: 'demo', services: Object.fromEntries(Object.entries(services).map(([n, labels]) => [n, { labels }])) };
@@ -34,6 +51,24 @@ describe('registry', () => {
       expect(def.example.startsWith('io.sencho.')).toBe(true);
     }
     expect(CAPABILITIES).toContain(SENCHO_LABELS_CAPABILITY);
+  });
+
+  it('gives every definition the parser that reads its value type', () => {
+    for (const def of SENCHO_LABEL_DEFINITIONS) {
+      expect(typeof def.parse).toBe('function');
+      const sample = def.valueType === 'url' ? 'https://a.example.com' : def.valueType === 'integer' ? '3' : 'true';
+      expect(def.parse(sample).ok).toBe(true);
+      expect(def.parse('definitely not valid').ok).toBe(false);
+    }
+  });
+
+  it('lists every registry key, example, and summary on the public docs page', () => {
+    const docs = fs.readFileSync(path.resolve(__dirname, '../../../docs/features/sencho-labels.mdx'), 'utf8');
+    for (const def of SENCHO_LABEL_DEFINITIONS) {
+      const key = def.match.kind === 'exact' ? def.match.key : `${def.match.prefix}<name>`;
+      expect(docs, `docs page names ${key}`).toContain(key);
+    }
+    expect(docs).toContain(SENCHO_LABELS_CAPABILITY);
   });
 
   it('routes keys to their definition and leaves foreign keys unmatched', () => {
@@ -69,6 +104,16 @@ describe('parseSenchoUrl', () => {
     ['https://app.example.com/a b', 'spaces or control'],
     ['https://app.example.com/\u0007', 'spaces or control'],
     ['https://app.example.com/\u0085', 'spaces or control'],
+    ['https://app.example.com/a\tb', 'spaces or control'],
+    ['https://app.example.com/a\nb', 'spaces or control'],
+    [`https://app.example.com/${chr(0x202e)}gnp.exe`, 'spaces or control'],
+    [`https://app.example.com/${chr(0x200b)}`, 'spaces or control'],
+    [`https://app.example.com/a${chr(0x2028)}b`, 'spaces or control'],
+    [`https://app.example.com/${chr(0x2066)}x`, 'spaces or control'],
+    [`https://app.example.com/a${chr(0xfeff)}b`, 'spaces or control'],
+    [`https://app.example.com/${chr(0x00ad)}`, 'spaces or control'],
+    ['https:\\\\app.example.com', 'must start with'],
+    ['https://:@app.example.com', 'username or password'],
     ['', 'empty'],
     [`https://app.example.com/${'a'.repeat(2100)}`, 'too long'],
   ])('rejects %j', (value, reason) => {
@@ -90,7 +135,7 @@ describe('normalizeLinkName', () => {
 
 describe('resolveSenchoLabels', () => {
   it('activates links, order, and hidden for each service independently', () => {
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       web: {
         'io.sencho.url': 'https://app.example.com',
         'io.sencho.url.docs': 'https://docs.example.com',
@@ -112,21 +157,23 @@ describe('resolveSenchoLabels', () => {
     expect(r.entries.every(e => e.state === 'active')).toBe(true);
   });
 
-  it('orders by value, then name, with unordered and invalid services last by name', () => {
-    const r = resolveSenchoLabels(model({
+  it('reports each service\'s own order value, and none for an unordered or invalid one', () => {
+    const r = resolveRendered(model({
       zeta: { 'io.sencho.order': '1' },
-      alpha: { 'io.sencho.order': '1' },
       mid: { 'io.sencho.order': '-5' },
       bad: { 'io.sencho.order': 'soon' },
       none: {},
       big: { 'io.sencho.order': '999999999' },
     }));
-    expect(r.serviceOrder).toEqual(['mid', 'alpha', 'zeta', 'big', 'bad', 'none']);
+    expect(Object.fromEntries(Object.entries(r.services).map(([name, labels]) => [name, labels.order])))
+      .toEqual({ big: 999999999, bad: null, mid: -5, none: null, zeta: 1 });
+    // The resolution carries no second copy of the presentation order.
+    expect(Object.keys(r).sort()).toEqual(['entries', 'renderable', 'services']);
   });
 
   it('ignores an invalid value with a fixed reason and never echoes the value', () => {
     const secret = 'https://user:hunter2@app.example.com';
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       web: { 'io.sencho.url': secret, 'io.sencho.hidden': 'maybe', 'io.sencho.order': '1.5' },
     }));
     expect(r.services.web).toEqual({ links: [], order: null, hidden: false });
@@ -140,7 +187,7 @@ describe('resolveSenchoLabels', () => {
   });
 
   it('keeps the key that sorts first when two named links normalize to one name', () => {
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       web: { 'io.sencho.url.Docs': 'https://a.example.com', 'io.sencho.url.docs': 'https://b.example.com' },
     }));
     expect(r.services.web.links).toEqual([{ name: 'docs', url: 'https://a.example.com' }]);
@@ -150,7 +197,7 @@ describe('resolveSenchoLabels', () => {
   });
 
   it('reports unknown io.sencho keys as unsupported and leaves foreign namespaces alone', () => {
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       web: { 'io.sencho.future': '1', 'sencho.service.url': 'https://old.example.com', 'io.sencho.URL': 'x' },
     }));
     expect(r.entries.map(e => [e.key, e.state])).toEqual([
@@ -161,7 +208,7 @@ describe('resolveSenchoLabels', () => {
   });
 
   it('reads list syntax, numeric and boolean scalars, and the last duplicate in a list', () => {
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       listed: ['io.sencho.url=https://a.example.com', 'io.sencho.url=https://b.example.com', 'io.sencho.hidden'],
       scalars: { 'io.sencho.order': 7, 'io.sencho.hidden': true },
     }));
@@ -172,7 +219,7 @@ describe('resolveSenchoLabels', () => {
   });
 
   it('accepts true and false in any case and rejects other spellings', () => {
-    const r = resolveSenchoLabels(model({
+    const r = resolveRendered(model({
       a: { 'io.sencho.hidden': 'TRUE' },
       b: { 'io.sencho.hidden': ' False ' },
       c: { 'io.sencho.hidden': 'yes' },
@@ -183,7 +230,7 @@ describe('resolveSenchoLabels', () => {
   });
 
   it('restores a rendered $$ to one dollar in link values only', () => {
-    const r = resolveSenchoLabels(model({ web: { 'io.sencho.url': 'https://app.example.com/?a=$$b' } }));
+    const r = resolveRendered(model({ web: { 'io.sencho.url': 'https://app.example.com/?a=$$b' } }));
     expect(r.services.web.links[0].url).toBe('https://app.example.com/?a=$b');
   });
 
@@ -196,16 +243,52 @@ describe('resolveSenchoLabels', () => {
 
   it('keeps service names that shadow Object properties as own keys', () => {
     const rendered = JSON.parse('{"services":{"constructor":{"labels":{"io.sencho.order":"2"}},"__proto__":{"labels":{"io.sencho.hidden":"true"}},"toString":{}}}') as unknown;
-    const r = resolveSenchoLabels(rendered);
+    const r = resolveRendered(rendered);
     const own = (name: string) => Object.getOwnPropertyDescriptor(r.services, name)?.value as { order: number | null; hidden: boolean } | undefined;
     expect(own('constructor')?.order).toBe(2);
     expect(own('__proto__')?.hidden).toBe(true);
-    expect(r.serviceOrder).toEqual(['constructor', '__proto__', 'toString']);
+    expect(Object.keys(r.services).sort()).toEqual(['__proto__', 'constructor', 'toString']);
+  });
+});
+
+describe('label reading', () => {
+  it('reads map and list syntax through one parser, skipping empty list items and non-scalars', () => {
+    expect([...parseLabelEntries({ a: 'x', b: 1, c: true, d: null, e: { nested: 1 } })]).toEqual([['a', 'x'], ['b', '1'], ['c', 'true']]);
+    expect([...parseLabelEntries(['a=x', 'bare', '', 'a=y', 7])]).toEqual([['a', 'y'], ['bare', ''], ['7', '']]);
+    expect(parseLabelEntries(undefined).size).toBe(0);
+    expect(parseLabelEntries('nope').size).toBe(0);
+  });
+
+  it('lets the preflight reader agree with the resolver on duplicates and rendered dollars', () => {
+    const listed = ['io.sencho.url=https://a.example.com', 'io.sencho.url=https://b.example.com/?x=$$y'];
+    expect(serviceUrlFromLabels(listed)).toBe('https://b.example.com/?x=$y');
+    expect(resolveRendered(model({ web: listed })).services.web.links[0].url).toBe('https://b.example.com/?x=$y');
+    expect(serviceUrlFromLabels({ 'io.sencho.url': 'javascript:alert(1)' })).toBeNull();
+    expect(serviceUrlFromLabels({ other: 'https://a.example.com' })).toBeNull();
+  });
+
+  it('unescapes every rendered dollar pair once and leaves a lone dollar', () => {
+    const url = (raw: string) => resolveRendered(model({ web: { 'io.sencho.url': raw, 'io.sencho.url.docs': raw } })).services.web.links;
+    expect(url('https://a.example.com/$$$$')[0].url).toBe('https://a.example.com/$$');
+    expect(url('https://a.example.com/$$$')[0].url).toBe('https://a.example.com/$$');
+    expect(url('https://a.example.com/$$a$$b')[1].url).toBe('https://a.example.com/$a$b');
+  });
+
+  it('reads whole-number orders within nine digits, with an optional sign', () => {
+    const order = (raw: string) => resolveRendered(model({ web: { 'io.sencho.order': raw } })).services.web.order;
+    expect([order('+5'), order('007'), order('-0'), order(' 12 ')]).toEqual([5, 7, -0, 12]);
+    expect([order('1234567890'), order('1e3'), order('0x10'), order('')]).toEqual([null, null, null, null]);
+  });
+
+  it('keeps the interpolated value of a label that no other file sets', () => {
+    // Compose resolves ${WEB_ORDER:-20} before the resolver sees the model.
+    const r = resolveRendered(model({ api: { 'io.sencho.order': '20', 'io.sencho.url.docs': 'https://docs.example.com/v/1' } }));
+    expect(r.services.api).toMatchObject({ order: 20, links: [{ name: 'docs', url: 'https://docs.example.com/v/1' }] });
   });
 });
 
 describe('label behavior annotations', () => {
-  const resolved = resolveSenchoLabels(model({ web: { 'io.sencho.url': 'https://a.example.com', 'io.sencho.order': 'x' } }));
+  const resolved = resolveRendered(model({ web: { 'io.sencho.url': 'https://a.example.com', 'io.sencho.order': 'x' } }));
 
   it('reports declared labels by their resolved state and ignores foreign keys', () => {
     expect(declaredLabelBehavior(resolved, 'web', 'io.sencho.url')).toMatchObject({ state: 'active', summary: expect.any(String) });
@@ -215,15 +298,84 @@ describe('label behavior annotations', () => {
 
   it('treats everything as inert when the model did not render', () => {
     expect(declaredLabelBehavior(unrenderableSenchoLabels(), 'web', 'io.sencho.url')?.state).toBe('inert');
-    expect(inertLabelBehavior('io.sencho.url', 'compose', false)?.state).toBe('inert');
+    expect(inertLabelBehavior('io.sencho.url', 'unrendered')?.state).toBe('inert');
   });
 
-  it('explains why image, runtime, and unknown copies are inert', () => {
-    for (const source of ['image', 'runtime', 'unknown', 'compose-system']) {
-      const behavior = inertLabelBehavior('io.sencho.url', source, true);
+  it('explains each reason a copy is inert, with a distinct explanation', () => {
+    const origins = ['image', 'runtime', 'stale-runtime', 'unknown', 'unrendered', 'node-wide'] as const;
+    const reasons = origins.map(origin => {
+      const behavior = inertLabelBehavior('io.sencho.url', origin);
       expect(behavior?.state).toBe('inert');
-      expect(behavior?.reason?.length).toBeGreaterThan(0);
+      return behavior?.reason;
+    });
+    expect(new Set(reasons).size).toBe(origins.length);
+    expect(inertLabelBehavior('traefik.enable', 'runtime')).toBeUndefined();
+  });
+
+  it('attributes a runtime copy that differs from a declared one to a stale container', () => {
+    expect(inertOriginOf('runtime', true)).toBe('stale-runtime');
+    expect(inertOriginOf('runtime', false)).toBe('runtime');
+    expect(inertOriginOf('image', true)).toBe('image');
+    expect(inertOriginOf('compose-system', false)).toBe('unknown');
+    expect(inertOriginOf('unknown', true)).toBe('unknown');
+  });
+
+  it('finds a declared label by service and key, even for a service named like an Object property', () => {
+    const odd = resolveRendered(JSON.parse('{"services":{"constructor":{"labels":{"io.sencho.order":"1"}}}}') as unknown);
+    expect(declaredLabelBehavior(odd, 'constructor', 'io.sencho.order')?.state).toBe('active');
+    expect(declaredLabelBehavior(odd, 'toString', 'io.sencho.order')).toBeUndefined();
+  });
+});
+
+describe('remote behavior sanitizing', () => {
+  it('keeps an absent behavior absent, so an older node reads as not reporting', () => {
+    expect(sanitizeRemoteBehavior('runtime', undefined)).toBeUndefined();
+  });
+
+  it('rebuilds a readable behavior field by field and drops extra properties', () => {
+    const raw = { state: 'invalid', reason: 'Use true or false.', summary: 'Collapses a helper.', extra: { deep: 1 } };
+    expect(sanitizeRemoteBehavior('compose', raw)).toEqual({ state: 'invalid', reason: 'Use true or false.', summary: 'Collapses a helper.' });
+  });
+
+  it.each([
+    ['an unknown state', { state: 'trusted' }],
+    ['a string', 'active'],
+    ['null', null],
+    ['an array', ['active']],
+    ['a non-string reason', { state: 'invalid', reason: 123 }],
+    ['a non-string summary', { state: 'active', summary: {} }],
+    ['no state', { reason: 'x' }],
+  ])('degrades %s to unsupported with a fixed reason', (_label, raw) => {
+    expect(sanitizeRemoteBehavior('compose', raw)).toEqual({
+      state: 'unsupported',
+      reason: expect.stringContaining('cannot read'),
+    });
+  });
+
+  it('forces every source other than the declared Compose copy to inert', () => {
+    for (const source of ['runtime', 'image', 'unknown', 'compose-system'] as const) {
+      expect(sanitizeRemoteBehavior(source, { state: 'active' })?.state).toBe('inert');
     }
-    expect(inertLabelBehavior('traefik.enable', 'runtime', true)).toBeUndefined();
+    expect(sanitizeRemoteBehavior('compose', { state: 'active' })?.state).toBe('active');
+  });
+
+  it('bounds the text a remote can send', () => {
+    const long = 'x'.repeat(5000);
+    const out = sanitizeRemoteBehavior('compose', { state: 'invalid', reason: long, summary: long });
+    expect(out?.reason?.length).toBe(240);
+    expect(out?.summary?.length).toBe(240);
+  });
+
+  it('keeps the more informative behavior when two nodes report one row', () => {
+    const inert: LabelBehavior = { state: 'inert', reason: 'a' };
+    const invalid: LabelBehavior = { state: 'invalid', reason: 'b' };
+    const active: LabelBehavior = { state: 'active' };
+    expect(mergeLabelBehavior(undefined, inert)).toBe(inert);
+    expect(mergeLabelBehavior(inert, undefined)).toBe(inert);
+    expect(mergeLabelBehavior(active, inert)).toBe(inert);
+    expect(mergeLabelBehavior(inert, active)).toBe(inert);
+    expect(mergeLabelBehavior(inert, invalid)).toBe(invalid);
+    expect(mergeLabelBehavior(invalid, inert)).toBe(invalid);
+    expect(mergeLabelBehavior(undefined, undefined)).toBeUndefined();
   });
 });

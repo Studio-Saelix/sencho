@@ -29,7 +29,7 @@ function writeStack(stack: string, files: Record<string, string>): void {
   for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
 }
 
-function stubRender(serviceLabels: Record<string, Record<string, string>> | null): void {
+function stubRender(serviceLabels: Record<string, Record<string, string> | string[]> | null): void {
   const rendered = serviceLabels === null
     ? null
     : JSON.stringify({
@@ -455,6 +455,63 @@ describe('io.sencho.* behavior annotations', () => {
     expect(labels.find(l => l.key === 'other.label')?.behavior).toBeUndefined();
   });
 
+  it('reads list-syntax labels, a bare key, and the last duplicate the same way the audit does', async () => {
+    writeStack('sl3', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: ['io.sencho.url=https://a.example.com', 'io.sencho.url=https://b.example.com', 'io.sencho.hidden', 'plain=1'] });
+    stubDockerList([]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl3');
+    const declared = Object.fromEntries((inv.services.find(s => s.service === 'web')?.declaredLabels ?? []).map(l => [l.key, l]));
+    expect(declared['io.sencho.url'].value).toBe('https://b.example.com');
+    expect(declared['io.sencho.url'].behavior?.state).toBe('active');
+    // A bare list item is an empty value: declared, but not a boolean.
+    expect(declared['io.sencho.hidden'].value).toBe('');
+    expect(declared['io.sencho.hidden'].behavior?.state).toBe('invalid');
+    expect(declared['plain'].behavior).toBeUndefined();
+  });
+
+  it('judges each replica of a service on its own value against the one declaration', async () => {
+    writeStack('sl4', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.hidden': 'true' } });
+    stubDockerList([
+      { id: 'r1', name: 'sl4-web-1', state: 'running', stack: 'sl4', service: 'web', imageId: 'img1', labels: { 'io.sencho.hidden': 'true' } },
+      { id: 'r2', name: 'sl4-web-2', state: 'running', stack: 'sl4', service: 'web', imageId: 'img1', labels: { 'io.sencho.hidden': 'false' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl4');
+    const replicas = inv.services.find(s => s.service === 'web')?.replicas ?? [];
+    const behaviors = replicas.map(r => r.runtimeLabels.find(l => l.key === 'io.sencho.hidden')?.behavior);
+    expect(behaviors[0]?.state).toBe('active');
+    expect(behaviors[1]?.state).toBe('inert');
+    // The declared key exists, so the stale copy is told to recreate, not to declare it.
+    expect(behaviors[1]?.reason).toContain('recreate the container');
+  });
+
+  it('treats a rendered $$ and the container\'s single $ as the same declaration', async () => {
+    writeStack('sl5', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.url': 'https://a.example.com/?x=$$y', 'other.label': 'a$$b' } });
+    stubDockerList([
+      { id: 'c1', name: 'sl5-web-1', state: 'running', stack: 'sl5', service: 'web', imageId: 'img1', labels: { 'io.sencho.url': 'https://a.example.com/?x=$y', 'other.label': 'a$b' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl5');
+    const runtime = Object.fromEntries((inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? []).map(l => [l.key, l]));
+    expect(runtime['io.sencho.url'].source).toBe('compose');
+    expect(runtime['io.sencho.url'].behavior?.state).toBe('active');
+    expect(runtime['other.label'].source).toBe('compose');
+  });
+
+  it('names an unrenderable stack as the reason for every io.sencho.* label and never activates one', async () => {
+    writeStack('sl6', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'io.sencho.url': 'https://a.example.com' } });
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({ rendered: 'not json', stderr: '', code: 0, timedOut: false }),
+    } as unknown as ComposeService);
+    stubDockerList([
+      { id: 'c1', name: 'sl6-web-1', state: 'running', stack: 'sl6', service: 'web', imageId: 'img1', labels: { 'io.sencho.url': 'https://a.example.com' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl6');
+    const labels = inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? [];
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'inert', reason: expect.stringContaining('could not be rendered') });
+  });
+
   it('never marks a node-wide io.sencho.* label active', async () => {
     stubDockerList([
       {
@@ -468,6 +525,8 @@ describe('io.sencho.* behavior annotations', () => {
     expect(labels.find(l => l.key === 'io.sencho.mesh')?.behavior?.state).toBe('inert');
     expect(labels.find(l => l.key === 'plain')?.behavior).toBeUndefined();
     expect(inv.byLabel.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+    // The node-wide view has no Compose model, so its reason points at the stack view instead of claiming the label is undeclared.
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.reason).toContain('Compose Labels view');
   });
 });
 
@@ -636,34 +695,108 @@ describe('GET /api/fleet/container-labels', () => {
       db.deleteNode(remoteId);
     }
   });
-  it('keeps a remote row\'s io.sencho.* behavior, accepts an older node without one, and rejects a malformed one', async () => {
-    stubDockerList([]);
-    const db = DatabaseService.getInstance();
-    const remoteId = db.addNode({ name: 'remote-beh', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
-    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
+  describe('remote io.sencho.* behavior', () => {
     const containers = [{ id: 'c', name: 'n', stack: 's', service: 'web' }];
-    const payload = (byLabel: unknown[]) => JSON.stringify({ nodeId: remoteId, containers: [], partial: false, generatedAt: 0, byLabel });
-    const respond = (body: string) => vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
-    try {
-      respond(payload([
-        { key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime', behavior: { state: 'inert', reason: 'Present only on the running container.' }, containers },
-        { key: 'plain', value: '1', source: 'runtime', containers },
-      ]));
-      let res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
-      expect(res.body.nodeErrors[remoteId]).toBeUndefined();
-      const rows = res.body.aggregatedByLabel as Array<{ key: string; behavior?: { state: string } }>;
-      expect(rows.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
-      expect(rows.find(r => r.key === 'plain')?.behavior).toBeUndefined();
+    const row = (extra: Record<string, unknown>) => ({ key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime', containers, ...extra });
+    const respondWith = (inventories: Record<string, unknown>) => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: Parameters<typeof fetch>[0]) => {
+        const host = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url).hostname;
+        return new Response(JSON.stringify(inventories[host]), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+    };
+    const payload = (nodeId: number, byLabel: unknown[], labelContainers: unknown[] = []) =>
+      ({ nodeId, containers: labelContainers, partial: false, generatedAt: 0, byLabel });
+    const addRemote = (name: string, host: string) => {
+      const db = DatabaseService.getInstance();
+      const id = db.addNode({ name, type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: `http://${host}`, api_token: 't' });
+      return id;
+    };
+    const fetchFleet = () => request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+    const rowsOf = (body: { aggregatedByLabel: Array<{ key: string; value: string; behavior?: { state: string; reason?: string } }> }) => body.aggregatedByLabel;
 
-      respond(payload([{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior: { state: 'trusted' }, containers }]));
-      res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
-      expect(res.body.nodeErrors[remoteId]).toBe('Remote returned an unexpected label-inventory payload');
+    it('keeps a remote row\'s behavior and accepts an older node that sends none', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-beh', 'new.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://new.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'new.invalid': payload(remoteId, [
+          row({ behavior: { state: 'inert', reason: 'Present only on the running container.' } }),
+          { key: 'plain', value: '1', source: 'runtime', containers },
+        ]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+        expect(rowsOf(res.body).find(r => r.key === 'plain')?.behavior).toBeUndefined();
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
 
-      respond(payload([{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior: 'active', containers }]));
-      res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
-      expect(res.body.nodeErrors[remoteId]).toBe('Remote returned an unexpected label-inventory payload');
-    } finally {
-      db.deleteNode(remoteId);
-    }
+    it.each([
+      ['an unknown state', { state: 'trusted' }],
+      ['a string', 'active'],
+      ['a non-string reason', { state: 'inert', reason: 123 }],
+    ])('degrades %s to an unsupported row and keeps the node\'s whole inventory', async (_label, behavior) => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-bad', 'bad.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://bad.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'bad.invalid': payload(remoteId, [
+          row({ behavior }),
+          { key: 'plain', value: '1', source: 'runtime', containers },
+        ], [{ id: 'c', name: 'n', stack: 's', service: 'web', state: 'running', labels: [{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior }] }]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'unsupported' });
+        expect(rowsOf(res.body).find(r => r.key === 'plain')).toBeDefined();
+        const node = (res.body.nodes as Array<{ nodeId: number; inventory: { containers: Array<{ labels: Array<{ behavior?: { state: string } }> }> } }>).find(n => n.nodeId === remoteId);
+        expect(node?.inventory.containers[0].labels[0].behavior?.state).toBe('unsupported');
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('forces a remote\'s active claim on a runtime-only label to inert and bounds its text', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-claim', 'claim.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://claim.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({ 'claim.invalid': payload(remoteId, [
+          row({ behavior: { state: 'active', reason: 'y'.repeat(5000), extra: { nested: true } } }),
+        ]) });
+        const res = await fetchFleet();
+        const behavior = rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior;
+        expect(behavior?.state).toBe('inert');
+        expect(behavior?.reason?.length).toBe(240);
+        expect(JSON.stringify(behavior)).not.toContain('nested');
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('shows the same status whichever node reports a row first when versions differ', async () => {
+      stubDockerList([]);
+      const oldId = addRemote('remote-old', 'old.invalid');
+      const newId = addRemote('remote-new', 'new2.invalid');
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) =>
+        id === oldId ? { apiUrl: 'http://old.invalid', apiToken: 't', trustedLoopback: false }
+          : id === newId ? { apiUrl: 'http://new2.invalid', apiToken: 't', trustedLoopback: false } : null);
+      try {
+        respondWith({
+          'old.invalid': payload(oldId, [row({})]),
+          'new2.invalid': payload(newId, [row({ behavior: { state: 'inert', reason: 'Present only on the running container.' } })]),
+        });
+        const first = await fetchFleet();
+        // Reverse the node order so the newer node is merged first.
+        const realGetNodes = DatabaseService.getInstance().getNodes.bind(DatabaseService.getInstance());
+        vi.spyOn(DatabaseService.getInstance(), 'getNodes').mockImplementation(() => [...realGetNodes()].reverse());
+        const second = await fetchFleet();
+        expect(rowsOf(first.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+        expect(rowsOf(second.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+      } finally {
+        DatabaseService.getInstance().deleteNode(oldId);
+        DatabaseService.getInstance().deleteNode(newId);
+      }
+    });
   });
 });

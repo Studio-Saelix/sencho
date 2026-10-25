@@ -196,7 +196,24 @@ describe('ContainerLabelsTab io.sencho.* status', () => {
     await user.click(await screen.findByText('By label'));
     const badge = await screen.findByTestId('label-behavior');
     expect(badge).toHaveAttribute('data-state', 'inert');
-    expect(badge.getAttribute('title')).toContain('Declare it in the Compose file');
+    await user.click(badge);
+    expect(await screen.findByTestId('label-behavior-reason')).toHaveTextContent('Declare it in the Compose file');
+  });
+
+  it('says a node reports no status for an io.sencho.* label it sent without one', async () => {
+    const user = userEvent.setup();
+    const olderNode = {
+      ...senchoFleet,
+      aggregatedByLabel: [
+        { key: 'io.sencho.url', value: 'https://runtime.example.com', source: 'runtime' as const, containers: senchoFleet.aggregatedByLabel[0].containers },
+        { key: 'traefik.enable', value: 'true', source: 'runtime' as const, containers: senchoFleet.aggregatedByLabel[0].containers },
+      ],
+    };
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => olderNode } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    expect(await screen.findAllByTestId('label-behavior-not-reported')).toHaveLength(1);
+    expect(screen.queryByTestId('label-behavior')).toBeNull();
   });
 
   it('marks it inert in the by-container view and leaves other labels unmarked', async () => {

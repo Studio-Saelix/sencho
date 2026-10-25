@@ -3,8 +3,10 @@
  * model (so interpolation and a merged override file count), and the stack view
  * reports which ones are active, ignored, or unsupported.
  *
- * Seeds its own stack and removes it afterwards. Nothing is deployed: the
- * labels are read from the Compose files, not from running containers.
+ * The first group seeds its own stack and deploys nothing: labels are read from
+ * the Compose files, not from running containers. The second group deploys a
+ * small stack to check the container list: links shown once per service, hidden
+ * helpers collapsed, and only a failed helper flagged as needing attention.
  */
 import { test, expect, type Page } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
@@ -19,7 +21,8 @@ const COMPOSE = `services:
   api:
     image: nginx:alpine
     labels:
-      io.sencho.order: "10"
+      io.sencho.order: "\${API_ORDER:-10}"
+      io.sencho.url.docs: https://\${DOCS_HOST:-docs.example.com}/api
       io.sencho.hidden: "maybe"
       io.sencho.future: "1"
   helper:
@@ -39,7 +42,6 @@ interface SenchoResolution {
   renderable: boolean;
   services: Record<string, SenchoServiceLabels>;
   entries: Array<{ service: string; key: string; state: string }>;
-  serviceOrder: string[];
 }
 
 async function seedStack(page: Page): Promise<void> {
@@ -115,11 +117,14 @@ test.describe('io.sencho.* labels', () => {
     ]);
     expect(serviceUrls).toEqual({ web: 'https://app.example.com' });
     expect(senchoLabels.services.helper.hidden).toBe(true);
+    // api's labels are set only in the base file, through interpolation defaults, so the
+    // resolved values are the defaults Compose substituted, not a file's literal text.
+    expect(senchoLabels.services.api.order).toBe(10);
+    expect(senchoLabels.services.api.links).toEqual([{ name: 'docs', url: 'https://docs.example.com/api' }]);
     // An invalid value is ignored, so the service stays visible, and an unknown key is reported.
     expect(senchoLabels.services.api.hidden).toBe(false);
     const states = Object.fromEntries(senchoLabels.entries.filter(e => e.service === 'api').map(e => [e.key, e.state]));
-    expect(states).toMatchObject({ 'io.sencho.hidden': 'invalid', 'io.sencho.order': 'active', 'io.sencho.future': 'unsupported' });
-    expect(senchoLabels.serviceOrder).toEqual(['web', 'api', 'helper']);
+    expect(states).toMatchObject({ 'io.sencho.hidden': 'invalid', 'io.sencho.order': 'active', 'io.sencho.future': 'unsupported', 'io.sencho.url.docs': 'active' });
   });
 
   test('the stack view lists services in label order and marks each label status', async ({ page }) => {
@@ -136,7 +141,92 @@ test.describe('io.sencho.* labels', () => {
     await expect(hiddenRow).toContainText('Use true or false.');
     const futureRow = panel.getByTestId('compose-label-row').filter({ hasText: 'io.sencho.future' });
     await expect(futureRow.getByTestId('label-behavior')).toHaveText('Unsupported');
-    const orderRow = panel.getByTestId('compose-label-row').filter({ hasText: 'io.sencho.url.docs' });
-    await expect(orderRow.getByTestId('label-behavior')).toHaveText('Active');
+    const docsRow = panel.getByTestId('compose-label-row').filter({ hasText: 'io.sencho.url.docs' }).filter({ hasText: 'docs.example.com/api' });
+    await expect(docsRow.getByTestId('label-behavior')).toHaveText('Active');
+  });
+});
+
+const DEPLOYED_STACK = 'e2e-sencho-labels-live';
+const DEPLOYED_COMPOSE = `services:
+  web:
+    image: alpine:3
+    command: sleep infinity
+    restart: "no"
+    deploy:
+      replicas: 2
+    labels:
+      io.sencho.order: "1"
+      io.sencho.url: https://app.example.com
+      io.sencho.url.docs: https://\${DOCS_HOST:-docs.example.com}/web
+  seed:
+    image: alpine:3
+    command: sh -c "exit 0"
+    restart: "no"
+    labels:
+      io.sencho.hidden: "true"
+  broken:
+    image: alpine:3
+    command: sleep infinity
+    restart: "no"
+    stop_grace_period: 1s
+    labels:
+      io.sencho.hidden: "true"
+`;
+
+test.describe('io.sencho.* labels on a deployed stack', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page);
+    await page.evaluate(async (stackName: string) => {
+      await fetch(`/api/stacks/${stackName}/down`, { method: 'POST', credentials: 'include' }).catch(() => {});
+      await fetch(`/api/stacks/${stackName}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, DEPLOYED_STACK);
+  });
+  test.afterEach(async ({ page }) => {
+    await page.evaluate(async (stackName: string) => {
+      await fetch(`/api/stacks/${stackName}/down`, { method: 'POST', credentials: 'include' }).catch(() => {});
+      await fetch(`/api/stacks/${stackName}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }, DEPLOYED_STACK);
+  });
+
+  test('shows links once per service, collapses helpers, and flags only the failed one', async ({ page }) => {
+    test.setTimeout(90_000);
+    const status = await page.evaluate(async ({ stackName, content }: { stackName: string; content: string }) => {
+      const create = await fetch('/api/stacks', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stackName }),
+      });
+      if (!create.ok && create.status !== 409) return create.status;
+      const write = await fetch(`/api/stacks/${stackName}`, {
+        method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }),
+      });
+      if (!write.ok) return write.status;
+      const deploy = await fetch(`/api/stacks/${stackName}/deploy`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ skip_scan: true }),
+      });
+      if (!deploy.ok) return deploy.status;
+      // A deploy that sees a container crash is rolled back, so the helper fails after it: stop it, which ends it with a non-zero exit.
+      const stop = await fetch(`/api/stacks/${stackName}/services/broken/stop`, { method: 'POST', credentials: 'include' });
+      return stop.status;
+    }, { stackName: DEPLOYED_STACK, content: DEPLOYED_COMPOSE });
+    expect(status).toBe(200);
+
+    await page.reload();
+    await waitForStacksLoaded(page);
+    await page.getByText(DEPLOYED_STACK, { exact: true }).first().click();
+
+    // Two helpers are hidden. The one-shot job exited 0 and the other was stopped with a failure, so exactly one needs attention.
+    const row = page.getByTestId('hidden-services-row');
+    await expect(row).toContainText('2 hidden helper services', { timeout: 30_000 });
+    await expect(page.getByTestId('hidden-services-attention')).toHaveText('1 needs attention');
+    await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toHaveCount(0);
+
+    // The service runs two replicas, and its interpolated named link shows once on the service header.
+    const docs = page.getByRole('link', { name: 'docs', exact: true });
+    await expect(docs).toHaveCount(1);
+    await expect(docs).toHaveAttribute('href', 'https://docs.example.com/web');
+
+    // Revealing the helpers lists the failed one in place.
+    await row.getByRole('button', { name: 'Show' }).click();
+    await expect(page.getByText('e2e-sencho-labels-live-broken-1')).toBeVisible();
+    await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toBeVisible();
   });
 });

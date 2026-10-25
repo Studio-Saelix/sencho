@@ -13,7 +13,7 @@ import { parseEffectiveAnatomy } from '../services/effectiveAnatomy';
 describe('parseEffectiveAnatomy', () => {
   it('returns an empty model for null / non-object input', () => {
     const empty = { services: [], ports: {}, volumes: {}, restart: null, networks: [], serviceUrls: {},
-      senchoLabels: { renderable: false, services: {}, entries: [], serviceOrder: [] } };
+      senchoLabels: { renderable: false } };
     expect(parseEffectiveAnatomy(null)).toEqual(empty);
     expect(parseEffectiveAnatomy('nope')).toEqual(empty);
     expect(parseEffectiveAnatomy(42)).toEqual(empty);
@@ -159,13 +159,14 @@ describe('parseEffectiveAnatomy', () => {
         worker: { labels: { 'io.sencho.hidden': 'true', 'io.sencho.url': 'javascript:alert(1)' } },
       },
     });
-    expect(anatomy.senchoLabels.renderable).toBe(true);
-    expect(anatomy.senchoLabels.serviceOrder).toEqual(['web', 'worker']);
-    expect(anatomy.senchoLabels.services.web.links.map(l => l.name)).toEqual([null, 'docs']);
-    expect(anatomy.senchoLabels.services.worker.hidden).toBe(true);
+    const labels = anatomy.senchoLabels;
+    if (!labels.renderable) throw new Error('expected a rendered model');
+    expect(labels.services.web.order).toBe(5);
+    expect(labels.services.web.links.map(l => l.name)).toEqual([null, 'docs']);
+    expect(labels.services.worker.hidden).toBe(true);
     // An invalid application link is reported, never promoted to the service URL.
     expect(anatomy.serviceUrls).toEqual({ web: 'https://app.example.com' });
-    expect(anatomy.senchoLabels.entries.find(e => e.service === 'worker' && e.key === 'io.sencho.url')?.state).toBe('invalid');
+    expect(labels.entries.find(e => e.service === 'worker' && e.key === 'io.sencho.url')?.state).toBe('invalid');
   });
 
   it('turns a rendered $$ back into one literal dollar', () => {

@@ -5,7 +5,7 @@ vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(u
 
 import { ServicePortLink } from './ServicePortLink';
 import { copyToClipboard } from '@/lib/clipboard';
-import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { parseServiceUrlResponse, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { Node } from '@/context/NodeContext';
 
 const entry: ServiceUrlEntry = {
@@ -388,5 +388,38 @@ describe('ServicePortLink runtime ownership', () => {
     expect(screen.getByRole('link').querySelector('svg')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Copy service URL' }));
     await waitFor(() => expect(copyToClipboard).toHaveBeenCalledWith('http://localhost:8090'));
+  });
+});
+
+describe('ServicePortLink on a node that predates the io.sencho.* contract', () => {
+  // The earlier release answers with a URL map for the draft label and no resolution.
+  const olderNode = parseServiceUrlResponse(1, 'web', true, {
+    renderable: true,
+    services: ['api'],
+    serviceUrls: { api: 'https://old-label.example.com' },
+    serviceUrlEdit: { api: 'root' },
+    serviceUrlClear: { api: 'root' },
+    ports: { api: [{ host: '8080', proto: 'tcp' }] },
+  });
+
+  it('keeps the generated link and offers no save that the node would silently ignore', () => {
+    const onEdit = vi.fn();
+    render(
+      <ServicePortLink
+        portLabel="8080"
+        publicPort={8080}
+        privatePort={80}
+        serviceName="api"
+        entry={olderNode}
+        node={{ id: 1, type: 'local' } as Node}
+        canEdit
+        sourceServices={['api']}
+        onEdit={onEdit}
+      />,
+    );
+    const link = screen.getByRole('link');
+    expect(link.getAttribute('href')).not.toContain('old-label.example.com');
+    expect(screen.queryByRole('button', { name: 'Edit service URL' })).toBeNull();
+    expect(onEdit).not.toHaveBeenCalled();
   });
 });

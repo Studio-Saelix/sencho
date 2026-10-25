@@ -20,7 +20,7 @@ import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { GitOpsSourceStatus } from '@/types/gitops';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { presentServices } from '@/lib/senchoLabels';
-import { resolvePublishedPortClick, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
+import { resolvePublishedPortClick, senchoLabelsOf, tcpOwners, resolveInterpolatedHostPorts, type DisplayPortRow } from '@/lib/serviceUrlResolve';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
 import DriftPanel from './stack/DriftPanel';
@@ -408,10 +408,7 @@ export default function StackAnatomyPanel({
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
-  const servicePresentation = presentServices(
-    anatomy?.services ?? [],
-    serviceUrlEntry?.renderable ? serviceUrlEntry.senchoLabels ?? null : null,
-  );
+  const servicePresentation = presentServices(anatomy?.services ?? [], senchoLabelsOf(serviceUrlEntry));
 
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);

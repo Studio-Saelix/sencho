@@ -45,12 +45,18 @@ export interface ServiceUrlEntry {
   restart?: string | null;
   networks?: string[];
   /**
-   * The node's `io.sencho.*` resolution. `null` when the node does not report one
-   * (an older version), so no link, order, or hidden state is applied from it.
+   * The node's `io.sencho.*` resolution. Present on every `ready` entry: a node
+   * that does not report a well-formed one is `unsupported` as a whole, so no
+   * link, order, or hidden state is applied from it.
    */
-  senchoLabels?: SenchoLabelResolution | null;
+  senchoLabels?: SenchoLabelResolution;
   /** The last refresh failed. This entry is still the previous ready model. */
   refreshFailed?: boolean;
+}
+
+/** The node's `io.sencho.*` resolution for an entry that rendered and reported one, else null. */
+export function senchoLabelsOf(entry: ServiceUrlEntry | null | undefined): SenchoLabelResolution | null {
+  return entry?.renderable ? entry.senchoLabels ?? null : null;
 }
 
 export type PortClick =
@@ -416,9 +422,12 @@ export function parseServiceUrlResponse(
     ? record.networks.filter((name): name is string => typeof name === 'string')
     : [];
   const facts = { ports, services, volumes, restart, networks };
-  // An older node has the dossier facts and no service URL field. Keep the
-  // facts and mark the URL list unsupported so the generated link stays.
-  if (!('serviceUrls' in record)) {
+  // An older node has the dossier facts and no service URL field, or has the
+  // field for the earlier draft label and no `io.sencho.*` resolution. Keep the
+  // facts and mark the URL list unsupported so the generated link stays and
+  // nothing from the contract is applied halfway.
+  const senchoLabels = readSenchoLabels(record.senchoLabels);
+  if (!('serviceUrls' in record) || !senchoLabels) {
     return { ...empty, ...facts, status: 'unsupported', renderable: record.renderable === true };
   }
   const serviceUrls = readServiceUrls(record.serviceUrls);
@@ -447,7 +456,7 @@ export function parseServiceUrlResponse(
     serviceUrlClear,
     ports,
     renderable: true,
-    senchoLabels: readSenchoLabels(record.senchoLabels),
+    senchoLabels,
     services,
     volumes,
     restart,

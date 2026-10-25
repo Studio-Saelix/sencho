@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
-import { LabelBehaviorBadge } from './LabelBehaviorBadge';
+import { LabelBehaviorStatus } from './LabelBehaviorBadge';
 import {
   LABEL_DISAMBIGUATION_COPY,
   SENCHO_LABELS_NODE_COPY,
@@ -17,6 +17,7 @@ import {
   SOURCE_FACET_LABELS,
   matchesSearch,
   sourcesPresent,
+  withReadBehaviors,
   type LabelSource,
   type LabelValue,
   type StackLabelInventory,
@@ -49,7 +50,7 @@ function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => voi
       <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">
         {SOURCE_LABELS[label.source]}
       </span>
-      {label.behavior && <LabelBehaviorBadge behavior={label.behavior} />}
+      <LabelBehaviorStatus label={label} />
       {label.redacted && isAdmin && onReveal && (
         <button type="button" onClick={onReveal} className="font-mono text-[10px] uppercase text-brand hover:underline">
           Reveal
@@ -82,8 +83,9 @@ function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container
 
 export default function ComposeLabelsPanel({ stackName }: { stackName: string }) {
   const { isAdmin } = useAuth();
-  const { hasCapability } = useNodes();
-  const senchoLabelsSupported = hasCapability('sencho-labels-v1');
+  const { hasCapability, activeNodeMeta } = useNodes();
+  // A failed or pending node info fetch has no version; only a node that answered and lacks the capability is old.
+  const nodeLacksSenchoLabels = activeNodeMeta?.version != null && !hasCapability('sencho-labels-v1');
   const [inventory, setInventory] = useState<StackLabelInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -102,7 +104,7 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
         setLoadError(true);
         throw new Error('Failed to load Compose label inventory');
       }
-      setInventory(await res.json() as StackLabelInventory);
+      setInventory(withReadBehaviors(await res.json() as StackLabelInventory));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load Compose label inventory');
       setInventory(null);
@@ -214,7 +216,7 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
       </div>
       <p className="text-[11px] leading-relaxed text-stat-subtitle">{LABEL_DISAMBIGUATION_COPY}</p>
 
-      {!senchoLabelsSupported && declaresSenchoLabels && (
+      {nodeLacksSenchoLabels && declaresSenchoLabels && (
         <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2 text-xs text-warning" data-testid="sencho-labels-unsupported">
           <Info className="h-4 w-4 shrink-0 mt-0.5" strokeWidth={1.5} />
           <span>{SENCHO_LABELS_NODE_COPY}</span>

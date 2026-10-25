@@ -13,8 +13,13 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 let senchoLabelsSupported = true;
+// `null` models a node info fetch that failed or has not resolved: no version, no capabilities.
+let nodeMeta: { version: string | null } | null = { version: '0.99.0' };
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: (cap: string) => cap !== 'sencho-labels-v1' || senchoLabelsSupported }),
+  useNodes: () => ({
+    activeNodeMeta: nodeMeta,
+    hasCapability: (cap: string) => cap !== 'sencho-labels-v1' || senchoLabelsSupported,
+  }),
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -341,10 +346,12 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
 
   beforeEach(() => {
     senchoLabelsSupported = true;
+    nodeMeta = { version: '0.99.0' };
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => senchoInventory } as Response);
   });
 
   it('distinguishes active, ignored, unsupported, and inert Sencho labels', async () => {
+    const user = userEvent.setup();
     render(<ComposeLabelsPanel stackName="demo" />);
     await screen.findByText('io.sencho.url');
     const states = screen.getAllByTestId('label-behavior').map(el => [el.getAttribute('data-state'), el.textContent]);
@@ -356,9 +363,56 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     ]);
     expect(screen.getByText('Use a whole number such as 10.')).toBeInTheDocument();
     expect(screen.getByText('Sencho does not recognize this label.')).toBeInTheDocument();
-    // An inert label explains itself on hover and stays quiet inline.
-    expect(screen.getByText('Inert').getAttribute('title')).toContain('Declare it in the Compose file');
+    // An inert label stays quiet inline and explains itself on click, which also works from the keyboard and a touch screen.
+    expect(screen.queryByTestId('label-behavior-reason')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Inert: why/ }));
+    expect(await screen.findByTestId('label-behavior-reason')).toHaveTextContent('Declare it in the Compose file');
     expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
+  });
+
+  it('never shows an unreadable or unearned status from a node as Active', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{
+          ...senchoInventory.services[0],
+          declaredLabels: [
+            { key: 'io.sencho.url', value: 'v', source: 'compose', behavior: { state: 'trusted' } },
+            { key: 'io.sencho.order', value: 'v', source: 'compose', behavior: { state: 'invalid', reason: { nested: true } } },
+          ],
+          replicas: [{
+            ...senchoInventory.services[0].replicas[0],
+            runtimeLabels: [{ key: 'io.sencho.hidden', value: 'true', source: 'runtime', behavior: { state: 'active' } }],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.getAllByTestId('label-behavior').map(el => el.getAttribute('data-state'))).toEqual(['unsupported', 'unsupported', 'inert']);
+    expect(screen.getAllByText(/cannot read/).length).toBeGreaterThan(0);
+  });
+
+  it('marks an io.sencho.* label from a node that reports no status, and leaves other labels alone', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{
+          ...senchoInventory.services[0],
+          declaredLabels: [
+            { key: 'io.sencho.url', value: 'https://app.example.com', source: 'compose' },
+            { key: 'traefik.enable', value: 'true', source: 'compose' },
+          ],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.getAllByTestId('label-behavior-not-reported')).toHaveLength(1);
+    expect(screen.queryByTestId('label-behavior')).toBeNull();
   });
 
   it('says so when the node does not apply io.sencho.* labels', async () => {
@@ -377,6 +431,21 @@ describe('ComposeLabelsPanel io.sencho.* status', () => {
     render(<ComposeLabelsPanel stackName="demo" />);
     expect(await screen.findByTestId('sencho-labels-unsupported')).toHaveTextContent('does not apply io.sencho.* labels');
     expect(screen.queryByTestId('label-behavior')).toBeNull();
+  });
+
+  it('does not tell the operator to update a current node whose info fetch failed', async () => {
+    senchoLabelsSupported = false;
+    nodeMeta = { version: null };
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...senchoInventory,
+        services: [{ ...senchoInventory.services[0], declaredLabels: [{ key: 'io.sencho.url', value: 'v', source: 'compose' as const }], replicas: [] }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    await screen.findByText('io.sencho.url');
+    expect(screen.queryByTestId('sencho-labels-unsupported')).toBeNull();
   });
 
   it('does not warn about an old node when the stack declares no Sencho labels', async () => {
