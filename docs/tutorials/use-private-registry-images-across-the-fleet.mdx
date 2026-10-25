@@ -1,0 +1,209 @@
+---
+title: Pull a Private Image on Every Node From One Stored Credential
+sidebarTitle: Use private registry images
+description: Store one registry credential on the hub, deploy a private image to a proxy node and a Pilot node that hold no credentials, read the seal pin, and place the same image with a Git-managed Blueprint.
+---
+
+Say `status-board` is a small nginx page baked into a private image on GitHub Container Registry, and you want it running on two remote nodes. Neither node has ever run `docker login`, and you would rather not copy a token onto every host and rotate it by hand later.
+
+This tutorial stores the credential once, on the hub. You deploy the image to a proxy node and to a Pilot node and watch both pull it. Then you read each node's seal pin, which records that the credential was delivered sealed. Last, you place the same image on all three nodes with a Git-managed Blueprint, which checks registry readiness before it changes anything.
+
+It covers one GHCR credential and one image. It does not cover AWS ECR, browsing image tags from Resources, or image update checks. Turning on HTTPS for nodes that cannot seal credentials is covered in [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). [Private Registries](/features/private-registries) has the full delivery rules and the troubleshooting list.
+
+## Prerequisites
+
+- The `admin` role on the hub. Adding a registry and resetting a seal pin both need it. Available on every tier, including Community.
+- Three nodes on a current Sencho release: the hub (**Local**), a proxy node, and a Pilot node, shown in the screenshots as `edge-01` and `edge-02`. Enroll them first with [Add a Remote Node to Your Fleet](/tutorials/enroll-a-remote-node) if you have not. A node too old to take part in credential delivery pulls with whatever registries it has itself; [Private Registries](/features/private-registries#remote-fleet-delivery) lists the conditions.
+- A private image on GHCR. This tutorial uses `ghcr.io/your-org/status-board:1.0`, built from an `nginx:1.27-alpine` image with one `index.html` copied in. Push it for `linux/amd64` and `linux/arm64` if your nodes mix architectures.
+- A GitHub personal access token that can read that package (the `read:packages` scope) and your GitHub username.
+- For the Blueprint part, a public Git repository with this file committed at the root as `compose.yaml`:
+
+  ```yaml
+  services:
+    web:
+      image: ghcr.io/your-org/status-board:1.0
+      restart: always
+      ports:
+        - "8100:80"
+  ```
+
+- Host port `8099` free on `edge-01` and `edge-02`, and `8100` free on all three nodes.
+
+<Warning>
+  Every step below deploys containers to real nodes. Use nodes you can afford to break, not production hosts.
+</Warning>
+
+<Steps>
+  <Step title="Confirm the nodes cannot pull the image on their own">
+    On `edge-01`, run:
+
+    ```bash
+    docker pull ghcr.io/your-org/status-board:1.0
+    ```
+
+    It fails with `Error response from daemon: error from registry: unauthorized`. The image is private and the node holds no credential for it. `edge-02` gives the same result.
+  </Step>
+  <Step title="Add the registry on the hub">
+    On the hub, open **Settings → Infrastructure → Registries**. With no registries saved, the page reads **No private registries configured**.
+
+    <Frame caption="The hub's Registries section before any credential is stored.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/registries-empty.png" alt="Registries section in Settings with an Add registry button and the message No private registries configured." />
+    </Frame>
+
+    Select **Add registry** and fill in the form:
+
+    - **Registry Type**: **GitHub Container Registry (GHCR)**. The **Registry URL** fills in `ghcr.io` for you.
+    - **Name**: `ghcr-status-board`
+    - **Username**: your GitHub username
+    - **Secret / Token**: the personal access token
+
+    Select **Test connection** first. A toast reads `Connection successful.` and nothing is saved yet, so you can fix a mistyped token before it is stored. Then select **Add**.
+
+    <Frame caption="The GHCR form filled in. The username is replaced and the token is hidden.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/add-registry-form.png" alt="Add registry form with Registry Type set to GitHub Container Registry (GHCR), Name ghcr-status-board, Registry URL ghcr.io, a username, a masked token, and Test connection and Add buttons." />
+    </Frame>
+
+    A toast reads `Registry added.` and the registry appears as a card showing **Secret stored**. Sencho encrypts the token at rest and never shows it again. The Registries section is hidden when you view a remote node through the node switcher, because each instance keeps its own list. You are adding this credential to the hub on purpose.
+
+    <Frame>
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/registry-card.png" alt="Registry card for ghcr-status-board with a GitHub (GHCR) badge, the URL ghcr.io, a username, Secret stored, a created date, and Test connection, Edit and Delete icon buttons." />
+    </Frame>
+  </Step>
+  <Step title="Look at the nodes before anything is delivered">
+    Open **Settings → Infrastructure → Nodes**. Each remote node has a row with its type, mode, and endpoint. Neither row has a **Seal** line under the node name yet.
+
+    <Frame caption="The node list before any private image has been deployed.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/nodes-before-delivery.png" alt="Nodes table listing Local, edge-01 as a Remote Proxy node, and edge-02 as a Remote Pilot Agent node, all Online, with no Seal line under either remote node." />
+    </Frame>
+  </Step>
+  <Step title="Deploy the image to the proxy node">
+    Use the node switcher to switch to `edge-01`, select **Create Stack**, and on the **Empty** tab enter `status-board` as the **Stack Name**. Select **Create**.
+
+    In the compose editor, replace the template with:
+
+    ```yaml
+    services:
+      web:
+        image: ghcr.io/your-org/status-board:1.0
+        restart: always
+        ports:
+          - "8099:80"
+    ```
+
+    <Frame caption="The compose file on edge-01. The image path is replaced for this screenshot.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/compose-private-image.png" alt="Stack page for status-board on edge-01 with the compose editor showing a web service that uses a ghcr.io image and publishes port 8099." />
+    </Frame>
+
+    Select **Save & Deploy**. Before the deploy starts, `edge-01` tells the hub which images it is about to pull and which registries it can already sign in to. The hub sees that `ghcr.io` is not covered and checks that the image requires a login. It then sends your stored credential with the deploy request, for this one operation. `edge-01` signs in with it, pulls the image, and discards it. The credential never enters `edge-01`'s own registry list.
+
+    The progress strip shows **Deploying**, then **Verifying health**. When it finishes, the stack reads **RUNNING** and the container `status-board-web-1` shows `8099 → 80/tcp`.
+
+    <Frame caption="The private image pulled and running on edge-01, a node with no registry credentials of its own.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/deployed-on-proxy-node.png" alt="status-board stack on edge-01 reading RUNNING with the container status-board-web-1 up and mapped from port 8099 to 80, above the container logs." />
+    </Frame>
+  </Step>
+  <Step title="Deploy the same image to the Pilot node">
+    Switch to `edge-02`, create the same `status-board` stack with the same compose file, and select **Save & Deploy**. The steps and the result are the same. The hub reaches this node through its Pilot tunnel instead of an HTTP address, and the credential is delivered the same way.
+
+    <Frame caption="The same stack running on edge-02, the Pilot node.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/deployed-on-pilot-node.png" alt="status-board stack on edge-02 reading RUNNING with the same compose file and a running status-board-web-1 container." />
+    </Frame>
+  </Step>
+  <Step title="Read the seal pins">
+    Return to **Settings → Infrastructure → Nodes** on the hub. Both remote rows now show a **Seal** line with the first characters of a fingerprint and a **Reset seal pin** button. The **Local** row has none, because the hub uses its own registry list directly.
+
+    <Frame caption="Each remote node now has a seal pin, recorded by the first deploy that needed a credential. The fingerprints are replaced.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/nodes-seal-pins.png" alt="Nodes table where edge-01 and edge-02 each show a Seal fingerprint and a Reset seal pin button under their names, and the Local row has neither." />
+    </Frame>
+
+    Sealed delivery works like this:
+
+    - Each node keeps its own sealing key pair and shares only the public half. The private half never leaves the node's data directory.
+    - The hub encrypts the credential to that public key before it sends it. Only the node can open it, so the credential is safe to carry over a plain HTTP node address or a Pilot tunnel.
+    - The hub pins the node's public key the first time it delivers a credential, on trust at first use. The fingerprint you see is that pin. If the node later presents a different key, the hub stops the operation with `Registry sealing key mismatch for this node` rather than sealing to a key it does not recognize.
+    - A node that cannot seal gets credentials only over a connection Sencho can treat as confidential, such as an HTTPS node address. Without one, the operation stops with `Registry credential delivery requires a confidential transport`.
+
+    A deploy of a public image never creates a pin. Only an operation that needed a credential does.
+
+    Select **Reset seal pin** only after a node was reinstalled or its data volume was replaced, because the node then has a new key. There is no confirmation dialog. The pin clears, and the next operation that needs a credential pins whatever key the node presents. If you are not sure the node was rebuilt on purpose, compare fingerprints with the node's operator before you reset.
+  </Step>
+  <Step title="Place the image with a Git-managed Blueprint">
+    A Blueprint managed from Git checks registry readiness before it touches any node. Build one on the same repository.
+
+    1. Create a source stack from your repository on the hub. Select **Create Stack**, open the **From Git** tab, and use `status-board-source` as the **Stack Name**, your repository URL, and `main` as the **Ref**. Leave **Apply behavior** on **Review only** and untick **Deploy after create**. Name it differently from the Blueprint, because the Blueprint places a stack named after itself on every node it targets.
+    2. Go to **Fleet → Blueprints**, select **Create your first Blueprint** (or **New Blueprint**), and enter `status-board-git` as the **Name**. Paste the same compose content, choose **Specific nodes**, select `Local`, `edge-01`, and `edge-02`, keep **Suggest** as the drift policy, and select **Save as draft**.
+    3. Select **Convert to Git**, choose `status-board-source` under **Live Git source**, and select **Convert**.
+    4. Select **Review and approve placement**, read the **Changes** list, which should show one create per node, and select **Approve placement**.
+
+    [Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One](/tutorials/roll-out-a-git-managed-blueprint) walks through each of those dialogs with screenshots.
+
+    The status block in the **GitOps** section now reads **Registry preflight blocked** with the reason `Registry readiness has not been evaluated yet`. That is expected. Nothing has checked yet whether the nodes can pull the image.
+
+    <Frame caption="Placement is approved, and registry readiness has not been evaluated yet.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/blueprint-preflight-not-evaluated.png" alt="Git-managed Blueprint sheet for status-board-git showing Registry preflight blocked with the reason Registry readiness has not been evaluated yet, and Pull source beside a highlighted Authorize rollout button." />
+    </Frame>
+
+    Select **Authorize rollout**. Sencho evaluates registry readiness first. Because the image is private, it asks whether each node can pull it: a credential already stored on a node wins for that host, and the hub fills in only the hosts a node cannot cover. Here `Local` uses the registry on the hub, and `edge-01` and `edge-02` receive the hub's credential through sealed delivery. If any node is not ready, nothing is deployed. Otherwise Sencho deploys the commit to the nodes one after another. There is no confirmation dialog.
+
+    The sheet shows what it loaded when you opened it and does not refresh on its own. After about a minute, close it and open it again. The stage row reads **Rollout configuration converged** and **Runtime synced and healthy**. Open **Evidence**: **Artifact qualified** names the `sha256` digest Sencho proved for the private image.
+
+    <Frame caption="The first rollout has converged. The Evidence panel shows the platform digest Sencho proved for the private image.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/blueprint-converged-evidence.png" alt="Git-managed Blueprint sheet with Runtime synced and healthy, the Evidence panel open, and the Artifact qualified line naming a sha256 digest." />
+    </Frame>
+
+    <Frame caption="All three nodes list the Blueprint as Active.">
+      <img src="/images/tutorials/use-private-registry-images-across-the-fleet/blueprint-deployments-active.png" alt="Deployments table in the Blueprint sheet listing Local, edge-01, and edge-02, each Active, with a Withdraw action." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from three places, so you are not trusting one screen.
+
+**The nodes serve the page.** On `edge-01` and `edge-02`, run the command below for port `8099`, and again for port `8100`. On the hub, run it for port `8100`. Every run prints `<title>Status board</title>`.
+
+```bash
+curl -s http://localhost:8099 | grep -o '<title>[^<]*</title>'
+```
+
+**The seal pins exist.** The two remote rows under **Settings → Infrastructure → Nodes** show a **Seal** line, as in the sixth step. A pin appears only after an operation needed a credential and the hub sealed it.
+
+**The node itself stores nothing.** Sign in to `edge-01` directly, at its own address, and open **Settings → Infrastructure → Registries**. It still reads **No private registries configured**. The containers run, and the node has no credential for `ghcr.io`. The hub supplied one for each operation and the node kept none.
+
+<Frame caption="edge-01's own Registries section, signed in directly. The deploys succeeded without a row here.">
+  <img src="/images/tutorials/use-private-registry-images-across-the-fleet/node-registries-empty.png" alt="Registries section on edge-01 showing the message No private registries configured and a registries count of 0." />
+</Frame>
+
+## If something goes wrong
+
+**A deploy or an update stops with `Registry credentials unavailable for challenged image hosts`.** The operation needs a login for `ghcr.io`, and neither the hub nor the node has a usable credential for that host. The usual cause is a registry row on the hub that was deleted or never saved. Sencho stops before it changes anything, so the running container stays as it was. On the stack, the **Update failed** chip names the reason and offers **Retry update**.
+
+<Frame caption="An update on edge-01 refused because the hub has no credential for ghcr.io. The running container is untouched.">
+  <img src="/images/tutorials/use-private-registry-images-across-the-fleet/update-failed-credentials-unavailable.png" alt="status-board stack on edge-01 still RUNNING, with an Update failed menu reading Registry credentials unavailable for challenged image hosts and Retry update, Restart, Roll back, Refresh, Copy details and Dismiss actions." />
+</Frame>
+
+A Git-managed Blueprint refuses earlier, at the preflight. Its status block reads **Registry preflight blocked** with `Registry credentials are missing for a required private image.`
+
+<Frame caption="The same missing credential, seen from the Blueprint's placement preflight.">
+  <img src="/images/tutorials/use-private-registry-images-across-the-fleet/blueprint-preflight-blocked.png" alt="Git-managed Blueprint sheet showing Registry preflight blocked with the reason Registry credentials are missing for a required private image, and an Authorize rollout button." />
+</Frame>
+
+Add the registry on the hub again and select **Test connection** in the form. Then select **Retry update**, choose **Update now**, or reopen the Blueprint and select **Authorize rollout** again. A new Git commit is not needed.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Private Registries" icon="box-archive" href="/features/private-registries">
+    Supported registry types, ECR setup, how delivery decides what to send, and every troubleshooting case.
+  </Card>
+  <Card title="Add a Remote Node to Your Fleet" icon="server" href="/tutorials/enroll-a-remote-node">
+    Enroll the proxy and Pilot nodes used here.
+  </Card>
+  <Card title="Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One" icon="rocket" href="/tutorials/roll-out-a-git-managed-blueprint">
+    The Blueprint lifecycle after the first rollout: health policy, pause, and rollback.
+  </Card>
+  <Card title="Git-managed Blueprints" icon="code-branch" href="/features/git-managed-blueprints">
+    How placement and rollout authorization work for Blueprints whose content lives in Git.
+  </Card>
+</CardGroup>
