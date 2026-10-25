@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { promises as fsp } from 'fs';
 import fsSync from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -210,6 +211,24 @@ describe('compose save publication', () => {
 
             expect(fsSync.statSync(victim).mode & 0o777).toBe(0o600);
             expect(fsSync.readFileSync(victim, 'utf8')).toBe('untouched');
+        });
+
+        it('releases the upload source when the staging file cannot be created', async () => {
+            const source = Readable.from([Buffer.from(composeContent(['web']))]);
+            const realOpen = fsp.open.bind(fsp);
+            vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                if (String(args[0]).includes('sencho-tmp')) throw Object.assign(new Error('refused'), { code: 'EACCES' });
+                return realOpen(...args);
+            }) as typeof fsp.open);
+            const writer = FileSystemService.getInstance() as unknown as {
+                writeStackFileAtomic(target: string, data: Readable): Promise<void>;
+            };
+
+            await expect(writer.writeStackFileAtomic(path.join(stackDir, 'compose.yaml'), source))
+                .rejects.toThrow('refused');
+
+            expect(source.destroyed).toBe(true);
+            expect(stagingFiles()).toEqual([]);
         });
 
         it('removes the staging file when restricted content fails to publish', async () => {

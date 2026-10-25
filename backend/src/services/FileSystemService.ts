@@ -2479,6 +2479,11 @@ export class FileSystemService {
         if (staged) await recordAtomicPublication(safePath, staged);
       }
     } finally {
+      // A source stream holds its own descriptor from the moment it is
+      // created, so a failure before it is consumed (the staging open
+      // refused) would otherwise leave it open. Destroying a finished stream
+      // is a no-op.
+      if (data instanceof Readable) data.destroy();
       if (stagedTmp) {
         await fsPromises.unlink(tmpPath).catch(() => {});
       }
