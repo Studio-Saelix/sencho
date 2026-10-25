@@ -2422,18 +2422,22 @@ export class FileSystemService {
     // can drop leading zeros which narrows entropy unpredictably.
     const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
-    // The staging file is created with the mode the published file will have,
-    // so restricted content (a 0600 compose file holding credentials) is never
-    // readable through the sibling while it is being written. Without an
-    // explicit mode, a replaced regular file's own mode caps the staging
-    // creation mode for the same reason (the umask can only narrow it) and its
-    // owner carries over, so a file kept private to another user does not
-    // become unreadable to them. A new file takes the process default, as a
-    // direct create would.
+    // Without an explicit mode, a replaced regular file's own mode and owner
+    // carry over, so a file kept private to another user does not become
+    // unreadable to them. A new file takes the process default, as a direct
+    // create would.
     const existing = opts.mode === undefined || !opts.owner ? await existingFileIdentity(safePath) : undefined;
     const publishedMode = opts.mode ?? existing?.mode;
-    const creationMode = publishedMode ?? 0o666;
     const owner = opts.owner ?? (existing ? { uid: existing.uid, gid: existing.gid } : undefined);
+    // A file that is handed to another owner is staged owner-only. Permission
+    // bits that are restricted for the intended group are readable by whichever
+    // group the staging file starts with, so a group-readable mode cannot be
+    // applied until the intended group holds the file. The published mode is
+    // set on the descriptor after the hand-off. Without a hand-off the creation
+    // mode is the published mode (the umask can only narrow it), which keeps
+    // restricted content from ever being readable through the sibling.
+    const handoverMode = owner !== undefined ? publishedMode : undefined;
+    const creationMode = handoverMode !== undefined ? 0o600 : (publishedMode ?? 0o666);
     let stagedTmp = false;
     let staged: { ino: number; size: number; mtimeMs: number } | undefined;
     try {
@@ -2454,8 +2458,20 @@ export class FileSystemService {
         } else {
           await fh.writeFile(data);
         }
-        if (opts.mode !== undefined) await fh.chmod(opts.mode);
         await chownStaged(fh, owner);
+        if (opts.mode !== undefined) {
+          await fh.chmod(opts.mode);
+        } else if (handoverMode !== undefined) {
+          // The mode the replaced file already had. A filesystem that cannot
+          // set modes leaves the staging file owner-only, which is the narrower
+          // outcome, so only a refusal to set the mode is tolerated.
+          try {
+            await fh.chmod(handoverMode);
+          } catch (err: unknown) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+          }
+        }
         await fh.sync();
         staged = await fh.stat();
       } finally {

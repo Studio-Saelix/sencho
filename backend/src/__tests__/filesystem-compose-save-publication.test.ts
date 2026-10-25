@@ -129,6 +129,65 @@ describe('compose save publication', () => {
             expect(stagingFiles()).toEqual([]);
         });
 
+        it('keeps a group-readable target owner-only until the intended owner holds the staging file', async () => {
+            // The staging file starts in the process's group. Group-read bits
+            // applied at creation would expose the new contents to that group
+            // until the descriptor is handed to the target's group, so the
+            // staging file stays owner-only through every write and the
+            // hand-off, and takes the published mode afterwards.
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o640);
+            const upload = path.join(path.dirname(stackDir), 'upload-spool-group.bin');
+            fsSync.writeFileSync(upload, `${composeContent(['web'])}# ${MARKER}\n`);
+            const events: string[] = [];
+            const exposed: number[] = [];
+            const realOpen = fsp.open.bind(fsp);
+            vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                const fh = await realOpen(...args);
+                const file = String(args[0]);
+                if (!file.includes('sencho-tmp')) return fh;
+                const sample = (event: string): void => {
+                    events.push(event);
+                    exposed.push(fsSync.statSync(file).mode & 0o077);
+                };
+                const realWrite = fh.writeFile.bind(fh);
+                fh.writeFile = (async (...writeArgs: Parameters<typeof fh.writeFile>) => {
+                    await realWrite(...writeArgs);
+                    sample('write');
+                }) as typeof fh.writeFile;
+                const realChown = fh.chown.bind(fh);
+                fh.chown = (async (uid: number, gid: number) => {
+                    await realChown(uid, gid);
+                    sample('chown');
+                }) as typeof fh.chown;
+                const realChmod = fh.chmod.bind(fh);
+                fh.chmod = (async (mode: fsSync.Mode) => {
+                    events.push('chmod');
+                    await realChmod(mode);
+                }) as typeof fh.chmod;
+                return fh;
+            }) as typeof fsp.open);
+            const svc = FileSystemService.getInstance();
+
+            // A buffered write, then a streamed upload that writes in chunks.
+            await svc.writeStackFile(STACK, 'compose.yaml', `${composeContent(['web'])}# ${MARKER}\n`);
+            expect(events).toEqual(['write', 'chown', 'chmod']);
+            expect(exposed.every((bits) => bits === 0)).toBe(true);
+            expect(modeAndContent(target).mode).toBe(0o640);
+
+            events.length = 0;
+            exposed.length = 0;
+            await svc.writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
+            expect(events.at(-2)).toBe('chown');
+            expect(events.at(-1)).toBe('chmod');
+            expect(events.filter((event) => event === 'write').length).toBeGreaterThan(0);
+            expect(exposed.every((bits) => bits === 0)).toBe(true);
+            const published = modeAndContent(target);
+            expect(published.mode).toBe(0o640);
+            expect(published.content).toContain(MARKER);
+            expect(stagingFiles()).toEqual([]);
+        });
+
         it('keeps a restricted target restricted when an upload replaces it', async () => {
             const target = path.join(stackDir, 'compose.yaml');
             fsSync.chmodSync(target, 0o600);
