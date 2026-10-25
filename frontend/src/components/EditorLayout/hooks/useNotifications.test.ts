@@ -318,7 +318,7 @@ describe('useNotifications', () => {
       return { seen, stop: () => window.removeEventListener('sencho:notifications-connection', onConnection) };
     };
 
-    it('announces the hub node id each time a remote socket opens, and nothing when it drops', async () => {
+    it('announces the hub node id each time a remote socket opens, and nothing when it drops', () => {
       vi.useFakeTimers();
       const opens = openEvents();
       const connections = connectionEvents();

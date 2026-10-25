@@ -1328,6 +1328,26 @@ describe('GitSourcePanel controller controls', () => {
         expect(reads()).toBe(2);
       });
 
+      it('coalesces a flapping node socket into one read and stops listening once the sheet closes', async () => {
+        vi.mocked(apiFetch).mockResolvedValue(jsonRes(observing()));
+        const { rerender } = render(panel({ nodeId: 9 }));
+        await screen.findByTestId('gitops-source');
+        const before = reads();
+        const socketOpened = () => act(() => {
+          window.dispatchEvent(new CustomEvent('sencho:node-notifications-open', { detail: { nodeId: 9 } }));
+        });
+
+        socketOpened();
+        socketOpened();
+        await settle();
+        expect(reads()).toBe(before + 1);
+
+        rerender(panel({ nodeId: 9, open: false }));
+        socketOpened();
+        await settle();
+        expect(reads()).toBe(before + 1);
+      });
+
       describe('with the real notification sockets', () => {
         class MockSocket {
           static instances: MockSocket[] = [];
