@@ -2,9 +2,9 @@ import type { Request, Response } from 'express';
 import {
   enforcePolicyPreDeploy,
   type PolicyEnforcementOptions,
-  type PolicyEnforcementResult,
   type PolicyViolation,
 } from '../services/PolicyEnforcement';
+import { allowedPolicyEvidence, type AllowedPolicyEvidence } from '../services/allowedPolicyEvidence';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import type { ScanPolicy } from '../services/DatabaseService';
@@ -13,7 +13,9 @@ import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
-import { isCleanEvidenceDecision, NODE_WIDE_EVIDENCE_TARGET, type EvidenceGateDecision } from '../services/securityEvidence';
+import { NODE_WIDE_EVIDENCE_TARGET, type EvidenceGateDecision } from '../services/securityEvidence';
+
+export { allowedPolicyEvidence, type AllowedPolicyEvidence };
 
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
@@ -149,6 +151,12 @@ export function buildPolicyGateOptions(
     ip: (req.ip ?? req.socket.remoteAddress ?? '') as string,
     auditMethod: req.method,
     auditPath: req.originalUrl || req.url,
+    // Put the decision on the response when the gate is reached through a service
+    // several calls deep; `policyEvidenceFor(res)` then reads it at the success
+    // response. `req.res` is absent only for a request built outside Express.
+    onAllowed: (allowed) => {
+      if (req.res) req.res.locals.policyEvidence = allowed;
+    },
   };
 }
 
@@ -161,33 +169,6 @@ export function buildSystemPolicyGateOptions(
     actor,
     auditMethod: overrides.auditMethod ?? 'POST',
     auditPath: overrides.auditPath,
-  };
-}
-
-/**
- * What an allowed operation reports about the evidence it was allowed on. Only
- * present when that evidence was not a clean pass; a clean allow has nothing to
- * report. The same decision is written to the audit log by the gate itself, so
- * this is the response-side half of one record, not a second source of truth.
- */
-export interface AllowedPolicyEvidence {
-  policy: { id: number; name: string };
-  /** True when an authorized bypass was used to proceed. */
-  bypassed: boolean;
-  evidence: EvidenceGateDecision;
-}
-
-/** The optional response field for an allowed gate result; empty on a clean pass. */
-export function allowedPolicyEvidence(
-  gate: PolicyEnforcementResult,
-): { policyEvidence?: AllowedPolicyEvidence } {
-  if (!gate.ok || !gate.policy || !gate.evidence || isCleanEvidenceDecision(gate.evidence)) return {};
-  return {
-    policyEvidence: {
-      policy: { id: gate.policy.id, name: gate.policy.name },
-      bypassed: gate.bypassed,
-      evidence: gate.evidence,
-    },
   };
 }
 

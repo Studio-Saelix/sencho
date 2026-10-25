@@ -2291,6 +2291,7 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       ...(result.previousImageId ? { previousImageId: result.previousImageId } : {}),
       ...(result.newImageId ? { newImageId: result.newImageId } : {}),
       ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
+      ...policyEvidenceFor(res),
     });
     return true;
   }
@@ -2802,6 +2803,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         message: 'Stack rolled back from recovery generation.',
         recoveryId: currentGen.id,
         gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+        ...policyEvidenceFor(res),
       });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;

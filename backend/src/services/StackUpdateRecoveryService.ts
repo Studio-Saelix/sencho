@@ -1175,6 +1175,7 @@ export class StackUpdateRecoveryService {
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+        onAllowed: policyOptions?.onAllowed,
       });
       if (!gate.ok) {
         throw Object.assign(

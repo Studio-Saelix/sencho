@@ -232,7 +232,8 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             const gate = await enforcePolicyPreDeploy(
               stackName,
               req.nodeId,
-              buildPolicyGateOptions(req),
+              // A dry run allows nothing, so it leaves no allowed-evidence row.
+              { ...buildPolicyGateOptions(req), recordAllowedEvidence: !isDryRun },
             );
             if (!gate.ok) {
               const blockedMsg = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);

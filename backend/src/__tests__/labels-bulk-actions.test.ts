@@ -221,6 +221,52 @@ describe('Stack Labels bulk actions', () => {
     expect(invalidateNodeCaches).not.toHaveBeenCalled();
   });
 
+  it('dry-run deploy asks the gate not to record an allowed decision, because nothing is allowed', async () => {
+    const label = await createAssignedLabel(['alpha']);
+
+    await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy', dryRun: true });
+    expect(enforcePolicyPreDeploy).toHaveBeenLastCalledWith(
+      'alpha', label.node_id, expect.objectContaining({ recordAllowedEvidence: false }),
+    );
+
+    await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy' });
+    expect(enforcePolicyPreDeploy).toHaveBeenLastCalledWith(
+      'alpha', label.node_id, expect.objectContaining({ recordAllowedEvidence: true }),
+    );
+  });
+
+  it('reports the evidence a stack was allowed on, per stack, for a real and a dry-run deploy', async () => {
+    const label = await createAssignedLabel(['alpha']);
+    enforcePolicyPreDeploy.mockResolvedValue({
+      ok: true,
+      bypassed: false,
+      policy: { id: 3, name: 'prod-gate' },
+      violations: [],
+      evidence: {
+        outcome: 'allow',
+        records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null }],
+        applications: [],
+        summary: 'x',
+      },
+    });
+
+    const real = await request(app).post(`/api/labels/${label.id}/action`).set('Authorization', authHeader).send({ action: 'deploy' });
+    expect(real.body.results[0]).toMatchObject({
+      stackName: 'alpha',
+      success: true,
+      policyEvidence: { policy: { name: 'prod-gate' }, bypassed: false },
+    });
+
+    const dry = await request(app).post(`/api/labels/${label.id}/action`).set('Authorization', authHeader).send({ action: 'deploy', dryRun: true });
+    expect(dry.body.results[0].policyEvidence.evidence.records[0]).toMatchObject({ state: 'unavailable' });
+  });
+
   it('dry-run stop reports per-stack success without dispatching real stops', async () => {
     const label = await createAssignedLabel(['alpha', 'beta']);
 

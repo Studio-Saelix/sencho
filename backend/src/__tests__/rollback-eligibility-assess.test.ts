@@ -100,4 +100,15 @@ describe('assessGenerationEligibility', () => {
   it('returns eligible when image ids and hold tags both resolve', async () => {
     await expect(assessGenerationEligibility(baseRow())).resolves.toBe('eligible');
   });
+
+  it('asks the gate not to record an allowed decision, since a poll allows nothing', async () => {
+    const { enforcePolicyForImageRefs } = await import('../services/PolicyEnforcement');
+    await assessGenerationEligibility(baseRow());
+    expect(enforcePolicyForImageRefs).toHaveBeenCalledWith(
+      'my-stack',
+      1,
+      expect.any(Array),
+      expect.objectContaining({ actor: 'rollback-eligibility', recordAllowedEvidence: false }),
+    );
+  });
 });

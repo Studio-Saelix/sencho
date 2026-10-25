@@ -28,6 +28,7 @@ import {
     type PolicyBlockReason,
     type PolicyRiskInputs,
 } from '../utils/policy-risk';
+import { allowedPolicyEvidence, type AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import {
     classifyScanEvidence,
     classifyScannerEvidence,
@@ -88,6 +89,14 @@ export interface PolicyEnforcementOptions {
      * nothing, and a row per poll would bury the rows for real operations.
      */
     recordAllowedEvidence?: boolean;
+    /**
+     * Called once with the decision when the gate allows on evidence that was not
+     * a clean pass, or when an authorized bypass was used. Lets a handler that
+     * reaches the gate through a service several calls deep (rollback compensate,
+     * the update orchestrator, automatic update) put the decision in its response
+     * without threading a return value through every layer in between.
+     */
+    onAllowed?: (allowed: AllowedPolicyEvidence) => void;
 }
 
 export interface PolicyEnforcementResult {
@@ -470,7 +479,12 @@ function evaluateImageRisk(
  */
 function describeEvidenceForAudit(evidence: EvidenceGateDecision | undefined): string {
     if (!evidence || isCleanEvidenceDecision(evidence)) return '';
-    const clean = (value: string): string => redactSensitiveText(sanitizeForLog(value));
+    // Targets are compose-file text. Beyond control characters and credentials,
+    // the characters this summary uses as delimiters are replaced so a hostile
+    // `image:` value cannot forge a field, and the length is capped so one cannot
+    // bloat the row.
+    const clean = (value: string): string =>
+        redactSensitiveText(sanitizeForLog(value)).replace(/[\s,=[\]]/g, '_').slice(0, 200);
     const unproven = evidence.records
         .filter((r) => r.state !== 'current')
         .map((r) => `${r.source}:${r.state}:${clean(r.target)}`);
@@ -502,9 +516,11 @@ function recordAllowedEvidenceAudit(
     if (opts.recordAllowedEvidence === false || result.bypassed) return;
     const { evidence, policy } = result;
     if (!result.ok || !policy) return;
-    const clause = describeEvidenceForAudit(evidence);
-    if (clause === '') return;
+    let summary = `policy.evidence_allowed stack="${stackName}" policy="${policy.name}"`;
     try {
+        const clause = describeEvidenceForAudit(evidence);
+        if (clause === '') return;
+        summary += clause;
         DatabaseService.getInstance().insertAuditLog({
             timestamp: Date.now(),
             username: opts.actor,
@@ -513,11 +529,29 @@ function recordAllowedEvidenceAudit(
             status_code: 200,
             node_id: nodeId,
             ip_address: opts.ip ?? '',
-            summary: `policy.evidence_allowed stack="${stackName}" policy="${policy.name}"${clause}`,
+            summary,
         });
     } catch (err) {
-        console.error('[Policy] Failed to record evidence decision audit entry:', err);
+        // The summary is logged whole: if the row is lost, this line is the only
+        // account of which unattended operation proceeded on what.
+        console.error('[Policy] Failed to record evidence decision audit entry (%s):', sanitizeForLog(summary), err);
     }
+}
+
+/**
+ * The single exit every public entry point funnels an allowed decision through:
+ * the durable audit row, then the caller's in-request callback.
+ */
+function retainAllowedDecision(
+    result: PolicyEnforcementResult,
+    stackName: string,
+    nodeId: number,
+    opts: PolicyEnforcementOptions,
+): PolicyEnforcementResult {
+    recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
+    const { policyEvidence } = allowedPolicyEvidence(result);
+    if (policyEvidence) opts.onAllowed?.(policyEvidence);
+    return result;
 }
 
 /**
@@ -590,9 +624,7 @@ export async function enforcePolicyPreDeploy(
     nodeId: number,
     opts: PolicyEnforcementOptions,
 ): Promise<PolicyEnforcementResult> {
-    const result = await evaluatePreDeploy(stackName, nodeId, opts);
-    recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
-    return result;
+    return retainAllowedDecision(await evaluatePreDeploy(stackName, nodeId, opts), stackName, nodeId, opts);
 }
 
 async function evaluatePreDeploy(
@@ -651,8 +683,7 @@ export async function enforcePolicyForImageRefs(
     failClosedInvalidRefs = false,
 ): Promise<PolicyEnforcementResult> {
     const result = await evaluateImageRefs(stackName, nodeId, imageRefs, opts, matchedPolicy, failClosedInvalidRefs);
-    recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
-    return result;
+    return retainAllowedDecision(result, stackName, nodeId, opts);
 }
 
 /**

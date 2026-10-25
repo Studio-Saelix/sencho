@@ -1115,6 +1115,11 @@ export class BlueprintService {
             actor: 'blueprint-reconciler',
             auditMethod: 'POST',
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
+            // The apply below runs the gate again against the stack as written to
+            // disk and audits that decision. This earlier one evaluates the
+            // blueprint's authored content for the same operation, so a row from
+            // each would count one apply twice.
+            recordAllowedEvidence: false,
         }, undefined, true);
         if (!gate.ok) {
             throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));

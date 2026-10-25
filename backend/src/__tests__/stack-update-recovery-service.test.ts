@@ -777,16 +777,23 @@ describe('StackUpdateRecoveryService', () => {
       .mockImplementation(() => undefined);
     mockAccess.mockResolvedValue(undefined);
 
+    const onAllowed = vi.fn();
     await expect(
-      StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
+      StackUpdateRecoveryService.getInstance().compensateWithCandidate(
+        genId,
+        async () => undefined,
+        { bypass: false, actor: 'admin', onAllowed },
+      ),
     ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
     expect(restoreSpy).toHaveBeenCalled();
     expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'restored_current' }));
+    // The caller's in-request callback must survive the options being rebuilt
+    // here, or a rollback through a recovery generation loses its decision.
     expect(enforcePolicyForImageRefs).toHaveBeenCalledWith(
       'my-stack',
       1,
       ['sencho-rb/aaaaaaaaaaaa/web:hold'],
-      expect.objectContaining({ actor: 'recovery-compensate' }),
+      expect.objectContaining({ actor: 'admin', onAllowed }),
     );
   });
 

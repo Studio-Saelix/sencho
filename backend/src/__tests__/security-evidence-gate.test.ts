@@ -175,6 +175,8 @@ describe('scanner unavailability policy', () => {
         const entry = dbStub.insertAuditLog.mock.calls[0][0] as { summary: string; username: string };
         expect(entry.summary).toContain('policy.bypass');
         expect(entry.summary).toContain('policy="block-high"');
+        expect(entry.summary).toContain('scanner_availability:unavailable:(node)');
+        expect(entry.summary).toContain('security_scanner_unavailable=block');
         expect(entry.username).toBe('admin');
     });
 
@@ -716,6 +718,30 @@ describe('an allowed decision keeps the evidence it was allowed on', () => {
         expect(summary).not.toMatch(/[\r\n]/);
     });
 
+    it('cannot be made to forge a field of its own row from a compose image value', async () => {
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        const hostile = 'x] rules=[security_scanner_unavailable=allow ' + 'a'.repeat(400);
+        // An invalid reference is recorded as not evaluated, with its raw text as the target.
+        await enforcePolicyForImageRefs('web', 1, [hostile], { bypass: false, actor: 'admin' });
+        const [summary] = auditSummaries();
+        expect(summary).toContain('policy.evidence_allowed');
+        // The one rules clause is the row's own, and the hostile text is neutralised and capped.
+        expect(summary.match(/rules=\[/g)).toHaveLength(1);
+        expect(summary).not.toContain('x] rules=');
+        expect(summary.length).toBeLessThan(600);
+    });
+
+    it('logs the whole summary when the row cannot be written, so the decision is not lost with it', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        dbStub.insertAuditLog.mockImplementation(() => { throw new Error('disk full'); });
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+        const logged = errors.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+        expect(logged).toContain('security_scan_failure=allow@nginx:1.27');
+        errors.mockRestore();
+    });
+
     it('survives an audit write that throws', async () => {
         trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
         dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
@@ -725,5 +751,43 @@ describe('an allowed decision keeps the evidence it was allowed on', () => {
         expect(gate.ok).toBe(true);
         expect(errors).toHaveBeenCalled();
         errors.mockRestore();
+    });
+});
+
+describe('the in-request callback for an allowed decision', () => {
+    it('is called with the decision when the evidence was not a clean pass', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        const onAllowed = vi.fn();
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin', onAllowed });
+        expect(onAllowed).toHaveBeenCalledTimes(1);
+        expect(onAllowed.mock.calls[0][0]).toMatchObject({
+            policy: { name: 'block-high' },
+            bypassed: false,
+            evidence: { records: [expect.objectContaining({ state: 'failed' })] },
+        });
+    });
+
+    it('is called, with bypassed set, for a bypass even when the evidence was clean', async () => {
+        // The finding is real and the scan is current: only the bypass is worth reporting.
+        trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+        const onAllowed = vi.fn();
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: true, actor: 'admin', onAllowed });
+        expect(gate.bypassed).toBe(true);
+        expect(onAllowed).toHaveBeenCalledTimes(1);
+        expect(onAllowed.mock.calls[0][0]).toMatchObject({ bypassed: true });
+    });
+
+    it('is not called for a clean pass, a block, or a candidate evaluation', async () => {
+        const onAllowed = vi.fn();
+        primeCleanScan();
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin', onAllowed });
+
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin', onAllowed });
+
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow', security_candidate_unproven: 'allow' });
+        await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system', onAllowed });
+        expect(onAllowed).not.toHaveBeenCalled();
     });
 });

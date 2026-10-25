@@ -15,7 +15,7 @@ import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeploy
 import type { DeployInvocationContext } from './network/missingExternalNetworksError';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
@@ -197,9 +197,13 @@ function securityPolicyDecision(raw: string | null): string | null {
     const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
     const byContent = (a: unknown, b: unknown): number => JSON.stringify(a).localeCompare(JSON.stringify(b));
     const ordered = [...applications].sort(byContent);
-    const records = Array.isArray(decoded.evidenceRecords) ? decoded.evidenceRecords : [];
+    // A present-but-malformed list is unreadable, not empty: it must never compare
+    // equal to a clean decision, so it takes the same null path as bad JSON.
+    if (decoded.evidenceRecords !== undefined && decoded.evidenceRecords !== null && !Array.isArray(decoded.evidenceRecords)) return null;
+    const records: unknown[] = Array.isArray(decoded.evidenceRecords) ? decoded.evidenceRecords : [];
+    if (!records.every(isRecord)) return null;
     const unproven = records
-        .filter((r): r is Record<string, unknown> => isRecord(r) && r.state !== 'current')
+        .filter((r) => r.state !== 'current')
         .map((r) => ({ source: r.source ?? null, state: r.state ?? null, target: r.target ?? null }))
         .sort(byContent);
     return JSON.stringify({
@@ -4836,7 +4840,11 @@ export class GitSourceService {
             // unchanged decision.
             evidenceOutcome: evaluation.evidence?.outcome ?? null,
             evidenceApplications: evaluation.evidence?.applications ?? null,
-            evidenceRecords: evaluation.evidence?.records ?? null,
+            // Reason text is scanner output and can echo a registry credential, so
+            // it is redacted before it is stored; the comparison ignores it.
+            evidenceRecords: evaluation.evidence?.records.map((r) => (
+                r.reason === undefined ? r : { ...r, reason: redactSensitiveText(r.reason) }
+            )) ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
