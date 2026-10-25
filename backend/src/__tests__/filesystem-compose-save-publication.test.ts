@@ -30,7 +30,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
     vi.restoreAllMocks();
-    fsSync.writeFileSync(path.join(stackDir, 'compose.yaml'), composeContent(['web']), 'utf8');
+    const target = path.join(stackDir, 'compose.yaml');
+    fsSync.rmSync(target, { force: true });
+    fsSync.writeFileSync(target, composeContent(['web']), 'utf8');
 });
 
 afterAll(() => {
@@ -134,6 +136,40 @@ describe('compose save publication', () => {
             expect(fsSync.statSync(target).mode & 0o777).toBe(0o600);
             expect(fsSync.readFileSync(target, 'utf8')).toContain(MARKER);
             expect(stagingFiles()).toEqual([]);
+        });
+
+        it('lets an upload replace a read-only file', async () => {
+            // The staging file is reopened to sync, which a read-only creation
+            // mode would refuse for a process that is not root.
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o444);
+            const upload = path.join(path.dirname(stackDir), 'upload-spool-readonly.bin');
+            fsSync.writeFileSync(upload, composeContent(['web', 'db']));
+
+            await FileSystemService.getInstance().writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
+
+            expect(fsSync.readFileSync(target, 'utf8')).toBe(composeContent(['web', 'db']));
+            expect(fsSync.statSync(target).mode & 0o222).toBe(0);
+            expect(stagingFiles()).toEqual([]);
+        });
+
+        it('hands the replacement to the owner of the file it replaces', async () => {
+            const target = path.join(stackDir, 'compose.yaml');
+            const { uid, gid } = fsSync.statSync(target);
+            const chown = vi.spyOn(fsp, 'chown');
+            const upload = path.join(path.dirname(stackDir), 'upload-spool-owner.bin');
+            fsSync.writeFileSync(upload, composeContent(['web']));
+
+            const svc = FileSystemService.getInstance();
+            await svc.writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
+            await svc.writeStackFile(STACK, 'compose.yaml', composeContent(['web', 'db']));
+
+            const staged = chown.mock.calls.map((call) => [String(call[0]), call[1], call[2]]);
+            expect(staged).toHaveLength(2);
+            for (const [file, toUid, toGid] of staged) {
+                expect(path.basename(file as string)).toContain('sencho-tmp');
+                expect([toUid, toGid]).toEqual([uid, gid]);
+            }
         });
 
         it('removes the staging file when restricted content fails to publish', async () => {

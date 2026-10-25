@@ -92,11 +92,13 @@ async function recordAtomicPublication(
   }
 }
 
-/** Mode of a regular file at `filePath`, or undefined for anything else. */
-async function existingFileMode(filePath: string): Promise<number | undefined> {
+/** Mode and owner of a regular file at `filePath`, or undefined for anything else. */
+async function existingFileIdentity(
+  filePath: string,
+): Promise<{ mode: number; uid: number; gid: number } | undefined> {
   try {
     const stat = await fsPromises.lstat(filePath);
-    return stat.isFile() ? stat.mode & 0o777 : undefined;
+    return stat.isFile() ? { mode: stat.mode & 0o777, uid: stat.uid, gid: stat.gid } : undefined;
   } catch {
     return undefined;
   }
@@ -733,6 +735,11 @@ export class FileSystemService {
    * Throws for every refusal, including `SYMLINK_ESCAPE`, `NOT_A_FILE`, and
    * `COMPOSE_LAYER_UNSTABLE`. Callers that release a saved claim must treat any
    * throw as unknown and keep the claim.
+   *
+   * `publishedBySencho` is true only when the layer is still the document
+   * Sencho published through the stage-and-rename helper in this process. A
+   * file read from disk cannot show that its writer has finished, so a caller
+   * that releases a saved claim trusts a layer only when this holds.
    */
   async readComposeLayer(
     stackName: string,
@@ -2399,21 +2406,29 @@ export class FileSystemService {
     // so restricted content (a 0600 compose file holding credentials) is never
     // readable through the sibling while it is being written. Without an
     // explicit mode, a replaced regular file's own mode caps the staging
-    // creation mode for the same reason (the umask can only narrow it); a new
-    // file takes the process default, as a direct create would.
-    const creationMode = opts.mode ?? await existingFileMode(safePath) ?? 0o666;
+    // creation mode for the same reason (the umask can only narrow it) and its
+    // owner carries over, so a file kept private to another user does not
+    // become unreadable to them. A new file takes the process default, as a
+    // direct create would.
+    const existing = opts.mode === undefined || !opts.owner ? await existingFileIdentity(safePath) : undefined;
+    const publishedMode = opts.mode ?? existing?.mode;
+    const creationMode = publishedMode ?? 0o666;
+    const owner = opts.owner ?? (existing ? { uid: existing.uid, gid: existing.gid } : undefined);
     let stagedTmp = false;
     try {
       if (data instanceof Readable) {
         // Stream a temp-file source (an upload spooled to disk) into the staging
         // file without buffering it in memory. 'wx' exclusively creates the
         // staging file; the random suffix already guarantees a fresh name.
-        const ws = createWriteStream(tmpPath, { flags: 'wx', mode: creationMode });
+        // The owner bit stays writable at creation so the staging file can be
+        // reopened to sync even when the replaced file is read-only; the mode
+        // is applied before publication.
+        const ws = createWriteStream(tmpPath, { flags: 'wx', mode: creationMode | 0o600 });
         stagedTmp = true;
         await pipeline(data, ws);
         const synced = await fsPromises.open(tmpPath, 'r+');
         try {
-          if (opts.mode !== undefined) await synced.chmod(opts.mode);
+          if (publishedMode !== undefined) await synced.chmod(publishedMode);
           await synced.sync();
         } finally {
           await synced.close();
@@ -2429,13 +2444,13 @@ export class FileSystemService {
           await fh.close();
         }
       }
-      if (opts.owner) {
+      if (owner) {
         // Keep the original owner when the process is allowed to set it (the
         // common root-in-a-container case). A non-root process cannot hand a
         // file to another user; the replacement stays owned by the process,
         // which is the only outcome available to it.
         try {
-          await fsPromises.chown(tmpPath, opts.owner.uid, opts.owner.gid);
+          await fsPromises.chown(tmpPath, owner.uid, owner.gid);
         } catch (err: unknown) {
           const code = (err as NodeJS.ErrnoException).code;
           if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
