@@ -1,10 +1,13 @@
-import { Ship } from 'lucide-react';
+import { RefreshCw, Ship } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 
 interface SelfStackProtectedDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** When true, the primary action routes to Fleet node updates. */
+  /** When true, confirming reapplies Sencho from its current Compose configuration. */
+  canReapply: boolean;
+  onReapply?: () => void;
+  /** When true (and the caller cannot reapply), the primary action routes to Fleet node updates. */
   canOpenFleetUpdates: boolean;
   onOpenFleetUpdates?: () => void;
 }
@@ -12,9 +15,39 @@ interface SelfStackProtectedDialogProps {
 export function SelfStackProtectedDialog({
   open,
   onOpenChange,
+  canReapply,
+  onReapply,
   canOpenFleetUpdates,
   onOpenFleetUpdates,
 }: SelfStackProtectedDialogProps) {
+  if (canReapply && onReapply) {
+    return (
+      <ConfirmModal
+        open={open}
+        onOpenChange={onOpenChange}
+        kicker="SELF STACK"
+        title="Reapply Sencho"
+        confirmLabel={
+          <>
+            <RefreshCw className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+            Reapply &amp; restart
+          </>
+        }
+        onConfirm={() => {
+          onOpenChange(false);
+          onReapply();
+        }}
+      >
+        <p className="text-sm text-stat-subtitle">
+          This stack is the running Sencho instance, so Deploy, Stop, and Update are
+          blocked on it. Reapply recreates Sencho from its current Compose
+          configuration. The dashboard briefly disconnects and reconnects
+          automatically when the restart completes.
+        </p>
+      </ConfirmModal>
+    );
+  }
+
   return (
     <ConfirmModal
       open={open}

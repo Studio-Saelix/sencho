@@ -328,6 +328,15 @@ export interface LabelInventoryRow {
   inspectFailed: boolean;
 }
 
+/** Options for container stop and restart. */
+export interface ContainerOpOptions {
+  /**
+   * Skip the Docker endpoint guard. For automation that restarts an unhealthy
+   * container on purpose (Auto-Heal), where bouncing the container is the fix.
+   */
+  allowEndpointContainer?: boolean;
+}
+
 class DockerController {
   private static readonly SYSTEM_NETWORKS = new Set(['bridge', 'host', 'none']);
   /**
@@ -3177,8 +3186,26 @@ class DockerController {
     }
   }
 
+  /**
+   * Refuses to stop or restart the container that carries this node's Docker
+   * API (the socket proxy Sencho reaches Docker through, or Sencho itself on a
+   * stop). The Docker endpoint guard is imported lazily: it reads container and
+   * identity state through this class.
+   */
+  private async assertNotDockerEndpointContainer(
+    containerId: string,
+    action: 'stop' | 'restart',
+    options?: ContainerOpOptions,
+  ): Promise<void> {
+    if (options?.allowEndpointContainer) return;
+    const { evaluateDockerEndpointContainer, DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    const refusal = await evaluateDockerEndpointContainer(containerId, action);
+    if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
   // State-safe: silently ignores 304 "already stopped" errors
-  public async stopContainer(containerId: string) {
+  public async stopContainer(containerId: string, options?: ContainerOpOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'stop', options);
     try {
       const container = this.docker.getContainer(containerId);
       await container.stop();
@@ -3191,7 +3218,8 @@ class DockerController {
     }
   }
 
-  public async restartContainer(containerId: string) {
+  public async restartContainer(containerId: string, options?: ContainerOpOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
     const container = this.docker.getContainer(containerId);
     await container.restart();
   }

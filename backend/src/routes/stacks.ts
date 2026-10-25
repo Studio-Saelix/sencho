@@ -103,6 +103,8 @@ import {
   refuseIfSelfStack,
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
+import { refuseIfDockerEndpoint } from '../helpers/dockerEndpointRoute';
+import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../helpers/dockerEndpointGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -583,6 +585,13 @@ async function runStackBulkOp(
       if (await isSelfStack(stackName, fsSvc.getBaseDir())) {
       return selfStackProtectedBulkResult(stackName);
     }
+  }
+  if (action !== 'start') {
+    const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(
+      stackName,
+      action === 'update' ? { kind: 'update' } : { kind: action },
+    );
+    if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
   }
 
   const user = req.user?.username ?? 'system';
@@ -1371,6 +1380,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:delete', 'stack', stackName)) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   const pruneVolumes = req.query.pruneVolumes === 'true';
   const debug = isDebugEnabled();
   const sanitizedName = sanitizeForLog(stackName);
@@ -2183,6 +2193,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'up' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
   const t0 = Date.now();
@@ -2309,6 +2320,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   const t0 = Date.now();
@@ -2441,6 +2453,7 @@ async function bulkContainerOp(
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (action === 'stop' && (await refuseIfSelfStack(req, res, stackName))) return;
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: action === 'stop' ? 'stop' : 'restart' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   const t0 = Date.now();
@@ -2503,6 +2516,7 @@ async function handleServiceAction(
     res.status(400).json({ error: 'Invalid service name' });
     return;
   }
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart' })) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const all = await dockerController.getContainersByStack(stackName);
@@ -2638,6 +2652,7 @@ async function handleServiceScopedMutation(
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
   if (!requireServiceScopedUpdateCapability(res)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName })) return;
   if (!tryAcquireStackOpLock(req, res, stackName, options.lockAction)) return;
 
   const t0 = Date.now();
@@ -2892,6 +2907,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   const t0 = Date.now();
@@ -2990,6 +3006,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // restore" from an anonymous failure it has to fail closed on.
   if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against

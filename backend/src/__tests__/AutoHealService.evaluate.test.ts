@@ -115,7 +115,7 @@ describe('AutoHealService.evaluate', () => {
 
         await service.evaluate();
 
-        expect(restartContainer).toHaveBeenCalledWith('container-1');
+        expect(restartContainer).toHaveBeenCalledWith('container-1', { allowEndpointContainer: true });
         const history = db.getAutoHealHistory(policy.id!);
         expect(history[0]).toMatchObject({ action: 'restarted', success: 1 });
         expect(history[0].reason).toContain('unhealthy');
@@ -145,7 +145,7 @@ describe('AutoHealService.evaluate', () => {
 
         await resetAutoHealSingleton().evaluate();
 
-        expect(restartContainer).toHaveBeenCalledWith('crash-1');
+        expect(restartContainer).toHaveBeenCalledWith('crash-1', { allowEndpointContainer: true });
         const history = db.getAutoHealHistory(policy.id!);
         expect(history[0]).toMatchObject({ action: 'restarted', success: 1 });
         expect(history[0].reason).toContain('crashed');
@@ -175,7 +175,7 @@ describe('AutoHealService.evaluate', () => {
 
         await resetAutoHealSingleton().evaluate();
 
-        expect(restartContainer).toHaveBeenCalledWith('dead-1');
+        expect(restartContainer).toHaveBeenCalledWith('dead-1', { allowEndpointContainer: true });
     });
 
     it('does not heal a recovered container that still carries a stale crash signal', async () => {

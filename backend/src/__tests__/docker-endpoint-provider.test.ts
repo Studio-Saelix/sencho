@@ -1,0 +1,202 @@
+/**
+ * Which container carries this node's Docker API. Covers the DOCKER_HOST
+ * parse, the shared-network address match, the unresolved paths that must not
+ * be guessed past, and the short-lived cache.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+const { mockLookup, mockListContainers } = vi.hoisted(() => ({
+  mockLookup: vi.fn(),
+  mockListContainers: vi.fn(),
+}));
+
+vi.mock('dns', () => ({ default: { promises: { lookup: mockLookup } } }));
+
+vi.mock('../services/DockerController', () => ({
+  default: {
+    getInstance: () => ({ getDocker: () => ({ listContainers: mockListContainers }) }),
+  },
+}));
+
+import SelfIdentityService from '../services/SelfIdentityService';
+import {
+  parseDockerEndpoint,
+  resolveDockerEndpointProvider,
+  resetDockerEndpointProviderCache,
+} from '../services/DockerEndpointProvider';
+
+const originalDockerHost = process.env.DOCKER_HOST;
+const SELF_ID = 'a'.repeat(64);
+const PROXY_ID = 'b'.repeat(64);
+
+function stubSelf(state: 'resolved' | 'none' | 'unresolved', networks: string[] = ['sencho_default']) {
+  const self = SelfIdentityService.getInstance();
+  vi.spyOn(self, 'ensureResolved').mockResolvedValue(state);
+  vi.spyOn(self, 'getUnresolvedReason').mockReturnValue(state === 'unresolved' ? 'HOSTNAME inspect failed: 403' : null);
+  vi.spyOn(self, 'isOwnContainer').mockImplementation(id => id === SELF_ID);
+  vi.spyOn(self, 'isOwnNetwork').mockImplementation(name => networks.includes(name));
+}
+
+function proxyContainer(over: Record<string, unknown> = {}) {
+  return {
+    Id: PROXY_ID,
+    Names: ['/sencho-proxy'],
+    Labels: {
+      'com.docker.compose.project': 'sencho',
+      'com.docker.compose.service': 'socket-proxy',
+      'com.docker.compose.project.working_dir': '/srv/compose/sencho',
+    },
+    NetworkSettings: { Networks: { sencho_default: { IPAddress: '172.20.0.3', NetworkID: 'n1' } } },
+    Mounts: [{ Type: 'bind', Source: '/var/run/docker.sock', Destination: '/var/run/docker.sock' }],
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  resetDockerEndpointProviderCache();
+  process.env.DOCKER_HOST = 'tcp://socket-proxy:2375';
+  mockLookup.mockResolvedValue([{ address: '172.20.0.3', family: 4 }]);
+  mockListContainers.mockResolvedValue([proxyContainer()]);
+  stubSelf('resolved');
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  if (originalDockerHost === undefined) delete process.env.DOCKER_HOST;
+  else process.env.DOCKER_HOST = originalDockerHost;
+});
+
+describe('parseDockerEndpoint', () => {
+  it.each([
+    [undefined, { kind: 'local' }],
+    ['', { kind: 'local' }],
+    ['unix:///var/run/docker.sock', { kind: 'local' }],
+    ['/var/run/docker.sock', { kind: 'local' }],
+    ['npipe:////./pipe/docker_engine', { kind: 'local' }],
+    ['ssh://user@host', { kind: 'local' }],
+    ['tcp://socket-proxy:2375', { kind: 'tcp', host: 'socket-proxy' }],
+    ['TCP://Proxy.internal:2375', { kind: 'tcp', host: 'Proxy.internal' }],
+    ['http://10.0.0.5:2375', { kind: 'tcp', host: '10.0.0.5' }],
+    ['tcp://[fd00::5]:2375', { kind: 'tcp', host: 'fd00::5' }],
+  ])('parses %s', (raw, expected) => {
+    expect(parseDockerEndpoint(raw)).toEqual(expected);
+  });
+});
+
+describe('resolveDockerEndpointProvider', () => {
+  it('is none for a local socket and never looks anything up', async () => {
+    process.env.DOCKER_HOST = 'unix:///var/run/docker.sock';
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('none');
+    expect(mockLookup).not.toHaveBeenCalled();
+    expect(mockListContainers).not.toHaveBeenCalled();
+  });
+
+  it('finds the container that owns the endpoint address on a shared network', async () => {
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result).toEqual({
+      state: 'resolved',
+      provider: {
+        containerId: PROXY_ID,
+        containerName: 'sencho-proxy',
+        project: 'sencho',
+        service: 'socket-proxy',
+        workingDir: '/srv/compose/sencho',
+        socketBindSource: '/var/run/docker.sock',
+      },
+    });
+  });
+
+  it('skips the lookup for an IP literal', async () => {
+    process.env.DOCKER_HOST = 'tcp://172.20.0.3:2375';
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('resolved');
+    expect(mockLookup).not.toHaveBeenCalled();
+  });
+
+  it('does not match an address that lives on a network Sencho is not attached to', async () => {
+    stubSelf('resolved', ['some_other_network']);
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('none');
+  });
+
+  it('never names Sencho itself as the provider', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer({ Id: SELF_ID })]);
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('none');
+  });
+
+  it('is none when no container owns the address, rather than guessing', async () => {
+    mockLookup.mockResolvedValue([{ address: '192.168.1.50', family: 4 }]);
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('none');
+  });
+
+  it('is none when Sencho is not in a container', async () => {
+    stubSelf('none');
+
+    expect((await resolveDockerEndpointProvider()).state).toBe('none');
+    expect(mockListContainers).not.toHaveBeenCalled();
+  });
+
+  it('is unresolved, with the reason, when Sencho cannot identify itself', async () => {
+    stubSelf('unresolved');
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result).toEqual({ state: 'unresolved', reason: 'HOSTNAME inspect failed: 403' });
+  });
+
+  it('is unresolved when the endpoint host does not resolve', async () => {
+    mockLookup.mockRejectedValue(new Error('getaddrinfo ENOTFOUND socket-proxy'));
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('unresolved');
+    expect((result as { reason: string }).reason).toContain('socket-proxy');
+  });
+
+  it('is unresolved when the container list fails', async () => {
+    mockListContainers.mockRejectedValue(new Error('403 forbidden'));
+
+    const result = await resolveDockerEndpointProvider();
+
+    expect(result.state).toBe('unresolved');
+  });
+
+  it('shares one lookup between concurrent callers and reuses the answer', async () => {
+    const [a, b] = await Promise.all([resolveDockerEndpointProvider(), resolveDockerEndpointProvider()]);
+    await resolveDockerEndpointProvider();
+
+    expect(a).toBe(b);
+    expect(mockListContainers).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache an unresolved answer, so the next call tries again', async () => {
+    mockListContainers.mockRejectedValueOnce(new Error('boom'));
+
+    expect((await resolveDockerEndpointProvider()).state).toBe('unresolved');
+    expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+    expect(mockListContainers).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers for the endpoint in force, not an earlier one', async () => {
+    expect((await resolveDockerEndpointProvider()).state).toBe('resolved');
+
+    process.env.DOCKER_HOST = 'unix:///var/run/docker.sock';
+
+    expect((await resolveDockerEndpointProvider()).state).toBe('none');
+  });
+});

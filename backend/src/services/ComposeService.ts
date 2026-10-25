@@ -66,6 +66,12 @@ import {
 } from '../helpers/decryptedComposeOutput';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import {
+  DockerEndpointProtectedError,
+  evaluateDockerEndpointGuard,
+  type DockerEndpointRefusal,
+  type EndpointMutation,
+} from '../helpers/dockerEndpointGuard';
 import type { NotificationCategory } from './NotificationService';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
@@ -264,6 +270,54 @@ export class ComposeService {
   /** Public wrapper for dual-arg assembly and recovery Compose invocations. */
   public async buildAuthoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
     return this.authoredComposeArgs(stackName, action);
+  }
+
+  /**
+   * The refusal for `mutation` when it would stop or recreate the container that
+   * carries this node's Docker API (Sencho itself or its socket proxy), else
+   * null. Routes call this for a clean 409 before they take a lock; every
+   * mutating entry point below calls it again through `assertDockerEndpointSafe`.
+   */
+  public evaluateDockerEndpoint(
+    stackName: string,
+    mutation: EndpointMutation,
+    stackDirOverride?: string,
+  ): Promise<DockerEndpointRefusal | null> {
+    return evaluateDockerEndpointGuard({
+      nodeId: this.nodeId,
+      stackName,
+      mutation,
+      probes: {
+        renderConfig: async () => (await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined)).rendered,
+        configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
+      },
+    });
+  }
+
+  private async assertDockerEndpointSafe(
+    stackName: string,
+    mutation: EndpointMutation,
+    stackDirOverride?: string,
+  ): Promise<void> {
+    const refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+    if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /** The hash Compose would assign `service` now; null when it cannot be computed. */
+  private async composeConfigHash(stackName: string, service: string, stackDirOverride?: string): Promise<string | null> {
+    try {
+      const args = await this.authoredComposeArgs(stackName, ['config', `--hash=${service}`], stackDirOverride);
+      const cwd = stackDirOverride ?? path.join(this.baseDir, stackName);
+      const stdout = await this.captureCompose(args.slice(1), cwd);
+      for (const line of stdout.split('\n')) {
+        const [name, hash] = line.trim().split(/\s+/);
+        if (name === service && hash) return hash;
+      }
+      return null;
+    } catch (error) {
+      console.warn('[ComposeService] config hash for %s/%s unavailable:', sanitizeForLog(stackName), sanitizeForLog(service), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
   }
 
   public async validateStackForMutation(stackName: string): Promise<void> {
@@ -859,6 +913,9 @@ export class ComposeService {
   }
 
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
+    if (action !== 'start') {
+      await this.assertDockerEndpointSafe(stackName, { kind: action === 'restart' ? 'restart' : 'stop' });
+    }
     const stackDir = path.join(this.baseDir, stackName);
     // Resolve the arguments first: a stack whose compose cannot be resolved is
     // refused before anything is touched, and must not cost a live gate.
@@ -878,6 +935,7 @@ export class ComposeService {
 
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     const composeArgs = await this.authoredComposeArgs(stackName, args);
@@ -1424,6 +1482,7 @@ export class ComposeService {
         );
       }
     }
+    await this.assertDockerEndpointSafe(stackName, { kind: 'up' }, ctx?.overlayDir);
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
@@ -2423,6 +2482,7 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
@@ -2727,6 +2787,7 @@ export class ComposeService {
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
@@ -2755,6 +2816,7 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
@@ -2769,6 +2831,8 @@ export class ComposeService {
   }
 
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
+    // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes

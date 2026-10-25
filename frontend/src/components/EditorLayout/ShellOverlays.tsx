@@ -20,7 +20,7 @@ import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffAc
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
-import type { useComposeReapplyAction } from '../FleetView/hooks/useComposeReapplyAction';
+import type { useComposeReapplyAction, ComposeReapplyTarget } from '../FleetView/hooks/useComposeReapplyAction';
 import type { StackAction } from './EditorView';
 import { resolveStackFileKey } from './hooks/resolveStackFileKey';
 
@@ -40,6 +40,8 @@ interface ShellOverlaysProps {
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
+  /** The active node when the caller may reapply Sencho from its Compose configuration, else null. */
+  reapplySelfTarget: ComposeReapplyTarget | null;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
@@ -64,6 +66,7 @@ export function ShellOverlays({
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
+  reapplySelfTarget,
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
@@ -125,6 +128,12 @@ export function ShellOverlays({
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
         onOpenChange={setSelfStackProtectedOpen}
+        canReapply={reapplySelfTarget !== null}
+        onReapply={() => {
+          // Same readiness and single-flight checks as the Save & Reapply confirm.
+          if (!reapplySelfTarget || !hydrationReady() || composeReapply.dispatching) return;
+          void composeReapply.runReapply(reapplySelfTarget);
+        }}
         canOpenFleetUpdates={canSelfUpdate}
         onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />

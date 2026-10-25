@@ -29,6 +29,10 @@ const {
   mockStartContainer: vi.fn(),
 }));
 
+vi.mock('../helpers/dockerEndpointRoute', () => ({
+  refuseIfDockerEndpoint: async () => false,
+}));
+
 vi.mock('../services/DockerController', async () => {
   const actual = await vi.importActual<typeof import('../services/DockerController')>(
     '../services/DockerController',

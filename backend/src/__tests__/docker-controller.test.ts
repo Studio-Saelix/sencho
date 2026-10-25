@@ -179,6 +179,53 @@ describe('DockerController - stopContainer', () => {
   });
 });
 
+describe('DockerController - Docker endpoint guard on stop and restart', () => {
+  const refusal = {
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+  };
+
+  async function spyOnGuard(result: typeof refusal | null) {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    return vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockResolvedValue(result);
+  }
+
+  it.each(['stop', 'restart'] as const)('refuses %s of the protected container before touching Docker', async (action) => {
+    const evaluate = await spyOnGuard(refusal);
+    const op = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop: op, restart: op });
+
+    const dc = DockerController.getInstance(1);
+    const call = action === 'stop' ? dc.stopContainer('abc123') : dc.restartContainer('abc123');
+
+    await expect(call).rejects.toMatchObject({ name: 'DockerEndpointProtectedError', code: 'docker_endpoint_protected' });
+    expect(evaluate).toHaveBeenCalledWith('abc123', action);
+    expect(op).not.toHaveBeenCalled();
+  });
+
+  it('lets Auto-Heal restart a container on purpose', async () => {
+    const evaluate = await spyOnGuard(refusal);
+    const restart = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ restart });
+
+    await DockerController.getInstance(1).restartContainer('abc123', { allowEndpointContainer: true });
+
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds when the guard has no objection', async () => {
+    await spyOnGuard(null);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop });
+
+    await DockerController.getInstance(1).stopContainer('abc123');
+
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── removeContainers ───────────────────────────────────────────────────
 
 describe('DockerController - removeContainers', () => {

@@ -179,6 +179,29 @@ describe('SelfIdentityService.initialize', () => {
     expect(warnSpy).toHaveBeenCalled();
   });
 
+  it('captures the compose service and working directory labels', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValue({
+      Id: FULL_CONTAINER_ID,
+      Name: '/sencho',
+      Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: {
+        Labels: {
+          'com.docker.compose.project': 'sencho',
+          'com.docker.compose.service': 'app',
+          'com.docker.compose.project.working_dir': '/srv/compose/sencho',
+        },
+      },
+      NetworkSettings: { Networks: {} },
+      Mounts: [],
+    });
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getComposeLocation()).toEqual({ service: 'app', workingDir: '/srv/compose/sencho' });
+  });
+
   it('parses /proc/self/cgroup formats (cgroupv1 docker, cgroupv2 docker, podman libpod)', async () => {
     const tmp = await import('os');
     const fsp = await import('fs/promises');
@@ -299,3 +322,120 @@ describe('SelfIdentityService matchers when empty (dev mode)', () => {
     expect(svc.isOwnContainer(FULL_CONTAINER_ID)).toBe(false);
   });
 });
+
+describe('SelfIdentityService identity state', () => {
+  const inspectResult = {
+    Id: FULL_CONTAINER_ID,
+    Name: '/sencho',
+    Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+    Config: { Labels: { 'com.docker.compose.project': 'sencho' } },
+    NetworkSettings: { Networks: {} },
+    Mounts: [],
+  };
+
+  it('is unresolved, not none, when Docker did not answer the probes', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockRejectedValue(new Error('403 forbidden'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('unresolved');
+    expect(svc.getUnresolvedReason()).toContain('403 forbidden');
+  });
+
+  it('is none, and stays none without asking Docker again, when the probes answer "not a container"', async () => {
+    process.env.HOSTNAME = 'my-laptop';
+    mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    expect(await svc.ensureResolved()).toBe('none');
+    expect(await svc.ensureResolved()).toBe('none');
+    await svc.initialize();
+
+    expect(mockContainer.inspect).toHaveBeenCalledTimes(1);
+    expect(svc.getUnresolvedReason()).toBeNull();
+  });
+
+  it('still tries the cgroup id after a non-404 HOSTNAME failure', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect
+      .mockRejectedValueOnce(new Error('temporary proxy error'))
+      .mockResolvedValueOnce(inspectResult);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getState()).toBe('resolved');
+    expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
+    expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
+  });
+
+  it('does not cache a failure: ensureResolved retries at once and recovers', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect
+      .mockRejectedValueOnce(new Error('connection reset'))
+      .mockResolvedValueOnce(inspectResult);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    expect(svc.getState()).toBe('unresolved');
+
+    expect(await svc.ensureResolved()).toBe('resolved');
+    expect(svc.isOwnContainer(FULL_CONTAINER_ID)).toBe(true);
+    expect(svc.getUnresolvedReason()).toBeNull();
+  });
+
+  it('keeps a plain initialize() from re-asking Docker on every call inside the retry gap', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      process.env.HOSTNAME = 'sencho-1';
+      mockContainer.inspect.mockRejectedValue(new Error('connection reset'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+      const svc = SelfIdentityService.getInstance();
+      await svc.initialize();
+      await svc.initialize();
+      expect(mockContainer.inspect).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 6_000);
+      mockContainer.inspect.mockResolvedValue(inspectResult);
+      await svc.initialize();
+
+      expect(mockContainer.inspect).toHaveBeenCalledTimes(2);
+      expect(svc.getState()).toBe('resolved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never downgrades a resolved identity', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValue(inspectResult);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    mockContainer.inspect.mockRejectedValue(new Error('boom'));
+
+    expect(await svc.ensureResolved()).toBe('resolved');
+    expect(mockContainer.inspect).toHaveBeenCalledTimes(1);
+  });
+
+  it('getBindMounts reports an unresolved identity as unverified, not as "not containerized"', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockRejectedValue(new Error('connection reset'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+
+    await expect(SelfIdentityService.getInstance().getBindMounts()).rejects.toThrow('cannot read mounts');
+  });
+});
+

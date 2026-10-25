@@ -91,6 +91,7 @@ function renderShell(
       gitSourceOpen={false}
       setGitSourceOpen={() => {}}
       canSelfUpdate={false}
+      reapplySelfTarget={null}
       composeReapply={{} as never}
       canSaveAndReapply={false}
       canOfferVolumeRemoval={false}

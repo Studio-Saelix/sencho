@@ -12,7 +12,7 @@ A stack's compose file lives in its own directory. A link inside that directory 
 </Frame>
 
 <Note>
-  Stack deploy, update, and down run `docker compose` through the same Docker endpoint as the rest of Sencho. When Sencho runs behind a Docker socket proxy, the proxy must allow POST and the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups for Compose operations to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+  Stack deploy, update, and down run `docker compose` through the same Docker endpoint as the rest of Sencho. When Sencho runs behind a Docker socket proxy, the proxy must allow POST and the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups for Compose operations to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy). Sencho refuses a stack operation that would stop or recreate the proxy it is using, because the connection would drop in the middle of the operation; see [Updating the proxy](/operations/self-hosting#updating-the-proxy).
 </Note>
 
 ## Creating a stack

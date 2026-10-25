@@ -38,7 +38,7 @@ import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveN
 import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
-import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
+import { useComposeReapplyAction, type ComposeReapplyTarget } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
     GlobalCommandPalette,
@@ -247,6 +247,10 @@ export default function EditorLayout() {
   // Save Only stays available regardless.
   const canSaveAndReapply =
     actionsReady && resolveCanSaveAndReapply(isAdmin, canReapplyCompose, isSelfStackSelected);
+  const reapplySelfTarget: ComposeReapplyTarget | null =
+    isAdmin && canReapplyCompose && activeNode
+      ? { nodeId: activeNode.id, type: activeNode.type === 'local' ? 'local' : 'remote', name: activeNode.name }
+      : null;
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -1564,6 +1568,7 @@ export default function EditorLayout() {
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
+          reapplySelfTarget={reapplySelfTarget}
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}

@@ -496,7 +496,7 @@ export class AutoHealService {
         this.restartTimestamps.set(restartKey, timestamps);
 
         try {
-            await DockerController.getInstance(nodeId).restartContainer(containerId);
+            await DockerController.getInstance(nodeId).restartContainer(containerId, { allowEndpointContainer: true });
             if (isDebugEnabled()) {
                 console.log(`[AutoHeal:diag] restart of ${containerName} on node ${nodeId} took ${Date.now() - now}ms`);
             }

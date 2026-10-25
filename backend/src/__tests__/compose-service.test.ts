@@ -168,6 +168,15 @@ vi.mock('fs', () => ({
   },
 }));
 
+const { mockEvaluateDockerEndpointGuard } = vi.hoisted(() => ({
+  mockEvaluateDockerEndpointGuard: vi.fn(),
+}));
+
+vi.mock('../helpers/dockerEndpointGuard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../helpers/dockerEndpointGuard')>()),
+  evaluateDockerEndpointGuard: mockEvaluateDockerEndpointGuard,
+}));
+
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
@@ -376,6 +385,7 @@ beforeEach(() => {
   mockGetRegistries.mockReturnValue([]);
   mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
   mockGetBindMounts.mockResolvedValue(null);
+  mockEvaluateDockerEndpointGuard.mockResolvedValue(null);
   mockLoadStackBuildServices.mockResolvedValue([]);
   mockResolveMissingExternalNetworks.mockResolvedValue({
     status: 'ok',
@@ -427,6 +437,132 @@ afterEach(() => {
   } else {
     process.env.SENCHO_MODE = originalSenchoMode;
   }
+});
+
+// ── Docker endpoint guard wiring ───────────────────────────────────────
+
+describe('ComposeService - Docker endpoint guard', () => {
+  const refusal = {
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+  };
+
+  it.each(['stop', 'restart', 'down'] as const)('refuses runCommand %s before spawning compose', async (action) => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', action)).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    });
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('classifies restart separately from stop, so restarting Sencho stays allowed', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const svc = ComposeService.getInstance(1);
+
+    const restart = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await restart;
+    const stop = svc.runCommand('my-stack', 'stop');
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+    proc.emit('close', 0);
+    await stop;
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['restart', 'stop']);
+  });
+
+  it('does not consult the guard for start', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).runCommand('my-stack', 'start');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+  });
+
+  it('refuses runDown, downStack, and a service-scoped update for the protected service', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.runDown('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    // downStack swallows teardown failures; a refusal is not one of them.
+    await expect(svc.downStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateService('my-stack', 'socket-proxy', false)).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.recreateServiceFromLocal('my-stack', 'socket-proxy')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const mutations = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation);
+    expect(mutations).toEqual([
+      { kind: 'stop' },
+      { kind: 'stop' },
+      { kind: 'service', service: 'socket-proxy' },
+      { kind: 'service', service: 'socket-proxy' },
+    ]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses deployStack and updateStack before any compose work starts', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.deployStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['up', 'update']);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('computes the config hash with the authored invocation and parses `service hash` output', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const check = svc.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('socket-proxy 4f9a1c\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'config', '--hash=socket-proxy'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') }),
+    );
+    expect(hash).toBe('4f9a1c');
+  });
+
+  it('reports an unavailable hash as null rather than throwing', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid compose project'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(hash).toBeNull();
+  });
 });
 
 // ── runCommand ─────────────────────────────────────────────────────────
