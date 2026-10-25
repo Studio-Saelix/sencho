@@ -162,13 +162,14 @@ export function buildPolicyGateOptions(
 
 export function buildSystemPolicyGateOptions(
   actor: string,
-  overrides: { bypass?: boolean; auditPath?: string; auditMethod?: string } = {},
+  overrides: Partial<Pick<PolicyEnforcementOptions, 'bypass' | 'auditPath' | 'auditMethod' | 'onAllowed'>> = {},
 ): PolicyEnforcementOptions {
   return {
     bypass: overrides.bypass ?? false,
     actor,
     auditMethod: overrides.auditMethod ?? 'POST',
     auditPath: overrides.auditPath,
+    onAllowed: overrides.onAllowed,
   };
 }
 
@@ -230,7 +231,6 @@ export async function runPolicyGate(
     });
     return false;
   }
-  res.locals.policyEvidence = allowedPolicyEvidence(gate).policyEvidence;
   return true;
 }
 

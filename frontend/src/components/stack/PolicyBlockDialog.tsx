@@ -136,6 +136,10 @@ export function PolicyBlockDialog({
   // about the whole block and is false when any image matched on the merits.
   const genuineCount = violations.filter((v) => !v.error).length;
   const hasGenuineViolation = genuineCount > 0;
+  // A setting governs the outcome only when a rule was applied. An evaluation
+  // that threw after a completed scan has no rule, so pointing at the settings
+  // would send the operator to a control that changes nothing for this block.
+  const governedBySetting = (payload?.evidence?.applications?.length ?? 0) > 0;
 
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
@@ -153,7 +157,7 @@ export function PolicyBlockDialog({
               // remaining rows are evidence placeholders, which did not trigger
               // anything on the merits.
               `The following ${genuineCount === 1 ? 'image' : `${genuineCount} images`} triggered the block.`
-            : 'No image was found to match those conditions. The deploy was stopped because the evidence needed to check them could not be obtained.'}
+            : 'No image was found to match those conditions. The deploy was stopped because the images could not be checked against them.'}
         </p>
         <div className="border border-glass-border bg-card/60 shadow-card-bevel divide-y divide-glass-border">
           {violations.length === 0 ? (
@@ -223,8 +227,8 @@ export function PolicyBlockDialog({
             </div>
             <p className="text-xs text-muted-foreground mt-1">
               {hasGenuineViolation
-                ? 'This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.'
-                : 'This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.'}
+                ? `This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained${governedBySetting ? ', and your settings say what to do in that case' : ''}.`
+                : `This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs was not available${governedBySetting ? ', and your settings say what to do in that case' : ''}.`}
             </p>
             <ul className="mt-2 space-y-1">
               {evidenceLines.map((line) => (
@@ -233,9 +237,11 @@ export function PolicyBlockDialog({
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-muted-foreground mt-2">
-              Change this on the Security page &rarr; Policies tab, under Evidence availability.
-            </p>
+            {governedBySetting && (
+              <p className="text-xs text-muted-foreground mt-2">
+                Change this on the Security page &rarr; Policies tab, under Evidence availability.
+              </p>
+            )}
           </div>
         )}
       </ModalBody>

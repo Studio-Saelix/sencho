@@ -58,6 +58,7 @@ import {
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
 import { candidateContentFingerprint } from './gitops/fingerprint';
 import type { CandidatePolicyEvaluation } from './PolicyEnforcement';
+import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -476,6 +477,12 @@ export interface GitApplyOpts {
     requirePlanFingerprint?: boolean;
     /** Drives configured_policy acceptance for automated webhook deliveries. */
     reconcileTrigger?: ReconcileTrigger;
+    /**
+     * Receives the policy decision when the deploy gate allows on evidence that
+     * was not a clean pass, so the manual-apply response can carry it. A call that
+     * joins another in-flight apply is not called; the audit row still records it.
+     */
+    onAllowed?: (allowed: AllowedPolicyEvidence) => void;
 }
 
 export type WebhookPullOptions = {
@@ -5627,6 +5634,7 @@ export class GitSourceService {
         legacyOwnedPaths: string[] | undefined;
         deploy: boolean;
         bypassPolicy: boolean;
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void;
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean };
         /**
          * By-reference out-param, required so no caller can silently opt out of
@@ -5962,6 +5970,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(captureActor, {
                         bypass: args.bypassPolicy === true,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed: args.onAllowed,
                     }),
                 );
                 if (recoveryId) {
@@ -6403,6 +6412,7 @@ export class GitSourceService {
                 legacyOwnedPaths,
                 deploy: opts.deploy ?? src.auto_deploy_on_apply,
                 bypassPolicy: opts.bypassPolicy === true,
+                onAllowed: opts.onAllowed,
                 started,
                 // applyLockedBody's wrapper tracks the operation via `started`;
                 // this flag exists only to keep the pipeline signature honest.

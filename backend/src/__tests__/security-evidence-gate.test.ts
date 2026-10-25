@@ -755,6 +755,18 @@ describe('an allowed decision keeps the evidence it was allowed on', () => {
 });
 
 describe('the in-request callback for an allowed decision', () => {
+    it('does not refuse an allowed operation because the callback threw', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const onAllowed = vi.fn(() => { throw new Error('boom'); });
+        const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin', onAllowed });
+        expect(gate.ok).toBe(true);
+        expect(onAllowed).toHaveBeenCalledTimes(1);
+        expect(errors).toHaveBeenCalled();
+        errors.mockRestore();
+    });
+
     it('is called with the decision when the evidence was not a clean pass', async () => {
         trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
         dbStub.getGlobalSettings.mockReturnValue({ security_scan_failure: 'allow' });

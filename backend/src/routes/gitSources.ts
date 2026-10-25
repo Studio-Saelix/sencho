@@ -6,6 +6,7 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsBindingError, GitOpsBindingService } from '../services/gitops/binding';
 import { SourceController } from '../services/gitops/SourceController';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
+import type { AllowedPolicyEvidence } from '../services/allowedPolicyEvidence';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
@@ -703,6 +704,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
     const source = DatabaseService.getInstance().getGitSource(stackName);
     const willDeploy = typeof deploy === 'boolean' ? deploy : source?.auto_deploy_on_apply === true;
     if (willDeploy && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+    let policyEvidence: AllowedPolicyEvidence | undefined;
     const result = await GitSourceService.getInstance().apply(
       stackName,
       commitSha.trim(),
@@ -712,6 +714,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         bypassPolicy: req.query.ignorePolicy === 'true' && req.user?.role === 'admin',
         planFingerprint: planFingerprint.trim(),
         requirePlanFingerprint: true,
+        onAllowed: (allowed) => { policyEvidence = allowed; },
       },
     );
     // Cache invalidation and the post-deploy scan now run inside GitSourceService.apply() itself.
@@ -723,7 +726,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
     } else {
       console.log('[GitSource] Applied commit %s to %s', sanitizeForLog(shortSha), sanitizeForLog(stackName));
     }
-    res.json(result);
+    res.json(policyEvidence ? { ...result, policyEvidence } : result);
   } catch (error) {
     sendGitSourceError(res, error);
   }

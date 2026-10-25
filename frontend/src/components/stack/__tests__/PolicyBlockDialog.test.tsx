@@ -133,6 +133,10 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.getByText('Policy evaluation failed: boom')).toBeInTheDocument();
     expect(screen.queryByText(/scan did not complete/i)).not.toBeInTheDocument();
     expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
+    // No rule was applied, so no setting governs this block and none is offered.
+    expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be obtained/i)).not.toBeInTheDocument();
   });
 
   it('explains both problems when one image is stale and its findings incomplete', () => {

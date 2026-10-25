@@ -85,7 +85,7 @@ export interface PolicyEnforcementOptions {
     /**
      * Leave an audit row when the gate allows on evidence that was not a clean
      * pass. Defaults to on. A read-only probe that asks "would this be allowed"
-     * (rollback eligibility, polled by the UI) sets it to false: it allowed
+     * (rollback eligibility, a read-only probe) sets it to false: it allowed
      * nothing, and a row per poll would bury the rows for real operations.
      */
     recordAllowedEvidence?: boolean;
@@ -471,7 +471,7 @@ function evaluateImageRisk(
 
 /**
  * The evidence half of an audit summary: the outcome, each record that was not
- * `current`, and the configured rule that acted on each. Empty for a clean pass,
+ * `current`, and the configured rules that acted. Empty for a clean pass,
  * so a row that has nothing to say about evidence reads exactly as it did before.
  *
  * Targets are image references taken from a compose file, so they are stripped of
@@ -501,8 +501,9 @@ function describeEvidenceForAudit(evidence: EvidenceGateDecision | undefined): s
  * allowed on a failed scan or a missing scanner is indistinguishable afterwards
  * from one allowed on current, clean evidence. It names the actor and trigger
  * (the audit entry's username, method and path), the policy, and what the
- * evidence was and which configured rule let it through. Written here, once, so
- * no caller has to remember to.
+ * evidence was and which configured rules acted, if any. It records the gate's
+ * decision, written when the gate allows, not that the operation then completed.
+ * Written here, once, so no caller has to remember to.
  *
  * A bypassed decision is not written again: its `policy.bypass` row already
  * names the exception and carries the same evidence clause.
@@ -550,7 +551,15 @@ function retainAllowedDecision(
 ): PolicyEnforcementResult {
     recordAllowedEvidenceAudit(result, stackName, nodeId, opts);
     const { policyEvidence } = allowedPolicyEvidence(result);
-    if (policyEvidence) opts.onAllowed?.(policyEvidence);
+    if (policyEvidence) {
+        // The decision is already durable and the gate allowed: a callback that
+        // throws must not turn that into a refused operation.
+        try {
+            opts.onAllowed?.(policyEvidence);
+        } catch (err) {
+            console.error('[Policy] onAllowed callback failed:', err);
+        }
+    }
     return result;
 }
 

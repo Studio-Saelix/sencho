@@ -1,9 +1,10 @@
 /**
  * The response-side half of an allowed gate decision.
  *
- * Its own module, with type-only imports, so a handler can build the response
- * field without importing the enforcement engine's runtime, and so the engine and
- * the HTTP helpers share one definition instead of one importing the other.
+ * Its own module, importing the enforcement engine by type only, so a handler
+ * can build the response field without loading the engine's runtime, and so the
+ * engine and the HTTP helpers share one definition instead of one importing the
+ * other.
  */
 import type { PolicyEnforcementResult } from './PolicyEnforcement';
 import { isCleanEvidenceDecision, type EvidenceGateDecision } from './securityEvidence';
@@ -12,8 +13,9 @@ import { isCleanEvidenceDecision, type EvidenceGateDecision } from './securityEv
  * What an allowed operation reports about the evidence it was allowed on. Only
  * built when that evidence was not a clean pass or a bypass was used; a clean
  * allow has nothing to report. The same decision is written to the audit log by
- * the gate itself (as `policy.evidence_allowed`, or on the `policy.bypass` row),
- * so this is the response-side half of one record, not a second source of truth.
+ * the gate itself (as `policy.evidence_allowed`, or on the `policy.bypass` row)
+ * unless the caller opted out with `recordAllowedEvidence: false`, so this is the
+ * response-side half of one record, not a second source of truth.
  */
 export interface AllowedPolicyEvidence {
     policy: { id: number; name: string };

@@ -63,6 +63,13 @@ async function auditSummaries(): Promise<string[]> {
   return db.getAuditLogsInRange(0, Date.now() + 60_000, 1000).map((e) => e.summary);
 }
 
+async function auditEntries() {
+  const { DatabaseService } = await import('../services/DatabaseService');
+  const db = DatabaseService.getInstance();
+  db.flushAuditLogBuffer();
+  return db.getAuditLogsInRange(0, Date.now() + 60_000, 1000);
+}
+
 async function setSettings(values: Record<string, string>): Promise<void> {
   const { DatabaseService } = await import('../services/DatabaseService');
   DatabaseService.getInstance().updateGlobalSettings(values);
@@ -129,6 +136,12 @@ describe('a deploy allowed on incomplete evidence', () => {
         applications: [expect.objectContaining({ rule: 'security_scanner_unavailable=allow' })],
       },
     });
+    // The durable half names who and what triggered the allowed decision.
+    const rows = (await auditEntries()).filter((e) => e.summary.startsWith('policy.evidence_allowed') && e.summary.includes('stack="evidence-no-scanner"'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ username: 'testadmin', method: 'POST', path: '/api/stacks/evidence-no-scanner/deploy' });
+    expect(rows[0].summary).toContain('scanner_availability:unavailable:(node)');
+    expect(rows[0].summary).toContain('security_scanner_unavailable=allow');
   });
 
   it('reports the decision in the response when a failed scan is allowed, and leaves an audit row', async () => {
