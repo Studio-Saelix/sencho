@@ -29,6 +29,7 @@ describe('parseRemotePolicyEvidence', () => {
     ['no evidence', { policyEvidence: { ...valid, evidence: undefined } }],
     ['evidence without records', { policyEvidence: { ...valid, evidence: { ...valid.evidence, records: undefined } } }],
     ['evidence without an outcome', { policyEvidence: { ...valid, evidence: { ...valid.evidence, outcome: 1 } } }],
+    ['evidence with an outcome that is not a decision', { policyEvidence: { ...valid, evidence: { ...valid.evidence, outcome: 'maybe' } } }],
   ])('treats %s as nothing sent', (_name, body) => {
     expect(parseRemotePolicyEvidence(body)).toBeUndefined();
   });

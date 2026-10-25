@@ -198,6 +198,21 @@ describe('rollback with the scanner unavailable and the policy set to block', ()
     expect(rows[0].summary).toContain('security_scanner_unavailable=block');
   });
 
+  it('does not let a deployer bypass it', async () => {
+    const bcrypt = (await import('bcrypt')).default;
+    (await db()).addUser({ username: 'rollback-deployer', password_hash: await bcrypt.hash('rollback-deployer-pass', 1), role: 'deployer' });
+    const login = await request(app).post('/api/auth/login').send({ username: 'rollback-deployer', password: 'rollback-deployer-pass' });
+    const cookies = login.headers['set-cookie'] as string | string[];
+    const deployerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+
+    const res = await request(app).post('/api/stacks/web/rollback?ignorePolicy=true').set('Cookie', deployerCookie);
+
+    expect(res.status).toBe(409);
+    expect(res.body.policy).toMatchObject({ name: 'rollback-gate' });
+    expect(restoreFromContext).not.toHaveBeenCalled();
+    expect(await bypassRows()).toHaveLength(0);
+  });
+
   it('does not let a bypass reach past an integrity refusal', async () => {
     await clearGenerations();
     await insertGeneration('not json');

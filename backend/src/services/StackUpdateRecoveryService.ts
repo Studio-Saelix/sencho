@@ -1296,8 +1296,8 @@ export class StackUpdateRecoveryService {
       // before that leaves the previous workload provably intact. The same
       // classification rides the error to the rollback caller (this node's
       // stack route, or the hub restoring through it): this catch is the only
-      // place that knows, and a code such as ROLLBACK_PROHIBITED is thrown on
-      // both sides of the file move.
+      // place that knows, and a code does not say it on its own
+      // (RECOVERY_PROBE_FAILED is thrown only after the files moved).
       //
       // A failed restore's own revert counts as movement even before this
       // function saw a clean return: the live files may be a mix of the

@@ -44,6 +44,15 @@ export function allowedPolicyEvidence(
 export function parseRemotePolicyEvidence(body: unknown): AllowedPolicyEvidence | undefined {
     if (typeof body !== 'object' || body === null) return undefined;
     const candidate = (body as { policyEvidence?: unknown }).policyEvidence;
+    if (candidate === undefined) return undefined;
+    const parsed = readPolicyEvidence(candidate);
+    // A field that is present but unreadable is dropped from the response, so the
+    // drop is logged: the remote node's own audit row is the only other record.
+    if (!parsed) console.warn('[Policy] Ignored a malformed policyEvidence field in a remote node response');
+    return parsed;
+}
+
+function readPolicyEvidence(candidate: unknown): AllowedPolicyEvidence | undefined {
     if (typeof candidate !== 'object' || candidate === null) return undefined;
     const { policy, bypassed, evidence } = candidate as Partial<Record<keyof AllowedPolicyEvidence, unknown>>;
     if (typeof policy !== 'object' || policy === null) return undefined;
@@ -52,7 +61,7 @@ export function parseRemotePolicyEvidence(body: unknown): AllowedPolicyEvidence 
     if (typeof evidence !== 'object' || evidence === null) return undefined;
     const decision = evidence as Partial<Record<keyof EvidenceGateDecision, unknown>>;
     if (
-        typeof decision.outcome !== 'string'
+        (decision.outcome !== 'allow' && decision.outcome !== 'warn' && decision.outcome !== 'block')
         || typeof decision.summary !== 'string'
         || !Array.isArray(decision.records)
         || !Array.isArray(decision.applications)

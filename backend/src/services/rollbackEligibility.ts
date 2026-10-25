@@ -3,6 +3,8 @@
  *
  * Pure evaluateRollbackEligibility maps known signals to a verdict.
  * assessGenerationEligibility gathers best-effort evidence for a recovery row.
+ * The security posture signal is advisory and cannot honor a bypass: it serves
+ * read-only readiness. A restore decides posture in its own policy gate.
  */
 import type { StackUpdateRecoveryGenerationRow } from './DatabaseService';
 import DockerController from './DockerController';
@@ -169,7 +171,8 @@ export async function assessGenerationEligibility(
      * Leave the security posture to the caller's own policy gate. The posture
      * check here evaluates with no bypass and no way to report why it blocked,
      * so a caller that holds the operator's bypass and renders the block must
-     * not let it veto first.
+     * not let it veto first. A deferred assessment never returns `eligible`
+     * (the posture signal stays unknown); callers test for `prohibited`.
      */
     deferSecurityPosture?: boolean;
   } = {},

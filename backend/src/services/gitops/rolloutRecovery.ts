@@ -93,10 +93,10 @@ const PRE_MUTATION_REFUSAL_CODES: ReadonlySet<string> = new Set([
 /**
  * Whether a failed restore can have mutated the target it was refused on.
  *
- * The node's own `failureClass` wins when it is present: a code such as
- * `ROLLBACK_PROHIBITED` is thrown both before any file move (eligibility) and
- * after one (the policy gate), so only the restore's catch knows which
- * happened.
+ * The node's own `failureClass` wins when it is present: a code alone does not
+ * say how far a restore got (`RECOVERY_PROBE_FAILED` arrives after the files
+ * moved), so only the restore's catch knows. The code set below is the fallback
+ * for a node that sends no class, and it is not exhaustive.
  */
 export function restoreFailureMutated(outcome: {
   code: string;

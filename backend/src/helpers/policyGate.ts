@@ -223,9 +223,9 @@ export async function runPolicyGate(
 }
 
 /**
- * The part of a policy-block 409 body the block dialog reads. Shared by every
- * route that refuses on a policy decision, so the dialog and its bypass button
- * open the same way whichever operation was refused.
+ * The part of a policy-block 409 body the block dialog reads. Shared by the
+ * deploy gate and the rollback route, so the dialog and its bypass button open
+ * the same way for either refusal.
  */
 export function policyBlockPayload(
   policy: ScanPolicy | undefined,
