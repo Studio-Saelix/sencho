@@ -1156,6 +1156,9 @@ describe('GitSourcePanel controller controls', () => {
         await settle();
 
         expect(screen.getByLabelText('Ref')).toHaveValue('develop');
+        // The refresh was applied, not discarded: its Retry is on the Overview tab.
+        openTab('Overview');
+        expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
       });
 
       it('stays quiet and keeps what it shows when the refresh cannot be read', async () => {
@@ -1204,6 +1207,126 @@ describe('GitSourcePanel controller controls', () => {
         await act(async () => { release(jsonRes(failed())); });
 
         expect(retryButton()).not.toBeInTheDocument();
+      });
+
+      it('keeps what it shows when the refresh finds no source or an unlinked stack', async () => {
+        vi.mocked(apiFetch)
+          .mockResolvedValueOnce(jsonRes(failed()))
+          .mockResolvedValueOnce(jsonRes({ error: 'gone' }, false, 404))
+          .mockResolvedValueOnce(jsonRes({ linked: false, gitopsRevision: settled([]) }))
+          .mockResolvedValue(jsonRes(failed()));
+        render(panel());
+        expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+
+        announce({ stackName: 'web' });
+        await waitFor(() => expect(reads()).toBe(2));
+        await settle();
+        announce({ stackName: 'web' });
+        await waitFor(() => expect(reads()).toBe(3));
+        await settle();
+
+        expect(retryButton()).toBeInTheDocument();
+        expect(toast.error).not.toHaveBeenCalled();
+      });
+
+      it('coalesces a burst of announcements into one read', async () => {
+        vi.mocked(apiFetch).mockResolvedValue(jsonRes(observing()));
+        render(panel());
+        await screen.findByTestId('gitops-source');
+        const before = reads();
+
+        announce({ stackName: 'web' });
+        announce({ stackName: 'web' });
+        announce({ stackName: 'web' });
+        await settle();
+
+        expect(reads()).toBe(before + 1);
+      });
+
+      it('cancels a pending refresh when the sheet unmounts', async () => {
+        vi.mocked(apiFetch).mockResolvedValue(jsonRes(observing()));
+        const { unmount } = render(panel());
+        await screen.findByTestId('gitops-source');
+        const before = reads();
+
+        announce({ stackName: 'web' });
+        unmount();
+        await settle();
+
+        expect(reads()).toBe(before);
+      });
+
+      it('reads the panel\'s own node and stack, and only that node\'s announcements', async () => {
+        nodeCtl.activeNode = { id: 1 };
+        vi.mocked(apiFetch).mockResolvedValueOnce(jsonRes(observing())).mockResolvedValue(jsonRes(failed()));
+        render(panel({ nodeId: 9 }));
+        await screen.findByTestId('gitops-source');
+
+        announce({ nodeId: 1, stackName: 'web' });
+        await settle();
+        expect(reads()).toBe(1);
+
+        announce({ nodeId: 9, stackName: 'web' });
+        await waitFor(() => expect(reads()).toBe(2));
+        for (const [url, options] of vi.mocked(apiFetch).mock.calls) {
+          expect(String(url)).toBe('/stacks/web/git-source');
+          expect(options).toMatchObject({ nodeId: 9 });
+        }
+      });
+
+      it('reads again when the notifications socket reconnects', async () => {
+        vi.mocked(apiFetch).mockResolvedValueOnce(jsonRes(observing())).mockResolvedValue(jsonRes(failed()));
+        render(panel());
+        await screen.findByTestId('gitops-source');
+
+        act(() => {
+          window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: false } }));
+        });
+        await settle();
+        expect(reads()).toBe(1);
+
+        act(() => {
+          window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: true } }));
+        });
+        expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+      });
+
+      it('does not let an older refresh undo a newer background read', async () => {
+        let releaseRefresh: (res: Response) => void = () => {};
+        let gets = 0;
+        vi.mocked(apiFetch).mockImplementation(async (_url: string, options?: { method?: string }) => {
+          if (options?.method === 'POST') return jsonRes({ success: true });
+          gets += 1;
+          if (gets === 1) return jsonRes(failed());
+          // The refresh the Retry click starts is slow and reports the old verdict.
+          if (gets === 2) return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+          return jsonRes(observing());
+        });
+        render(panel());
+        fireEvent.click(await screen.findByRole('button', { name: /^retry$/i }));
+        await waitFor(() => expect(gets).toBe(3));
+        await waitFor(() => expect(retryButton()).not.toBeInTheDocument());
+
+        await act(async () => { releaseRefresh(jsonRes(failed())); });
+
+        expect(retryButton()).not.toBeInTheDocument();
+      });
+
+      it('replays an announcement that arrived during a manual reload of a failed open', async () => {
+        let release: (res: Response) => void = () => {};
+        vi.mocked(apiFetch)
+          .mockResolvedValueOnce(jsonRes({ error: 'boom' }, false, 500))
+          .mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; }))
+          .mockResolvedValue(jsonRes(failed()));
+        render(panel());
+        fireEvent.click(await within(await screen.findByTestId('git-source-load-error')).findByRole('button', { name: /^retry$/i }));
+        await waitFor(() => expect(reads()).toBe(2));
+
+        announce({ stackName: 'web' });
+        release(jsonRes(observing()));
+
+        await waitFor(() => expect(reads()).toBe(3));
+        expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
       });
 
       it('stops listening once the sheet closes', async () => {

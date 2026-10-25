@@ -114,6 +114,8 @@ test.describe('Git source Retry after a health-gate failure (local git server)',
       await gitButton.click();
       const sheet = page.getByRole('dialog');
       await expect(sheet.getByRole('heading', { name: /git source/i })).toBeVisible({ timeout: 5_000 });
+      // Wait for the opening read, so the absence below is a loaded answer and not an empty sheet.
+      await expect(sheet.getByRole('tab', { name: 'Overview' })).toBeVisible({ timeout: 10_000 });
       await expect(sheet.getByRole('button', { name: /^retry$/i })).toHaveCount(0);
 
       const applied = await api(page, `/api/stacks/${stackName}/git-source/apply`, {

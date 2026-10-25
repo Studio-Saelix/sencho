@@ -267,6 +267,7 @@ export function GitSourcePanel({
   // sheet just left cannot overwrite the one it is now showing.
   const loadSeq = useRef(0);
   const backgroundSeq = useRef(0);
+  const backgroundApplied = useRef(0);
   const loadedForOpen = useRef(false);
   // An announcement that arrived while the opening read was still in flight: that
   // read may predate it, so one more read follows once the sheet has loaded.
@@ -294,7 +295,11 @@ export function GitSourcePanel({
     const background = mode === 'background';
     const seq = background ? loadSeq.current : ++loadSeq.current;
     const bgSeq = background ? ++backgroundSeq.current : 0;
-    const current = () => seq === loadSeq.current && (!background || bgSeq === backgroundSeq.current);
+    // A background read that applied while this one was in flight started after
+    // it did, so it is the newer answer and this one must not undo it.
+    const bgApplied0 = backgroundApplied.current;
+    const current = () => seq === loadSeq.current
+      && (background ? bgSeq === backgroundSeq.current : backgroundApplied.current === bgApplied0);
     const fresh = mode === 'open';
     if (fresh) {
       setLoading(true);
@@ -302,7 +307,10 @@ export function GitSourcePanel({
       loadedForOpen.current = false;
     }
     const fail = (message: string) => {
-      if (mode === 'background') return;
+      if (background) {
+        console.warn('[GitSourcePanel] background refresh failed; the sheet may be stale:', stackName, message);
+        return;
+      }
       if (!fresh) {
         toast.error('Could not refresh the sheet. Reopen it to see the current state.');
         return;
@@ -318,17 +326,26 @@ export function GitSourcePanel({
       if (res.ok) {
         const data: GitSourceRead | GitSourceUnlinked = await res.json();
         if (!current()) return;
+        if (background) {
+          // Only a linked source on a sheet already showing one: anything else
+          // would mix the answer with a form or error the operator is looking at.
+          if ('linked' in data || !hasSource.current) return;
+          backgroundApplied.current += 1;
+          setRevision(data.gitopsRevision);
+          setSource(data);
+          return;
+        }
         setRevision(data.gitopsRevision);
         // An existing stack with no Git source attached answers 200 { linked: false }.
         if ('linked' in data) {
-          if (mode !== 'background') resetToUnlinked();
-        } else if (mode !== 'background' || hasSource.current) {
+          resetToUnlinked();
+        } else {
           setSource(data);
           hasSource.current = true;
           if (mode === 'open' || mode === 'save') fillForm(data);
         }
       } else if (res.status === 404) {
-        if (mode !== 'background') {
+        if (!background) {
           resetToUnlinked();
           setRevision(null);
         }
@@ -350,6 +367,16 @@ export function GitSourcePanel({
     }
   }, [stackName, nodeId, resetToUnlinked, fillForm]);
 
+  // The opening read, plus the one more read an announcement that landed during
+  // it earns. A superseded read leaves the flag to the read that replaced it.
+  const loadOpen = useCallback(async () => {
+    refreshQueued.current = false;
+    await load('open');
+    if (!refreshQueued.current || !loadedForOpen.current) return;
+    refreshQueued.current = false;
+    void load('background');
+  }, [load]);
+
   useEffect(() => {
     if (open) {
       setTab('overview');
@@ -357,14 +384,9 @@ export function GitSourcePanel({
       // Drop whatever the sheet held for another stack or an earlier visit before reading afresh.
       resetToUnlinked();
       setRevision(null);
-      void load('open').then(() => {
-        // A superseded read leaves the flag to the read that replaced it.
-        if (!refreshQueued.current || !loadedForOpen.current) return;
-        refreshQueued.current = false;
-        void load('background');
-      });
+      void loadOpen();
     }
-  }, [open, load, resetToUnlinked]);
+  }, [open, loadOpen, resetToUnlinked]);
 
   // The health verdict lands after the deploy that started it, usually with the
   // sheet still open, and the server offers Retry only once it has failed. The
@@ -391,9 +413,17 @@ export function GitSourcePanel({
         void load('background');
       }, INVALIDATE_DEBOUNCE_MS);
     };
+    // Announcements sent while the socket was down are gone, so a reconnect is
+    // itself a reason to look again.
+    const onConnection = (e: Event) => {
+      if (!(e as CustomEvent<{ connected?: boolean }>).detail?.connected) return;
+      onInvalidate(new CustomEvent('sencho:state-invalidate', { detail: { scope: 'gitops' } }));
+    };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
+    window.addEventListener('sencho:notifications-connection', onConnection);
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      window.removeEventListener('sencho:notifications-connection', onConnection);
       if (timer) clearTimeout(timer);
     };
   }, [open, panelNodeId, stackName, load]);
@@ -1121,7 +1151,7 @@ export function GitSourcePanel({
         className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3"
       >
         <p className="font-mono text-[11px] text-destructive">{loadError}</p>
-        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { void load('open'); }}>
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { void loadOpen(); }}>
           <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.5} />
           Retry
         </Button>
