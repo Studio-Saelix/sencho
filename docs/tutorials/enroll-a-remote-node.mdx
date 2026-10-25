@@ -4,7 +4,7 @@ sidebarTitle: Enroll a remote node
 description: Bring a second server under management in the same Sencho console, without opening any inbound ports on it.
 ---
 
-Say you run Sencho on one server already, and you separately have a home media server running a Jellyfin stack via Docker Compose, on a connection with no port forwarding. This walks through bringing that second server into your Sencho console as a remote node, using **Pilot Agent** mode: the remote host only needs outbound HTTPS, so nothing has to be opened on your router or firewall.
+Say you run Sencho on one server already, and you separately have a home media server running a Jellyfin stack via Docker Compose, on a connection with no port forwarding. This walks through bringing that second server into your Sencho console as a remote node, using **Pilot Agent** mode: the remote host only needs outbound HTTPS, so nothing has to be opened on your router or firewall. The remote host runs the standard Sencho image in Pilot mode, a headless node with no UI of its own, and you keep managing it from your existing console.
 
 By the end, both servers appear side by side in the same console, and Sencho can see the Jellyfin containers already running on the second one.
 
