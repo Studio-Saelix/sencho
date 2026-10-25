@@ -42,6 +42,8 @@ import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ServiceUrlEditBlock, ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import { ServicePortLink } from './ServicePortLink';
+import { ServiceSenchoLinks } from './ServiceSenchoLinks';
+import { presentServices } from '@/lib/senchoLabels';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
 import StructuredLogViewer from '../StructuredLogViewer';
@@ -404,6 +406,20 @@ export function ContainersHealth({
     const [density, setDensity] = useState<'compact' | 'detailed'>(
         safeContainers.length > 1 ? 'compact' : 'detailed',
     );
+    // Helper services the stack marks hidden collapse behind one row; the row keeps
+    // their health visible and reveals them in place.
+    const [showHidden, setShowHidden] = useState(false);
+    const sencho = serviceUrlEntry?.renderable ? serviceUrlEntry.senchoLabels ?? null : null;
+    const presentation = presentServices(effectiveServices.map(spec => spec.name), sencho);
+    const specByName = new Map(effectiveServices.map(spec => [spec.name, spec]));
+    const orderedSpecs = presentation.order.flatMap(name => specByName.get(name) ?? []);
+    const hiddenSpecs = orderedSpecs.filter(spec => presentation.hidden.has(spec.name));
+    const visibleSpecs = showHidden ? orderedSpecs : orderedSpecs.filter(spec => !presentation.hidden.has(spec.name));
+    const hiddenNeedingAttention = hiddenSpecs.filter(spec => {
+        const group = safeContainers.filter(c => c.Service === spec.name);
+        return group.length < spec.expectedReplicas
+            || group.some(c => c.State !== 'running' || c.healthStatus === 'unhealthy');
+    }).length;
     // Summary strip + density/expand toggles: multi-container stacks only,
     // whether the body is flat or grouped by declared service.
     const total = safeContainers.length;
@@ -623,6 +639,11 @@ export function ContainersHealth({
                                                     </>
                                                 ) : null}
                                             </div>
+                                            <ServiceSenchoLinks
+                                                resolution={sencho}
+                                                service={composeService}
+                                                applicationLinkShown={Boolean(mainPort && mainPortPrivate)}
+                                            />
                                         </div>
                                     </div>
                                     <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
@@ -806,7 +827,7 @@ export function ContainersHealth({
             {densityToolbar}
             {isMultiService ? (
                 <div className="flex flex-col gap-3">
-                    {effectiveServices.map(spec => {
+                    {visibleSpecs.map(spec => {
                         const group = safeContainers.filter(c => c.Service === spec.name);
                         const status = serviceUpdateStatuses.find(s => s.service === spec.name);
                         const busy = serviceUpdateInProgress?.service === spec.name;
@@ -894,6 +915,31 @@ export function ContainersHealth({
                             </div>
                         );
                     })}
+                    {hiddenSpecs.length > 0 && (
+                        <div
+                            className="flex items-center justify-between gap-3 rounded-lg border border-hairline px-3 py-2"
+                            data-testid="hidden-services-row"
+                        >
+                            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                                <span>{hiddenSpecs.length} hidden helper service{hiddenSpecs.length === 1 ? '' : 's'}</span>
+                                {hiddenNeedingAttention > 0 && (
+                                    <span className="text-warning" data-testid="hidden-services-attention">
+                                        {hiddenNeedingAttention} need{hiddenNeedingAttention === 1 ? 's' : ''} attention
+                                    </span>
+                                )}
+                            </div>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 shrink-0 max-md:h-11"
+                                aria-pressed={showHidden}
+                                onClick={() => setShowHidden(prev => !prev)}
+                            >
+                                {showHidden ? 'Hide' : 'Show'}
+                            </Button>
+                        </div>
+                    )}
                 </div>
             ) : showConfirmedEmpty ? (
                 <div className="text-muted-foreground text-sm">No containers running for this stack.</div>

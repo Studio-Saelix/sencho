@@ -1,6 +1,6 @@
 /**
  * Unit tests for the URL-label source authority: which compose file a service's
- * `sencho.service.url` label comes from, expressed as editability of the
+ * `io.sencho.url` label comes from, expressed as editability of the
  * resolved main file. A later file setting the key shadows the main file
  * whatever its value (valid, invalid, interpolated, or equal).
  */
@@ -18,13 +18,13 @@ function state(override: string | null, services = ['web'], rootContent?: string
 
 describe('serviceUrlFileFacts', () => {
   it('reads map-form and list-form labels as set keys, with or without a valid value', () => {
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n')?.sets.has('web')).toBe(true);
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      sencho.service.url:\n')?.sets.has('web')).toBe(true);
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url=https://app.example.com\n')?.sets.has('web')).toBe(true);
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url=\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      io.sencho.url: not-a-url\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      io.sencho.url:\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - io.sencho.url=https://app.example.com\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - io.sencho.url=\n')?.sets.has('web')).toBe(true);
     // A bare list item sets the key to an empty value and shadows earlier files all the same.
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - sencho.service.url\n')?.sets.has('web')).toBe(true);
-    expect(serviceUrlFileFacts('services:\n  web:\n    labels: [sencho.service.url]\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      - io.sencho.url\n')?.sets.has('web')).toBe(true);
+    expect(serviceUrlFileFacts('services:\n  web:\n    labels: [io.sencho.url]\n')?.sets.has('web')).toBe(true);
     expect(serviceUrlFileFacts('services:\n  web:\n    labels:\n      other.label: x\n')?.sets.has('web')).toBe(false);
     expect(serviceUrlFileFacts('services:\n  web:\n    image: nginx\n')?.sets.has('web')).toBe(false);
   });
@@ -52,7 +52,7 @@ describe('serviceUrlFileFacts', () => {
     expect(serviceUrlFileFacts(sibling)?.interpolated.has('api')).toBe(false);
     // A literal key with an interpolated value is still a known set: the key
     // decides which label is written.
-    const literal = 'services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n';
+    const literal = 'services:\n  web:\n    labels:\n      - io.sencho.url=${APP_URL}\n';
     expect(serviceUrlFileFacts(literal)?.sets.has('web')).toBe(true);
     expect(serviceUrlFileFacts(literal)?.interpolated.has('web')).toBe(false);
     // Compose's `$$` escape writes a literal `${URL_LABEL}` key, not this label.
@@ -69,7 +69,7 @@ describe('serviceUrlFileFacts', () => {
   it('resolves anchors and merge keys to a set key', () => {
     const source = [
       'x-labels: &labels',
-      '  sencho.service.url: https://app.example.com',
+      '  io.sencho.url: https://app.example.com',
       'services:',
       '  web:',
       '    labels: *labels',
@@ -77,7 +77,7 @@ describe('serviceUrlFileFacts', () => {
     ].join('\n');
     expect(serviceUrlFileFacts(source)?.sets.has('web')).toBe(true);
     const anchoredBare = [
-      'x-url: &url sencho.service.url',
+      'x-url: &url io.sencho.url',
       'services:',
       '  web:',
       '    labels:',
@@ -118,7 +118,7 @@ describe('serviceUrlFileFacts', () => {
       '      service: base',
       '  api:',
       '    labels:',
-      '      sencho.service.url: https://api.example.com',
+      '      io.sencho.url: https://api.example.com',
       '',
     ].join('\n');
     const facts = serviceUrlFileFacts(source);
@@ -155,18 +155,18 @@ describe('resolveServiceUrlEditState', () => {
   it('leaves every service editable when no other file sets the key', () => {
     expect(state(null)).toEqual({ web: 'root' });
     expect(state('services:\n  web:\n    image: nginx\n')).toEqual({ web: 'root' });
-    expect(state('services:\n  api:\n    labels:\n      sencho.service.url: https://api.example.com\n', ['web'])).toEqual({ web: 'root', api: 'other' });
+    expect(state('services:\n  api:\n    labels:\n      io.sencho.url: https://api.example.com\n', ['web'])).toEqual({ web: 'root', api: 'other' });
   });
 
   it('audit case 1: an invalid later label still shadows the main file', () => {
-    expect(state('services:\n  web:\n    labels:\n      sencho.service.url: not-a-url\n')).toEqual({ web: 'other' });
+    expect(state('services:\n  web:\n    labels:\n      io.sencho.url: not-a-url\n')).toEqual({ web: 'other' });
   });
 
   it('audit F1: a later bare list label counts as a set key and shadows the main file', () => {
-    expect(state('services:\n  web:\n    labels:\n      - sencho.service.url\n')).toEqual({ web: 'other' });
+    expect(state('services:\n  web:\n    labels:\n      - io.sencho.url\n')).toEqual({ web: 'other' });
     // The anchored form resolves through the same parsed path.
     const anchored = [
-      'x-url: &url sencho.service.url',
+      'x-url: &url io.sencho.url',
       'services:',
       '  web:',
       '    labels:',
@@ -177,12 +177,12 @@ describe('resolveServiceUrlEditState', () => {
   });
 
   it('audit case 2: a literal main label shadowed by a later file', () => {
-    const override = 'services:\n  web:\n    labels:\n      sencho.service.url: https://override.example.com\n';
+    const override = 'services:\n  web:\n    labels:\n      io.sencho.url: https://override.example.com\n';
     expect(state(override)).toEqual({ web: 'other' });
   });
 
   it('audit case 3: equal labels in both layers still shadow the main file', () => {
-    expect(state('services:\n  web:\n    labels:\n      sencho.service.url: https://same.example.com\n')).toEqual({ web: 'other' });
+    expect(state('services:\n  web:\n    labels:\n      io.sencho.url: https://same.example.com\n')).toEqual({ web: 'other' });
   });
 
   it('refuses unverifiable later files instead of guessing', () => {
@@ -201,9 +201,9 @@ describe('resolveServiceUrlEditState', () => {
     expect(state('services:\n  web:\n    labels:\n      - "${URL_LABEL}=https://later.example.com"\n'))
       .toEqual({ web: 'unknown' });
     // A literal known key with an interpolated value still shadows like any set.
-    expect(state('services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n'))
+    expect(state('services:\n  web:\n    labels:\n      - io.sencho.url=${APP_URL}\n'))
       .toEqual({ web: 'other' });
-    expect(state('services:\n  web:\n    labels:\n      sencho.service.url: "${APP_URL}"\n'))
+    expect(state('services:\n  web:\n    labels:\n      io.sencho.url: "${APP_URL}"\n'))
       .toEqual({ web: 'other' });
   });
 
@@ -215,7 +215,7 @@ describe('resolveServiceUrlEditState', () => {
       'services:',
       '  web:',
       '    labels:',
-      '      - sencho.service.url=https://old.example.com',
+      '      - io.sencho.url=https://old.example.com',
       '      - "${URL_LABEL}=https://winning.example.com"',
       '',
     ].join('\n');
@@ -262,7 +262,7 @@ describe('resolveServiceUrlEditState', () => {
   });
 
   it('keys the state map safely for service names that shadow Object properties', () => {
-    const states = state('services:\n  constructor:\n    labels:\n      sencho.service.url: https://c.example.com\n  __proto__:\n    labels:\n      sencho.service.url: https://p.example.com\n', []);
+    const states = state('services:\n  constructor:\n    labels:\n      io.sencho.url: https://c.example.com\n  __proto__:\n    labels:\n      io.sencho.url: https://p.example.com\n', []);
     expect(Object.keys(states).sort()).toEqual(['__proto__', 'constructor']);
     expect(states.constructor).toBe('other');
     expect(states.__proto__).toBe('other');
@@ -270,7 +270,7 @@ describe('resolveServiceUrlEditState', () => {
 });
 
 describe('resolveServiceUrlClearState', () => {
-  const root = 'services:\n  web:\n    labels:\n      sencho.service.url: https://root.example.com\n';
+  const root = 'services:\n  web:\n    labels:\n      io.sencho.url: https://root.example.com\n';
 
   function clear(args: {
     rootContent?: string | null;
@@ -293,15 +293,15 @@ describe('resolveServiceUrlClearState', () => {
   });
 
   it('audit F2: refuses a clear that would surface an earlier compose file', () => {
-    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      sencho.service.url: https://base.example.com\n'] }))
+    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      io.sencho.url: https://base.example.com\n'] }))
       .toEqual({ web: 'other' });
     // A bare earlier label (empty value) is still a contribution that keeps the clear from taking effect.
-    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      - sencho.service.url\n'] }))
+    expect(clear({ earlier: ['services:\n  web:\n    labels:\n      - io.sencho.url\n'] }))
       .toEqual({ web: 'other' });
   });
 
   it('refuses a clear that a later compose file would keep winning', () => {
-    expect(clear({ later: ['services:\n  web:\n    labels:\n      sencho.service.url: https://later.example.com\n'] }))
+    expect(clear({ later: ['services:\n  web:\n    labels:\n      io.sencho.url: https://later.example.com\n'] }))
       .toEqual({ web: 'other' });
   });
 
@@ -316,13 +316,13 @@ describe('resolveServiceUrlClearState', () => {
         'services:',
         '  web:',
         '    labels:',
-        '      - sencho.service.url=https://root.example.com',
+        '      - io.sencho.url=https://root.example.com',
         '      - "${URL_LABEL}=https://other.example.com"',
         '',
       ].join('\n'),
     })).toEqual({ web: 'unknown' });
     // A literal key with an interpolated value is removed as a whole item.
-    expect(clear({ rootContent: 'services:\n  web:\n    labels:\n      - sencho.service.url=${APP_URL}\n' }))
+    expect(clear({ rootContent: 'services:\n  web:\n    labels:\n      - io.sencho.url=${APP_URL}\n' }))
       .toEqual({ web: 'root' });
   });
 
@@ -351,10 +351,10 @@ describe('resolveServiceUrlClearState', () => {
         'services:',
         '  web:',
         '    labels:',
-        '      sencho.service.url: https://root.example.com',
+        '      io.sencho.url: https://root.example.com',
         '  api:',
         '    labels:',
-        '      sencho.service.url: https://api.example.com',
+        '      io.sencho.url: https://api.example.com',
         '',
       ].join('\n'),
       services: ['web', 'api'],
@@ -364,7 +364,7 @@ describe('resolveServiceUrlClearState', () => {
   it('keys the clear state map safely for service names that shadow Object properties', () => {
     const states = clear({
       services: [],
-      later: ['services:\n  constructor:\n    labels:\n      sencho.service.url: https://c.example.com\n  __proto__:\n    labels:\n      sencho.service.url: https://p.example.com\n'],
+      later: ['services:\n  constructor:\n    labels:\n      io.sencho.url: https://c.example.com\n  __proto__:\n    labels:\n      io.sencho.url: https://p.example.com\n'],
     });
     expect(states.constructor).toBe('other');
     expect(states.__proto__).toBe('other');

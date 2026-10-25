@@ -406,6 +406,71 @@ describe('buildStackLabelInventory', () => {
   });
 });
 
+describe('io.sencho.* behavior annotations', () => {
+  it('marks declared labels active or invalid and image or runtime copies inert', async () => {
+    writeStack('sl1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({
+      web: {
+        'io.sencho.url': 'https://app.example.com',
+        'io.sencho.order': 'first',
+        'io.sencho.future': 'x',
+      },
+    });
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl1-web-1', state: 'running', stack: 'sl1', service: 'web', imageId: 'img1',
+        labels: {
+          'io.sencho.url': 'https://app.example.com',
+          'io.sencho.hidden': 'true',
+          'io.sencho.image-only': 'y',
+        },
+      },
+    ], { images: { img1: { 'io.sencho.image-only': 'y' } } });
+    const inv = await buildStackLabelInventory(nodeId, 'sl1');
+    const web = inv.services.find(s => s.service === 'web');
+    const declared = Object.fromEntries((web?.declaredLabels ?? []).map(l => [l.key, l.behavior]));
+    expect(declared['io.sencho.url']).toMatchObject({ state: 'active' });
+    expect(declared['io.sencho.order']).toMatchObject({ state: 'invalid', reason: 'Use a whole number such as 10.' });
+    expect(declared['io.sencho.future']).toMatchObject({ state: 'unsupported' });
+    const runtime = Object.fromEntries((web?.replicas[0].runtimeLabels ?? []).map(l => [l.key, l]));
+    // The runtime copy equal to the declaration is that declaration.
+    expect(runtime['io.sencho.url'].behavior?.state).toBe('active');
+    // Present only at runtime, or only in the image: visible but inert.
+    expect(runtime['io.sencho.hidden'].behavior?.state).toBe('inert');
+    expect(runtime['io.sencho.image-only'].behavior?.state).toBe('inert');
+  });
+
+  it('keeps every io.sencho.* label inert when the model did not render', async () => {
+    writeStack('sl2', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender(null);
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl2-web-1', state: 'running', stack: 'sl2', service: 'web', imageId: 'img1',
+        labels: { 'io.sencho.url': 'https://runtime.example.com', 'other.label': '1' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl2');
+    const labels = inv.services.find(s => s.service === 'web')?.replicas[0].runtimeLabels ?? [];
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'inert' });
+    expect(labels.find(l => l.key === 'other.label')?.behavior).toBeUndefined();
+  });
+
+  it('never marks a node-wide io.sencho.* label active', async () => {
+    stubDockerList([
+      {
+        id: 'c1', name: 'a-1', state: 'running', stack: 'a', service: 'web', imageId: 'img1',
+        labels: { 'io.sencho.url': 'https://runtime.example.com', 'io.sencho.mesh': 'true', 'plain': '1' },
+      },
+    ]);
+    const inv = await buildNodeLabelInventory(nodeId);
+    const labels = inv.containers[0].labels;
+    expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+    expect(labels.find(l => l.key === 'io.sencho.mesh')?.behavior?.state).toBe('inert');
+    expect(labels.find(l => l.key === 'plain')?.behavior).toBeUndefined();
+    expect(inv.byLabel.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+  });
+});
+
 describe('GET /api/system/container-labels', () => {
   it('requires authentication', async () => {
     const res = await request(app).get('/api/system/container-labels');
@@ -567,6 +632,36 @@ describe('GET /api/fleet/container-labels', () => {
       const res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
       expect(res.status).toBe(200);
       expect(res.body.nodeErrors[remoteId]).toBeDefined();
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+  it('keeps a remote row\'s io.sencho.* behavior, accepts an older node without one, and rejects a malformed one', async () => {
+    stubDockerList([]);
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'remote-beh', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't', trustedLoopback: false } : null);
+    const containers = [{ id: 'c', name: 'n', stack: 's', service: 'web' }];
+    const payload = (byLabel: unknown[]) => JSON.stringify({ nodeId: remoteId, containers: [], partial: false, generatedAt: 0, byLabel });
+    const respond = (body: string) => vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+    try {
+      respond(payload([
+        { key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime', behavior: { state: 'inert', reason: 'Present only on the running container.' }, containers },
+        { key: 'plain', value: '1', source: 'runtime', containers },
+      ]));
+      let res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+      expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+      const rows = res.body.aggregatedByLabel as Array<{ key: string; behavior?: { state: string } }>;
+      expect(rows.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
+      expect(rows.find(r => r.key === 'plain')?.behavior).toBeUndefined();
+
+      respond(payload([{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior: { state: 'trusted' }, containers }]));
+      res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+      expect(res.body.nodeErrors[remoteId]).toBe('Remote returned an unexpected label-inventory payload');
+
+      respond(payload([{ key: 'io.sencho.url', value: 'v', source: 'runtime', behavior: 'active', containers }]));
+      res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+      expect(res.body.nodeErrors[remoteId]).toBe('Remote returned an unexpected label-inventory payload');
     } finally {
       db.deleteNode(remoteId);
     }

@@ -8,8 +8,11 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useAuth } from '@/context/AuthContext';
+import { useNodes } from '@/context/NodeContext';
+import { LabelBehaviorBadge } from './LabelBehaviorBadge';
 import {
   LABEL_DISAMBIGUATION_COPY,
+  SENCHO_LABELS_NODE_COPY,
   SOURCE_LABELS,
   SOURCE_FACET_LABELS,
   matchesSearch,
@@ -46,6 +49,7 @@ function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => voi
       <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">
         {SOURCE_LABELS[label.source]}
       </span>
+      {label.behavior && <LabelBehaviorBadge behavior={label.behavior} />}
       {label.redacted && isAdmin && onReveal && (
         <button type="button" onClick={onReveal} className="font-mono text-[10px] uppercase text-brand hover:underline">
           Reveal
@@ -78,6 +82,8 @@ function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container
 
 export default function ComposeLabelsPanel({ stackName }: { stackName: string }) {
   const { isAdmin } = useAuth();
+  const { hasCapability } = useNodes();
+  const senchoLabelsSupported = hasCapability('sencho-labels-v1');
   const [inventory, setInventory] = useState<StackLabelInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -131,6 +137,11 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
   }, [inventory]);
 
   const serviceNames = useMemo(() => (inventory?.services ?? []).map(s => s.service), [inventory]);
+
+  const declaresSenchoLabels = useMemo(
+    () => (inventory?.services ?? []).some(svc => svc.declaredLabels.some(l => l.key.startsWith('io.sencho.'))),
+    [inventory],
+  );
 
   // Filter-aware view model: computed before render so badges reflect only visible labels and
   // empty/failure states stay truthful. Per-service checkbox is the only thing that hides a card.
@@ -202,6 +213,13 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
         <span className={LABEL_CLASS}>compose labels</span>
       </div>
       <p className="text-[11px] leading-relaxed text-stat-subtitle">{LABEL_DISAMBIGUATION_COPY}</p>
+
+      {!senchoLabelsSupported && declaresSenchoLabels && (
+        <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2 text-xs text-warning" data-testid="sencho-labels-unsupported">
+          <Info className="h-4 w-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+          <span>{SENCHO_LABELS_NODE_COPY}</span>
+        </div>
+      )}
 
       {!noServices && (
         <div className="flex items-center gap-2">

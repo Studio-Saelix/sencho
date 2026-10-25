@@ -2023,7 +2023,7 @@ stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
 // Read-only and advisory; auto-proxies to the active node. The response carries
-// structural fields plus a validated `sencho.service.url` per service. Other
+// structural fields plus a validated `io.sencho.url` per service. Other
 // resolved env, label, and command values are never extracted. A secret
 // interpolated INTO a structural field or that allowlisted label still resolves into
 // the payload, but is already readable at the same stack:read scope via the

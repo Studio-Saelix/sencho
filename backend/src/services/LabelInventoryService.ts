@@ -7,6 +7,14 @@ import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
 import { sanitizeForLog } from '../utils/safeLog';
+import {
+  declaredLabelBehavior,
+  inertLabelBehavior,
+  resolveSenchoLabels,
+  unrenderableSenchoLabels,
+  type LabelBehavior,
+  type SenchoLabelResolution,
+} from '../helpers/senchoLabels';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -24,6 +32,8 @@ export interface LabelValue {
   value: string;
   source: LabelSource;
   redacted?: boolean;
+  /** Whether Sencho acts on this `io.sencho.*` label. Absent for every other label. */
+  behavior?: LabelBehavior;
 }
 
 export interface ContainerLabelRow {
@@ -49,6 +59,7 @@ export interface LabelIndexRow {
   value: string;
   redacted?: boolean;
   source: LabelSource;
+  behavior?: LabelBehavior;
   containers: LabelIndexContainerRef[];
 }
 
@@ -174,9 +185,16 @@ function toLabelValue(
   value: string,
   source: LabelSource,
   revealSecrets: boolean,
+  behavior?: LabelBehavior,
 ): LabelValue {
   const redacted = redactLabelValue(key, value, revealSecrets);
-  return { key, value: redacted.value, source, ...(redacted.redacted ? { redacted: true } : {}) };
+  return {
+    key,
+    value: redacted.value,
+    source,
+    ...(redacted.redacted ? { redacted: true } : {}),
+    ...(behavior ? { behavior } : {}),
+  };
 }
 
 function stripContainerName(names: string[] | undefined): string {
@@ -218,6 +236,7 @@ function buildByLabelIndex(
           value: label.value,
           source: label.source,
           ...(label.redacted ? { redacted: true } : {}),
+          ...(label.behavior ? { behavior: label.behavior } : {}),
           containers: [],
         };
         map.set(mapKey, row);
@@ -280,9 +299,11 @@ export async function buildNodeLabelInventory(
       stack: row.stack,
       service: row.service,
       state: row.state,
-      labels: Object.entries(row.labels).map(([key, value]) =>
-        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets),
-      ).sort((a, b) => a.key.localeCompare(b.key)),
+      // Nothing here comes from a rendered Compose model, so every io.sencho.* label is inert.
+      labels: Object.entries(row.labels).map(([key, value]) => {
+        const source = resolveLabelSource(key, value, imageLabels);
+        return toLabelValue(key, value, source, revealSecrets, inertLabelBehavior(key, source, true));
+      }).sort((a, b) => a.key.localeCompare(b.key)),
     };
   });
 
@@ -311,6 +332,7 @@ export async function buildStackLabelInventory(
   // for inspection failures so the two banners stay distinct.
   let renderFailed = false;
   const declaredByService = new Map<string, Record<string, string>>();
+  let sencho: SenchoLabelResolution = unrenderableSenchoLabels();
 
   if (result.rendered !== null) {
     try {
@@ -318,6 +340,7 @@ export async function buildStackLabelInventory(
       for (const [serviceName, svc] of Object.entries(parsed.services ?? {})) {
         declaredByService.set(serviceName, parseLabelsMap(svc.labels));
       }
+      sencho = resolveSenchoLabels(parsed);
       renderable = true;
     } catch (err) {
       console.error('[LabelInventory] Failed to parse rendered compose for stack %s:', sanitizeForLog(stackName), err);
@@ -360,7 +383,7 @@ export async function buildStackLabelInventory(
   const services: StackServiceLabelRow[] = [...serviceNames].sort().map((service) => {
     const declared = declaredByService.get(service) ?? {};
     const declaredLabels = Object.entries(declared)
-      .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets))
+      .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets, declaredLabelBehavior(sencho, service, key)))
       .sort((a, b) => a.key.localeCompare(b.key));
 
     const replicas: StackLabelReplica[] = (replicasByService.get(service) ?? []).map((rep) => {
@@ -383,7 +406,12 @@ export async function buildStackLabelInventory(
           const source: LabelSource = renderFailed && !key.startsWith(COMPOSE_SYSTEM_PREFIX)
             ? 'unknown'
             : resolveLabelSource(key, value, imageLabels, declared);
-          return toLabelValue(key, value, source, revealSecrets);
+          // A runtime label equal to the declared one is that same declaration; any other
+          // origin never drives behavior.
+          const behavior = source === 'compose'
+            ? declaredLabelBehavior(sencho, service, key)
+            : inertLabelBehavior(key, source, sencho.renderable);
+          return toLabelValue(key, value, source, revealSecrets, behavior);
         })
         .sort((a, b) => a.key.localeCompare(b.key));
       const runtimeMap = Object.fromEntries(Object.entries(rep.labels));

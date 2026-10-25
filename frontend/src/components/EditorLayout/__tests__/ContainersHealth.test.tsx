@@ -13,6 +13,7 @@ import type { ContainerInfo } from '../EditorView';
 import type { Node } from '@/context/NodeContext';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
+import { parseServiceUrlResponse, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 
 const LOCAL_NODE = { id: 1, type: 'local' } as Node;
 
@@ -866,5 +867,136 @@ describe('live-refresh stale chip', () => {
     );
     expect(screen.queryByText(/Container state may be stale/i)).toBeNull();
     expect(screen.getByText(/Could not load containers/i)).toBeInTheDocument();
+  });
+});
+
+describe('io.sencho.* labels on the container list', () => {
+  function svc(name: string, overrides: Partial<EffectiveServiceSpec> = {}): EffectiveServiceSpec {
+    return { name, declaredImage: `${name}:latest`, hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false, ...overrides };
+  }
+
+  function box(name: string, overrides: Partial<ContainerInfo> = {}): ContainerInfo {
+    return {
+      Id: `id-${name}`, Names: [`/${name}-1`], Service: name, State: 'running', Status: 'Up 1 hour', Image: name, ...overrides,
+    } as unknown as ContainerInfo;
+  }
+
+  function entryFor(resolution: unknown): ServiceUrlEntry {
+    return parseServiceUrlResponse(1, 'demo', true, {
+      renderable: true, services: [], ports: {}, volumes: {}, networks: [], restart: null,
+      serviceUrls: {}, serviceUrlEdit: {}, serviceUrlClear: {},
+      ...(resolution === undefined ? {} : { senchoLabels: resolution }),
+    });
+  }
+
+  const resolution = {
+    renderable: true,
+    services: {
+      web: { links: [{ name: null, url: 'https://app.example.com' }, { name: 'docs', url: 'https://docs.example.com' }], order: 20, hidden: false },
+      api: { links: [], order: 10, hidden: false },
+      redis: { links: [], order: null, hidden: true },
+    },
+    entries: [{ service: 'api', key: 'io.sencho.hidden', state: 'invalid', reason: 'Use true or false.' }],
+    serviceOrder: ['api', 'web', 'redis'],
+  };
+
+  function renderStack(entry: ServiceUrlEntry | null, containers: ContainerInfo[], services: EffectiveServiceSpec[]) {
+    return render(
+      <ContainersHealth
+        safeContainers={containers}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={services}
+        serviceUrlEntry={entry}
+      />,
+    );
+  }
+
+  const stack = () => [box('web'), box('api'), box('redis')];
+  const specs = () => [svc('api'), svc('redis'), svc('web')];
+
+  it('lists services in the node order and collapses hidden helpers into one row', () => {
+    renderStack(entryFor(resolution), stack(), specs());
+    const names = screen.getAllByText(/^(api|web|redis)-1$/).map(el => el.textContent);
+    expect(names).toEqual(['api-1', 'web-1']);
+    expect(screen.getByTestId('hidden-services-row')).toHaveTextContent('1 hidden helper service');
+    expect(screen.queryByText('redis-1')).toBeNull();
+    // The summary still counts every container, hidden or not.
+    expect(screen.getByText('3 containers')).toBeInTheDocument();
+  });
+
+  it('reveals hidden services in place and collapses them again', async () => {
+    const user = userEvent.setup();
+    renderStack(entryFor(resolution), stack(), specs());
+    await user.click(screen.getByRole('button', { name: 'Show' }));
+    expect(screen.getByText('redis-1')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hide' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: 'Hide' }));
+    expect(screen.queryByText('redis-1')).toBeNull();
+  });
+
+  it('keeps an unhealthy or stopped hidden service visible as needing attention', () => {
+    renderStack(entryFor(resolution), [box('web'), box('api'), box('redis', { State: 'exited', Status: 'Exited (1)' })], specs());
+    expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
+    renderStack(entryFor(resolution), [box('web'), box('api'), box('redis', { healthStatus: 'unhealthy' })], specs());
+    expect(screen.getAllByTestId('hidden-services-attention')).toHaveLength(2);
+  });
+
+  it('never hides every service', () => {
+    const allHidden = {
+      ...resolution,
+      services: {
+        web: { links: [], order: null, hidden: true },
+        api: { links: [], order: null, hidden: true },
+        redis: { links: [], order: null, hidden: true },
+      },
+    };
+    renderStack(entryFor(allHidden), stack(), specs());
+    expect(screen.queryByTestId('hidden-services-row')).toBeNull();
+    expect(screen.getByText('redis-1')).toBeInTheDocument();
+  });
+
+  it('shows named links and an application link for a service that publishes no port', () => {
+    renderStack(entryFor(resolution), stack(), specs());
+    const row = screen.getAllByTestId('service-sencho-links')[0];
+    expect(row).toBeTruthy();
+    const docs = screen.getByRole('link', { name: 'docs' });
+    expect(docs).toHaveAttribute('href', 'https://docs.example.com');
+    expect(docs).toHaveAttribute('target', '_blank');
+    expect(docs).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('link', { name: 'app.example.com' })).toHaveAttribute('href', 'https://app.example.com');
+  });
+
+  it('does not repeat the application link when the published port already opens it', () => {
+    const published = box('web', { Ports: [{ PrivatePort: 80, PublicPort: 8080 }] } as Partial<ContainerInfo>);
+    renderStack(entryFor(resolution), [published, box('api'), box('redis')], specs());
+    expect(screen.queryByRole('link', { name: 'app.example.com' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'docs' })).toBeInTheDocument();
+  });
+
+  it('reports ignored labels quietly with the reason on hover', () => {
+    renderStack(entryFor(resolution), stack(), specs());
+    const note = screen.getByTestId('service-sencho-ignored');
+    expect(note).toHaveTextContent('1 Sencho label ignored');
+    expect(note).toHaveAttribute('title', 'io.sencho.hidden: Use true or false.');
+  });
+
+  it('applies nothing from a node that reports no resolution or an unrenderable model', () => {
+    renderStack(entryFor(undefined), stack(), specs());
+    expect(screen.queryByTestId('hidden-services-row')).toBeNull();
+    expect(screen.queryByTestId('service-sencho-links')).toBeNull();
+    expect(screen.getAllByText(/^(api|web|redis)-1$/).map(el => el.textContent)).toEqual(['api-1', 'redis-1', 'web-1']);
+  });
+
+  it('applies nothing while the model is unrenderable', () => {
+    const entry: ServiceUrlEntry = { ...entryFor(resolution), renderable: false };
+    renderStack(entry, stack(), specs());
+    expect(screen.queryByTestId('hidden-services-row')).toBeNull();
+    expect(screen.queryByTestId('service-sencho-links')).toBeNull();
   });
 });

@@ -1,27 +1,16 @@
-/**
- * The one allowlisted Compose label whose value may leave the rendered model.
- * Every other label stays key-only, because label values can carry secrets.
- */
-export const SERVICE_URL_LABEL = 'sencho.service.url';
+import { parseSenchoUrl, SENCHO_URL_LABEL } from './senchoLabels';
 
-const MAX_SERVICE_URL_LENGTH = 2048;
+/**
+ * The application link label, the first allowlisted Compose label whose value
+ * may leave the rendered model (the named links share its validation). Every
+ * other label stays key-only, because label values can carry secrets.
+ */
+export const SERVICE_URL_LABEL = SENCHO_URL_LABEL;
 
 /** A literal http(s) URL with no userinfo, or null when the value is not one. */
 export function serviceUrlFromLabelValue(raw: string): string | null {
-  const value = raw.trim();
-  if (!value || value.length > MAX_SERVICE_URL_LENGTH) return null;
-  if (value.includes(' ') || value.includes('\n') || value.includes('\r')) return null;
-  if (!/^https?:\/\//i.test(value)) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-  if (parsed.username !== '' || parsed.password !== '') return null;
-  if (!parsed.hostname) return null;
-  return value;
+  const parsed = parseSenchoUrl(raw);
+  return parsed.ok ? parsed.value : null;
 }
 
 /** The validated URL from a rendered label map or `key=value` list, else null. */

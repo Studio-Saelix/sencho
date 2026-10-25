@@ -1,0 +1,116 @@
+---
+title: "Sencho Labels"
+sidebarTitle: Sencho labels
+description: "Declare io.sencho.* labels in your Compose file to add application links, set display order, and tuck helper services out of the way."
+---
+
+Sencho reads a small set of Compose labels in the reserved `io.sencho.*` namespace. They describe how a service should be presented in Sencho: where its application lives, where it sits in the list, and whether it is a helper that can stay out of the way. The namespace is stable for 1.0, and the labels in this page keep working across releases.
+
+These are four different things that are easy to confuse:
+
+| Kind | Where you set it | What it does |
+|------|------------------|--------------|
+| **Docker and Compose labels** | `labels:` on a service | Metadata for Docker, Compose, Traefik, and other tools. Sencho shows them in the [label audit](/features/docker-label-audit) and does not act on them. `com.docker.compose.*` belongs to Docker. |
+| **`io.sencho.*` labels** | `labels:` on a service | Tell Sencho how to present that service. This page. |
+| **[Stack Labels](/features/stack-labels)** | The sidebar | Tags you use to group stacks. They are not Compose labels. |
+| **Node Labels** | Node settings | Tags used for Blueprint placement. They are not Compose labels. |
+
+## The labels
+
+Every label belongs to one service and applies to all of its replicas.
+
+| Label | Value | Effect |
+|-------|-------|--------|
+| `io.sencho.url` | An `http://` or `https://` URL | The service's application link. A published port opens it instead of the generated host and port. A service with no published port, such as one behind a reverse proxy, shows it as a link on its container card. |
+| `io.sencho.url.<name>` | An `http://` or `https://` URL | An extra named link, such as `docs` or `admin`. Names use lowercase letters, digits, and hyphens, up to 32 characters; uppercase is lowercased. |
+| `io.sencho.order` | A whole number | Where the service sits in lists. Lower numbers come first. |
+| `io.sencho.hidden` | `true` or `false` | Collapses a helper service out of default lists. |
+
+```yaml
+services:
+  web:
+    image: ghcr.io/example/app:1.4
+    labels:
+      io.sencho.url: https://app.example.com
+      io.sencho.url.docs: https://docs.example.com
+      io.sencho.url.admin: https://admin.example.com
+      io.sencho.order: "10"
+  migrate:
+    image: ghcr.io/example/app:1.4
+    labels:
+      io.sencho.hidden: "true"
+      io.sencho.order: "90"
+```
+
+Both the map form shown above and the `- key=value` list form work. Compose renders every label value as text, so quoting a number or boolean is optional.
+
+### Links
+
+A link is clickable only when it is a valid `http://` or `https://` address with a host. Sencho ignores a link that has another scheme, a username or password, spaces or control characters, or is not a well-formed URL, and says why in the [Compose Labels tab](/features/docker-label-audit#stack-compose-labels-tab).
+
+A configured `io.sencho.url` always wins over the generated link for a published port. Named links are listed after it, sorted by name, and never replace a port link. If two names are the same after lowercasing (for example `Docs` and `docs`), the one that sorts first is kept and the other is ignored.
+
+A link is an address you chose, so Sencho opens it exactly as written. It never swaps in the host of the node that runs the stack, which is why a remote node's links stay correct.
+
+### Order
+
+Services with a valid `io.sencho.order` come first, from the lowest number up. Services with the same number, no label, or a value that is not a whole number follow, sorted by name. Order changes presentation only: it does not change the order Compose starts services, dependencies, health checks, or updates.
+
+### Hidden helper services
+
+`io.sencho.hidden: "true"` collapses a noisy helper, such as a one-shot migration job or a sidecar, out of the container list. The list shows one row, **N hidden helper services**, with a **Show** button that reveals them in place. The row calls out how many of them need attention, so a hidden service that stopped or turned unhealthy is never invisible.
+
+Hidden is presentation only. A hidden service still counts toward the stack's health and container totals, and is still included in drift, security scans, image updates, policies, the Dossier, and every stack action. Sencho never collapses every service in a stack, so a stack whose services are all marked hidden shows them all.
+
+## What Sencho trusts
+
+Only labels declared on a service in your Compose file, after Compose has rendered it, change how Sencho behaves. A label that comes from an image, from a running container, or from anywhere Sencho cannot place is still listed in the label audit but never acts. If Compose cannot be rendered, Sencho applies no `io.sencho.*` labels at all rather than guessing from what is running, and the Compose Labels tab says so.
+
+Because Sencho reads the rendered result, the usual Compose rules apply: a value from `${VARIABLE}` interpolation is resolved first, and when several Compose files set the same label, the file merged last decides the value. Labels are read on the node that owns the stack.
+
+## Where you see them
+
+The **Compose Labels** tab marks every `io.sencho.*` label with its status:
+
+| Status | Meaning |
+|--------|---------|
+| **Active** | Declared in the rendered Compose file and valid. |
+| **Ignored** | Declared, but the value is not valid. The reason is shown beside it. |
+| **Unsupported** | A key in the `io.sencho.` namespace that Sencho does not define. |
+| **Inert** | Present on the image or the running container, or the Compose file could not be rendered. Declare it in the Compose file for it to apply. |
+
+On the stack's container list, a service with ignored labels shows a quiet count, such as **1 Sencho label ignored**, with the reasons on hover. The same inert marking appears in the Fleet **Docker Labels** tab, where every `io.sencho.*` label is inert because that view reads running containers only.
+
+Sencho reads these labels from the saved Compose file, not from the running container, so they do not need a redeploy to take effect. The running container only carries a changed label after it is recreated, which the label audit shows as a difference between **Declared in Compose** and the running container.
+
+## Mixed-version fleets
+
+A node that predates `io.sencho.*` labels does not apply any of them: its stacks show no named links, no order, and no hidden services, and the Compose Labels tab tells you to upgrade the node when a stack declares them. Sencho never applies part of the contract on such a node. See [Node compatibility](/features/node-compatibility).
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="My link does not show up">
+    Open the stack's **Compose Labels** tab and find the label. **Ignored** shows the reason, such as a missing `https://` or credentials in the address. **Inert** means the label is on the container or image but not in the Compose file. If the tab says the node does not apply `io.sencho.*` labels, upgrade that node.
+  </Accordion>
+  <Accordion title="A service is missing from the container list">
+    It is probably marked `io.sencho.hidden: "true"`. Use **Show** on the **hidden helper services** row to reveal it. Remove the label to list it by default.
+  </Accordion>
+  <Accordion title="The order did not change">
+    The value must be a whole number such as `"10"`; `first` or `1.5` is ignored and listed as **Ignored**. Services without a valid order always sort after ordered ones.
+  </Accordion>
+  <Accordion title="A label shows as Unsupported">
+    Sencho does not define that key. Check the spelling against the table above. Keys outside the `io.sencho.` namespace are ordinary Docker labels and are never marked.
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Docker Label Audit" icon="tags" href="/features/docker-label-audit">
+    See every Docker and Compose label, where it came from, and whether Sencho acts on it.
+  </Card>
+  <Card title="Stack Management" icon="layer-group" href="/features/stack-management">
+    Container cards, published port links, and the Open App shortcut.
+  </Card>
+</CardGroup>

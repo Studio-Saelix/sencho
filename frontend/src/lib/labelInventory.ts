@@ -1,10 +1,20 @@
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
+export type LabelBehaviorState = 'active' | 'invalid' | 'unsupported' | 'inert';
+
+/** Whether Sencho acts on an `io.sencho.*` label. Absent for every other label and on older nodes. */
+export interface LabelBehavior {
+  state: LabelBehaviorState;
+  reason?: string;
+  summary?: string;
+}
+
 export interface LabelValue {
   key: string;
   value: string;
   source: LabelSource;
   redacted?: boolean;
+  behavior?: LabelBehavior;
 }
 
 export interface ContainerLabelRow {
@@ -30,6 +40,7 @@ export interface LabelIndexRow {
   value: string;
   redacted?: boolean;
   source: LabelSource;
+  behavior?: LabelBehavior;
   containers: LabelIndexContainerRef[];
 }
 
@@ -80,8 +91,18 @@ export interface StackLabelInventory {
   generatedAt: number;
 }
 
+export const BEHAVIOR_LABELS: Record<LabelBehaviorState, string> = {
+  active: 'Active',
+  invalid: 'Ignored',
+  unsupported: 'Unsupported',
+  inert: 'Inert',
+};
+
+export const SENCHO_LABELS_NODE_COPY =
+  'This node does not apply io.sencho.* labels. Upgrade the node to use them.';
+
 export const LABEL_DISAMBIGUATION_COPY =
-  'Docker labels are metadata declared on Compose services or attached to running containers. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
+  'Docker labels are metadata declared on Compose services or attached to running containers. Labels in the io.sencho.* namespace, when declared in the Compose file, tell Sencho how to present a service. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
 
 export const SOURCE_LABELS: Record<LabelSource, string> = {
   compose: 'Declared in Compose',
