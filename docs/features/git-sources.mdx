@@ -119,7 +119,7 @@ Every linked source inherits the interval, and there is no per-source interval. 
 
 **Suspend** pauses reconciliation for one source: polling, webhooks, and automatic apply stop until you resume. **Suspend** and **Resume** are on the **Automation** tab, and **Resume** is also in the **Overview** while the source is suspended. An optional reason is stored with the suspension. **Resume** re-evaluates the source immediately rather than waiting for the next poll.
 
-**Retry** is offered when the last attempt failed or a retry is already scheduled, and not while the source is suspended. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry, and neither does a **Manual** source; use **Retry** after you fix the cause.
+**Retry** is offered when the last attempt failed, a retry is already scheduled, or the deployed commit failed its health check, and not while the source is suspended. When a newer commit is waiting, the Overview offers **Review update** instead. It is stage-aware: a failed fetch refetches, and a failed apply or deploy continues from the evidence already on disk. Permanent failures, such as a missing ref, schedule no automatic retry, and neither does a **Manual** source; use **Retry** after you fix the cause.
 
 ## Pulling and reviewing changes
 
