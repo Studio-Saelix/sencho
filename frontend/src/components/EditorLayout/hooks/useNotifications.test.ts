@@ -304,6 +304,73 @@ describe('useNotifications', () => {
     expect(onGitOpsChange).toHaveBeenCalledTimes(1);
   });
 
+  describe('remote socket reopening', () => {
+    const openEvents = () => {
+      const seen: unknown[] = [];
+      const onOpen = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener('sencho:node-notifications-open', onOpen);
+      return { seen, stop: () => window.removeEventListener('sencho:node-notifications-open', onOpen) };
+    };
+    const connectionEvents = () => {
+      const seen: unknown[] = [];
+      const onConnection = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener('sencho:notifications-connection', onConnection);
+      return { seen, stop: () => window.removeEventListener('sencho:notifications-connection', onConnection) };
+    };
+
+    it('announces the hub node id each time a remote socket opens, and nothing when it drops', async () => {
+      vi.useFakeTimers();
+      const opens = openEvents();
+      const connections = connectionEvents();
+      try {
+        // The remote's numbering is not the hub's, so the id comes from the roster.
+        const remote = makeRemoteNode('online', { id: 7 });
+        renderHook(() =>
+          useNotifications({
+            nodes: [localNode, remote],
+            onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn(),
+          }),
+        );
+        expect(MockWS.instances).toHaveLength(2);
+        act(() => { MockWS.instances[0]?.onopen?.(); });
+        act(() => { MockWS.instances[1]?.onopen?.(); });
+        expect(opens.seen).toEqual([{ nodeId: 7 }]);
+
+        act(() => { MockWS.instances[1]?.onclose?.({ code: 1006 }); });
+        expect(opens.seen).toHaveLength(1);
+        act(() => { vi.advanceTimersByTime(1000); });
+        expect(MockWS.instances).toHaveLength(3);
+        act(() => { MockWS.instances[2]?.onopen?.(); });
+
+        expect(opens.seen).toEqual([{ nodeId: 7 }, { nodeId: 7 }]);
+        // The local feed never went down, so its connection event is untouched.
+        expect(connections.seen).toEqual([{ connected: true }]);
+      } finally {
+        opens.stop();
+        connections.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it('stays silent for a socket the roster has already dropped', async () => {
+      const opens = openEvents();
+      try {
+        const remote = makeRemoteNode('online', { id: 7 });
+        const { rerender } = renderHook(({ nodes }) =>
+          useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+        { initialProps: { nodes: [localNode, remote] } });
+        await waitFor(() => expect(MockWS.instances).toHaveLength(2));
+        rerender({ nodes: [localNode] });
+
+        act(() => { MockWS.instances[1]?.onopen?.(); });
+
+        expect(opens.seen).toEqual([]);
+      } finally {
+        opens.stop();
+      }
+    });
+  });
+
   it('deleteNotification removes the matching item', async () => {
     const { result } = renderHook(() =>
       useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),

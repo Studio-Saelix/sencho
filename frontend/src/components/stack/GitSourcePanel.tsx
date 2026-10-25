@@ -421,11 +421,19 @@ export function GitSourcePanel({
     const onConnection = (e: Event) => {
       if ((e as CustomEvent<{ connected?: boolean }>).detail?.connected) refreshSoon();
     };
+    // A remote node has its own socket, so its reconnect is announced per node
+    // and only the sheet that reads that node has missed anything.
+    const onNodeSocketOpen = (e: Event) => {
+      const detail = (e as CustomEvent<{ nodeId?: unknown }>).detail;
+      if (panelNodeId !== null && detail?.nodeId === panelNodeId) refreshSoon();
+    };
     window.addEventListener('sencho:state-invalidate', onInvalidate);
     window.addEventListener('sencho:notifications-connection', onConnection);
+    window.addEventListener('sencho:node-notifications-open', onNodeSocketOpen);
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       window.removeEventListener('sencho:notifications-connection', onConnection);
+      window.removeEventListener('sencho:node-notifications-open', onNodeSocketOpen);
       if (timer) clearTimeout(timer);
     };
   }, [open, panelNodeId, stackName, load]);

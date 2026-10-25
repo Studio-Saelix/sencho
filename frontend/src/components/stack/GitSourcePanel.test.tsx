@@ -4,8 +4,8 @@
  * attached), the form must land in the empty/unlinked state rather than
  * treating the sentinel as a configured source.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, renderHook, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 
 // Mutable controls so a deploy-mode test can set the active node and capture the
@@ -18,7 +18,7 @@ const nodeCtl = vi.hoisted(() => ({
 }));
 const dfCtl = vi.hoisted(() => ({ params: null as null | { stackName: string; action: string; nodeId: number | null } }));
 
-vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
 vi.mock('@/context/DeployFeedbackContext', () => ({
   useDeployFeedback: () => ({
     runWithLog: vi.fn(
@@ -95,7 +95,9 @@ vi.mock('./GitSourceSecretsSection', () => ({
   ),
 }));
 
-import { apiFetch } from '@/lib/api';
+import { apiFetch, fetchForNode } from '@/lib/api';
+import { useNotifications } from '@/components/EditorLayout/hooks/useNotifications';
+import type { Node } from '@/context/NodeContext';
 import { GitSourcePanel } from './GitSourcePanel';
 import { toast } from '@/components/ui/toast-store';
 import type { PullResult } from './GitSourceDiffDialog';
@@ -1306,6 +1308,96 @@ describe('GitSourcePanel controller controls', () => {
           window.dispatchEvent(new CustomEvent('sencho:notifications-connection', { detail: { connected: true } }));
         });
         expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+      });
+
+      it('reads again when the panel\'s own node reopens its notifications socket', async () => {
+        nodeCtl.activeNode = { id: 1 };
+        vi.mocked(apiFetch).mockResolvedValueOnce(jsonRes(observing())).mockResolvedValue(jsonRes(failed()));
+        render(panel({ nodeId: 9 }));
+        await screen.findByTestId('gitops-source');
+
+        const socketOpened = (nodeId: number) => act(() => {
+          window.dispatchEvent(new CustomEvent('sencho:node-notifications-open', { detail: { nodeId } }));
+        });
+        socketOpened(1);
+        await settle();
+        expect(reads()).toBe(1);
+
+        socketOpened(9);
+        expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+        expect(reads()).toBe(2);
+      });
+
+      describe('with the real notification sockets', () => {
+        class MockSocket {
+          static instances: MockSocket[] = [];
+          static readonly OPEN = 1;
+          onopen: (() => void) | null = null;
+          onmessage: ((e: { data: string }) => void) | null = null;
+          onclose: ((e: { code: number }) => void) | null = null;
+          onerror: ((e: unknown) => void) | null = null;
+          readyState = 1;
+          close = vi.fn();
+          url: string;
+          constructor(url: string) { this.url = url; MockSocket.instances.push(this); }
+        }
+        const hubNode = (id: number, type: Node['type']): Node => ({
+          id, name: `node-${id}`, type, mode: 'proxy', api_url: '', compose_dir: '', is_default: type === 'local', status: 'online', created_at: 0,
+        });
+        const remoteSocket = (nodeId: number) => MockSocket.instances.filter((ws) => ws.url.endsWith(`nodeId=${nodeId}`));
+        const gitSourceReads = () => vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).endsWith('/git-source')).length;
+
+        // The local socket stays up throughout; a remote node's socket drops and
+        // comes back, and only the sheet that reads that node has missed anything.
+        const setUp = async (panelNodeId: number) => {
+          MockSocket.instances = [];
+          vi.stubGlobal('WebSocket', MockSocket);
+          vi.mocked(fetchForNode).mockResolvedValue(jsonRes([], false, 500));
+          vi.mocked(apiFetch).mockImplementation(async (url: string) =>
+            String(url).endsWith('/git-source') ? jsonRes(observing()) : jsonRes([], false, 500));
+          nodeCtl.activeNode = { id: panelNodeId };
+          const nodes = [hubNode(1, 'local'), hubNode(2, 'remote'), hubNode(3, 'remote')];
+          renderHook(() => useNotifications({
+            nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn(),
+          }));
+          render(panel({ nodeId: panelNodeId }));
+          await screen.findByTestId('gitops-source');
+          act(() => { MockSocket.instances.forEach((ws) => ws.onopen?.()); });
+          await settle();
+          expect(gitSourceReads()).toBe(2);
+        };
+        const dropAndReopen = async (nodeId: number) => {
+          const before = remoteSocket(nodeId).length;
+          act(() => { remoteSocket(nodeId)[before - 1].onclose?.({ code: 1006 }); });
+          await waitFor(() => expect(remoteSocket(nodeId)).toHaveLength(before + 1), { timeout: 3000 });
+          act(() => { remoteSocket(nodeId)[before].onopen?.(); });
+        };
+
+        afterEach(() => { vi.unstubAllGlobals(); });
+
+        it('reveals Retry after the panel\'s remote socket reconnects past a missed verdict', async () => {
+          await setUp(2);
+          // The verdict lands while the remote socket is down: only a later read sees it.
+          vi.mocked(apiFetch).mockClear();
+          vi.mocked(apiFetch).mockImplementation(async (url: string) =>
+            String(url).endsWith('/git-source') ? jsonRes(failed()) : jsonRes([], false, 500));
+          expect(retryButton()).not.toBeInTheDocument();
+
+          await dropAndReopen(2);
+
+          expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+        });
+
+        it('does not read when another remote node\'s socket reconnects', async () => {
+          await setUp(2);
+          const before = gitSourceReads();
+
+          await dropAndReopen(3);
+          await settle();
+
+          expect(gitSourceReads()).toBe(before);
+          expect(retryButton()).not.toBeInTheDocument();
+        });
       });
 
       it('does not let an older refresh undo a newer background read', async () => {
