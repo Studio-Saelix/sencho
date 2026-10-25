@@ -182,6 +182,36 @@ describe('compose save publication', () => {
             expect(pathChown).not.toHaveBeenCalled();
         });
 
+        it('does not follow a link swapped in for the staging file during an upload', async () => {
+            const target = path.join(stackDir, 'compose.yaml');
+            fsSync.chmodSync(target, 0o666);
+            const victim = path.join(path.dirname(stackDir), 'swap-victim.txt');
+            fsSync.writeFileSync(victim, 'untouched', { mode: 0o600 });
+            fsSync.chmodSync(victim, 0o600);
+            const upload = path.join(path.dirname(stackDir), 'upload-spool-swap.bin');
+            fsSync.writeFileSync(upload, composeContent(['web', 'db']));
+            const realOpen = fsp.open.bind(fsp);
+            // Another process sharing the directory replaces the staging name
+            // with a link whenever Sencho creates or reopens it by name.
+            const swapForLink = (file: string): void => {
+                fsSync.rmSync(file, { force: true });
+                fsSync.symlinkSync(victim, file);
+            };
+            vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                const file = String(args[0]);
+                const staging = file.includes('sencho-tmp');
+                if (staging && args[1] === 'r+') swapForLink(file);
+                const fh = await realOpen(...args);
+                if (staging && args[1] === 'wx') swapForLink(file);
+                return fh;
+            }) as typeof fsp.open);
+
+            await FileSystemService.getInstance().writeScopedFileFromTemp(STACK, 'compose.yaml', upload);
+
+            expect(fsSync.statSync(victim).mode & 0o777).toBe(0o600);
+            expect(fsSync.readFileSync(victim, 'utf8')).toBe('untouched');
+        });
+
         it('removes the staging file when restricted content fails to publish', async () => {
             const target = path.join(stackDir, 'compose.yaml');
             fsSync.chmodSync(target, 0o600);

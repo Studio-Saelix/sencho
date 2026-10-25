@@ -1,10 +1,9 @@
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { promises as fsPromises, constants as fsConstants, createReadStream, createWriteStream } from 'fs';
+import { promises as fsPromises, constants as fsConstants, createReadStream } from 'fs';
 import type { Dirent } from 'fs';
 import { Readable } from 'stream';
-import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
 import { DatabaseService } from './DatabaseService';
 import { isPathWithinBase, isValidRelativeStackPath, isValidStackName } from '../utils/validation';
@@ -2436,36 +2435,31 @@ export class FileSystemService {
     const creationMode = publishedMode ?? 0o666;
     const owner = opts.owner ?? (existing ? { uid: existing.uid, gid: existing.gid } : undefined);
     let stagedTmp = false;
+    let staged: { ino: number; size: number; mtimeMs: number } | undefined;
     try {
-      if (data instanceof Readable) {
-        // Stream a temp-file source (an upload spooled to disk) into the staging
-        // file without buffering it in memory. 'wx' exclusively creates the
-        // staging file; the random suffix already guarantees a fresh name.
-        // The owner bit stays writable at creation so the staging file can be
-        // reopened to sync even when the replaced file is read-only; the mode
-        // is applied before publication.
-        const ws = createWriteStream(tmpPath, { flags: 'wx', mode: creationMode | 0o600 });
-        stagedTmp = true;
-        await pipeline(data, ws);
-        const synced = await fsPromises.open(tmpPath, 'r+');
-        try {
-          if (publishedMode !== undefined) await synced.chmod(publishedMode);
-          await chownStaged(synced, owner);
-          await synced.sync();
-        } finally {
-          await synced.close();
-        }
-      } else {
-        const fh = await fsPromises.open(tmpPath, 'wx', creationMode);
-        stagedTmp = true;
-        try {
+      // One exclusively created descriptor serves the whole write: content,
+      // mode, owner, sync, and the identity recorded at publication. Reopening
+      // the staging name by path would follow a link swapped in for it by a
+      // process that shares the directory, and the mode and owner would land
+      // on the link's target.
+      const fh = await fsPromises.open(tmpPath, 'wx', creationMode);
+      stagedTmp = true;
+      try {
+        if (data instanceof Readable) {
+          // Stream a temp-file source (an upload spooled to disk) into the
+          // staging file chunk by chunk, without buffering it in memory.
+          for await (const chunk of data) {
+            await fh.writeFile(chunk as Buffer | string);
+          }
+        } else {
           await fh.writeFile(data);
-          if (opts.mode !== undefined) await fh.chmod(opts.mode);
-          await chownStaged(fh, owner);
-          await fh.sync();
-        } finally {
-          await fh.close();
         }
+        if (opts.mode !== undefined) await fh.chmod(opts.mode);
+        await chownStaged(fh, owner);
+        await fh.sync();
+        staged = await fh.stat();
+      } finally {
+        await fh.close();
       }
       if (opts.exclusive) {
         // link() is atomic against EEXIST. Tmp and target are guaranteed to live
@@ -2480,10 +2474,9 @@ export class FileSystemService {
           throw err;
         }
       } else {
-        const staged = await fsPromises.stat(tmpPath);
         await fsPromises.rename(tmpPath, safePath);
         stagedTmp = false;
-        await recordAtomicPublication(safePath, staged);
+        if (staged) await recordAtomicPublication(safePath, staged);
       }
     } finally {
       if (stagedTmp) {
