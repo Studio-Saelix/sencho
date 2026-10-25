@@ -954,6 +954,19 @@ describe('ResourcesView', () => {
         expect(toast.success).not.toHaveBeenCalled();
       });
 
+      it('does not claim success when the server answered without per-container results', async () => {
+        mockNode({ '/system/orphans': orphans, '/system/prune/orphans': {} });
+        const user = userEvent.setup();
+        render(<ResourcesView />);
+        await user.click(await screen.findByRole('tab', { name: /external/i }));
+        await user.click(await screen.findByRole('checkbox', { name: 'Select all external containers' }));
+        await user.click(screen.getByRole('button', { name: 'Purge selected (2)' }));
+        await user.click(await screen.findByRole('button', { name: 'Purge' }));
+
+        await waitFor(() => expect(toast.warning).toHaveBeenCalledWith('The purge finished but its result could not be read. Check the list below.'));
+        expect(toast.success).not.toHaveBeenCalled();
+      });
+
       it('reports an error, not a success, when none could be removed', async () => {
         await purgeBoth([{ id: 'c1', success: false, error: 'Service "socket-proxy" carries the Docker connection.' }, { id: 'c2', success: false, error: 'busy' }]);
 

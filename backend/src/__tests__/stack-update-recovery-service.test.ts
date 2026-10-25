@@ -300,13 +300,15 @@ describe('StackUpdateRecoveryService', () => {
   describe('a Docker endpoint guard refusal of the restore up', () => {
     const genId = '77777777-7777-4777-8777-777777777777';
 
-    async function refuseRestoreUp(opts: { contentPath: string | null; revert?: 'clean' | 'fails' }) {
+    async function refuseRestoreUp(opts: { contentPath: string | null; revert?: 'clean' | 'fails'; refusedBeforeRestore?: boolean }) {
       const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
       const { resolveComposeProjectContext, resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
       const context = {
         validateForMutation: vi.fn().mockResolvedValue(undefined),
         backupFromContext: vi.fn().mockResolvedValue(genId),
-        restoreFromContext: vi.fn().mockResolvedValue(undefined),
+        restoreFromContext: opts.refusedBeforeRestore
+          ? vi.fn().mockRejectedValue(new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }))
+          : vi.fn().mockResolvedValue(undefined),
         nodeId: 1,
         stackName: 'my-stack',
         stackDir: '/test/compose/my-stack',
@@ -374,6 +376,14 @@ describe('StackUpdateRecoveryService', () => {
       expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
       // The class recorded for the recovery is the one the caller receives.
       expect(failed).toHaveBeenCalledTimes(1);
+      expect(failed).toHaveBeenCalledWith('pre_mutation');
+    });
+
+    it('rethrows it as pre_mutation, unmarked, when it is raised before any file was restored', async () => {
+      const { outcome, update, failed } = await refuseRestoreUp({ contentPath: genId, refusedBeforeRestore: true });
+
+      await expect(outcome).rejects.toMatchObject({ code: 'docker_endpoint_protected', failureClass: 'pre_mutation' });
+      expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
       expect(failed).toHaveBeenCalledWith('pre_mutation');
     });
 

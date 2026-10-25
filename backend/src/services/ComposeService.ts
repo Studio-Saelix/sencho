@@ -114,6 +114,8 @@ export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
   public readonly rolledBack: boolean;
   public readonly originalError: unknown;
+  /** Why the rollback did not run, when the Docker endpoint guard refused it. */
+  public readonly rollbackRefusal?: string;
   /**
    * Canonical GitOps deploy operation id of the failed deploy, stamped by
    * ComposeService's deploy catch before this error is rethrown. Mutable
@@ -131,6 +133,7 @@ export class ComposeRollbackError extends Error {
     this.rollbackAttempted = rollbackAttempted;
     this.rolledBack = rolledBack;
     this.originalError = originalError;
+    this.rollbackRefusal = rollbackRefusal;
     Object.setPrototypeOf(this, ComposeRollbackError.prototype);
   }
 }
@@ -319,7 +322,20 @@ export class ComposeService {
     mutation: EndpointMutation,
     stackDirOverride?: string,
   ): Promise<void> {
-    const refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+    let refusal: DockerEndpointRefusal | null;
+    try {
+      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+    } catch (error) {
+      // A guard that cannot run is not a pass. Raised as a refusal so callers
+      // that tolerate other teardown failures (delete, template rollback) keep
+      // the stack's files and records.
+      console.error('[ComposeService] Docker endpoint check failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      throw new DockerEndpointProtectedError({
+        reason: 'unresolved',
+        service: null,
+        message: `Sencho could not verify that this operation keeps its Docker connection safe (${getErrorMessage(error, 'check failed')}), so it was not run.`,
+      });
+    }
     if (refusal) throw new DockerEndpointProtectedError(refusal);
   }
 

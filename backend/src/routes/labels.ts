@@ -239,7 +239,12 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               continue;
             }
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true });
+              // A dry run answers what the real run would, and the real run is
+              // refused when it would recreate the container carrying the Docker connection.
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: 'up' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true });
               continue;
             }
             // Per-stack lock so a bulk deploy cannot race a manual
@@ -258,10 +263,13 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               continue;
             }
           } else {
-            // stop / restart have no pre-action policy gate; dry-run just
-            // confirms the stack would be reached.
+            // stop / restart have no pre-action policy gate; dry-run confirms
+            // the stack would be reached and that the Docker endpoint guard allows it.
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true });
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: action === 'stop' ? 'stop' : 'restart' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true });
               continue;
             }
             const lock = await StackOpLockService.getInstance().runExclusive(

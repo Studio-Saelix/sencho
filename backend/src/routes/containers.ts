@@ -60,6 +60,7 @@ containersRouter.post('/:id/stop', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
       return;
     }
+    console.error('[Containers] Stop failed:', error);
     res.status(500).json({ error: 'Failed to stop container' });
   }
 });
@@ -77,6 +78,7 @@ containersRouter.post('/:id/restart', async (req: Request, res: Response) => {
       res.status(409).json({ error: error.message, code: error.code, reason: error.reason });
       return;
     }
+    console.error('[Containers] Restart failed:', error);
     res.status(500).json({ error: 'Failed to restart container' });
   }
 });

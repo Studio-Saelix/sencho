@@ -3928,6 +3928,41 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('does not report success, and names the refusal, when the Docker endpoint guard refuses the deploy of an applied source', async () => {
+            const sha = 'e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8';
+            const svc = await seedPending('reconcile-apply-endpoint-refused', 'services:\n  x:\n    image: alpine\n', sha);
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            const { FileSystemService } = await import('../services/FileSystemService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+            const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new DockerEndpointProtectedError({
+                reason: 'provider',
+                service: 'socket-proxy',
+                message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+            }));
+
+            try {
+                const applicationId = liveApp('reconcile-apply-endpoint-refused')!.id;
+                const result = await svc.reconcile({
+                    intent: 'apply',
+                    applicationId,
+                    stackName: 'reconcile-apply-endpoint-refused',
+                    trigger: 'manual',
+                    actor: 'tester',
+                    commitSha: sha,
+                    planFingerprint: '',
+                    deploy: true,
+                });
+                expect(result.outcome).toBe('recovery_required');
+                expect(result.reason).toContain('carries the Docker connection');
+            } finally {
+                validateSpy.mockRestore();
+                saveSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
         it('reports a truthful failure, not the stale staged-candidate outcome, when fetch throws before touching the application row', async () => {
             const sha = 'e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3';
             const svc = await seedPending('reconcile-fetch-fail', 'services:\n  x:\n    image: alpine\n', sha);

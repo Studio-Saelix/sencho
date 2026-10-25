@@ -3201,7 +3201,7 @@ class DockerController {
     options?: ContainerOpOptions,
   ): Promise<void> {
     if (options?.allowEndpointContainer) return;
-    const { evaluateDockerEndpointContainer, DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    const { evaluateDockerEndpointContainer } = await import('../helpers/dockerEndpointGuard');
     const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker);
     if (refusal) throw new DockerEndpointProtectedError(refusal);
   }

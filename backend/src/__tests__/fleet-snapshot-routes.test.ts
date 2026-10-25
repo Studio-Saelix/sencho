@@ -1617,5 +1617,8 @@ describe('Fleet snapshot restore: remote node refuses the redeploy to protect it
             .send({ nodeId: remoteId, stackName: 'rother', redeploy: true });
 
         expect(res.body.code).not.toBe('docker_endpoint_protected');
+        // A different refusal keeps its own failure; it is not relabelled as the guard's.
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('stack_op_in_progress');
     });
 });

@@ -1,6 +1,7 @@
 import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
+import { ComposeService } from './ComposeService';
 import { HealthGateService } from './HealthGateService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
@@ -39,6 +40,12 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
         const message = `Policy "${policy.policy?.name}" blocked auto-update: ${policy.violations.length} image(s) matched ${summarizeBlockReasons(policy.violations)}${images ? ` (${images})` : ''}`;
         NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', message, { stackName, actor: 'system:image-update' });
         return { result: 'policy_blocked' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${message}` };
+      }
+      // Before the observation is spent: a refused update leaves it usable for a
+      // later attempt, and the caller is told why instead of seeing a failure.
+      const endpointRefusal = await ComposeService.getInstance(nodeId).evaluateDockerEndpoint(stackName, { kind: 'update' });
+      if (endpointRefusal) {
+        return { result: 'rejected' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${endpointRefusal.message}` };
       }
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(

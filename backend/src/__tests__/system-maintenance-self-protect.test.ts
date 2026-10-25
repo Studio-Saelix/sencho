@@ -184,6 +184,24 @@ describe('Self-protection on /api/system/prune/orphans', () => {
     expect(docker.removeContainers).toHaveBeenCalledWith([OTHER_CONTAINER]);
   });
 
+  it('hands the client each container the Docker endpoint guard refused, so a refusal is not read as a purge', async () => {
+    stubSelfIdentity({ containerId: SELF_CONTAINER });
+    const docker = stubDockerControllerNoops();
+    docker.removeContainers.mockResolvedValue([
+      { id: OTHER_CONTAINER, success: false, refused: true, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+    ]);
+
+    const res = await request(app)
+      .post('/api/system/prune/orphans')
+      .set('Authorization', authHeader)
+      .send({ containerIds: [OTHER_CONTAINER] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      { id: OTHER_CONTAINER, success: false, refused: true, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+    ]);
+  });
+
   it('does not flag a request that excludes the self container', async () => {
     stubSelfIdentity({ containerId: SELF_CONTAINER });
     const docker = stubDockerControllerNoops();

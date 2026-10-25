@@ -72,6 +72,30 @@ describe('MeshService.triggerRedeploy (registry delivery refusal)', () => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
         db.deleteNode(nodeId);
     });
+    it('records a local redeploy the Docker endpoint guard refuses as a failure that names the reason', async () => {
+        const db = DatabaseService.getInstance();
+        const stackName = 'mesh-endpoint-refused-stack';
+        const localNodeId = db.getNodes().find(n => n.type === 'local')!.id!;
+        const policyGate = await import('../helpers/policyGate');
+        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
+        const { ComposeService } = await import('../services/ComposeService');
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'provider',
+            service: 'socket-proxy',
+            message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        }));
+        const svc = MeshService.getInstance();
+
+        svc.triggerRedeploy(localNodeId, stackName, 'admin');
+
+        await vi.waitFor(() => expect(svc.getActivity({ source: 'mesh' }).some(event =>
+            event.level === 'error'
+            && event.message.includes(`mesh redeploy failed for ${stackName}`)
+            && event.message.includes('carries the Docker connection'))).toBe(true));
+        expect(svc.getActivity({ source: 'mesh' }).some(event => event.message === `mesh redeploy ok for ${stackName}`)).toBe(false);
+    });
+
     it('carries the refusal code into the activity message and audit summary', async () => {
         const db = DatabaseService.getInstance();
         const stackName = 'mesh-refusal-stack';

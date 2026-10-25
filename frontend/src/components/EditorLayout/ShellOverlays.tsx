@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import BashExecModal from '../BashExecModal';
 import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
@@ -91,6 +92,16 @@ export function ShellOverlays({
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
+
+  // The Reapply confirm acts on the active node, so a node switch closes it
+  // rather than leaving a dialog that now targets a different Sencho.
+  const reapplyNodeId = reapplySelfTarget?.nodeId ?? null;
+  const shownForNodeId = useRef(reapplyNodeId);
+  useEffect(() => {
+    if (shownForNodeId.current === reapplyNodeId) return;
+    shownForNodeId.current = reapplyNodeId;
+    setSelfStackProtectedOpen(false);
+  }, [reapplyNodeId, setSelfStackProtectedOpen]);
 
   const isDeleteConfirming =
     deleteTarget != null &&

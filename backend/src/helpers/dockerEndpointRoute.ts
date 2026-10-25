@@ -41,12 +41,11 @@ export function sendIfDockerEndpointProtected(res: Response, error: unknown): bo
   if (!res.headersSent) {
     // A restore through this node (the hub rolling a rollout back) needs to know
     // whether anything moved before the refusal.
-    const failureClass = (error as { failureClass?: unknown }).failureClass;
     res.status(409).json({
       error: error.message,
       code: DOCKER_ENDPOINT_PROTECTED_CODE,
       reason: error.reason,
-      ...(failureClass === 'pre_mutation' || failureClass === 'post_mutation' ? { failureClass } : {}),
+      ...(error.failureClass ? { failureClass: error.failureClass } : {}),
     });
   }
   return true;

@@ -11,6 +11,7 @@ import {
 import { BlueprintService, BlueprintNameConflictError, BlueprintOwnershipProbeError } from '../services/BlueprintService';
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { refuseIfSelfStack } from '../helpers/selfStackGuard';
+import { sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
@@ -636,6 +637,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             return;
         }
         if (refuseGitManagedConflict(res, error)) return;
+        if (sendIfDockerEndpointProtected(res, error)) return;
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }

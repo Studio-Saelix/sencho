@@ -75,7 +75,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-function renderShell(
+function shellElement(
   overlay: OverlayState,
   stackActions: Partial<StackActionsHook>,
   over: {
@@ -84,7 +84,7 @@ function renderShell(
     composeReapply?: { dispatching: boolean; reconnecting?: boolean; runReapply: () => void };
   } = {},
 ) {
-  return render(
+  return (
     <ShellOverlays
       overlayState={overlay}
       stackActions={stackActions as unknown as StackActionsHook}
@@ -106,8 +106,12 @@ function renderShell(
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
       hydrationReady={over.hydrationReady ?? (() => false)}
-    />,
+    />
   );
+}
+
+function renderShell(...args: Parameters<typeof shellElement>) {
+  return render(shellElement(...args));
 }
 
 describe('ShellOverlays diff-preview confirmation', () => {
@@ -238,6 +242,18 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
     expect(setOpen).toHaveBeenCalledWith(false);
     expect(runReapply).toHaveBeenCalledWith(target);
+  });
+
+  it('closes the dialog when the active node changes, so Reapply never targets a different Sencho', () => {
+    const setOpen = vi.fn();
+    const overlay = makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen });
+    const composeReapply = { dispatching: false, runReapply: vi.fn() };
+    const { rerender } = renderShell(overlay, {}, { reapplySelfTarget: target, composeReapply, hydrationReady: () => true });
+    expect(setOpen).not.toHaveBeenCalled();
+
+    rerender(shellElement(overlay, {}, { reapplySelfTarget: { ...target, nodeId: 2, name: 'Remote' }, composeReapply, hydrationReady: () => true }));
+
+    expect(setOpen).toHaveBeenCalledWith(false);
   });
 
   it('closes the dialog without starting a second reapply while one is in flight', () => {

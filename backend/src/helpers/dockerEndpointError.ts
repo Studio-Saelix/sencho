@@ -5,7 +5,11 @@
  */
 export const DOCKER_ENDPOINT_PROTECTED_CODE = 'docker_endpoint_protected';
 
-export type EndpointRefusalReason = 'sencho' | 'provider' | 'invalid_label' | 'unresolved';
+export const ENDPOINT_REFUSAL_REASONS = ['sencho', 'provider', 'invalid_label', 'unresolved'] as const;
+export type EndpointRefusalReason = typeof ENDPOINT_REFUSAL_REASONS[number];
+
+/** Whether anything moved before a restore was refused; set by the recovery that knows. */
+export type EndpointFailureClass = 'pre_mutation' | 'post_mutation';
 
 export interface DockerEndpointRefusal {
   reason: EndpointRefusalReason;
@@ -17,6 +21,7 @@ export class DockerEndpointProtectedError extends Error {
   readonly code = DOCKER_ENDPOINT_PROTECTED_CODE;
   readonly reason: EndpointRefusalReason;
   readonly service: string | null;
+  failureClass?: EndpointFailureClass;
 
   constructor(refusal: DockerEndpointRefusal) {
     super(refusal.message);
@@ -37,13 +42,13 @@ export function isDockerEndpointProtectedError(error: unknown): error is DockerE
  * `remoteStackError` surfaces with the remote's message and reason). Returns
  * the text to show and the reason, or null for any other error.
  */
-export function dockerEndpointRefusalOf(error: unknown): { message: string; reason: string | null } | null {
+export function dockerEndpointRefusalOf(error: unknown): { message: string; reason: EndpointRefusalReason | null } | null {
   if (isDockerEndpointProtectedError(error)) return { message: error.message, reason: error.reason };
   if (!(error instanceof Error)) return null;
   const remote = error as Error & { code?: unknown; httpStatus?: unknown; remoteError?: unknown; remoteReason?: unknown };
   if (remote.code !== DOCKER_ENDPOINT_PROTECTED_CODE || remote.httpStatus !== 409) return null;
   return {
     message: typeof remote.remoteError === 'string' && remote.remoteError ? remote.remoteError : error.message,
-    reason: typeof remote.remoteReason === 'string' ? remote.remoteReason : null,
+    reason: ENDPOINT_REFUSAL_REASONS.find(reason => reason === remote.remoteReason) ?? null,
   };
 }

@@ -316,6 +316,9 @@ describe('a file-backup rollback whose redeploy the guard refuses', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('docker_endpoint_protected');
+    // Told in the reply, not only in the alert feed: the files are a mix of the restore and what was there.
+    expect(res.body.error).toContain('could not be put back');
+    expect(res.body.failureClass).toBe('post_mutation');
     expect(revert).toHaveBeenCalledTimes(1);
     expect(NotificationService.getInstance().dispatchAlert).toHaveBeenCalled();
   });
@@ -400,9 +403,27 @@ describe('POST /api/stacks/bulk', () => {
     expect(res.status).toBe(200);
     const infra = res.body.results.find((r: { stackName: string }) => r.stackName === 'infra');
     const blog = res.body.results.find((r: { stackName: string }) => r.stackName === 'blog');
-    expect(infra).toMatchObject({ ok: false, code: 'docker_endpoint_protected' });
+    // The check failed; no refusal was made, so the row is a failed operation, not a protected one.
+    expect(infra).toMatchObject({ ok: false, code: 'op_failed' });
+    expect(infra.error).toContain('Could not verify');
     expect(blog.ok).toBe(true);
     expect(mockUpdateStack).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a refusal raised inside the lock, after the pre-check passed, as protected rather than failed', async () => {
+    mockEvaluate.mockResolvedValue(null);
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    mockUpdateStack.mockRejectedValue(new DockerEndpointProtectedError(refusal));
+    const { NotificationService } = await import('../services/NotificationService');
+
+    const res = await request(app)
+      .post('/api/stacks/bulk')
+      .set('Cookie', authCookie)
+      .send({ action: 'update', stackNames: ['infra'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ stackName: 'infra', ok: false, code: 'docker_endpoint_protected', error: refusal.message });
+    expect(NotificationService.getInstance().dispatchAlert).not.toHaveBeenCalledWith('error', expect.anything(), expect.stringContaining('infra'), expect.anything());
   });
 
   it('keeps restart a restart kind, and skips the guard for start', async () => {

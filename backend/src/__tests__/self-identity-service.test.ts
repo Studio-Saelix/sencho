@@ -129,6 +129,7 @@ describe('SelfIdentityService.initialize', () => {
     const err: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
     mockContainer.inspect.mockRejectedValue(err);
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -149,6 +150,7 @@ describe('SelfIdentityService.initialize', () => {
         Mounts: [{ Type: 'volume', Name: 'sencho_data' }],
       });
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -162,6 +164,7 @@ describe('SelfIdentityService.initialize', () => {
     const err404: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
     mockContainer.inspect.mockRejectedValue(err404);
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -227,6 +230,50 @@ describe('SelfIdentityService.initialize', () => {
     expect(await SelfIdentityService.readContainerIdFromCgroup(path.join(dir, 'does-not-exist'))).toBeNull();
 
     await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  it('parses the container id from the engine bind mounts in /proc/self/mountinfo', async () => {
+    const tmp = await import('os');
+    const fsp = await import('fs/promises');
+    const path = await import('path');
+    const dir = await fsp.mkdtemp(path.join(tmp.tmpdir(), 'sencho-mountinfo-'));
+
+    const info = path.join(dir, 'mountinfo');
+    await fsp.writeFile(info, [
+      '1001 995 8:1 /var/lib/docker/containers/' + FULL_CONTAINER_ID + '/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/sda1 rw',
+      '1002 995 8:1 /var/lib/docker/containers/' + FULL_CONTAINER_ID + '/hostname /etc/hostname rw,relatime - ext4 /dev/sda1 rw',
+    ].join('\n'));
+    expect(await SelfIdentityService.readContainerIdFromMountinfo(info)).toBe(FULL_CONTAINER_ID);
+
+    const none = path.join(dir, 'none');
+    await fsp.writeFile(none, '22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n');
+    expect(await SelfIdentityService.readContainerIdFromMountinfo(none)).toBeNull();
+    expect(await SelfIdentityService.readContainerIdFromMountinfo(path.join(dir, 'does-not-exist'))).toBeNull();
+
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  it('resolves through mountinfo when HOSTNAME is custom and the cgroup shows no id (cgroup v2 private namespace)', async () => {
+    process.env.HOSTNAME = 'sencho';
+    const err404: Error & { statusCode?: number } = Object.assign(new Error('no such container'), { statusCode: 404 });
+    mockContainer.inspect
+      .mockRejectedValueOnce(err404)
+      .mockResolvedValueOnce({
+        Id: FULL_CONTAINER_ID,
+        Name: '/sencho',
+        Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+        Config: { Labels: { 'com.docker.compose.project': 'sencho' } },
+        NetworkSettings: { Networks: {} },
+        Mounts: [],
+      });
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(FULL_CONTAINER_ID);
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+    expect(svc.getState()).toBe('resolved');
+    expect(svc.getIdentity().containerId).toBe(FULL_CONTAINER_ID);
+    expect(mockDocker.getContainer).toHaveBeenNthCalledWith(2, FULL_CONTAINER_ID);
   });
 
   it('is idempotent: re-initialize is a no-op', async () => {
@@ -338,6 +385,7 @@ describe('SelfIdentityService identity state', () => {
     mockContainer.inspect.mockRejectedValue(new Error('403 forbidden'));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -350,6 +398,7 @@ describe('SelfIdentityService identity state', () => {
     process.env.HOSTNAME = 'my-laptop';
     mockContainer.inspect.mockRejectedValue(Object.assign(new Error('no such container'), { statusCode: 404 }));
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     expect(await svc.ensureResolved()).toBe('none');
@@ -367,6 +416,7 @@ describe('SelfIdentityService identity state', () => {
       .mockResolvedValueOnce(inspectResult);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -383,6 +433,7 @@ describe('SelfIdentityService identity state', () => {
       .mockRejectedValueOnce(new Error('403 forbidden'));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(FULL_CONTAINER_ID);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -413,6 +464,7 @@ describe('SelfIdentityService identity state', () => {
       .mockResolvedValueOnce(inspectResult);
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     const svc = SelfIdentityService.getInstance();
     await svc.initialize();
@@ -430,6 +482,7 @@ describe('SelfIdentityService identity state', () => {
       mockContainer.inspect.mockRejectedValue(new Error('connection reset'));
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
       const svc = SelfIdentityService.getInstance();
       await svc.initialize();
@@ -464,6 +517,7 @@ describe('SelfIdentityService identity state', () => {
     mockContainer.inspect.mockRejectedValue(new Error('connection reset'));
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(SelfIdentityService, 'readContainerIdFromCgroup').mockResolvedValue(null);
+    vi.spyOn(SelfIdentityService, 'readContainerIdFromMountinfo').mockResolvedValue(null);
 
     await expect(SelfIdentityService.getInstance().getBindMounts()).rejects.toThrow('cannot read mounts');
   });

@@ -34,6 +34,8 @@ export async function getRuntimeContainerIdCandidates(): Promise<string[]> {
   if (hostname && isHexId(hostname)) candidates.add(hostname);
   const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
   if (cgroupId) candidates.add(cgroupId);
+  const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+  if (mountId) candidates.add(mountId);
   return [...candidates];
 }
 

@@ -261,6 +261,7 @@ import { SchedulerService } from '../services/SchedulerService';
 import { HealthGateService } from '../services/HealthGateService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { prepareOutboundRegistryDeliveryBody } from '../helpers/registryDeliveryOutbound';
+import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -2031,6 +2032,53 @@ describe('SchedulerService - lifecycle actions', () => {
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 
+  it.each([
+    ['auto_stop', 'runCommand'],
+    ['auto_down', 'runCommand'],
+    ['auto_start', 'deployStack'],
+    ['restart', 'runCommand'],
+  ] as const)('%s refused by the Docker endpoint guard records a failed run with the reason', async (action, method) => {
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask(action));
+    const refusal = new DockerEndpointProtectedError({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    });
+    (method === 'runCommand' ? mockRunCommand : mockDeployStack).mockRejectedValueOnce(refusal);
+    if (action === 'restart') {
+      mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Service: 'web' }, { Id: 'c2', Service: 'socket-proxy' }]);
+      mockAssertNoEndpointContainers.mockRejectedValueOnce(refusal);
+    }
+
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({
+      status: 'failure',
+      error: expect.stringContaining('carries the Docker connection'),
+    }));
+  });
+
+  it.each([
+    ['auto_stop', mockStopContainer],
+    ['restart', mockRestartContainer],
+  ] as const)('%s on a standalone container refused by the guard records a failed run with the reason', async (action, containerOp) => {
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask(action, { target_type: 'container', target_id: 'socket-proxy' }));
+    mockFindContainerByName.mockResolvedValue({ id: 'abc123deadbeef', name: 'socket-proxy', state: 'running', image: 'proxy', stackProject: null });
+    containerOp.mockRejectedValueOnce(new DockerEndpointProtectedError({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    }));
+
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(containerOp).toHaveBeenCalledWith('abc123deadbeef');
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({
+      status: 'failure',
+      error: expect.stringContaining('carries the Docker connection'),
+    }));
+  });
+
   it('auto_backup captures a current recovery generation', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_backup'));
     await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
@@ -2116,6 +2164,30 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     );
     expect(mockRunCommand).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
+  });
+
+  it.each([
+    ['auto_stop', {}],
+    ['auto_down', {}],
+    ['auto_start', {}],
+    ['auto_stop', { target_type: 'container', target_id: 'socket-proxy' }],
+  ] as const)('%s on a remote node that refuses with its own guard records a failed run carrying the reason', async (action, overrides) => {
+    const fetchMock = stubRemote();
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 409,
+      text: async () => JSON.stringify({ error: 'Service "socket-proxy" carries the Docker connection Sencho is using.', code: 'docker_endpoint_protected', reason: 'provider' }),
+      json: async () => ({ error: 'Service "socket-proxy" carries the Docker connection Sencho is using.', code: 'docker_endpoint_protected', reason: 'provider' }),
+    });
+    mockFindContainerByName.mockResolvedValue({ id: 'abc123deadbeef', name: 'socket-proxy', state: 'running', image: 'proxy', stackProject: null });
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask(action, { node_id: 2, ...overrides }));
+
+    await SchedulerService.getInstance().triggerTask(300, { userId: 1, username: 'admin', role: 'admin' } as const);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({
+      status: 'failure',
+      error: expect.stringContaining('carries the Docker connection'),
+    }));
   });
 
   it('auto_down proxies to the remote down endpoint', async () => {

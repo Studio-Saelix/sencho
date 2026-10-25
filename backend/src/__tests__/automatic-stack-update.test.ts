@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  policy: vi.fn(), execute: vi.fn(), beginStack: vi.fn(), link: vi.fn(),
+  endpoint: vi.fn(), policy: vi.fn(), execute: vi.fn(), beginStack: vi.fn(), link: vi.fn(),
   recheck: vi.fn(), invalidate: vi.fn(), broadcast: vi.fn(), alert: vi.fn(),
 }));
+vi.mock('../services/ComposeService', () => ({ ComposeService: { getInstance: () => ({ evaluateDockerEndpoint: mocks.endpoint }) } }));
 vi.mock('../services/PolicyEnforcement', () => ({ enforcePolicyPreDeploy: mocks.policy }));
 vi.mock('../services/StackUpdateOrchestrator', () => ({ StackUpdateOrchestrator: { getInstance: () => ({ execute: mocks.execute }) } }));
 vi.mock('../services/HealthGateService', () => ({ HealthGateService: { getInstance: () => ({ beginStack: mocks.beginStack }) } }));
@@ -19,6 +20,7 @@ import { StackOpLockService } from '../services/StackOpLockService';
 beforeEach(() => {
   vi.clearAllMocks();
   StackOpLockService.resetForTests();
+  mocks.endpoint.mockResolvedValue(null);
   mocks.policy.mockResolvedValue({ ok: true, violations: [] });
   mocks.execute.mockResolvedValue({ kind: 'stack_compose_done', deployedGenerationId: 'generation', recoveryId: 'recovery' });
   mocks.beginStack.mockReturnValue('health');
@@ -59,6 +61,26 @@ describe('automatic stack apply pipeline', () => {
     expect(mocks.execute).not.toHaveBeenCalled();
     expect(mocks.beginStack).not.toHaveBeenCalled();
     expect(mocks.recheck).not.toHaveBeenCalled();
+  });
+
+  it('reports the reason and keeps the observation unspent when the Docker endpoint guard refuses', async () => {
+    mocks.endpoint.mockResolvedValue({ reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection Sencho is using.' });
+    const consume = vi.fn();
+    const result = await applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority', observation: { verify: vi.fn(), consume } });
+    expect(mocks.endpoint).toHaveBeenCalledWith('web', { kind: 'update' });
+    expect(result).toMatchObject({ result: 'rejected', applied: false, healthGateId: null });
+    expect(result.message).toContain('carries the Docker connection');
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(mocks.beginStack).not.toHaveBeenCalled();
+  });
+
+  it('fails the apply, spending nothing, when the Docker endpoint check itself fails', async () => {
+    mocks.endpoint.mockRejectedValue(new Error('list denied'));
+    const consume = vi.fn();
+    await expect(applyAutomaticStackUpdate({ ...input, verificationOwner: 'hub_authority', observation: { verify: vi.fn(), consume } })).rejects.toThrow('list denied');
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
   });
 
   it('rejects stale facts before policy or any mutation side effect', async () => {

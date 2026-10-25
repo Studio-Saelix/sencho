@@ -595,6 +595,37 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect(seen).toEqual([{ state: 'id', id: 'sha256:abc' }, { state: 'unknown' }]);
   });
 
+  it('hands the guard the rendered Compose config, so a label set only in the file is seen', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let rendered: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      rendered = await input.probes.renderConfig();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'stop' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: { proxy: { labels: { 'io.sencho.infrastructure': 'true' } } } })));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.arrayContaining(['compose', 'config', '--format', 'json']), expect.anything());
+    expect(rendered).toContain('io.sencho.infrastructure');
+  });
+
+  it('turns a guard check that cannot run into a refusal, never a pass', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockEvaluateDockerEndpointGuard.mockRejectedValue(new Error('node lookup failed'));
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      reason: 'unresolved',
+    });
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toThrow(/node lookup failed/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('computes the config hash with the authored invocation and parses `service hash` output', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);

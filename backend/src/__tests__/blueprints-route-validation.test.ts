@@ -129,6 +129,28 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         expect(StackOpLockService.getInstance().get(1, 'apply-local-busy')?.action).toBe('update');
     });
 
+    it('returns 409 docker_endpoint_protected with the reason when the guard refuses the deploy', async () => {
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        const apply = vi.spyOn(BlueprintService.prototype, 'applyLocalUnderLock').mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'provider',
+            service: 'socket-proxy',
+            message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        }));
+        const res = await request(app)
+            .post('/api/blueprints/apply-local')
+            .set('Cookie', adminCookie)
+            .send({
+                stackName: 'apply-local-refused',
+                composeContent: 'services:\n  app:\n    image: nginx\n',
+                markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+            });
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+        expect(res.body.error).toContain('carries the Docker connection');
+        apply.mockRestore();
+    });
+
     it('rejects a malformed digestPins body', async () => {
         const res = await request(app)
             .post('/api/blueprints/apply-local')

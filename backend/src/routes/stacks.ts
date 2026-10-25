@@ -596,7 +596,7 @@ async function runStackBulkOp(
     } catch (error) {
       // An error here is not a pass: the stack is reported refused and the batch carries on.
       console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
-      return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: DOCKER_ENDPOINT_PROTECTED_CODE };
+      return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: 'op_failed' };
     }
   }
 
@@ -662,6 +662,10 @@ async function runStackBulkOp(
     }
     return { stackName, ok: true };
   } catch (err) {
+    // Raised inside the lock after the pre-check passed: still a refusal, not a failed operation.
+    if (isDockerEndpointProtectedError(err)) {
+      return { stackName, ok: false, error: err.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    }
     if (action !== 'start') notifyActionFailure(action, stackName, err, user);
     return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
   } finally {
@@ -3224,6 +3228,10 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         } catch (revertError) {
           console.error('[Stacks] Failed to revert files after a refused rollback: %s', sanitizeForLog(stackName), revertError);
           notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+          // The files are a mix of the restore and what was there: say so, and
+          // let the hub treat the refusal as having moved something.
+          error.failureClass = 'post_mutation';
+          error.message += ' The restored files could not be put back; check the stack files before deploying again.';
         }
       }
       sendIfDockerEndpointProtected(res, error);

@@ -3,6 +3,10 @@ import net from 'net';
 import DockerController from './DockerController';
 import SelfIdentityService from './SelfIdentityService';
 import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
+
+/** Endpoint hosts already reported as matching no container, so the warning is logged once per host. */
+const warnedUnmatchedHost = new Set<string>();
 
 /**
  * Finds the container that carries this node's Docker API, when there is one.
@@ -12,10 +16,11 @@ import { getErrorMessage } from '../utils/errors';
  * container is the connection: stopping or recreating it cuts the API Sencho is
  * using to do the work, and the rollback that follows dies the same way.
  *
- * A `resolved` or settled `none` answer is reused for up to 15 s (see
- * `resolveDockerEndpointProvider`), and callers also match the provider by its
- * Compose project and service, because a recreate changes the container id. A `unix://` endpoint or a direct socket mount is `none`;
- * mounting the socket does not make a container this node's connection.
+ * Callers also match the provider by its Compose project and service, because
+ * a recreate changes the container id (the cache rules are on
+ * `resolveDockerEndpointProvider`). A `unix://` endpoint or a direct socket
+ * mount is `none`: mounting the socket does not make a container this node's
+ * connection.
  */
 export type DockerEndpointProvider =
   /** `unmatched` is set when a tcp endpoint was looked up and no container owns it: that answer is not remembered. */
@@ -69,6 +74,7 @@ let cached: { endpoint: string | undefined; at: number; value: Promise<DockerEnd
 /** Test hook: forget the cached answer. */
 export function resetDockerEndpointProviderCache(): void {
   cached = null;
+  warnedUnmatchedHost.clear();
 }
 
 /**
@@ -135,6 +141,14 @@ async function resolveUncached(endpoint: string | undefined): Promise<DockerEndp
       && (self.isOwnNetwork(name) || (!!network.NetworkID && self.isOwnNetwork(network.NetworkID))));
   });
   if (!match || typeof match.Id !== 'string') {
+    if (!warnedUnmatchedHost.has(parsed.host)) {
+      warnedUnmatchedHost.add(parsed.host);
+      console.warn(
+        '[DockerEndpointProvider] No container on a shared network owns the Docker endpoint address for "%s"; only %s protects a proxy reached this way',
+        sanitizeForLog(parsed.host),
+        'the io.sencho.infrastructure label',
+      );
+    }
     return { state: 'none', unmatched: true, reason: `No container on a network Sencho shares owns the Docker endpoint address for "${parsed.host}".` };
   }
 

@@ -653,7 +653,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
             const data: { results?: Array<{ success: boolean; error?: string }> } | null = await res.json().catch(() => null);
-            const failed = (data?.results ?? []).filter(r => !r.success);
+            if (!data?.results) {
+                // Nothing says which containers were removed, so success is not claimed.
+                toast.warning('The purge finished but its result could not be read. Check the list below.');
+                await refreshAll();
+                return;
+            }
+            const failed = data.results.filter(r => !r.success);
             if (failed.length === 0) {
                 toast.success(`Purged ${selectedOrphans.length} external container(s)`);
             } else if (failed.length === selectedOrphans.length) {

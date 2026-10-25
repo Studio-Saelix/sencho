@@ -217,6 +217,17 @@ describe('resolveDockerEndpointProvider', () => {
     expect(mockListContainers).toHaveBeenCalledTimes(2);
   });
 
+  it('says once, per host, that a tcp endpoint matched no container', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockLookup.mockResolvedValue([{ address: '192.168.1.50', family: 4 }]);
+
+    await resolveDockerEndpointProvider();
+    await resolveDockerEndpointProvider();
+
+    const unmatched = warn.mock.calls.filter(call => String(call[0]).includes('owns the Docker endpoint address'));
+    expect(unmatched).toHaveLength(1);
+  });
+
   it('does not keep a failed lookup in the cache, so the next call resolves again', async () => {
     vi.spyOn(SelfIdentityService.getInstance(), 'ensureResolved').mockRejectedValueOnce(new Error('inspect exploded'));
 

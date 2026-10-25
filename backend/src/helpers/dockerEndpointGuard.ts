@@ -11,7 +11,7 @@ import { getRuntimeContainerIdCandidates, matchesContainerId, workingDirMatchesS
 import { getErrorMessage } from '../utils/errors';
 import type { DockerEndpointRefusal } from './dockerEndpointError';
 
-/**
+/*
  * Guard for lifecycle operations that would stop or recreate the container
  * carrying this node's Docker API: Sencho itself, or the socket proxy Sencho
  * reaches Docker through. Recreating the proxy cuts the connection the
@@ -31,6 +31,7 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * Scheduler, webhook, GitOps, Blueprint, mesh, and bulk update all reach one of
  * the two.
  */
+
 export {
   DOCKER_ENDPOINT_PROTECTED_CODE,
   DockerEndpointProtectedError,
@@ -108,12 +109,50 @@ function isDockerUnavailable(error: unknown): boolean {
     || message.includes('cannot connect to the docker daemon');
 }
 
-type RenderedService = { infrastructure: string | undefined; image: string | undefined; pullPolicy: string | undefined };
+type RenderedService = {
+  infrastructure: string | undefined;
+  image: string | undefined;
+  pullPolicy: string | undefined;
+  /** Services this one is wired to; Compose recreates it when one of them is recreated. */
+  linkedServices: string[];
+};
+
+type RenderedServiceDocument = {
+  labels?: unknown;
+  image?: unknown;
+  pull_policy?: unknown;
+  depends_on?: unknown;
+  network_mode?: unknown;
+  volumes_from?: unknown;
+  links?: unknown;
+};
+
+/** Names of the services `service` depends on, shares a network namespace with, or mounts volumes from. */
+function linkedServicesOf(service: RenderedServiceDocument | undefined): string[] {
+  const linked = new Set<string>();
+  const dependsOn = service?.depends_on;
+  if (Array.isArray(dependsOn)) {
+    for (const name of dependsOn) if (typeof name === 'string') linked.add(name);
+  } else if (dependsOn && typeof dependsOn === 'object') {
+    for (const name of Object.keys(dependsOn)) linked.add(name);
+  }
+  const networkMode = service?.network_mode;
+  if (typeof networkMode === 'string' && networkMode.startsWith('service:')) linked.add(networkMode.slice('service:'.length));
+  for (const list of [service?.volumes_from, service?.links]) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (typeof entry !== 'string' || entry.startsWith('container:')) continue;
+      const name = entry.split(':')[0];
+      if (name) linked.add(name);
+    }
+  }
+  return [...linked];
+}
 
 /** The label value and image of every service in rendered Compose YAML. Throws on YAML that does not parse. */
 function readRenderedServices(renderedYaml: string): Map<string, RenderedService> {
   const out = new Map<string, RenderedService>();
-  const parsed = parseYaml(renderedYaml) as { services?: Record<string, { labels?: unknown; image?: unknown; pull_policy?: unknown }> } | null;
+  const parsed = parseYaml(renderedYaml) as { services?: Record<string, RenderedServiceDocument> } | null;
   const services = parsed?.services;
   if (!services || typeof services !== 'object') return out;
   for (const [name, service] of Object.entries(services)) {
@@ -130,6 +169,7 @@ function readRenderedServices(renderedYaml: string): Map<string, RenderedService
       infrastructure,
       image: typeof service?.image === 'string' ? service.image : undefined,
       pullPolicy: typeof service?.pull_policy === 'string' ? service.pull_policy : undefined,
+      linkedServices: linkedServicesOf(service),
     });
   }
   return out;
@@ -137,8 +177,7 @@ function readRenderedServices(renderedYaml: string): Map<string, RenderedService
 
 /**
  * Services whose label value is exactly "true" are marked; any other value is
- * invalid. The guard itself reads the same data through `readRenderedServices`;
- * this is the focused form its tests pin.
+ * invalid.
  */
 export function readInfrastructureLabels(renderedYaml: string): { marked: string[]; invalid: Array<{ service: string; value: string }> } {
   const marked: string[] = [];
@@ -283,11 +322,11 @@ type Recreate = 'yes' | 'no' | 'unknown';
 const PULLING_POLICY = /^(always|refresh|daily|weekly|every_.+)$/i;
 
 /**
- * Whether `compose up -d` would recreate `service`: a different config hash, a
- * different local image id behind its tag (a pull that landed outside Sencho),
- * or a digest-pin overlay rewriting its image all do.
+ * Whether `service` itself would be recreated by `compose up -d`: a different
+ * config hash, a different local image id behind its tag (a pull that landed
+ * outside Sencho), or a digest-pin overlay rewriting its image all do.
  */
-async function wouldRecreate(
+async function ownRecreate(
   input: EndpointGuardInput,
   stackContainers: ListedContainer[],
   service: string,
@@ -310,6 +349,35 @@ async function wouldRecreate(
     if (existing.some(container => (container.ImageID ?? '').replace(/^sha256:/, '') !== wanted)) return 'yes';
   }
   return 'no';
+}
+
+/**
+ * Whether `compose up -d` would stop or recreate `service`: its own recreate
+ * decision, or that of anything it is wired to, because Compose recreates or
+ * restarts a service when a service it depends on, shares a network namespace
+ * with, or mounts volumes from is recreated.
+ */
+async function wouldRecreate(
+  input: EndpointGuardInput,
+  stackContainers: ListedContainer[],
+  service: string,
+  rendered: Map<string, RenderedService>,
+): Promise<Recreate> {
+  let unknown = false;
+  const visited = new Set<string>();
+  const queue = [service];
+  while (queue.length > 0) {
+    const name = queue.shift() as string;
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const view = rendered.get(name);
+    const own = await ownRecreate(input, stackContainers, name, view);
+    if (own === 'yes') return 'yes';
+    if (own === 'unknown') unknown = true;
+    // A link to a service the render does not contain (a disabled profile) cannot be recreated.
+    queue.push(...(view?.linkedServices ?? []).filter(linked => rendered.has(linked)));
+  }
+  return unknown ? 'unknown' : 'no';
 }
 
 function viewOf(provider: DockerEndpointProvider): ProviderView {
@@ -413,13 +481,15 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const providerInfo = provider.state === 'resolved' ? provider.provider : null;
   const providerReason = provider.state === 'unresolved' ? provider.reason : null;
   for (const entry of found) {
-    const services = [...new Set(entry.containers.map(serviceOf).filter((s): s is string => s !== null))];
+    // A protected container without a Compose service label (a stale or hand-made
+    // container carrying the stack label) is still protected, under its name.
+    const services = [...new Set(entry.containers.map(c => serviceOf(c) ?? c.Names?.[0]?.replace(/^\//, '') ?? c.Id ?? 'unknown'))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
       if (restartsSelf && entry.role === 'sencho') continue;
       if (mutation.kind === 'up') {
-        const recreate = await wouldRecreate(input, stackContainers, service, rendered.get(service));
+        const recreate = await wouldRecreate(input, stackContainers, service, rendered);
         if (recreate === 'no') continue;
         if (recreate === 'unknown') return unknownRecreateRefusal(entry.role, service);
       }
@@ -454,11 +524,11 @@ export interface InspectsContainers {
 
 /**
  * Container-level guard for stop, restart, and removal (removal is evaluated as
- * a stop). It mirrors the stack
- * level: the provider (by id, by Compose service, or by label) is always
- * refused; a container that may be the provider when it cannot be told apart is
- * refused; the Sencho container is refused on stop and removal only (a restart
- * brings it back, which is the one intended way to bounce Sencho).
+ * a stop). It mirrors the stack level: the provider (by id, by Compose service,
+ * or by label) is always refused; a container that may be the provider when it
+ * cannot be told apart is refused; the Sencho container is refused on stop and
+ * removal only (a restart brings it back, which is the one intended way to
+ * bounce Sencho).
  */
 export async function evaluateDockerEndpointContainer(
   containerId: string,
