@@ -181,8 +181,15 @@ export function holdForStatefulReview(
  * was promoted) first, falling back to the staged candidate copy (accepted but
  * not yet promoted). Reports the first readable copy, or a reason when neither
  * is readable.
+ *
+ * Exported because two callers need the generation that is actually in force
+ * rather than the candidate on disk. Promotion removes the applied directory and
+ * renames the candidate over it, so after the first rollout a generation has an
+ * applied directory and no candidate directory at all. A reader that resolves
+ * only the candidate therefore finds nothing on every generation that has been
+ * promoted once, which is every generation a working install has.
  */
-function readAppliedGenerationContents(
+export function readAppliedGenerationContents(
     stackName: string,
     app: GitOpsApplicationRow,
     generation: GitOpsGenerationRow,

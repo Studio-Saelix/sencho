@@ -3,7 +3,7 @@
  * Executor cleanup helpers for clear_reversed_evict / clear_stale_guard live at the bottom.
  */
 
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { parse as parseYaml } from 'yaml';
 import {
     DatabaseService,
@@ -12,6 +12,8 @@ import {
     type Node,
 } from './DatabaseService';
 import { BlueprintReconciler, type ReconcileDecision } from './BlueprintReconciler';
+import { GitOpsStore } from './gitops/store';
+import { GitOpsTransitions } from './gitops/transitions';
 import { projectBlueprintRevision } from '../helpers/gitopsResponse';
 import type {
     ArtifactFacet,
@@ -34,6 +36,8 @@ import {
     isExecutorAction,
     intentFingerprint,
     evaluateEffectiveApproval,
+    parseApprovedBlastJson,
+    serializeApprovedBlast,
 } from './blueprintApproval';
 
 export const BLUEPRINT_PREVIEW_PILOT_STALE_MS = 60_000;
@@ -103,6 +107,16 @@ export interface PreviewWarningItem {
     message: string;
 }
 
+/**
+ * Where an effective approval came from.
+ *
+ * The legacy combined approval is the pre-decomposition mechanism and still
+ * the executor for a Blueprint with no live application. `configured_policy` is
+ * the decomposed placement approval a policy wrote for its own decision, which
+ * the reconciler executes on an automatic rollout.
+ */
+export type ApprovalAuthority = 'legacy_combined' | 'configured_policy';
+
 export interface BlueprintPreviewResult {
     blueprintId: number;
     classification: Blueprint['classification'];
@@ -117,6 +131,20 @@ export interface BlueprintPreviewResult {
     stackName: string;
     approvalStatus: 'pending' | 'approved';
     effectiveApproval: EffectiveApproval;
+    /**
+     * Which authority makes `effectiveApproval` approved, or null when nothing
+     * does. Separate from `effectiveApproval` so a surface can name the actual
+     * authority: a plan a policy covers is approved, but calling it a combined
+     * approval would be false.
+     */
+    approvalAuthority: ApprovalAuthority | null;
+    /**
+     * Why a policy-approved plan is still waiting, or null when nothing is
+     * holding it. Set only when the composed approval is pending, so the tick
+     * will not run any of the plan. A plan the combined approval still covers
+     * in part stays reapproval required and does not carry this sentence.
+     */
+    approvalHoldReason: string | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };
@@ -437,6 +465,25 @@ function projectActions(
         }
     }
 
+    // A severed target the selector wants again used to vanish here: the node was
+    // online and labelled and produced no row at all, so the plan read as nothing
+    // to do with nothing to say about why. The tombstone still holds, because
+    // only an explicit deploy re-opens a severed placement and that revival is
+    // recorded by the transition itself. So the row is informational, names what
+    // the operator has to do, and gives automatic placement no new authority.
+    //
+    // It yields to the status-precedence pass above, which pushes without a `seen`
+    // guard: an in-flight or guard row is the specific, actionable truth about
+    // that node right now, and a second explanation for the same node only asks
+    // the operator to reconcile two rows pointing in different directions.
+    for (const nodeId of decision.severedNodeIds) {
+        if (!desiredIds.has(nodeId)) continue;
+        if (out.some((row) => row.node.id === nodeId)) continue;
+        const node = byId.get(nodeId);
+        if (!node) continue;
+        push(node, 'skip_withdrawn', 'warning', 'Withdrawn earlier; deploy again to restore');
+    }
+
     for (const node of decision.deploy) {
         if (seen.has(node.id)) continue;
         const dep = depByNode.get(node.id);
@@ -494,6 +541,13 @@ function projectActions(
             } else if (status === 'active') {
                 const action = driftCheckAction(blueprint.drift_mode);
                 push(node, action, driftCheckSeverity(action), 'Active deployment check');
+            } else if (status === 'repair_held') {
+                // A held target is still being checked, and the hold is a state
+                // rather than a latch, so the preview offers the same check an
+                // active row gets. Omitting it would make a target Sencho is
+                // actively declining to repair look untracked.
+                const action = driftCheckAction(blueprint.drift_mode);
+                push(node, action, driftCheckSeverity(action), 'Repair held; recheck pending');
             }
         } else {
             if (status === 'withdrawn') continue;
@@ -520,6 +574,113 @@ function asApprovedBlueprint(blueprint: Blueprint): Blueprint & BlueprintApprova
         approved_at: b.approved_at ?? null,
         approved_by: b.approved_by ?? null,
     };
+}
+
+/**
+ * Why an Enforce plan a policy already approved is still waiting for Apply.
+ *
+ * The placement policy covers the node set, and Enforce then asks every
+ * retained node for a repair. That repair is not part of the placement
+ * decision, so the policy path declines the whole plan. The sentence is the
+ * one the rollout preview and the operator docs both show.
+ */
+export const ENFORCE_APPROVAL_HOLD_REASON =
+    'Enforce waits for Apply. Automatic placement acts in Observe or Suggest. In Enforce, a place, a withdrawal, or a repair under a policy approval stays pending until you confirm it.';
+
+/**
+ * The composed authority a preview, a list row, and the reconciler all read.
+ *
+ * The policy path is tried first, mirroring the reconciler: its approval is
+ * bound to the current intent, while the combined approval's fingerprint does
+ * not cover the node set a roster change moved. When the policy cannot run the
+ * whole plan the combined approval is the fallback, and the surfaces report
+ * what the tick does under it: approved when the plan is inside its blast,
+ * reapproval required when the plan outgrew it, in which case the tick runs the
+ * authorized subset and waits for the operator for the rest.
+ *
+ * The combined evaluation reads the same narrowed blast the executor does, so a
+ * plan action the placement's frozen target set drops is unauthorized here too.
+ * Reading the raw blast instead would report an approval the tick withholds, and
+ * the plan would wait with nothing on screen to prompt for Apply.
+ */
+export function composeEffectiveApproval(
+    blueprint: Blueprint,
+    executorActions: ConfirmableActionRef[],
+): {
+    effectiveApproval: EffectiveApproval;
+    unauthorizedActions: ConfirmableActionRef[];
+    approvalAuthority: ApprovalAuthority | null;
+    approvalHoldReason: string | null;
+} {
+    if (executorActions.length > 0) {
+        const policyAuthorized = BlueprintReconciler.getInstance()
+            .policyPlacementAuthorizedActions(blueprint, executorActions);
+        if (policyAuthorized) {
+            return {
+                effectiveApproval: 'approved',
+                unauthorizedActions: [],
+                approvalAuthority: 'configured_policy',
+                approvalHoldReason: null,
+            };
+        }
+    }
+    const evaluated = evaluateEffectiveApproval(scopedApprovedBlueprint(blueprint), executorActions);
+    if (evaluated.effectiveApproval === 'approved') {
+        return { ...evaluated, approvalAuthority: 'legacy_combined', approvalHoldReason: null };
+    }
+    // reapproval_required means the combined approval still runs the subset it
+    // covers, including an Enforce repair. The hold sentence is only for a
+    // plan the tick will not touch.
+    if (evaluated.effectiveApproval !== 'pending') {
+        return { ...evaluated, approvalAuthority: null, approvalHoldReason: null };
+    }
+    return {
+        ...evaluated,
+        approvalAuthority: null,
+        approvalHoldReason: enforcePlacementHoldReason(blueprint, executorActions),
+    };
+}
+
+/**
+ * The Enforce hold, or null when Enforce is not what is keeping this plan waiting.
+ *
+ * The same method that refuses execution answers the question, with the hold
+ * turned off: would this plan run if the retained nodes were only being
+ * checked? A yes means the placement approval covers the plan and Enforce is
+ * the only reason it is waiting, including when a retained node is mid-deploy
+ * and its repair has dropped out of the plan. Any other refusal (a compose
+ * edit, a first placement, a manual rollout) is a different wait, and this
+ * reason would misname it.
+ */
+function enforcePlacementHoldReason(
+    blueprint: Blueprint,
+    executorActions: ConfirmableActionRef[],
+): string | null {
+    if (blueprint.drift_mode !== 'enforce') return null;
+    const asObservation = executorActions.map((ref) => (
+        ref.action === 'check_enforce' ? { nodeId: ref.nodeId, action: 'check_observe' as const } : ref
+    ));
+    const wouldRun = BlueprintReconciler.getInstance()
+        .policyPlacementAuthorizedActions(blueprint, asObservation, { enforceHold: false });
+    return wouldRun ? ENFORCE_APPROVAL_HOLD_REASON : null;
+}
+
+/**
+ * The Blueprint as the executor sees it: its approved blast after the live
+ * placement's frozen target set narrows it, or the Blueprint unchanged when
+ * there is no placement authority to narrow by.
+ *
+ * Only the blast changes. The fingerprint is read from the same row by the
+ * evaluator, so an approval the placement cannot resolve is left to report what
+ * it always did, while a blast it narrows is evaluated narrowed.
+ */
+function scopedApprovedBlueprint(blueprint: Blueprint): Blueprint & Partial<BlueprintApprovalFields> {
+    const approved = asApprovedBlueprint(blueprint);
+    const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
+    if (!parsed.ok) return approved;
+    const scope = BlueprintReconciler.getInstance().scopeLegacyBlast(blueprint, parsed.entries);
+    if (!scope?.resolvable || scope.entries.length === parsed.entries.length) return approved;
+    return { ...approved, approved_blast_json: serializeApprovedBlast(scope.entries) };
 }
 
 /** Upgrade create rows to blockers when an unmanaged same-name stack already exists. */
@@ -585,12 +746,17 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         action: c.action,
     });
     const confirmable = changes
-        .filter(c => c.action !== 'skip_cordoned' && c.action !== 'blocked_name_conflict')
+        .filter(c => c.action !== 'skip_cordoned' && c.action !== 'skip_withdrawn' && c.action !== 'blocked_name_conflict')
         .map(toActionRef);
     const executorActions = changes.filter(c => isExecutorAction(c.action)).map(toActionRef);
 
     const approvedBp = asApprovedBlueprint(blueprint);
-    const { effectiveApproval, unauthorizedActions } = evaluateEffectiveApproval(approvedBp, executorActions);
+    // The same composed authority the reconciler executes under: a covering
+    // policy placement approval first, the legacy combined approval as the
+    // fallback. Without the composition the editor would say pending while the
+    // tick deployed anyway.
+    const { effectiveApproval, unauthorizedActions, approvalAuthority, approvalHoldReason } =
+        composeEffectiveApproval(blueprint, executorActions);
 
     const { requirements, compat, reqWarnings } = extractRequirements(blueprint.compose_content);
     const compatibilityWarnings = [...blueprint.classification_reasons, ...compat];
@@ -654,6 +820,8 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
         stackName: blueprint.name,
         approvalStatus: approvedBp.approval_status,
         effectiveApproval,
+        approvalAuthority,
+        approvalHoldReason,
         planFingerprint: intentFingerprint(blueprint),
         generatedAt: Date.now(),
         summary,
@@ -934,10 +1102,11 @@ export function evaluateLightweightEffectiveApproval(blueprintId: number): {
     const executorActions = raw
         .filter(r => isExecutorAction(r.action))
         .map(r => ({ nodeId: r.node.id, action: r.action }));
-    const { effectiveApproval, unauthorizedActions } = evaluateEffectiveApproval(
-        asApprovedBlueprint(blueprint),
-        executorActions,
-    );
+    // The composed authority, not the legacy columns alone: a plan a policy
+    // placement approval covers is approved here exactly as the preview and the
+    // reconciler read it, so the catalog chip cannot say pending for a
+    // Blueprint the tick is about to execute.
+    const { effectiveApproval, unauthorizedActions } = composeEffectiveApproval(blueprint, executorActions);
     return { effectiveApproval, unauthorizedActions };
 }
 
@@ -968,5 +1137,56 @@ export function applyClearStaleGuard(blueprintId: number, nodeId: number): void 
     const db = DatabaseService.getInstance();
     const dep = db.getDeployment(blueprintId, nodeId);
     if (!dep || dep.status !== 'pending_state_review' || dep.last_deployed_at != null) return;
+    // Retire first. The guard row is what the clear path keys off, so deleting
+    // it before the target is retired strands the target on a hold whose only
+    // resolution has just been removed: the node keeps reporting a stateful
+    // confirmation and no tick will clear it again. Failing here leaves both in
+    // place, so the next tick retries instead.
+    if (!retireHeldTarget(blueprintId, nodeId)) return;
     db.deleteDeployment(blueprintId, nodeId);
+}
+
+/**
+ * Retire the revision-state target that was holding this node.
+ *
+ * Clearing the guard deletes the deployment row the hold was recorded against,
+ * so the target would otherwise keep reporting a stateful confirmation for a
+ * placement that no longer exists, and the projection would pin the whole
+ * application to awaiting a confirmation the operator has no way to perform:
+ * the clear path is the only thing that resolves the hold, and it has already
+ * run. Retiring rather than clearing the stage, because the node is no longer
+ * part of this placement and a later placement mints a fresh target on first
+ * contact.
+ *
+ * Best-effort by design. The projection is a read model and this guard row is
+ * authoritative on its own; refusing to delete it because the revision state
+ * could not be updated would strand the deployment the operator asked to clear.
+ */
+function retireHeldTarget(blueprintId: number, nodeId: number): boolean {
+    try {
+        const store = GitOpsStore.getInstance();
+        const app = store.getLiveBlueprintApplication(blueprintId);
+        if (!app) return true;
+        const target = store.getTarget(app.id, nodeId);
+        if (!target || target.target_status !== 'active') return true;
+        GitOpsTransitions.getInstance().targetTombstoned(app.id, nodeId, {
+            // Distinct per call rather than derived from the node, because
+            // history dedupes on the operation id: a deterministic one makes a
+            // second hold-and-clear cycle on the same node look like a replay
+            // and silently drop its audit row.
+            operationId: `op-stale-guard-clear-${randomUUID()}`,
+            actor: null,
+            trigger: 'blueprint_stale_guard_clear',
+            at: Date.now(),
+        });
+        return true;
+    } catch (error) {
+        console.error(
+            '[BlueprintPreview] could not retire the held target for blueprint %d on node %d:',
+            blueprintId,
+            nodeId,
+            error instanceof Error ? error.stack ?? error.message : String(error),
+        );
+        return false;
+    }
 }

@@ -16,7 +16,7 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => useAuthMock(),
 }));
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ hasCapability: () => false }),
+  useNodes: () => ({ hasCapability: () => false, nodes: [] }),
 }));
 
 vi.mock('../FleetView/hooks/useFleetPreferences', () => ({
@@ -62,9 +62,7 @@ vi.mock('../FleetView/hooks/useFleetOverview', () => ({
       onlineCount: 0,
       criticalCount: 0,
       avgCpuNum: 0,
-      worstCpu: 0,
       totalMemUsed: 0,
-      totalMemTotal: 0,
       totalContainers: 0,
       totalContainersAll: 0,
     },
@@ -118,7 +116,7 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
     expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /blueprints/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /federation/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /actions/i })).toBeTruthy();
   });
@@ -198,6 +196,6 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     // Routing still visible (gated on experimental only, not tier or admin)
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     // Unrelated tabs still visible
-    expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /blueprints/i })).toBeTruthy();
   });
 });

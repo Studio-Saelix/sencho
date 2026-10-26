@@ -187,6 +187,17 @@ export type HealthPolicyDecision =
   | { action: 'none'; reason: 'health_policy_observe' };
 
 /**
+ * The operator-facing sentence for a decision that ends advancement.
+ *
+ * One string for both places a hold is written, so the reason an operator reads
+ * on the application is the same whether the hold was recorded by the transition
+ * that decided it or carried out by the executor afterwards.
+ */
+export function healthHoldReason(reason: string): string {
+  return `Held by the health rollout policy (${reason.replace(/_/g, ' ')}).`;
+}
+
+/**
  * Decide what a verdict does, from the policy frozen into the rollout
  * generation.
  *

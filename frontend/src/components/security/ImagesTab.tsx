@@ -520,7 +520,7 @@ export function ImagesTab({
           options={FILTER_OPTIONS}
           value={severity}
           onValueChange={(v) => { setSeverity((v || 'all') as ImageFilterValue); setPage(0); }}
-          className="w-[200px] [&>button]:!bg-background"
+          className="w-[200px] [&>button]:!bg-control"
         />
       </div>
 

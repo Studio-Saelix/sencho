@@ -163,8 +163,18 @@ function gitInputFromDiscover(request: RegistryDeliveryDiscoverRequest): CreateS
     contextDir: typeof record.context_dir === 'string' ? record.context_dir : null,
     syncEnv: record.sync_env === true,
     envPath: typeof record.env_path === 'string' ? record.env_path : null,
-    authType: record.auth_type === 'token' ? 'token' : 'none',
+    authType: record.auth_type === 'token'
+      ? 'token'
+      : record.auth_type === 'deploy_key' ? 'deploy_key' : 'none',
     token: typeof record.token === 'string' ? record.token : null,
+    deployKey: typeof record.deploy_key === 'string' ? record.deploy_key : null,
+    sshKnownHostsEntry: typeof record.ssh_known_hosts_entry === 'string'
+      ? record.ssh_known_hosts_entry
+      : null,
+    sshHostKeyFingerprint: typeof record.ssh_host_key_fingerprint === 'string'
+      ? record.ssh_host_key_fingerprint
+      : null,
+    caBundle: typeof record.ca_bundle === 'string' ? record.ca_bundle : null,
     autoApplyOnWebhook: record.auto_apply_on_webhook === true,
     autoDeployOnApply: record.auto_deploy_on_apply === true,
   };
@@ -173,15 +183,14 @@ function gitInputFromDiscover(request: RegistryDeliveryDiscoverRequest): CreateS
 export async function prepareGitCandidateSource(
   request: RegistryDeliveryDiscoverRequest,
 ): Promise<PreparedSourceResult> {
+  const { GitSourceError, GitSourceService } = await import('../services/GitSourceService');
   if (request.gitApply === true && request.stack) {
-    const { GitSourceService } = await import('../services/GitSourceService');
     return GitSourceService.getInstance().prepareRegistryDeliveryFromPending(request.stack);
   }
   const input = gitInputFromDiscover(request);
   if (!input) {
-    throw new Error('Git candidate discovery is missing required fields');
+    throw new GitSourceError('GIT_ERROR', 'Git candidate discovery is missing required fields');
   }
-  const { GitSourceService } = await import('../services/GitSourceService');
   return GitSourceService.getInstance().prepareRegistryDeliveryFromGit(input);
 }
 

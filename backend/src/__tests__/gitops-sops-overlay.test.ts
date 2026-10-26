@@ -1,26 +1,50 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
-import os from 'os';
 import crypto from 'crypto';
 import { GitOpsDecryptOverlay } from '../services/gitops/sops/overlay';
 import { buildGitOpsDecryptOverlay } from '../services/gitops/sops/prepareOverlay';
+import { SopsDecryptError } from '../services/gitops/sops/decode';
 import type { ComposeInputEntry } from '../types/gitProjectManifest';
-import { buildSopsAgeDocument } from './helpers/sopsFixtures';
+import { buildSopsAgeDocument, buildSopsAgeDotenvDocument } from './helpers/sopsFixtures';
+import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+
+async function importTestIdentity(identity: string): Promise<void> {
+  const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
+  const { DatabaseService } = await import('../services/DatabaseService');
+  DatabaseService.getInstance().getDb().exec(`
+    CREATE TABLE IF NOT EXISTS gitops_sops_identities (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL,
+      stack_name TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      encrypted_identity TEXT NOT NULL,
+      label TEXT NULL,
+      created_at INTEGER NOT NULL,
+      rotated_at INTEGER NULL
+    );
+  `);
+  await SopsIdentityStore.getInstance().importIdentity({
+    applicationId: 'app-1',
+    stackName: 'demo',
+    identity,
+  });
+}
 
 describe('GitOpsDecryptOverlay', () => {
   let dataDir: string;
 
-  beforeEach(() => {
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-sops-overlay-'));
-    process.env.DATA_DIR = dataDir;
-    GitOpsDecryptOverlay.resetForTests();
+  beforeAll(async () => {
+    dataDir = await setupTestDb();
   });
 
-  afterEach(() => {
-    delete process.env.DATA_DIR;
-    fs.rmSync(dataDir, { recursive: true, force: true });
+  afterAll(() => {
+    cleanupTestDb(dataDir);
+  });
+
+  beforeEach(() => {
+    GitOpsDecryptOverlay.resetForTests();
   });
 
   it('leaves durable source bytes unchanged while overlay holds plaintext', async () => {
@@ -55,25 +79,7 @@ describe('GitOpsDecryptOverlay', () => {
       sopsRecipients: [recipient],
     }];
 
-    const { SopsIdentityStore } = await import('../services/gitops/sops/identityStore');
-    const { DatabaseService } = await import('../services/DatabaseService');
-    DatabaseService.getInstance().getDb().exec(`
-      CREATE TABLE IF NOT EXISTS gitops_sops_identities (
-        id TEXT PRIMARY KEY,
-        application_id TEXT NOT NULL,
-        stack_name TEXT NOT NULL,
-        recipient TEXT NOT NULL,
-        encrypted_identity TEXT NOT NULL,
-        label TEXT NULL,
-        created_at INTEGER NOT NULL,
-        rotated_at INTEGER NULL
-      );
-    `);
-    await SopsIdentityStore.getInstance().importIdentity({
-      applicationId: 'app-1',
-      stackName: 'demo',
-      identity,
-    });
+    await importTestIdentity(identity);
 
     const overlay = await buildGitOpsDecryptOverlay({
       stackName: 'demo',
@@ -97,6 +103,108 @@ describe('GitOpsDecryptOverlay', () => {
     })).toThrow(/binding mismatch/i);
     await GitOpsDecryptOverlay.getInstance().destroy(1, 'demo', overlay!.binding.operationId);
     expect(fs.existsSync(overlay!.overlayDir)).toBe(false);
+  });
+
+  it('formats dotenv output for the consumer role', async () => {
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const sopsDoc = await buildSopsAgeDotenvDocument({
+      values: { PASSWORD: 'pa$word' },
+      identity,
+      recipient,
+    });
+
+    const sourceRoot = path.join(dataDir, 'git-managed', '1', 'demo', 'candidate');
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, 'svc.env'), sopsDoc, { mode: 0o600 });
+    fs.writeFileSync(path.join(sourceRoot, 'cred.env'), sopsDoc, { mode: 0o600 });
+    fs.writeFileSync(path.join(sourceRoot, 'sec.env'), sopsDoc, { mode: 0o600 });
+
+    const base = {
+      sourcePath: null as string | null,
+      ownership: 'managed' as const,
+      provenance: 'fetch' as const,
+      sensitivity: 'high' as const,
+      contentSha256: null as string | null,
+      sizeBytes: null as number | null,
+      state: 'present' as const,
+      deletionAuthority: 'sencho' as const,
+      note: null as string | null,
+      encryption: 'sops-age' as const,
+      sopsRecipients: [recipient],
+    };
+    const inputs: ComposeInputEntry[] = [
+      { ...base, sourcePath: 'svc.env', materializedPath: 'svc.env', role: 'env', dependencyKind: 'env_file' },
+      { ...base, sourcePath: 'cred.env', materializedPath: 'cred.env', role: 'config', dependencyKind: 'config' },
+      { ...base, sourcePath: 'sec.env', materializedPath: 'sec.env', role: 'secret', dependencyKind: 'secret' },
+    ];
+
+    await importTestIdentity(identity);
+
+    const overlay = await buildGitOpsDecryptOverlay({
+      stackName: 'demo',
+      nodeId: 1,
+      applicationId: 'app-1',
+      generationId: 'gen-role',
+      commitSha: 'e'.repeat(40),
+      sourceRoot,
+      manifest: { inputs },
+    });
+    expect(overlay).not.toBeNull();
+    expect(fs.readFileSync(path.join(overlay!.overlayDir, 'svc.env'), 'utf8'))
+      .toBe('PASSWORD="pa$$word"\n');
+    expect(fs.readFileSync(path.join(overlay!.overlayDir, 'cred.env'), 'utf8'))
+      .toBe('PASSWORD=pa$word\n');
+    expect(fs.readFileSync(path.join(overlay!.overlayDir, 'sec.env'), 'utf8'))
+      .toBe('PASSWORD=pa$word\n');
+  });
+
+  it('preserves the decrypt failure class through the overlay', async () => {
+    const age = await import('age-encryption');
+    const identity = await age.generateIdentity();
+    const recipient = await age.identityToRecipient(identity);
+    const sopsDoc = await buildSopsAgeDocument({
+      values: { DB_PASSWORD: 'plain' },
+      identity,
+      recipient,
+    });
+    const tampered = sopsDoc.replace(/^DB_PASSWORD:/m, 'RENAMED_PASSWORD:');
+    expect(tampered).not.toBe(sopsDoc);
+
+    const sourceRoot = path.join(dataDir, 'git-managed', '1', 'demo', 'candidate-tampered');
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, '.env'), tampered, { mode: 0o600 });
+
+    const inputs: ComposeInputEntry[] = [{
+      sourcePath: '.env',
+      materializedPath: '.env',
+      role: 'env',
+      dependencyKind: 'env_file',
+      ownership: 'managed',
+      provenance: 'fetch',
+      sensitivity: 'high',
+      contentSha256: null,
+      sizeBytes: null,
+      state: 'present',
+      deletionAuthority: 'sencho',
+      note: null,
+      encryption: 'sops-age',
+      sopsRecipients: [recipient],
+    }];
+
+    await importTestIdentity(identity);
+    const rejection = await buildGitOpsDecryptOverlay({
+      stackName: 'demo',
+      nodeId: 1,
+      applicationId: 'app-1',
+      generationId: 'gen-tampered',
+      commitSha: 'f'.repeat(40),
+      sourceRoot,
+      manifest: { inputs },
+    }).catch((err: unknown) => err);
+    expect(rejection).toBeInstanceOf(SopsDecryptError);
+    expect(rejection).toMatchObject({ code: 'decrypt_failed' });
   });
 
   it('sweepStale removes leftover overlay directories', async () => {

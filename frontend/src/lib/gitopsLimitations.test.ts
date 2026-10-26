@@ -32,7 +32,12 @@ const LIVE_ARM_CODES = [
   'artifact_observation_invalid',
   'artifact_observation_decode_failed',
   'placement_required_targets_invalid',
+  'invocation_observation_missing',
+  'invocation_observed_invalid',
+  'invocation_expected_invalid',
+  'withdrawal_residue',
   'recovery_unproven',
+  'artifact_expectation_unresolved',
   'lkg_artifact_unprovable',
   'source_acceptance_unprovable',
   'artifact_expectation_unprovable',
@@ -44,6 +49,7 @@ const LIVE_ARM_CODES = [
   'legacy_pending',
   'blueprint_reapproval_required',
   'git_managed_rollout_not_enabled',
+  'git_managed_artifact_unmodellable',
 ] as const;
 
 describe('gitops limitation copy', () => {
@@ -108,6 +114,13 @@ describe('gitops limitation copy', () => {
     expect(caveats).toHaveLength(2);
     expect(caveats[0]).toBe(GITOPS_LIMITATION_COPY.lkg_generation_missing);
     expect(caveats[1]).toBe(GITOPS_LIMITATION_COPY.legacy_pending);
+  });
+
+  it('names the construct that makes a Git-managed compose unmodellable', () => {
+    // The write-time detail is the one piece of evidence the copy carries: it
+    // names the exact construct the operator has to change.
+    expect(limitationCaveat(limitation('git_managed_artifact_unmodellable', 'the approved compose uses include')))
+      .toBe(`${GITOPS_LIMITATION_COPY.git_managed_artifact_unmodellable} Cause: the approved compose uses include.`);
   });
 
   it('returns nothing for a projection with no caveats', () => {

@@ -13,15 +13,49 @@
 import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint, type BlueprintSelector } from '../DatabaseService';
 import { GitOpsStore } from './store';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from './policyComposition';
 import { GitOpsTransitions, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { GitManagedContentError, GitOpsBindingError, isGitManagedBlueprint } from './binding';
 import { carriedHealthPolicyJson } from './healthPolicy';
+import { applyAutomaticPlacement } from './automaticPlacement';
+import { sanitizeForLog } from '../../utils/safeLog';
 
 /** What an operator changed, which decides whether a new intent is minted. */
 export type BlueprintChangeKind = 'operational' | 'metadata_only' | 'none';
 
-function sha256(value: string): string {
+/**
+ * Run the bounded automatic placement decision for a candidate this producer
+ * just opened.
+ *
+ * Called after the producer's transaction has committed, never inside it. The
+ * decision reads and writes through its own single-writer transaction, and a
+ * refusal or a defect in it must not be able to roll back the operator's
+ * Blueprint write. Nothing here throws at the caller for the same reason: the
+ * Blueprint edit already succeeded and a 500 would report otherwise.
+ */
+function evaluateAutomaticPlacement(
+    pending: { applicationId: string; envelope: EventEnvelope } | null,
+): void {
+    if (!pending) return;
+    try {
+        applyAutomaticPlacement(pending.applicationId, pending.envelope);
+    } catch (error) {
+        console.error(
+            '[GitOps] automatic placement evaluation failed for',
+            sanitizeForLog(pending.applicationId),
+            ':',
+            sanitizeForLog(error instanceof Error ? error.message : String(error)),
+        );
+    }
+}
+
+/**
+ * Hex SHA-256 of authored compose content, the same function that mints the
+ * `compose_content_sha256` an intent revision records. Shared so a producer
+ * verifying content against that hash cannot drift from the one that wrote it.
+ */
+export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
@@ -64,6 +98,14 @@ export type BlueprintUpdates = Parameters<DatabaseService['updateBlueprint']>[1]
  * describe the Blueprint to a reader and change nothing a node runs, so they
  * must not mint an intent: a fresh identity would invalidate acknowledgements
  * that are still accurate.
+ *
+ * `drift_mode` is deliberately not operational, for the same reason. It chooses
+ * what Sencho does about divergence it already observes, and changes nothing
+ * about what any node runs. Treating it as operational opened a rollout
+ * candidate, which invalidated placement and superseded the live rollout
+ * generation, which left every target permanently held with nothing left to
+ * advance it: switching a Blueprint to Enforce was the one edit guaranteed to
+ * stop Enforce from ever repairing.
  */
 export function classifyBlueprintChange(
   before: Blueprint,
@@ -74,7 +116,8 @@ export function classifyBlueprintChange(
   return changedKeys.size > 0 ? 'metadata_only' : 'none';
 }
 
-const OPERATIONAL_KEYS = ['name', 'compose_content', 'selector', 'drift_mode', 'enabled'] as const;
+/** What gets deployed, and where. Anything outside this changes no node's runtime. */
+const OPERATIONAL_KEYS = ['name', 'compose_content', 'selector', 'enabled'] as const;
 
 /**
  * A selector compared by value rather than by how it was written.
@@ -206,7 +249,8 @@ export function commitBlueprintCreate(
   const db = DatabaseService.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const blueprint = db.getDb().transaction(() => {
     const blueprint = db.createBlueprint(input);
     const envelope = envelopeFor(input.created_by, 'blueprint_create');
     const applicationId = randomUUID();
@@ -225,8 +269,11 @@ export function commitBlueprintCreate(
       ),
       envelope,
     });
+    pending = { applicationId, envelope };
     return blueprint;
   })();
+  evaluateAutomaticPlacement(pending);
+  return blueprint;
 }
 
 /**
@@ -247,7 +294,8 @@ export function commitBlueprintUpdate(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const result = db.getDb().transaction(() => {
     const before = db.getBlueprint(blueprintId);
     if (!before) return { blueprint: undefined, change: 'none' as BlueprintChangeKind };
     if (isGitManagedBlueprint(before) && updates.compose_content !== undefined) {
@@ -276,15 +324,21 @@ export function commitBlueprintUpdate(
       ),
       envelope,
     });
+    pending = { applicationId: app.id, envelope };
     return { blueprint, change };
   })();
+  evaluateAutomaticPlacement(pending);
+  return result;
 }
 
 /**
  * Record a pin change.
  *
- * Pinning moves where a Blueprint is allowed to run, so it revises placement
- * the same way a selector edit does. Re-pinning to the node already pinned
+ * Setting or clearing a pin moves where a Blueprint is allowed to run, so it
+ * revises placement the same way a selector edit does. The evaluation that
+ * follows marks either direction pin-driven, so bounded auto does not approve
+ * it. Confirm Apply is what places the freed node. An operator placement
+ * policy never reaches that mark. Re-pinning to the node already pinned
  * changes nothing and writes nothing.
  */
 export function commitBlueprintPin(
@@ -297,7 +351,8 @@ export function commitBlueprintPin(
   const store = GitOpsStore.getInstance();
   const tx = GitOpsTransitions.getInstance();
 
-  return db.getDb().transaction(() => {
+  let pending: { applicationId: string; envelope: EventEnvelope } | null = null;
+  const result = db.getDb().transaction(() => {
     const before = db.getBlueprint(blueprintId);
     if (!before) return { blueprint: undefined, changed: false };
     if (before.pinned_node_id === nodeId) return { blueprint: before, changed: false };
@@ -318,8 +373,11 @@ export function commitBlueprintPin(
       ),
       envelope,
     });
+    pending = { applicationId: app.id, envelope };
     return { blueprint, changed: true };
   })();
+  evaluateAutomaticPlacement(pending);
+  return result;
 }
 
 /**
@@ -401,8 +459,17 @@ export function blankInlineApplication(id: string, blueprintId: number, at: numb
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
+    // An Inline Blueprint has no Git source, so source policy is manual by
+    // construction. Placement and rollout authorization are still configured
+    // independently, and both start at their safe defaults.
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+    // Nothing has declined yet on a row that was just inserted.
+    placement_policy_refusal_reason: null,
+    placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

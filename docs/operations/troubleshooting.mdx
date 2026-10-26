@@ -3,10 +3,6 @@ title: Troubleshooting
 description: Solutions to the most common Sencho setup and runtime problems.
 ---
 
-<Note>
-  Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the [known limitations](https://github.com/studio-saelix/sencho/blob/main/KNOWN_LIMITATIONS.md) and validate against your own setup before deploying it on critical infrastructure.
-</Note>
-
 If something has broken and you want a quick "what do I do now?" overview rather than a specific symptom, start with the [Recovery guide](/operations/recovery). It walks through getting back to a working state when Sencho, a deploy, sign-in, Docker, or a remote node fails, and links back here for the details.
 
 ## High GPU usage on constrained graphics
@@ -41,6 +37,16 @@ The most common causes:
 - **Missing environment variable** - a required variable in your `.env` file is empty or has the wrong name.
 - **Port already in use** - another container or host process is bound to the same port. Change the host port in the compose file.
 - **Volume path does not exist** - a bind-mount path on the host doesn't exist yet. Create the directory manually.
+
+---
+
+## Deploy or update stops with "Rollback coverage is unavailable"
+
+**Symptom:** A deploy, update, Save & Deploy, scheduled update or Git apply fails before any container changes, with a message that starts `Rollback coverage is unavailable:` and names a cause.
+
+**Cause:** Before a protected run Sencho captures a recovery generation, and it refuses to proceed when the stack cannot be captured safely: a compose file that is a link out of the compose directory or a broken link, a compose file that cannot be read or parsed, a `COMPOSE_FILE` entry outside the stack folder, two files whose names differ only by letter case, or no compose file in the folder.
+
+**Fix:** Correct the cause named in the message and run the action again. The stack was not touched. The [Atomic Deployments](/features/atomic-deployments#troubleshooting) page lists each message with its fix. A stack that includes or extends a file outside its own folder is not refused.
 
 ---
 
@@ -161,6 +167,16 @@ proxy_read_timeout 3600s;
 ```
 
 Traefik handles WebSocket upgrades automatically for HTTP/1.1 backends, so no extra config is needed.
+
+---
+
+## Clients share one rate-limit bucket behind a reverse proxy
+
+**Symptom:** A few failed sign-ins lock out every user for 15 minutes, the audit log records the proxy's address instead of each operator's, the sign-in cookie is not marked `Secure`, or an SSO callback is built with `http://`.
+
+**Cause:** Sencho accepts `X-Forwarded-*` headers only from peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`. When the variable is unset, or the direct proxy is missing from it, Sencho uses the proxy's own address for the client address, the request scheme, and rate-limit keys. Look for `[TrustProxy]` lines in the logs: one at startup for an invalid or missing list, and one per unlisted peer when an HTTP request carries forwarding headers.
+
+**Fix:** Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy's address, using `/32` for one IPv4 address or `/128` for one IPv6 address, or to the proxy network CIDR, then restart. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup).
 
 ---
 
@@ -306,7 +322,7 @@ To re-test connectivity after making changes, open **Settings · Infrastructure 
 
 **Expected behavior:** Docker system networks (`bridge`, `host`, `none`) cannot be deleted. They are created by the Docker daemon and are required for normal operation. Sencho intentionally hides the delete action for these networks.
 
-If you need to clean up unused *user-created* networks, use the **Prune Dead Networks** button in the Quick Clean section at the top of the Resources page.
+If you need to clean up unused *user-created* networks, open the **⋯** menu in the Resources tab strip and choose **Prune unused networks**.
 
 ---
 
@@ -351,12 +367,14 @@ After deploying, the topology will show these networks and their connected conta
 
 **Symptom:** You right-click a stack in the sidebar but "Open App" is not listed.
 
-**Cause:** The **Open App** option only appears when both conditions are met:
+**Cause:** **Open App** appears when the stack is running and one of these is true:
 
-1. The stack is **running** (status shows UP).
-2. At least one container in the stack has a **published port** (a port mapped to the host).
+1. At least one container has a **published port** (a port mapped to the host).
+2. The stack is the one open in the editor and exactly one service has a service URL.
 
-If your container uses host networking, doesn't expose ports, or only binds to internal Docker networks, the option won't appear. You can still access the app manually by checking the container's port mappings in the stack detail view.
+A service URL is the Compose label `sencho.service.url`. Set it from the pencil beside a published port on the stack's container card when that service is defined in the compose file that is open. A port Docker assigns automatically uses that label on the container card. Open App uses it when only one service publishes a port that way. A service defined only in another compose file keeps its link, and the label is edited in the file that defines it. Setting the label is refused when a compose file merged after the open one sets it for the service, whether or not that value is a valid URL, when those later files cannot be traced (they use `include`, a service uses `extends`, a label list interpolates the key, a file uses a custom YAML tag, or the stack sets `COMPOSE_FILE`), and when a label list in the open file interpolates the key, because the effective label could not be predicted; the pencil explains the source and leaves the open file unchanged. Clearing it is refused when another file still declares the label, when the chain cannot be traced (`include`, a label list that interpolates the key, a custom YAML tag, or `COMPOSE_FILE`), or when the service inherits one through `extends` or `label_file`, because the link would not return to the generated host and port. The source is checked again right before the save. A compose file that is a symlink pointing outside the stack directory, including into another stack, or a dangling symlink, is refused. The click then opens that address instead of the generated host and port. Without the label, or when the service URL list cannot be loaded, the click keeps the generated link.
+
+If the container uses host networking, publishes no ports, and has no service URL, the option is not shown.
 
 ---
 

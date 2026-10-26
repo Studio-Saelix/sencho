@@ -48,6 +48,7 @@ export async function createMuteRule(draft: MuteRuleDraft): Promise<{ ok: boolea
     try {
         const res = await apiFetch('/notification-suppression-rules', {
             method: 'POST',
+            localOnly: true,
             body: JSON.stringify({ ...DEFAULT_BODY, ...draft }),
         });
         if (res.ok) {

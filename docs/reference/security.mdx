@@ -6,10 +6,6 @@ description: How Sencho protects your infrastructure with layered authentication
 
 Sencho applies defense-in-depth across authentication, authorization, encryption, and auditing. All security features ship with sensible defaults and work out of the box on a fresh install.
 
-<Note>
-  Sencho is used in production for day-to-day Docker Compose and fleet management. As a pre-1.0 project it still evolves quickly, so review the [known limitations](https://github.com/studio-saelix/sencho/blob/main/KNOWN_LIMITATIONS.md) and validate against your own setup before deploying it on critical infrastructure.
-</Note>
-
 ## The authentication stack
 
 Every self-hosted instance includes the full security stack. Some advanced governance and authentication options require an Admiral plan today.
@@ -246,6 +242,8 @@ Sencho applies tiered rate limiting to prevent credential stuffing and API abuse
 | SSO endpoints | Moderate per-IP limit | 15 minutes |
 | Global API | Per-user (authenticated) or per-IP (unauthenticated) | 1 minute |
 
+Per-IP limits use the client address. Behind a reverse proxy, Sencho takes the forwarded client address only from peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`; until the proxy is listed, every client behind it shares one sign-in and SSO limit. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup).
+
 Authenticated requests are keyed by user identity rather than IP address. This prevents users behind a shared NAT or VPN from pooling into a single budget. High-frequency polling endpoints (health checks, container stats) are exempt from the global limit but subject to their own ceiling.
 
 ## Node-to-node authentication
@@ -285,14 +283,15 @@ For copy-paste verification commands, see [Verifying Images](/operations/verifyi
 </Note>
 
 1. **Serve Sencho over HTTPS**, either behind a TLS reverse proxy (nginx, Traefik, Caddy) or with [native TLS on the instance](/getting-started/configuration#native-tls-on-the-control-instance), so session cookies travel on a confidential connection. See [Self-Hosting](/operations/self-hosting). Compatible remotes also accept sealed registry credentials over plain HTTP; HTTPS and native TLS remain the recommended posture for session cookies and for remotes that have not yet upgraded to sealing.
-2. **Configure the Docker socket proxy** with the minimum API groups the Sencho features you use require, keeping mutating and build groups disabled where possible. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
-3. **Enable at least one SSO provider** to centralize identity management and reduce password sprawl. See [SSO & LDAP Authentication](/features/sso).
-4. **Enroll all admin accounts in 2FA** to protect against credential theft. See [Two-Factor Authentication](/features/two-factor-authentication).
-5. **Use scoped API tokens** instead of sharing admin credentials with CI/CD pipelines. See [API Tokens](/features/api-tokens).
-6. **Set `FRONTEND_URL`** to restrict CORS to your domain. See [Configuration](/getting-started/configuration).
-7. **Verify Docker image signatures** before deploying to confirm the image has not been tampered with. See [Verifying Images](/operations/verifying-images).
-8. **Review the audit log regularly** or assign a dedicated Auditor-role user for ongoing compliance monitoring. See [Audit Log](/features/audit-log).
-9. **Keep Sencho updated** to receive security patches and dependency upgrades. See [Upgrade](/operations/upgrade).
+2. **Set `SENCHO_TRUSTED_PROXY_CIDRS`** to your reverse proxy when Sencho sits behind one, so sign-in limits and the audit trail see real client addresses. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup).
+3. **Configure the Docker socket proxy** with the minimum API groups the Sencho features you use require, keeping mutating and build groups disabled where possible. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+4. **Enable at least one SSO provider** to centralize identity management and reduce password sprawl. See [SSO & LDAP Authentication](/features/sso).
+5. **Enroll all admin accounts in 2FA** to protect against credential theft. See [Two-Factor Authentication](/features/two-factor-authentication).
+6. **Use scoped API tokens** instead of sharing admin credentials with CI/CD pipelines. See [API Tokens](/features/api-tokens).
+7. **Set `FRONTEND_URL`** to restrict CORS to your domain. See [Configuration](/getting-started/configuration).
+8. **Verify Docker image signatures** before deploying to confirm the image has not been tampered with. See [Verifying Images](/operations/verifying-images).
+9. **Review the audit log regularly** or assign a dedicated Auditor-role user for ongoing compliance monitoring. See [Audit Log](/features/audit-log).
+10. **Keep Sencho updated** to receive security patches and dependency upgrades. See [Upgrade](/operations/upgrade).
 
 ## Reporting a vulnerability
 

@@ -253,6 +253,10 @@ function converted(opts: { sourcePolicy?: 'manual' | 'automatic' } = {}): {
     ...directApplicationFixture(`app-${stackName}`, stackName),
     configured_repo_url: `https://github.com/example/${stackName}.git`,
     source_policy: opts.sourcePolicy ?? 'manual',
+    // The automatic dispatch path this fixture exercises is what an existing
+    // installation has, so the policy has to say so. The fresh-install default
+    // is manual, and a policy-authorized mint is refused without this.
+    rollout_authorization_policy: 'automatic' as const,
   };
   GitOpsTransitions.getInstance().activateDirect({
     application,

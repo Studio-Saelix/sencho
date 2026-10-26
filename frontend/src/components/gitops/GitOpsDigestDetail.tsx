@@ -78,6 +78,42 @@ function digestCell(digest: string | null): ReactNode {
   return <span title={digest} className="break-all">{formatShortDigest(digest)}</span>;
 }
 
+/**
+ * The index digest as the proof for the approved child, when the observation
+ * names no child of the expected set.
+ *
+ * The containerd image store exposes only the index digest locally (image Id,
+ * RepoDigests and descriptor all carry it), so the platform child digest is not
+ * visible on such a node. The child is still determined by the index and the
+ * platform the running image declares. The fallback requires every other digest
+ * the observation recorded to be a child of the expected set, and the caller
+ * has already refused a wrong one.
+ */
+function indexProvesChild(
+  expected: ServiceArtifactEvidence,
+  observed: ServiceArtifactEvidence,
+  candidates: string[],
+): string | null {
+  const childDigests = new Set<string>();
+  const add = (digest: string | null | undefined): void => {
+    if (digest) childDigests.add(digest.toLowerCase());
+  };
+  add(expected.platformDigest);
+  for (const variant of expected.platformVariants ?? []) add(variant.digest);
+  if (candidates.some((digest) => childDigests.has(digest.toLowerCase()))) return null;
+  const indexDigest = expected.indexDigest?.toLowerCase();
+  if (!indexDigest || !candidates.some((digest) => digest.toLowerCase() === indexDigest)) return null;
+  if (candidates.some((digest) => digest.toLowerCase() !== indexDigest && !childDigests.has(digest.toLowerCase()))) {
+    return null;
+  }
+  const platform = observed.platform;
+  if (!platform) return null;
+  const named = expected.platformVariants && expected.platformVariants.length > 0
+    ? expected.platformVariants.some((variant) => variant.platform === platform)
+    : expected.platform === platform;
+  return named ? expected.indexDigest : null;
+}
+
 function rowFor(
   expected: ServiceArtifactEvidence,
   expectedQualification: ArtifactExpectedIdentity['qualification'],
@@ -120,13 +156,17 @@ function rowFor(
   if (candidates.length === 0) {
     return { ...base, state: 'unverified', expected: approved, observed: null, note: 'no digest was recorded for this service' };
   }
-  const match = candidates.find((digest) => digest.toLowerCase() === approved.toLowerCase());
+  const childMatch = candidates.find((digest) => digest.toLowerCase() === approved.toLowerCase());
+  const indexMatch = childMatch ? null : indexProvesChild(expected, observed, candidates);
+  const match = childMatch ?? indexMatch;
   return {
     ...base,
     state: match ? 'matched' : 'drifted',
     expected: approved,
     observed: match ?? candidates[0],
-    note: null,
+    note: indexMatch
+      ? 'this node exposes only the image index digest; the platform child follows from the index and the platform'
+      : null,
   };
 }
 

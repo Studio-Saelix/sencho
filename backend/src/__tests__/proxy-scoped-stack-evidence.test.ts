@@ -297,6 +297,84 @@ describe('remote proxy scoped stack evidence and DELETE cleanup', () => {
     db.deleteRoleAssignmentsByStack(failDeleteNodeId, 'keep-me');
   });
 
+  it('removes the hub mute rule for a stack after a successful remote DELETE', async () => {
+    const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+    const now = Date.now();
+    const seed = (name: string, nodeId: number | null, stackPatterns: string[]) =>
+      db.createNotificationSuppressionRule({
+        name,
+        node_id: nodeId,
+        stack_patterns: stackPatterns,
+        label_ids: null,
+        categories: null,
+        levels: null,
+        applies_to: 'both',
+        enabled: true,
+        expires_at: null,
+        schedule: null,
+        created_at: now,
+        updated_at: now,
+      });
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'stack',
+      resource_id: 'muted-stack',
+      node_id: evidenceNodeId,
+    });
+    seed('Mute muted-stack', evidenceNodeId, ['muted-stack']);
+    seed('Mute muted-stack on another node', wrongNodeId, ['muted-stack']);
+    seed('Wildcard', evidenceNodeId, ['muted-*']);
+
+    const res = await request(app)
+      .delete('/api/stacks/muted-stack')
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(evidenceNodeId));
+
+    expect(res.status).toBe(204);
+    const names = db.getNotificationSuppressionRules().map((r) => r.name);
+    expect(names).not.toContain('Mute muted-stack');
+    expect(names).toContain('Mute muted-stack on another node');
+    expect(names).toContain('Wildcard');
+    db.getDb().prepare('DELETE FROM notification_suppression_rules').run();
+  });
+
+  it('keeps the hub mute rule when the remote DELETE is non-2xx', async () => {
+    const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
+    const now = Date.now();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'stack',
+      resource_id: 'kept-stack',
+      node_id: failDeleteNodeId,
+    });
+    const rule = db.createNotificationSuppressionRule({
+      name: 'Mute kept-stack',
+      node_id: failDeleteNodeId,
+      stack_patterns: ['kept-stack'],
+      label_ids: null,
+      categories: null,
+      levels: null,
+      applies_to: 'both',
+      enabled: true,
+      expires_at: null,
+      schedule: null,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const res = await request(app)
+      .delete('/api/stacks/kept-stack')
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(failDeleteNodeId));
+
+    expect(res.status).toBe(500);
+    expect(db.getNotificationSuppressionRule(rule.id)).toBeDefined();
+    db.deleteNotificationSuppressionRule(rule.id);
+    db.deleteRoleAssignmentsByStack(failDeleteNodeId, 'kept-stack');
+  });
+
   it('builds evidence from a node-scoped grant on the target node', async () => {
     const db = (await import('../services/DatabaseService')).DatabaseService.getInstance();
     db.addRoleAssignment({

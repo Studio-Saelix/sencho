@@ -27,3 +27,9 @@ export function getNodeDisk(node: FleetNode): number {
 export function isCritical(node: FleetNode): boolean {
     return getNodeCpu(node) > 90 || getNodeDisk(node) > 90;
 }
+
+/** Sort rank for attention-first ordering: offline, then critical, then the rest. */
+export function attentionRank(node: FleetNode): number {
+    if (node.status !== 'online') return 0;
+    return isCritical(node) ? 1 : 2;
+}

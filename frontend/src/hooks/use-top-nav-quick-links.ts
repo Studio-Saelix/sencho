@@ -6,7 +6,7 @@ import { notifyPreferenceWrite } from '@/lib/preferences/preferenceEvents';
 import { readQuickLinksProvenance, type QuickLinksProvenance } from '@/lib/preferences/quickLinksProvenance';
 
 export const TOP_NAV_QUICK_LINKS_KEY = 'sencho.appearance.topNavQuickLinks';
-export const MAX_QUICK_LINKS = 8;
+export const MAX_QUICK_LINKS = 10;
 
 /**
  * Sanitize a candidate ID list: keep registry-known eligible IDs, dedupe,

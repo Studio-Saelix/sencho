@@ -6,11 +6,13 @@ import type { PreDeployScanImage } from '@/types/security';
 import type { Node } from '@/context/NodeContext';
 
 type DiffPreview = {
-  mode: 'save' | 'save-and-deploy';
+  mode: 'save' | 'save-and-deploy' | 'save-and-pull-images';
   language: 'yaml' | 'ini';
   original: string;
   modified: string;
   fileName: string;
+  /** When set, confirm runs this instead of the editor's active-tab save. */
+  onConfirm?: () => Promise<void>;
 };
 
 type PolicyBlock = {

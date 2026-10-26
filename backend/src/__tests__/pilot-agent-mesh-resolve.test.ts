@@ -104,9 +104,31 @@ describe('resolveByComposeLabels (mesh target resolver)', () => {
         expect(result.err).toBe('agent_error');
     });
 
-    it('prefers the compose default network over any other attached network', async () => {
-        // Container is attached to both bridge and stack_default; pickContainerIp
-        // must return the stack_default IP regardless of object key order.
+    it('prefers sencho_mesh over the compose default network', async () => {
+        // A meshed service that declares no networks is attached to both its
+        // stack default and sencho_mesh. Sencho is only attached to
+        // sencho_mesh, and Docker bridges are isolated, so the default-bridge
+        // IP is not dialable and picking it would time out every mesh dial.
+        inspectMock.mockResolvedValueOnce({
+            NetworkSettings: {
+                Networks: {
+                    api_default: { IPAddress: '172.30.0.42' },
+                    sencho_mesh: { IPAddress: '10.90.0.2' },
+                },
+            },
+        });
+
+        const result = await resolveByComposeLabels('api', 'db', 5432);
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) throw new Error('narrowing');
+        expect(result.host).toBe('10.90.0.2');
+    });
+
+    it('falls back to the compose default network when sencho_mesh is absent', async () => {
+        // A service the override left alone (network_mode: host) has no
+        // sencho_mesh attachment; the fallback order still has to be fixed
+        // because Networks key order varies across daemon versions.
         inspectMock.mockResolvedValueOnce({
             NetworkSettings: {
                 Networks: {

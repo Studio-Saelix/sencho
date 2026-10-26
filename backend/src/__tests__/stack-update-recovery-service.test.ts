@@ -402,7 +402,7 @@ describe('StackUpdateRecoveryService', () => {
 
     await expect(
       StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
-    ).rejects.toMatchObject({ code: 'GENERATION_CONTENT_MISSING' });
+    ).rejects.toMatchObject({ code: 'GENERATION_CONTENT_MISSING', failureClass: 'pre_mutation' });
 
     expect(restoreSpy).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'recovery_required' }));
@@ -779,7 +779,7 @@ describe('StackUpdateRecoveryService', () => {
 
     await expect(
       StackUpdateRecoveryService.getInstance().compensateWithCandidate(genId, async () => undefined),
-    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED' });
+    ).rejects.toMatchObject({ code: 'ROLLBACK_PROHIBITED', failureClass: 'post_mutation' });
     expect(restoreSpy).toHaveBeenCalled();
     expect(update).not.toHaveBeenCalledWith(genId, expect.objectContaining({ status: 'restored_current' }));
     expect(enforcePolicyForImageRefs).toHaveBeenCalledWith(
@@ -788,6 +788,59 @@ describe('StackUpdateRecoveryService', () => {
       ['sencho-rb/aaaaaaaaaaaa/web:hold'],
       expect.objectContaining({ actor: 'recovery-compensate' }),
     );
+  });
+
+  it('holds when the restore fails mid-write and its own revert does not land', async () => {
+    const genId = '66666666-6666-4666-8666-666666666666';
+    // The store could not put the live files back after a partial write, so
+    // this is not a refusal that moved nothing; it has to hold.
+    const restoreSpy = vi.fn().mockRejectedValue(
+      Object.assign(new Error('write failed mid-restore'), { restoreRevertFailed: true }),
+    );
+    const { resolveComposeProjectContextForGeneration } = await import('../services/composeProjectContext');
+    vi.mocked(resolveComposeProjectContextForGeneration).mockResolvedValue({
+      validateForMutation: vi.fn().mockResolvedValue(undefined),
+      backupFromContext: vi.fn().mockResolvedValue(genId),
+      restoreFromContext: restoreSpy,
+      nodeId: 1,
+      stackName: 'my-stack',
+      stackDir: '/test/compose/my-stack',
+      backupSlotId: genId,
+      toComposeArgs: vi.fn(),
+      resolveServiceImageMap: vi.fn(),
+    } as never);
+
+    vi.spyOn(DatabaseService.prototype, 'getStackUpdateRecoveryGeneration').mockReturnValue({
+      id: genId,
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'active',
+      phase: 'reconciling',
+      is_current: 1,
+      backup_slot_id: genId,
+      content_path: genId,
+      operation_kind: 'update',
+      override_path: '/test/compose/my-stack/.sencho-recovery-dddddddddddd.yml',
+      services_json: '[]',
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: null,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+      released_at: null,
+      released_by: null,
+    } as never);
+    vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
+      .mockImplementation(() => undefined);
+    mockAccess.mockResolvedValue(undefined);
+
+    await expect(
+      StackUpdateRecoveryService.getInstance().compensateWithCandidateOutcome(genId, async () => undefined),
+    ).resolves.toEqual({ rolledBack: false, failureClass: 'post_mutation' });
+    expect(restoreSpy).toHaveBeenCalled();
   });
 
   it('refuses compensation when services_json is malformed', async () => {

@@ -11,11 +11,28 @@ export type BlueprintDeploymentStatus =
     | 'active'
     | 'drifted'
     | 'correcting'
+    | 'repair_held'
     | 'failed'
     | 'withdrawing'
     | 'withdrawn'
     | 'evict_blocked'
     | 'name_conflict';
+
+/** How each deployment status reads to an operator, shared by the catalog and the sheet. */
+export const DEPLOYMENT_STATUS_LABEL: Record<BlueprintDeploymentStatus, string> = {
+    pending: 'Pending',
+    pending_state_review: 'Awaiting confirmation',
+    deploying: 'Deploying',
+    active: 'Active',
+    drifted: 'Drifted',
+    correcting: 'Correcting',
+    repair_held: 'Repair held',
+    failed: 'Failed',
+    withdrawing: 'Withdrawing',
+    withdrawn: 'Withdrawn',
+    evict_blocked: 'Evict blocked',
+    name_conflict: 'Name conflict',
+};
 
 export type BlueprintSelector =
     | { type: 'labels'; any: string[]; all: string[] }
@@ -108,6 +125,7 @@ export type PreviewAction =
     | 'in_flight_correct'
     | 'in_flight_withdraw'
     | 'skip_cordoned'
+    | 'skip_withdrawn'
     | 'blocked_name_conflict';
 
 export interface BlueprintPreviewWarning {
@@ -131,6 +149,17 @@ export interface BlueprintPreview {
     stackName: string;
     approvalStatus: 'pending' | 'approved';
     effectiveApproval: EffectiveApproval;
+    /**
+     * Which authority makes `effectiveApproval` approved, or null when nothing
+     * does. Absent on payloads from an older backend, which is the same as null.
+     */
+    approvalAuthority?: 'legacy_combined' | 'configured_policy' | null;
+    /**
+     * Why a policy-approved plan is still waiting, or null when nothing is
+     * holding it. Absent on payloads from an older backend, which shows no
+     * reason line.
+     */
+    approvalHoldReason?: string | null;
     planFingerprint: string;
     generatedAt: number;
     summary: { safe: number; warning: number; blocker: number; total: number };
@@ -336,6 +365,21 @@ export async function acceptDeployment(
         localOnly: true,
     });
     return expectJson(res, 'Failed to accept deployment');
+}
+
+export interface RecheckResult {
+    /** True when the name is free and the row moved back to pending for the next reconcile. */
+    cleared: boolean;
+    status: BlueprintDeploymentStatus;
+}
+
+/** Re-evaluate a name conflict on one node. Never deploys; a cleared row waits for the next reconcile. */
+export async function recheckNameConflict(blueprintId: number, nodeId: number): Promise<RecheckResult> {
+    const res = await apiFetch(`/blueprints/${blueprintId}/deployments/${nodeId}/recheck`, {
+        method: 'POST',
+        localOnly: true,
+    });
+    return expectJson<RecheckResult>(res, 'Failed to check the name conflict');
 }
 
 export async function previewBlueprint(id: number): Promise<BlueprintPreview> {
@@ -571,6 +615,7 @@ export function statusTone(status: BlueprintDeploymentStatus): 'success' | 'bran
         case 'pending_state_review':
         case 'evict_blocked':
         case 'drifted':
+        case 'repair_held':
         case 'withdrawing': return 'warning';
         case 'failed':
         case 'name_conflict': return 'destructive';

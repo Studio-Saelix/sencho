@@ -74,6 +74,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/services/api/recovery')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:deploy',
       });
+      expect(classifyStackApiPath('GET', '/stacks/web/recoveries')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:deploy',
+      });
     });
 
     it('maps stack DELETE to stack:delete', () => {
@@ -84,6 +87,12 @@ describe('classifyStackApiPath', () => {
 
     it('treats git-source/apply primary as stack:edit', () => {
       expect(classifyStackApiPath('POST', '/stacks/web/git-source/apply')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:edit',
+      });
+    });
+
+    it('treats pull-images primary as stack:edit', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/pull-images')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:edit',
       });
     });
@@ -134,6 +143,9 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('GET', '/stacks/statuses')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/readiness-summary')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('GET', '/stacks/discovery')).toEqual({ kind: 'static' });
+      // Two segments, so without the exclusion it would read `platform` as a
+      // stack name and demand an exact grant on a stack called `platform`.
+      expect(classifyStackApiPath('GET', '/stacks/platform/docker-context')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/scan')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/move')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/bulk')).toEqual({ kind: 'static' });
@@ -189,6 +201,15 @@ describe('classifyStackApiPath', () => {
         kind: 'unknown-named',
       });
       expect(classifyStackApiPath('POST', '/stacks/web/services/api/recovery')).toEqual({
+        kind: 'unknown-named',
+      });
+    });
+
+    // The index is exact-match, so registering one suffix never widens
+    // authority to a lookalike neighbour.
+    it('refuses the bare pull suffix that has no route', () => {
+      expect(classifyStackApiPath('POST', '/stacks/web/pull')).toEqual({ kind: 'unknown-named' });
+      expect(classifyStackApiPath('POST', '/stacks/web/pull-images/extra')).toEqual({
         kind: 'unknown-named',
       });
     });

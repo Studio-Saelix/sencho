@@ -4,7 +4,7 @@ import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from '.
 import { enqueueHistoryPublication } from './publish';
 import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
 import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
-import { gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
+import { gitOpsCandidateState, gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -42,6 +42,8 @@ export type GitOpsHistoryStage =
   | 'blueprint_deploy_started'
   | 'blueprint_drifted'
   | 'blueprint_evict_blocked'
+  | 'blueprint_drift_cleared'
+  | 'blueprint_repair_held'
   | 'blueprint_state_review'
   | 'blueprint_withdraw_failed'
   | 'blueprint_withdraw_started'
@@ -65,6 +67,7 @@ export type GitOpsHistoryStage =
   | 'health_run_released'
   | 'inline_revision_frozen'
   | 'intent_revised'
+  | 'invocation_observed'
   | 'legacy_combined_appended'
   | 'operation_interrupted'
   | 'partial_cleared'
@@ -78,6 +81,7 @@ export type GitOpsHistoryStage =
   | 'rollback_completed'
   | 'rollback_in_progress'
   | 'rollback_partial_failed'
+  | 'rollback_refusal_settled'
   | 'rollout_authorized'
   | 'rollout_candidate_opened'
   | 'rollout_generation_opened'
@@ -89,6 +93,8 @@ export type GitOpsHistoryStage =
   | 'source_poll_scheduled'
   | 'source_policy_changed'
   | 'health_rollout_policy_set'
+  | 'placement_policy_changed'
+  | 'rollout_authorization_policy_changed'
   | 'source_reconcile_started'
   | 'source_reconcile_settled'
   | 'source_retry_scheduled'
@@ -161,6 +167,13 @@ export type HistoryInsert = {
   rolloutAuthorizationRef?: string | null;
   legacyCombinedApprovalRef?: string | null;
   requiredTargetsJson?: string | null;
+  /**
+   * The observation this row records, when the stage is one that carries
+   * evidence. The column predates its writer; the audit row is where a
+   * reader looking at *why* the target row moved finds the value itself,
+   * rather than only the fact that something moved.
+   */
+  invocationObservedJson?: string | null;
   recoveryRef?: string | null;
   redactedReasonClass?: string | null;
   at: number;
@@ -231,7 +244,7 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     null,
     null,
     null,
-    null,
+    row.invocationObservedJson ?? null,
     row.recoveryRef ?? null,
     row.redactedReasonClass ?? null,
   );
@@ -251,6 +264,8 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       trigger: row.trigger,
       actor: row.actor,
       at: row.at,
+      candidateGenerationId: row.generationId ?? row.application.candidate_generation_id ?? null,
+      candidateState: gitOpsCandidateState(row.application),
     });
   } else if (outboxPlan?.kind === 'event') {
     insertGitOpsEventOutbox(db, {

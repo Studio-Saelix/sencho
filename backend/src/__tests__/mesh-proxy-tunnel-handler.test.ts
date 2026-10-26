@@ -151,6 +151,33 @@ describe('handleMeshProxyTunnel', () => {
         }
     });
 
+    it('a new upgrade replaces a tunnel that no longer answers pings (half-open after a tunnel/VPN drop)', async () => {
+        const srv = await startServer();
+        try {
+            // autoPong: false simulates a peer whose socket is half-open: the
+            // server still thinks it is connected, but pings go unanswered.
+            const wsA = new WebSocket(`ws://127.0.0.1:${srv.port}/api/mesh/proxy-tunnel`, { autoPong: false });
+            await new Promise<void>((resolve, reject) => { wsA.once('open', () => resolve()); wsA.once('error', reject); });
+            await new Promise((r) => setTimeout(r, 20));
+            const dialerA = (MeshService.getInstance() as unknown as { reverseDialer: unknown }).reverseDialer;
+            expect(dialerA).not.toBeNull();
+
+            const wsAClosed = new Promise<void>((resolve) => wsA.once('close', () => resolve()));
+            const wsB = await dialTunnel(srv.port);
+            await wsAClosed;
+            await new Promise((r) => setTimeout(r, 20));
+            const dialerB = (MeshService.getInstance() as unknown as { reverseDialer: unknown }).reverseDialer;
+            expect(dialerB).not.toBeNull();
+            expect(dialerB).not.toBe(dialerA);
+            expect(wsB.readyState).toBe(WebSocket.OPEN);
+
+            wsB.close(1000, 'test cleanup');
+            await new Promise((r) => setTimeout(r, 30));
+        } finally {
+            await srv.close();
+        }
+    }, 15_000);
+
     it('installs the central-namespace nodeId from the ?nodeId= query param', async () => {
         const srv = await startServer();
         try {

@@ -1,6 +1,16 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
+  isRecord,
+  isSelfStackProtectedResponse,
+  parseStackActionError,
+  parseStackOpInProgress,
+  parseUpdateSuccessBody,
+  postStackUpdate,
+  stackOpInProgressMessage,
+  type StackActionError,
+} from '@/lib/stackUpdate';
+import {
   newAttemptId,
   abortAttempt,
   beginSpan,
@@ -11,7 +21,12 @@ import {
   type SpanHandle,
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
-import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
+import { ENV_READ_FAILED_NOTICE } from '../envNotice';
+import { openServiceUrl } from '@/lib/serviceUrl';
+import { fetchServiceUrlEntry } from './useServiceUrls';
+import { resolveOpenAppTarget, serviceUrlLookupPending } from '@/lib/serviceUrlResolve';
+import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
+import { StackOpenError, stackOpenConnectionMessage, stackOpenRefusalMessage } from '@/lib/stackOpenError';
 import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import { absentFault, pendingSourceStatus, type GitSourcePendingMap } from '@/lib/gitopsState';
@@ -51,28 +66,6 @@ type MissingExternalNetworksEnvelope = MissingExternalNetworksPayload & {
   declaredExternalCount: number;
 };
 
-type UpdateSuccessBody = {
-  healthGateId: string | null;
-  recheckWarning?: string;
-};
-
-/** healthGateId (and optional recheckWarning) from a success body. */
-const parseUpdateSuccessBody = async (response: Response): Promise<UpdateSuccessBody> => {
-  try {
-    const body: unknown = await response.json();
-    if (!isRecord(body)) return { healthGateId: null };
-    return {
-      healthGateId: typeof body.healthGateId === 'string' ? body.healthGateId : null,
-      recheckWarning: typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined,
-    };
-  } catch (e) {
-    // A success body should always parse; the warn surfaces a future
-    // double-read bug instead of silently disabling the gate UI.
-    console.warn('[HealthGate] could not read the success body:', e);
-    return { healthGateId: null };
-  }
-};
-
 /** healthGateId from a success body, or null when absent or unreadable. */
 const parseHealthGateId = async (response: Response): Promise<string | null> => {
   const { healthGateId } = await parseUpdateSuccessBody(response);
@@ -84,18 +77,6 @@ const parseHealthGateId = async (response: Response): Promise<string | null> => 
 // discard, discardAndLoadPending calls setActiveNode(targetNode) and skips the
 // stack-load branch.
 export const NODE_SWITCH_PENDING_TOKEN = '__node-switch-pending__';
-
-type StackActionError = Error & { rolledBack?: boolean; failure?: FailureClassification };
-
-// Fallback classification when the response never reached a Sencho backend
-// (proxy 502/504 for a dead remote, or a 503 with no classified body).
-const NODE_UNREACHABLE_FAILURE: FailureClassification = {
-  reason: 'node_unreachable',
-  label: 'Node or Docker unreachable',
-  suggestion: 'Check that the node is online and Docker is running, then retry.',
-};
-
-const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
 // Mirrors ImageUpdateService's post-update warning copy: UPDATE_STILL_PRESENT_WARNING,
 // UPDATE_VERIFICATION_INCOMPLETE_WARNING, and UPDATE_DIGEST_UNCHANGED_WARNING. Those
@@ -109,57 +90,6 @@ const GENERIC_POST_UPDATE_WARNINGS: ReadonlySet<string> = new Set([
   'The update command completed, but Sencho could not fully verify whether an image update remains.',
   'The update command completed, but the image digest was not updated. Your Docker daemon may cache older content through a registry mirror, or the container may still be pinned to the previous image. Check your daemon configuration or recreate the container with --force-recreate.',
 ]);
-
-const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
-
-const isSelfStackProtectedResponse = (rawBody: string, status?: number): boolean => {
-  if (status !== 409) return false;
-  try {
-    const parsed: unknown = JSON.parse(rawBody);
-    return isRecord(parsed) && parsed.code === SELF_STACK_PROTECTED_CODE;
-  } catch {
-    return false;
-  }
-};
-
-const parseFailureClassification = (value: unknown): FailureClassification | undefined => {
-  if (
-    isRecord(value) &&
-    typeof value.reason === 'string' &&
-    typeof value.label === 'string' && value.label.trim() &&
-    typeof value.suggestion === 'string' && value.suggestion.trim()
-  ) {
-    return { reason: value.reason, label: value.label, suggestion: value.suggestion };
-  }
-  if (value !== undefined) {
-    // Likely hub/node version skew or a mangled proxy body; the raw error
-    // message still renders, only the classification panel is degraded.
-    console.warn('Unrecognized failure classification shape in error response:', value);
-  }
-  return undefined;
-};
-
-type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'delete';
-
-interface StackOpInProgressInfo {
-  action: StackOpAction;
-  startedAt: number;
-  user: string;
-}
-
-const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
-  deploy: 'deploying',
-  down: 'taking down',
-  restart: 'restarting',
-  stop: 'stopping',
-  start: 'starting',
-  update: 'updating',
-  delete: 'deleting',
-};
-
-const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(
-  Object.keys(STACK_OP_PRESENT_PARTICIPLE),
-);
 
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
@@ -198,6 +128,8 @@ interface UseStackActionsOptions {
   // names. Evaluated against the load target so post-load auto-edit is not
   // gated by a stale previously-selected stack.
   canEditStack: (stackNameOrFilename: string) => boolean;
+  serviceUrlsRef?: { current: import('@/lib/serviceUrlResolve').ServiceUrlEntry | null };
+  onStackFilesChanged?: () => void;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
   /**
@@ -218,9 +150,6 @@ interface UseStackActionsOptions {
   /** Authoritative canReapplyCompose === true for the active node. */
   canReapplyCompose?: boolean;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null;
 
 const PRE_DEPLOY_SUMMARY_TIMEOUT_MS = 5000;
 
@@ -360,70 +289,37 @@ function getResponseCode(rawBody: string): string | undefined {
   }
 }
 
-const parseStackOpInProgress = (rawBody: string): StackOpInProgressInfo | null => {
-  try {
-    const parsed: unknown = JSON.parse(rawBody);
-    if (!isRecord(parsed) || parsed.code !== 'stack_op_in_progress') return null;
-    const inProgress = parsed.inProgress;
-    if (
-      !isRecord(inProgress) ||
-      typeof inProgress.action !== 'string' ||
-      typeof inProgress.startedAt !== 'number' ||
-      !VALID_STACK_OP_ACTIONS.has(inProgress.action)
-    ) {
-      return null;
-    }
-    return {
-      action: inProgress.action as StackOpAction,
-      startedAt: inProgress.startedAt,
-      user: typeof inProgress.user === 'string' ? inProgress.user : '',
-    };
-  } catch {
-    return null;
-  }
+/**
+ * Success copy for an image pull. The route answers with its own message and the
+ * names of any services that build from source and are therefore skipped; the
+ * count and the list are derived here from those names, never from prose.
+ */
+const pullSuccessMessage = (body: unknown): string => {
+  const message = isRecord(body) && typeof body.message === 'string' ? body.message.trim() : '';
+  const skipped =
+    isRecord(body) && Array.isArray(body.skippedBuildBacked)
+      ? body.skippedBuildBacked.filter((name): name is string => typeof name === 'string')
+      : [];
+  if (skipped.length === 0) return message || 'Pulled registry images.';
+  const noun = skipped.length === 1 ? 'service' : 'services';
+  return `${message || 'Pulled registry images'}. Skipped ${skipped.length} build-backed ${noun}: ${skipped.join(', ')}.`;
 };
 
-const stackOpInProgressMessage = (stackName: string, info: StackOpInProgressInfo): string => {
-  const verb = STACK_OP_PRESENT_PARTICIPLE[info.action] ?? 'busy';
-  const actor = info.user && info.user !== 'system' ? ` (started by ${info.user})` : '';
-  return `${stackName} is already ${verb}${actor}.`;
-};
-
-const parseStackActionError = (rawBody: string, fallback: string, status?: number): StackActionError => {
-  let message = rawBody || fallback;
-  let rolledBack = false;
-  let failure: FailureClassification | undefined;
-  let parsedCode: string | undefined;
-  let bodyWasJson = false;
-
-  try {
-    const parsed: unknown = JSON.parse(rawBody);
-    bodyWasJson = true;
-    if (isRecord(parsed)) {
-      if (typeof parsed.error === 'string' && parsed.error.trim()) {
-        message = parsed.error;
-      }
-      rolledBack = parsed.rolledBack === true;
-      failure = parseFailureClassification(parsed.failure);
-      if (typeof parsed.code === 'string') parsedCode = parsed.code;
-    }
-  } catch {
-    /* not JSON */
-  }
-
-  // A gateway-style status with no classified body means the request likely
-  // never reached the owning node's backend; surface that as the cause. A 503
-  // qualifies only when it is body-less (proxy generated) or the backend's own
-  // docker_unavailable shape, so an unrelated future 503 is not mislabeled.
-  if (!failure && status !== undefined && UNREACHABLE_STATUSES.has(status)) {
-    const qualifies = status !== 503 || !bodyWasJson || parsedCode === 'docker_unavailable';
-    if (qualifies) failure = { ...NODE_UNREACHABLE_FAILURE };
-  }
-
-  const error = new Error(message) as StackActionError;
-  error.rolledBack = rolledBack;
-  error.failure = failure;
-  return error;
+/**
+ * A failed pull reports the whole compose output, layer progress included, which
+ * floods a toast. Keep the last few failure lines, which compose writes as
+ * `<service> Error ...` or `Error ...`, and count the rest; with none, keep the
+ * last line. The progress panel, when on, still streams the full output.
+ */
+const PULL_FAILURE_LINE = /^(\S+\s+)?error[\s:]/i;
+const MAX_PULL_FAILURE_LINES = 3;
+const summarizePullFailure = (detail: string): string => {
+  const lines = detail.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const failures = [...new Set(lines.filter(line => PULL_FAILURE_LINE.test(line)))];
+  if (failures.length === 0) return lines.at(-1) ?? detail;
+  const shown = failures.slice(-MAX_PULL_FAILURE_LINES).join('; ');
+  const hidden = failures.length - MAX_PULL_FAILURE_LINES;
+  return hidden > 0 ? `${shown} (+${hidden} more in the progress output)` : shown;
 };
 
 export function useStackActions(options: UseStackActionsOptions) {
@@ -442,6 +338,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     hasGuidedExternalNetworkPreflight = false,
     hasServiceScopedUpdate = false,
     canEditStack,
+    serviceUrlsRef,
+    onStackFilesChanged,
     canOfferVolumeRemoval = false,
     onDeletedOpenStack,
     removeNotificationsForStack,
@@ -599,10 +497,56 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const openStackApp = (file: string) => {
     if (!hydrationReady()) return;
+    const capturedNode = activeNode ?? null;
+    const capturedNodeId = capturedNode?.id ?? null;
     const port = stackListState.stackPorts[file];
-    if (!port) return;
-    const url = buildServiceUrl({ node: activeNode, publicPort: port });
-    if (url) openServiceUrl(url);
+    const portService = stackListState.stackPortServices[file];
+    const cached = serviceUrlsRef?.current ?? null;
+    const finish = (target: { url: string } | { error: string } | null, popup: Window | null) => {
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
+        popup?.close();
+        return;
+      }
+      if (!target || 'error' in target) {
+        popup?.close();
+        if (target && 'error' in target) toast.error(target.error);
+        return;
+      }
+      if (popup && !popup.closed) {
+        popup.opener = null;
+        popup.location.href = target.url;
+        return;
+      }
+      openServiceUrl(target.url);
+    };
+    // A completed entry resolves synchronously. A lookup still in flight is
+    // not a cache hit: the tab opens in the click below and waits for the
+    // configured address instead of opening the generated one.
+    if (cached && cached.stackName === file && cached.nodeId === capturedNodeId && !serviceUrlLookupPending(cached)) {
+      finish(resolveOpenAppTarget({ entry: cached, publicPort: port, serviceName: portService, node: capturedNode }), null);
+      return;
+    }
+    // Open the tab in this click so a slow lookup does not miss the browser's
+    // user-activation window. The blank tab is navigated, or closed, once the
+    // address is known.
+    const popup = window.open('', '_blank');
+    if (popup) popup.opener = null;
+    void fetchServiceUrlEntry(capturedNodeId, file).then(next => {
+      finish(resolveOpenAppTarget({ entry: next, publicPort: port, serviceName: portService, node: capturedNode }), popup);
+    }).catch(error => {
+      console.error('Failed to resolve service URL:', error);
+      if ((activeNodeIdRef.current ?? null) !== capturedNodeId) {
+        popup?.close();
+        return;
+      }
+      const target = resolveOpenAppTarget({ entry: null, publicPort: port, serviceName: portService, node: capturedNode });
+      if (!target) {
+        popup?.close();
+        toast.error('Service URL unavailable');
+        return;
+      }
+      finish(target, popup);
+    });
   };
 
   const resetEditorState = () => {
@@ -618,11 +562,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     stackListState.setSelectedFile(null);
     editorState.setContent('');
     editorState.setOriginalContent('');
+    editorState.setComposeEtag(null);
+    editorState.setComposeFilename(null);
     editorState.setEnvContent('');
     editorState.setOriginalEnvContent('');
     editorState.setEnvFiles([]);
     editorState.setSelectedEnvFile('');
     editorState.setEnvExists(false);
+    editorState.setEnvInventoryFailed(false);
     editorState.setContainers([]);
     editorState.setContainersLoadStatus('idle');
     editorState.setContainersLoadError(null);
@@ -909,19 +856,32 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setOriginalEnvContent('');
     editorState.setEnvExists(false);
     editorState.setEnvEtag(null);
+    // Cleared with the rest; loadEnvState sets it again when the inventory
+    // request itself failed rather than returned an empty list.
+    editorState.setEnvInventoryFailed(false);
   };
 
-  const loadEnvState = async (filename: string, signal?: AbortSignal, opNodeId?: number | null): Promise<string[]> => {
+  // ok=false means the env state is not trustworthy (inventory or content
+  // could not be read, or the request was aborted); files carries the resolved
+  // list when only the content fetch failed, so callers can tell that case
+  // apart from a genuinely empty stack.
+  const loadEnvState = async (
+    filename: string,
+    signal?: AbortSignal,
+    opNodeId?: number | null,
+  ): Promise<{ files: string[]; ok: boolean }> => {
     try {
       const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal, nodeId: opNodeId });
-      if (signal?.aborted) return [];
+      if (signal?.aborted) return { files: [], ok: false };
       if (!envsRes.ok) {
         clearEnvState();
-        return [];
+        editorState.setEnvInventoryFailed(true);
+        return { files: [], ok: false };
       }
       const { envFiles } = await envsRes.json();
-      if (signal?.aborted) return [];
-      if (envFiles && envFiles.length > 0) {
+      if (signal?.aborted) return { files: [], ok: false };
+      if (Array.isArray(envFiles) && envFiles.length > 0) {
+        editorState.setEnvInventoryFailed(false);
         editorState.setEnvFiles(envFiles);
         const firstFile = envFiles[0];
         editorState.setSelectedEnvFile(firstFile);
@@ -930,25 +890,29 @@ export function useStackActions(options: UseStackActionsOptions) {
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
           { signal, nodeId: opNodeId },
         );
-        if (signal?.aborted) return envFiles;
+        if (signal?.aborted) return { files: envFiles, ok: false };
         if (envContentRes.ok) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
           editorState.setOriginalEnvContent(envText || '');
           editorState.setEnvEtag(envContentRes.headers.get('etag'));
-        } else {
-          editorState.setEnvContent('');
-          editorState.setOriginalEnvContent('');
-          editorState.setEnvEtag(null);
+          return { files: envFiles, ok: true };
         }
-        return envFiles;
+        // The file exists but its content could not be read. Presenting an
+        // empty buffer would assert something untrue, and the next save would
+        // be unguarded, so mark the env state unreadable: the editor shows the
+        // failure notice and refuses to save or create over it.
+        clearEnvState();
+        editorState.setEnvInventoryFailed(true);
+        return { files: envFiles, ok: false };
       }
       clearEnvState();
-      return [];
+      return { files: [], ok: true };
     } catch (err) {
-      if (isAbortError(err)) return [];
+      if (isAbortError(err)) return { files: [], ok: false };
       clearEnvState();
-      return [];
+      editorState.setEnvInventoryFailed(true);
+      return { files: [], ok: false };
     }
   };
 
@@ -1054,18 +1018,22 @@ export function useStackActions(options: UseStackActionsOptions) {
       bodySpan = null;
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
-        throw new Error(`Failed to load stack: ${res.status}`);
+        const refused = stackOpenRefusalMessage(filename, res.status, text);
+        throw refused ? new StackOpenError(refused) : new Error(`Failed to load stack: ${res.status}`);
       }
       const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
+      const reloadingOpenFile = stackListState.selectedFile === filename;
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
+      editorState.setComposeFilename(res.headers.get('x-compose-file'));
+      if (reloadingOpenFile) onStackFilesChanged?.();
       endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
-      const envFiles = await loadEnvState(filename, signal, opNodeId);
+      const envLoad = await loadEnvState(filename, signal, opNodeId);
       const containersResult = await loadContainerState(filename, signal, attemptId, opNodeId);
       if (!signal.aborted) {
         if (containersResult.ok) {
@@ -1095,25 +1063,27 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (!signal.aborted) {
         detailHydratedPendingRef.current = { attemptId, token: filename, proxied };
       }
-      return { ok: true, envFiles };
+      return { ok: true, envFiles: envLoad.files };
     } catch (error) {
       if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
-      toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
+      const refused = error instanceof StackOpenError ? error.message : undefined;
+      toast.error(refused ?? stackOpenConnectionMessage(filename));
       stackListState.setSelectedFile(null);
       editorState.setContent('');
       editorState.setOriginalContent('');
       editorState.setComposeEtag(null);
-      editorState.setEnvContent('');
-      editorState.setOriginalEnvContent('');
-      editorState.setEnvEtag(null);
+      // The failed stack was never loaded, so its env state is unknown, not
+      // absent. Clear it or the previous stack's "no env file" would authorize
+      // a create against this one.
+      clearEnvState();
       editorState.setContainers([]);
       editorState.setContainersLoadStatus('idle');
       editorState.setContainersLoadError(null);
       editorState.setEffectiveServices([]);
-      return { ok: false };
+      return { ok: false, error: refused };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);
@@ -1179,24 +1149,126 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const saveFile = async (options?: { force?: boolean }): Promise<boolean> => {
+  const saveComposeContent = async (args: {
+    content: string;
+    stackName: string;
+    nodeId: number | null;
+    etag: string | null;
+    filename: string | null;
+    force?: boolean;
+  }): Promise<
+    | { ok: true; etag: string | null }
+    | { ok: false; conflict: true; code: string; currentContent: string; etag: string | null; filename: string | null }
+    | { ok: false; conflict: false; error: string }
+  > => {
+    const headers: Record<string, string> = {};
+    if (!args.force && args.etag) headers['If-Match'] = args.etag;
+    if (args.filename) headers['X-Compose-File'] = args.filename;
+    const opLoadSignal = loadFileAbortRef.current?.signal;
+    try {
+      const response = await apiFetch(`/stacks/${args.stackName}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ content: args.content }),
+        nodeId: args.nodeId,
+      });
+      if (response.status === 412) {
+        const payload = await response.json().catch(() => null) as { currentContent?: unknown; code?: unknown; filename?: unknown } | null;
+        return {
+          ok: false,
+          conflict: true,
+          code: typeof payload?.code === 'string' ? payload.code : 'stack_file_changed',
+          currentContent: typeof payload?.currentContent === 'string' ? payload.currentContent : '',
+          etag: response.headers.get('etag'),
+          filename: response.headers.get('x-compose-file') ?? (typeof payload?.filename === 'string' ? payload.filename : null),
+        };
+      }
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => '');
+        let serverError = '';
+        try {
+          const parsed = JSON.parse(bodyText) as { error?: unknown } | null;
+          if (parsed && typeof parsed.error === 'string') serverError = parsed.error;
+        } catch {
+          serverError = '';
+        }
+        return { ok: false, conflict: false, error: serverError || `HTTP ${response.status}` };
+      }
+      const stillOwns = !opLoadSignal?.aborted
+        && stackListState.selectedFile === args.stackName
+        && (activeNode?.id ?? null) === args.nodeId;
+      if (stillOwns) {
+        editorState.setOriginalContent(args.content);
+        const newEtag = response.headers.get('etag');
+        if (newEtag) editorState.setComposeEtag(newEtag);
+        const savedName = response.headers.get('x-compose-file');
+        if (savedName) editorState.setComposeFilename(savedName);
+      }
+      return { ok: true, etag: response.headers.get('etag') };
+    } catch (error) {
+      console.error('Failed to save compose file:', error);
+      return { ok: false, conflict: false, error: (error as Error).message };
+    }
+  };
+
+  const saveFile = async (options?: { force?: boolean; envPath?: string; create?: boolean }): Promise<boolean> => {
     if (editorState.activeTab === 'files') return false;
     if (!stackListState.selectedFile) return false;
     const force = options?.force === true;
+    const pinnedEnvPath = options?.envPath;
     const isCompose = editorState.activeTab === 'compose';
     const currentContent = isCompose
       ? editorState.content || ''
       : editorState.envContent || '';
+    // The env tab opens before an env file exists. Its first save asks the
+    // backend to create the file Compose reads and returns the resolved path,
+    // which becomes the selected file so later saves target it directly. A
+    // confirmed overwrite after a create conflict retries with force=1 and
+    // pins the exact file the conflict named, so a config change between the
+    // two requests cannot move the write to another file. The retry passes
+    // create explicitly so the mode cannot depend on state-update ordering.
+    const creatingEnv = !isCompose && (options?.create ?? !editorState.envExists);
+    // A failed inventory load is an unknown state, not an absent file: never
+    // offer or perform a create over it.
+    if (creatingEnv && editorState.envInventoryFailed) {
+      toast.error(ENV_READ_FAILED_NOTICE);
+      return false;
+    }
+    // Save & Deploy / Save & Pull on an untouched, still-empty env tab have
+    // nothing to write. Skipping the create lets the deploy proceed and avoids
+    // planting an empty env file the operator never edited.
+    if (creatingEnv && (editorState.envContent || '') === '' && (editorState.originalEnvContent || '') === '') {
+      toast.info('Nothing to save: the environment file is still empty.');
+      return true;
+    }
     const endpoint = isCompose
       ? `/stacks/${stackListState.selectedFile}`
-      : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
+      : creatingEnv
+        ? `/stacks/${stackListState.selectedFile}/env?create=1${force ? '&force=1' : ''}${pinnedEnvPath ? `&file=${encodeURIComponent(pinnedEnvPath)}` : ''}`
+        : `/stacks/${stackListState.selectedFile}/env?file=${encodeURIComponent(editorState.selectedEnvFile)}`;
     const etag = isCompose ? editorState.composeEtag : editorState.envEtag;
     const headers: Record<string, string> = {};
-    if (!force && etag) headers['If-Match'] = etag;
+    if (creatingEnv && !force) {
+      // The create branch of this build ignores the precondition (creation is
+      // exclusive either way), but a node that predates create-on-save treats
+      // it as a normal conditional write: an existing file answers 412 with
+      // its content instead of being overwritten, and a missing file keeps
+      // that node's handled 404.
+      headers['If-Match'] = 'W/"0"';
+    } else if (!force && etag) {
+      headers['If-Match'] = etag;
+    }
+    if (isCompose && editorState.composeFilename) {
+      headers['X-Compose-File'] = editorState.composeFilename;
+    }
     // Pin the PUT to the node this tab captured at the start of the operation.
     // A forced retry re-enters this same closure and reads the same already
     // captured `activeNode` binding, so both PUTs carry one target.
     const opNodeId = activeNode?.id ?? null;
+    // The load that produced the current editor state, captured before the PUT:
+    // a stack switch during the request aborts it, so post-save recovery can
+    // tell that the editor moved on and must not repaint.
+    const opLoadSignal = loadFileAbortRef.current?.signal;
     try {
       const response = await apiFetch(endpoint, {
         method: 'PUT',
@@ -1208,19 +1280,109 @@ export function useStackActions(options: UseStackActionsOptions) {
         const payload = await response.json().catch(() => null);
         const currentRemoteContent =
           payload && typeof payload.currentContent === 'string' ? payload.currentContent : '';
+        const conflictPath =
+          payload && typeof payload.envPath === 'string' ? payload.envPath : '';
+        // The response belongs to a stack the editor has left: a new load
+        // aborted this one's signal and owns the state now. Do not paint the
+        // old stack's file into it, and do not prompt for a conflict the
+        // operator is no longer looking at.
+        if (opLoadSignal?.aborted) return false;
+        const conflictCode = payload && typeof payload === 'object' && 'code' in payload
+          ? (payload as { code?: unknown }).code
+          : undefined;
+        if (isCompose && conflictCode === 'compose_source_changed') {
+          const reload = confirmComposeSourceReload(message => window.confirm(message));
+          if (!reload) {
+            toast.error('The compose file on disk changed. Your edits were kept.');
+            return false;
+          }
+          editorState.setContent(currentRemoteContent);
+          editorState.setOriginalContent(currentRemoteContent);
+          editorState.setComposeEtag(response.headers.get('etag'));
+          const payloadName = payload && typeof payload === 'object' && 'filename' in payload
+            ? (payload as { filename?: unknown }).filename
+            : undefined;
+          const nextName = response.headers.get('x-compose-file')
+            ?? (typeof payloadName === 'string' ? payloadName : null);
+          editorState.setComposeFilename(nextName);
+          toast.info('Reloaded the current compose file.');
+          onStackFilesChanged?.();
+          return false;
+        }
+        // A create conflict means the file appeared after the tab loaded. Adopt
+        // it and its ETag so the notice clears, later saves target the real
+        // file, and a forced retry that fails cannot fall back to an unguarded
+        // write on the next manual save.
+        if (creatingEnv && conflictPath) {
+          editorState.setEnvExists(true);
+          editorState.setSelectedEnvFile(conflictPath);
+          editorState.setEnvFiles([conflictPath]);
+          editorState.setEnvEtag(response.headers.get('etag'));
+        }
         const fileName = isCompose
           ? 'compose.yaml'
-          : (editorState.selectedEnvFile || '.env').split('/').pop() ?? '.env';
+          : (conflictPath || editorState.selectedEnvFile || '.env').split('/').pop() ?? '.env';
         const confirmed = window.confirm(
-          `${fileName} was changed by another tab or process. Overwrite their changes with yours? Click Cancel to discard your local edits and reload the latest version.`,
+          creatingEnv
+            ? `${fileName} already exists for this stack and you have not loaded its contents. Overwriting replaces it with your edits. Click Cancel to reload the existing file instead.`
+            : `${fileName} was changed by another tab or process. Overwrite their changes with yours? Click Cancel to discard your local edits and reload the latest version.`,
         );
         if (confirmed) {
-          return await saveFile({ force: true });
+          return await saveFile({ force: true, envPath: conflictPath || undefined, create: creatingEnv });
         }
         if (isCompose) {
           editorState.setContent(currentRemoteContent);
           editorState.setOriginalContent(currentRemoteContent);
           editorState.setComposeEtag(response.headers.get('etag'));
+        } else if (creatingEnv && !conflictPath) {
+          // A node that predates the envPath field named the conflict but not
+          // the file, and such a node's route resolves the default env source,
+          // so the retry cannot pin a path. Keep the 412 content visible, then
+          // refresh the inventory so the tab stops offering to create one. The
+          // refresh runs under the signal captured before the PUT; if a stack
+          // switch aborts it, the new load owns the state and nothing more is
+          // painted.
+          editorState.setEnvContent(currentRemoteContent);
+          editorState.setOriginalEnvContent(currentRemoteContent);
+          editorState.setEnvEtag(response.headers.get('etag'));
+          const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+          if (opLoadSignal?.aborted) return false;
+          if (!refreshed.ok) {
+            // The refresh did not complete (or loaded no content). The buffer
+            // still holds the conflicted file's content; the unknown-state
+            // guard refuses the next save, so report the failure instead of
+            // claiming a reload.
+            editorState.setEnvContent(currentRemoteContent);
+            editorState.setOriginalEnvContent(currentRemoteContent);
+            editorState.setEnvEtag(response.headers.get('etag'));
+            toast.error('Could not reload the environment files. Reload the editor before saving.');
+            return false;
+          }
+        } else if (creatingEnv && conflictPath) {
+          // The conflict named a file the editor had not loaded. Re-read the
+          // env state instead of trusting the payload: the file can be removed
+          // while the dialog is open, and adopting a path that no longer
+          // exists would fail the allowed-file check on every later save. A
+          // successful refresh adopts what is on disk now, or returns the
+          // editor to create mode when nothing is left.
+          const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+          if (opLoadSignal?.aborted) return false;
+          if (!refreshed.ok) {
+            // Keep the conflicted content visible under its ETag; the
+            // unknown-state guard refuses the next save instead of writing
+            // over something unread.
+            editorState.setEnvContent(currentRemoteContent);
+            editorState.setOriginalEnvContent(currentRemoteContent);
+            editorState.setEnvEtag(response.headers.get('etag'));
+            toast.error('Could not reload the environment files. Reload the editor before saving.');
+            return false;
+          }
+          if (refreshed.files.length === 0) {
+            // The file vanished while the dialog was open; the refresh left
+            // the editor in create mode, so the next save creates it.
+            toast.info('The environment file no longer exists. Saving will create it.');
+            return false;
+          }
         } else {
           editorState.setEnvContent(currentRemoteContent);
           editorState.setOriginalEnvContent(currentRemoteContent);
@@ -1230,8 +1392,23 @@ export function useStackActions(options: UseStackActionsOptions) {
         return false;
       }
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        // Surface the server's error text, not the raw JSON envelope: a failed
+        // save (404 vanished stack, 409 unusable path, 413 too large) is shown
+        // to the operator in a toast.
+        const bodyText = await response.text().catch(() => '');
+        let serverError = '';
+        try {
+          const parsed = JSON.parse(bodyText) as { error?: unknown } | null;
+          if (parsed && typeof parsed.error === 'string') serverError = parsed.error;
+        } catch {
+          // Non-JSON body (e.g. a proxy error page): fall back to the status.
+        }
+        throw new Error(serverError || `HTTP ${response.status}`);
       }
+      // If the editor moved to another stack while the PUT was in flight, the
+      // new load owns the state: the write succeeded, but none of this
+      // response's file state may be painted into the editor.
+      if (opLoadSignal?.aborted) return true;
       const newEtag = response.headers.get('etag');
       if (isCompose) {
         editorState.setOriginalContent(editorState.content);
@@ -1239,8 +1416,33 @@ export function useStackActions(options: UseStackActionsOptions) {
       } else {
         editorState.setOriginalEnvContent(editorState.envContent);
         if (newEtag) editorState.setEnvEtag(newEtag);
+        if (creatingEnv) {
+          // Create path: adopt the resolved path the backend returns so the
+          // next save targets the real file instead of failing the allowed-file
+          // check. Present for both a fresh create and the forced overwrite.
+          const payload = (await response.json().catch(() => null)) as
+            { envPath?: unknown } | null;
+          const createdPath =
+            payload && typeof payload.envPath === 'string' ? payload.envPath : '';
+          if (createdPath) {
+            editorState.setEnvExists(true);
+            editorState.setSelectedEnvFile(createdPath);
+            editorState.setEnvFiles([createdPath]);
+          } else {
+            // A node that predates the envPath response accepted the write but
+            // cannot name the path. Refresh the inventory so the editor leaves
+            // create mode and later saves are normal conditional writes instead
+            // of prompting for an overwrite on every save.
+            const refreshed = await loadEnvState(stackListState.selectedFile, opLoadSignal, opNodeId);
+            if (opLoadSignal?.aborted) return true;
+            if (!refreshed.ok) {
+              toast.error('Saved, but the environment files could not be reloaded. Reload the editor before the next save.');
+            }
+          }
+        }
       }
       toast.success('File saved successfully!');
+      onStackFilesChanged?.();
       return true;
     } catch (error) {
       console.error('Failed to save file:', error);
@@ -1280,6 +1482,23 @@ export function useStackActions(options: UseStackActionsOptions) {
       });
     } else {
       void handleSaveAndDeploy(e);
+    }
+  };
+
+  const requestSaveAndPullImages = (e: React.MouseEvent) => {
+    const isCompose = editorState.activeTab === 'compose';
+    const orig = isCompose ? editorState.originalContent : editorState.originalEnvContent;
+    const curr = isCompose ? editorState.content : editorState.envContent;
+    if (diffPreviewEnabled && editorState.activeTab !== 'files' && curr !== orig) {
+      overlayState.setDiffPreview({
+        mode: 'save-and-pull-images',
+        language: isCompose ? 'yaml' : 'ini',
+        original: orig,
+        modified: curr,
+        fileName: isCompose ? 'compose.yaml' : editorState.selectedEnvFile || '.env',
+      });
+    } else {
+      void handleSaveAndPullImages(e);
     }
   };
 
@@ -1512,16 +1731,96 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const deployStack = async (e?: React.MouseEvent) => {
+  // Acquires registry images without reconciling the runtime. The running
+  // workload is untouched, so there is no optimistic status flip to undo, and
+  // the endpoint has no policy gate, so there is no policy-block branch. No
+  // activity record is written either: the `deploy_success` and
+  // `image_update_applied` records are the marker `UpdateGuardService` reads as
+  // "last successful apply", so emitting one from a pull would corrupt rollback
+  // readiness.
+  const runPullImages = async (
+    stackName: string,
+    started?: Promise<void>,
+    deploySessionId?: string,
+    opNodeId?: number | null,
+  ): Promise<RunResult> => {
+    try {
+      if (started) await started;
+      const response = await apiFetch(
+        `/stacks/${stackName}/pull-images`,
+        withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }),
+      );
+      if (!response.ok) {
+        const rawBody = await response.text();
+        if (isSelfStackProtectedResponse(rawBody, response.status)) {
+          overlayState.openSelfStackProtected();
+          return { ok: false, errorMessage: 'Sencho instance protected' };
+        }
+        if (response.status === 409) {
+          const inProgress = parseStackOpInProgress(rawBody);
+          if (inProgress) {
+            // The save half already reported success, so the bare in-progress
+            // sentence would leave this half's outcome unstated. Naming it also
+            // keeps the wording distinct from a Git pull, which means a fetch.
+            const message = `Image pull failed: ${stackOpInProgressMessage(stackName, inProgress)}`;
+            toast.error(message);
+            return { ok: false, errorMessage: message };
+          }
+        }
+        throw parseStackActionError(rawBody, 'The server rejected the request', response.status);
+      }
+      toast.success(pullSuccessMessage(await response.json().catch(() => null)));
+      return { ok: true };
+    } catch (error) {
+      console.error('Failed to pull images:', error);
+      const detail = summarizePullFailure((error as Error).message || 'no detail was returned');
+      // The save half already confirmed itself with its own toast, so this one
+      // reports only the half that failed and never re-states the save.
+      toast.error(`Image pull failed: ${detail}`);
+      return { ok: false, errorMessage: detail };
+    }
+  };
+
+  // When a save has already succeeded and the follow-up action never starts, that
+  // is a split outcome the operator has to be told about: without this they see the
+  // save's own success toast and no indication that nothing was deployed or pulled.
+  // The "Saved;" clause is what separates the two cases, because only the post-save
+  // paths may claim a save happened. Declared above both actions that use it.
+  const DEPLOY_LABELS = { midSentence: 'deploy', standalone: 'Deploy' };
+  const PULL_LABELS = { midSentence: 'image pull', standalone: 'Image pull' };
+
+  const reportNotStarted = (
+    afterSave: boolean,
+    labels: { midSentence: string; standalone: string },
+    reason: string,
+  ) => {
+    toast.error(afterSave
+      ? `Saved; ${labels.midSentence} not started: ${reason}`
+      : `${labels.standalone} not started: ${reason}`);
+  };
+
+  const deployStack = async (e?: React.MouseEvent, options: { afterSave?: boolean } = {}) => {
+    const afterSave = options.afterSave === true;
+    // Report only after a save. A bare call is either blocked by an affordance the
+    // UI already disables, or is a second click landing while the first deploy is
+    // still starting, and an error toast there is wrong: the action IS running.
+    const bail = (reason: string) => {
+      if (afterSave) reportNotStarted(true, DEPLOY_LABELS, reason);
+    };
     e?.preventDefault();
     e?.stopPropagation();
-    if (!hydrationReady()) return;
-    if (
-      !stackListState.selectedFile ||
-      stackListState.isStackBusy(stackListState.selectedFile) ||
-      deployPendingRef.current
-    )
+    if (!hydrationReady()) {
+      bail('status data is unavailable. Refresh and try again.');
       return;
+    }
+    if (!stackListState.selectedFile) {
+      bail('no stack is selected.');
+      return;
+    }
+    if (stackListState.isStackBusy(stackListState.selectedFile) || deployPendingRef.current) {
+      bail('another operation is already running on this stack.');
+      return;
+    }
 
     const stackFile = stackListState.selectedFile;
     if (isSelfStackFile(stackFile)) {
@@ -1628,13 +1927,82 @@ export function useStackActions(options: UseStackActionsOptions) {
     await beginDeployAfterAdvisory();
   };
 
+  const pullStackImages = async (e?: React.MouseEvent, options: { afterSave?: boolean } = {}) => {
+    const afterSave = options.afterSave === true;
+    // Same rule as deployStack: only the post-save path owes the operator an
+    // explanation, because only there has a success toast already gone out.
+    const bail = (reason: string) => {
+      if (afterSave) reportNotStarted(true, PULL_LABELS, reason);
+    };
+    e?.preventDefault();
+    e?.stopPropagation();
+    if (!hydrationReady()) {
+      bail('status data is unavailable. Refresh and try again.');
+      return;
+    }
+    if (!stackListState.selectedFile) {
+      bail('no stack is selected.');
+      return;
+    }
+    if (stackListState.isStackBusy(stackListState.selectedFile) || deployPendingRef.current) {
+      bail('another operation is already running on this stack.');
+      return;
+    }
+
+    const stackFile = stackListState.selectedFile;
+    if (isSelfStackFile(stackFile)) {
+      overlayState.openSelfStackProtected();
+      return;
+    }
+
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    // Snapshot the node once so the log session and the POST stay bound to the
+    // same target even if the active node changes mid-flight.
+    const opNodeId = activeNode?.id ?? null;
+    deployPendingRef.current = true;
+    // Publish the pull like every sibling lifecycle action, so the surfaces that
+    // read the action map see an operation in flight rather than an idle stack.
+    // `isStackBusy` keys off map membership, so this is also what holds deploy
+    // and update off while the pull runs. Two refreshes are deliberately absent:
+    // the stack list, because a pull changes no runtime state, and the update
+    // badge, because a pull does not recompute the ImageUpdateService snapshot
+    // the badge reads; it catches up on that hook's own poll instead.
+    stackListState.setStackAction(stackFile, 'pull');
+    try {
+      await runWithLog({ stackName, action: 'pull', nodeId: opNodeId }, (started, ds) =>
+        runPullImages(stackName, started, ds, opNodeId),
+      );
+    } finally {
+      stackListState.clearStackAction(stackFile);
+      deployPendingRef.current = false;
+    }
+  };
+
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {
     // Readiness is rechecked before the PUT so a readiness loss while the file
     // was being edited cannot slip a mutation through.
     if (!hydrationReady()) return;
     const saved = await saveFile();
     if (!saved) return;
-    await deployStack(e);
+    // afterSave: the save already reported itself, so a deploy that skips has to
+    // name itself rather than leave the operator with one success toast.
+    await deployStack(e, { afterSave: true });
+  };
+
+  const handleSaveAndPullImages = async (e: React.MouseEvent) => {
+    // Same readiness contract, and the same sentence, as the diff-preview path
+    // in ShellOverlays: this writes the file before pulling, so it must not
+    // proceed on unauthoritative status evidence, and both entry points for one
+    // action must answer identically when they refuse.
+    if (!hydrationReady()) {
+      toast.error('Status data unavailable. Refresh and try again.');
+      return;
+    }
+    const saved = await saveFile();
+    if (!saved) return;
+    // afterSave: the save already reported itself, so a pull that skips has to
+    // name itself rather than leave the operator with one success toast.
+    await pullStackImages(e, { afterSave: true });
   };
 
   // Admin "Deploy anyway": re-issue the blocked action with ?ignorePolicy=true.
@@ -1829,10 +2197,48 @@ export function useStackActions(options: UseStackActionsOptions) {
       await runWithLog({ stackName, action, nodeId: opNodeId }, async (started, ds) => {
         await started;
         try {
-          const url = ignorePolicy
-            ? `/stacks/${stackName}/${endpoint}?ignorePolicy=true`
-            : `/stacks/${stackName}/${endpoint}`;
-          const response = await apiFetch(url, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
+          if (action === 'update') {
+            const outcome = await postStackUpdate({ nodeId: opNodeId, stackName, deploySessionId: ds, ignorePolicy });
+            switch (outcome.kind) {
+              case 'self-stack':
+                overlayState.openSelfStackProtected();
+                return { ok: false as const, errorMessage: 'Sencho instance protected' };
+              case 'busy':
+                toast.error(outcome.message);
+                return { ok: false as const, errorMessage: outcome.message };
+              case 'policy-blocked': {
+                overlayState.setPolicyBlock({ stackName, stackFile, action: 'update', payload: outcome.payload, nodeId: opNodeId });
+                const message = `Update blocked by policy "${outcome.policyName}"`;
+                toast.error(message);
+                return { ok: false as const, errorMessage: message };
+              }
+              case 'failed':
+                recordActionFailureFor(stackFile, stackName, action, startedAt, outcome.error.message, outcome.error.rolledBack === true, outcome.error.failure);
+                await refreshSelectedContainers(stackName, stackFile);
+                return {
+                  ok: false as const,
+                  errorMessage: outcome.error.message,
+                  rolledBack: outcome.error.rolledBack,
+                };
+              case 'ok':
+                overlayState.setPolicyBlock(null);
+                // With a health gate observing, the operation finishing is not the
+                // final verdict yet; soften the toast so success is not claimed twice.
+                if (outcome.healthGateId) {
+                  toast.info('Stack updated. Verifying health...');
+                } else {
+                  toast.success(successMessage);
+                }
+                // Same surface as service-scoped Apply / Fleet Apply Now: the backend
+                // may explain why a digest rebuild is still detected after Compose.
+                if (outcome.recheckWarning) toast.info(outcome.recheckWarning);
+                stackListState.fetchImageUpdates();
+                await refreshSelectedContainers(stackName, stackFile);
+                stackListState.recordActionSuccess(stackFile);
+                return { ok: true as const, healthGateId: outcome.healthGateId };
+            }
+          }
+          const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
             if (isSelfStackProtectedResponse(errText, response.status)) {
@@ -1846,14 +2252,6 @@ export function useStackActions(options: UseStackActionsOptions) {
                 toast.error(message);
                 return { ok: false as const, errorMessage: message };
               }
-              if (action === 'update') {
-                const blockedBy = tryOpenPolicyBlock(errText, stackName, stackFile, 'update', opNodeId);
-                if (blockedBy) {
-                  const message = `Update blocked by policy "${blockedBy}"`;
-                  toast.error(message);
-                  return { ok: false as const, errorMessage: message };
-                }
-              }
             }
             const actionError = parseStackActionError(errText, `${action} failed`, response.status);
             recordActionFailureFor(stackFile, stackName, action, startedAt, actionError.message, actionError.rolledBack === true, actionError.failure);
@@ -1865,22 +2263,8 @@ export function useStackActions(options: UseStackActionsOptions) {
             };
           }
           overlayState.setPolicyBlock(null);
-          const { healthGateId, recheckWarning } = await parseUpdateSuccessBody(response);
-          if (action === 'update') {
-            // With a health gate observing, the operation finishing is not the
-            // final verdict yet; soften the toast so success is not claimed twice.
-            if (healthGateId) {
-              toast.info('Stack updated. Verifying health...');
-            } else {
-              toast.success(successMessage);
-            }
-            // Same surface as service-scoped Apply / Fleet Apply Now: the backend
-            // may explain why a digest rebuild is still detected after Compose.
-            if (recheckWarning) toast.info(recheckWarning);
-            stackListState.fetchImageUpdates();
-          } else {
-            toast.success(successMessage);
-          }
+          const { healthGateId } = await parseUpdateSuccessBody(response);
+          toast.success(successMessage);
           await refreshSelectedContainers(stackName, stackFile);
           stackListState.recordActionSuccess(stackFile);
           return { ok: true as const, healthGateId };
@@ -2509,9 +2893,13 @@ export function useStackActions(options: UseStackActionsOptions) {
     navigateToNotification,
     changeEnvFile,
     saveFile,
+    saveComposeContent,
     requestSave,
     requestSaveAndDeploy,
+    requestSaveAndPullImages,
     handleSaveAndDeploy,
+    handleSaveAndPullImages,
+    pullStackImages,
     rollbackStack,
     discardChanges,
     openComposeEditor,

@@ -55,6 +55,17 @@ describe('ContainersHealth published port link', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
+  it('gives the name a floor so the action icons wrap instead of crushing the port link', () => {
+    renderHealth(container([{ PrivatePort: 80, PublicPort: 8080 }]));
+    const identity = screen.getByText('web').closest('[class*="min-w-[12rem]"]');
+    expect(identity).toBeTruthy();
+    expect(identity?.parentElement?.className).toContain('flex-wrap');
+    expect(identity?.parentElement?.className).not.toContain('max-md:flex-wrap');
+    expect(identity?.className).toContain('max-md:basis-full');
+    expect(identity?.className).toContain('max-md:min-w-0');
+    expect(identity?.contains(screen.getByRole('link', { name: /8080/ }))).toBe(true);
+  });
+
   it('uses https when the container port is 443', () => {
     renderHealth(container([{ PrivatePort: 443, PublicPort: 8443 }]));
     expect(screen.getByRole('link', { name: /8443/ })).toHaveAttribute('href', 'https://localhost:8443');

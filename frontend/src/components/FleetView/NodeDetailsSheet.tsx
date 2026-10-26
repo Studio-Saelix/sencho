@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Cpu, MemoryStick, HardDrive, Globe, Monitor, Terminal, Ban, Pencil, KeyRound, Network } from 'lucide-react';
-import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
+import { SystemSheet, SheetSection, type SystemSheetAction } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { NodeLabelPicker } from '@/components/blueprints/NodeLabelPicker';
@@ -9,6 +9,7 @@ import { formatVersion } from '@/lib/version';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { formatBytes } from '@/lib/utils';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
+import { NodeCordonModal } from './NodeCordonModal';
 import type { FleetNode, NodeUpdateStatus } from './types';
 
 interface NodeDetailsSheetProps {
@@ -21,6 +22,10 @@ interface NodeDetailsSheetProps {
     canManageNode: boolean;
     onOpenNetworking?: (nodeId: number) => void;
     onEdit?: (node: Node) => void;
+    /** Opens the delete confirmation. Absent where the sheet cannot delete (the phone screen). */
+    onDelete?: (node: Node) => void;
+    /** Runs after a cordon or uncordon; its presence is what offers the Cordon action. */
+    onCordonChange?: () => void;
 }
 
 // A small nice-to-have translation for the most operator-relevant capability
@@ -69,10 +74,11 @@ function Field({ label, children, span }: { label: string; children: ReactNode; 
 
 export function NodeDetailsSheet({
     open, onOpenChange, node, registryNode, updateStatus, networkingSignal,
-    canManageNode, onOpenNetworking, onEdit,
+    canManageNode, onOpenNetworking, onEdit, onDelete, onCordonChange,
 }: NodeDetailsSheetProps) {
-    const { nodeMeta, refreshNodeMeta } = useNodes();
+    const { nodes: registryNodes, nodeMeta, refreshNodeMeta } = useNodes();
     const [capabilitiesExpanded, setCapabilitiesExpanded] = useState(false);
+    const [cordonOpen, setCordonOpen] = useState(false);
     const nodeId = node?.id ?? null;
 
     useEffect(() => {
@@ -110,7 +116,23 @@ export function NodeDetailsSheet({
             ? `Last seen ${formatTimeAgo(fleetSecondsToMs(node.last_successful_contact))}`
             : 'Never contacted';
 
+    // The same rules the card menu applies: the default node and the last local node cannot be deleted.
+    const isLastLocal = registryNode?.type === 'local' && registryNodes.filter(n => n.type === 'local').length <= 1;
+    const canDelete = Boolean(canManageNode && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
+    const secondaryActions: SystemSheetAction[] = [];
+    if (canManageNode && onCordonChange) {
+        secondaryActions.push({
+            label: node.cordoned ? 'Uncordon node' : 'Cordon node',
+            icon: Ban,
+            onClick: () => setCordonOpen(true),
+        });
+    }
+    if (onOpenNetworking && hasNetworkingSignal) {
+        secondaryActions.push({ label: 'View networking', icon: Network, onClick: () => onOpenNetworking(node.id) });
+    }
+
     return (
+        <>
         <SystemSheet
             open={open}
             onOpenChange={onOpenChange}
@@ -122,11 +144,11 @@ export function NodeDetailsSheet({
                 icon: Pencil,
                 onClick: () => onEdit(registryNode),
             } : undefined}
-            secondaryActions={onOpenNetworking && hasNetworkingSignal ? [{
-                label: 'View networking',
-                icon: Network,
-                onClick: () => onOpenNetworking(node.id),
-            }] : undefined}
+            secondaryActions={secondaryActions.length > 0 ? secondaryActions : undefined}
+            destructiveAction={canDelete && registryNode ? {
+                label: 'Delete node',
+                onClick: () => onDelete?.(registryNode),
+            } : undefined}
             footerContext={footerContext}
             size="md"
         >
@@ -346,5 +368,12 @@ export function NodeDetailsSheet({
                 </div>
             </SheetSection>
         </SystemSheet>
+        <NodeCordonModal
+            node={node}
+            open={cordonOpen}
+            onOpenChange={setCordonOpen}
+            onChanged={onCordonChange}
+        />
+        </>
     );
 }

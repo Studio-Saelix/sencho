@@ -28,9 +28,9 @@ import {
   type GitOpsEventPayload,
   type SettledAttemptPayload,
 } from './attemptPayload';
-import { GITOPS_NOTIFICATION_META } from './notifications';
+import { GITOPS_NOTIFICATION_META, SETTLED_FAMILY_NOTIFICATION, gitOpsAttemptNotificationKey, settledNotificationFamily } from './notifications';
+import { settledOutcomeCarriesNews } from './outcomes';
 import { sanitizeForLog } from '../../utils/safeLog';
-import type { NotificationCategory } from '../NotificationService';
 
 type OutboxRow = {
   settled_history_id: string;
@@ -41,14 +41,10 @@ type OutboxRow = {
   drained_at: number | null;
 };
 
-export function settledNotificationDedupeKey(settledHistoryId: string): string {
-  return `gitops:settled:${settledHistoryId}`;
-}
-
 /**
  * Dedupe key for one event notification.
  *
- * Distinct from the settled prefix so the two kinds stay tellable apart in
+ * Distinct from the attempt prefix so the two kinds stay tellable apart in
  * `notification_history`, and stable per history row so a replay after a crash
  * between insert and mark-drained collides with the first notification instead
  * of producing a second.
@@ -110,22 +106,6 @@ function markDrained(db: Database.Database, settledHistoryId: string, at: number
   ).run(at, at, settledHistoryId);
 }
 
-function categoryForOutcome(outcome: string): NotificationCategory {
-  if (outcome === 'blocked') return 'git_plan_blocked';
-  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required' || outcome === 'unknown') {
-    return 'git_pull_failed';
-  }
-  return 'git_pull_ready';
-}
-
-function levelForOutcome(outcome: string): 'info' | 'warning' | 'error' {
-  if (outcome === 'blocked') return 'warning';
-  if (outcome === 'failed_previous_intact' || outcome === 'recovery_required' || outcome === 'unknown') {
-    return 'error';
-  }
-  return 'info';
-}
-
 /**
  * Resolve the name a notification is allowed to show.
  *
@@ -163,30 +143,63 @@ function notificationLabel(applicationId: string, stackName: string | null): {
 }
 
 function fanoutSettledNotification(payload: SettledAttemptPayload): void {
-  // An attempt that settled without proving anything is not notified, the same
-  // rule the insert applies when it decides not to write this row. The two have to
-  // agree, because boot repair drains rows an earlier process inserted, so a build
-  // that predates the rule can still leave one behind: without this, the repair
-  // would announce a failed pull that the current insert would refuse to write,
-  // and the one path that is supposed to reproduce the original outcome would be
-  // the path that diverges from it.
-  if (payload.outcome === 'unknown') {
+  // An attempt that settled without news is not notified, the same rule the
+  // insert applies when it decides not to write this row. The two have to
+  // agree, because boot repair drains rows an earlier process inserted, so a
+  // build that predates the rule can still leave one behind: without this, the
+  // repair would announce a steady state that the current insert would refuse
+  // to write, and the one path that is supposed to reproduce the original
+  // outcome would be the path that diverges from it.
+  if (!settledOutcomeCarriesNews(payload.outcome)) {
     logSuppressedSettledRow(payload);
     return;
   }
   const { visibleStack, label } = notificationLabel(payload.applicationId, payload.stackName);
   const reason = payload.reason ? `: ${payload.reason}` : '';
+  const family = settledNotificationFamily(payload.outcome);
+  const meta = SETTLED_FAMILY_NOTIFICATION[family];
   DatabaseService.getInstance().addNotificationHistory(
     payload.nodeId ?? NodeRegistry.getInstance().getDefaultNodeId(),
     {
-      level: levelForOutcome(payload.outcome),
-      category: categoryForOutcome(payload.outcome),
+      level: meta.level,
+      category: meta.category,
       message: `GitOps ${payload.outcome} for ${label}${reason}`,
       timestamp: payload.at,
       stack_name: visibleStack ?? undefined,
       actor_username: payload.actor,
       gitops_operation_id: payload.operationId,
-      dedupe_key: settledNotificationDedupeKey(payload.settledHistoryId),
+      dedupe_key: gitOpsAttemptNotificationKey(
+        payload.operationId,
+        // A candidate awaiting review or blocked by a local conflict is a
+        // standing state: it settles the same way on every poll, so it is keyed
+        // to the candidate and announces once. Every other outcome is about the
+        // attempt that ran, and stays on the attempt key, or the operator's
+        // problem would be swallowed by the candidate's own first entry.
+        //
+        // The family and the candidate's state have to agree for the key to be
+        // the candidate's. They disagree on purpose in one direction: a
+        // dispatch refused while a reviewable candidate is live settles
+        // `blocked` while the candidate is still `awaiting_review`, and that
+        // refusal is about the attempt.
+        //
+        // The one case where the live write and this settle can land on
+        // different candidate keys is a hold recorded between them: the live
+        // write reads the candidate as `awaiting_review`, and a hold the
+        // controller records before the attempt settles makes this row
+        // `held`. Both facts are true and each is worth one entry, so that
+        // window costs the operator an extra informative row rather than a
+        // repeat, and the next poll settles under the held key and stops.
+        payload.candidateGenerationId && payload.candidateState !== null
+          && (family === 'ready'
+            ? payload.candidateState === 'awaiting_review' || payload.candidateState === 'held'
+            : payload.candidateState === 'blocked')
+          ? {
+              applicationId: payload.applicationId,
+              generationId: payload.candidateGenerationId,
+              state: payload.candidateState,
+            }
+          : undefined,
+      ),
     },
   );
 }

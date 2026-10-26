@@ -2,6 +2,11 @@ import type { ArtifactEvidenceJson, ObservedArtifactIdentity, ServiceArtifactEvi
 import type { RepoIdentity } from './repoIdentity';
 import type { RefKind } from '../git/types';
 import type { HealthRolloutPolicy } from './healthPolicy';
+import type { PlacementPolicy, RolloutAuthorizationPolicy } from './policyComposition';
+import type { PlacementPolicyReason } from './placementPolicy';
+
+export type { PlacementPolicyReason };
+import type { AuthorityPolicyRead } from './authorityPolicyProjection';
 
 export type GitOpsTargetMode = 'direct' | 'inline_blueprint' | 'blueprint';
 export type GitOpsLifecycleStatus = 'active' | 'creating' | 'detached' | 'deleted';
@@ -110,10 +115,37 @@ export type GitOpsApplicationRow = {
   active_generation_id: string | null;
   pause_at: number | null;
   pause_reason: string | null;
+  /**
+   * Who placed the pause. A system hold (a refused dispatch) belongs to the
+   * rollout it was holding, so a source acceptance that supersedes that rollout
+   * clears it; an operator pause and a health-policy hold survive until a
+   * person resumes.
+   */
+  pause_origin: 'operator' | 'system' | 'health';
   /** sourceSuspended/sourceUnsuspended's own reason field; independent of pause_reason. */
   source_suspended_reason: string | null;
   /** Controller-owned. See gitops/SourceController.ts. */
   source_policy: SourcePolicy;
+  /**
+   * Whether a change in Blueprint target intent needs an operator. Configured
+   * independently of `source_policy`: accepting content says nothing about
+   * where it may run.
+   */
+  placement_policy: PlacementPolicy;
+  /**
+   * Whether rollout authorization is minted by policy or waits for an operator.
+   * Configured independently of both other domains, and never satisfied by
+   * either of them.
+   */
+  rollout_authorization_policy: RolloutAuthorizationPolicy;
+  /**
+   * Why bounded automatic placement last declined, and when it did. Null when
+   * nothing has declined: never evaluated, or the policy is `operator`, or the
+   * last evaluation approved. Absence is not "reviewed and found nothing", so a
+   * reader must not report a clean review from a null here.
+   */
+  placement_policy_refusal_reason: PlacementPolicyReason | null;
+  placement_policy_refused_at: number | null;
   poll_interval_secs: number | null;
   next_poll_at: number | null;
   attempt_seq: number;
@@ -278,9 +310,29 @@ export type GitOpsRolloutGenerationRow = {
   preflight_fingerprint: string | null;
   preflight_evidence_json: string | null;
   rollout_strategy_json: string;
+  /**
+   * The policy snapshot this generation executes, frozen when it opened.
+   *
+   * NULL on a generation that predates the column, which is the one case that
+   * reconstructs rather than carrying a recorded value. Never defaulted to an
+   * empty object: that would make absence impossible and turn every existing
+   * generation into a decode failure.
+   */
+  policy_snapshot_json: string | null;
   provenance: GitOpsRolloutGenerationProvenance;
   supersedes_generation_id: string | null;
   superseded_at: number | null;
+  /**
+   * When the operator withdrew this rollout (Supersede or Rollback).
+   *
+   * Null on a system supersede (a preflight drift, a placement invalidation, a
+   * re-authorization) and on a generation that predates the column, which the
+   * migration backfills as withdrawn. A null here therefore means no operator
+   * withdrawal is recorded. The automatic policy refuses to re-mint only when
+   * this is set, so a system supersede still re-drives while an operator's
+   * decision sticks.
+   */
+  withdrawn_at: number | null;
   operation_id: string;
   actor: string | null;
   trigger: string;
@@ -305,6 +357,13 @@ export type GitOpsApprovalRow = {
   fingerprint: string | null;
   blast_json: string | null;
   policy_provenance_json: string | null;
+  /**
+   * The confirmation object stored with a source acceptance, or null when no
+   * object was stored. A missing property is read the same way. Null plus a
+   * non-null placement pointer is not "unconfirmed": `storedSourceConfirmation`
+   * reads that pointer as a confirmation whose rollout must wait.
+   */
+  source_confirmation_json?: string | null;
   actor: string | null;
   created_at: number;
 };
@@ -335,6 +394,12 @@ export type GitOpsTargetCurrentRow = {
   expected_artifact_set_id: string | null;
   latest_artifact_set_id: string | null;
   observed_artifact_identity_json: string | null;
+  /**
+   * What Compose was actually invoked with on this node, read back off the
+   * running project. Null means Sencho has not looked: either no apply has
+   * recorded one, or the node could not be reached. See json.ts.
+   */
+  observed_invocation_json: string | null;
   intent_revision_id: string | null;
   rollout_candidate_id: string | null;
   rollout_generation_id: string | null;
@@ -357,6 +422,17 @@ export type GitOpsTargetCurrentRow = {
   recovery_ref: string | null;
   recovery_generation_id: string | null;
   recovery_phase: RecoveryPhase | null;
+  /**
+   * The class and time of the recovery failure this row still claims.
+   *
+   * Separate from `failure_class` and `failure_at` because those columns are
+   * shared with deploy and withdraw failures. A claim that may have moved the
+   * target has to keep its own record when a later failure writes the shared
+   * slot, or it would read back as a refusal that moved nothing. See
+   * `recoveryClaim.ts`.
+   */
+  recovery_failure_class: string | null;
+  recovery_failure_at: number | null;
   interruption_stage: TargetActiveStage | null;
   interruption_at: number | null;
   interruption_operation_id: string | null;
@@ -429,6 +505,28 @@ export type ResolveApprovalExpected =
   | { kind: 'placement_approval'; applicationId: string; intentRevisionId: string; requiredNodeIds: readonly number[] }
   | { kind: 'rollout_authorization'; applicationId: string; binding: FutureRolloutAuthorizationBinding }
   | { kind: 'legacy_combined'; applicationId: string };
+
+/**
+ * The rollout scope an approved placement froze: the node ids a subsequent
+ * rollout authorization would authorize a dispatch against.
+ *
+ * Distinct from `targets`, which are observed applications on nodes. They
+ * answer different questions and disagree routinely: a Blueprint approved for
+ * node B before its first rollout has an observed target on node A from an
+ * earlier placement, and none on B until a rollout places one. A confirmation
+ * that names the observed rows would tell the operator the action deploys
+ * somewhere it will not.
+ *
+ * `approved` carries only a set `resolveApprovalRef` accepts against the
+ * current intent, so `unresolved` covers a dangling or stale approval reference
+ * as well as unreadable evidence. All three non-approved states read as "no
+ * scope is proven", which is what the execution path does with them.
+ */
+export type ApprovedRolloutScope =
+  | { status: 'not_applicable' }
+  | { status: 'unapproved' }
+  | { status: 'unresolved'; approvalRef: string; reason: 'no_candidate' | 'unreadable_required_targets' | 'approval_does_not_resolve' }
+  | { status: 'approved'; approvalRef: string; nodeIds: number[] };
 
 export type FutureGitOpsEvidence = {
   readonly applicationId: string;
@@ -638,6 +736,7 @@ export type RuntimeFacet =
         | 'evict_blocked'
         | 'drifted'
         | 'correcting'
+        | 'repair_held'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'
@@ -780,6 +879,7 @@ export const FACET_EVIDENCE_SOURCE: FacetEvidenceSource = {
     evict_blocked: 'current',
     drifted: 'current',
     correcting: 'current',
+    repair_held: 'current',
     fully_deployed_health_pending: 'current',
     health_checking: 'current',
     synced_and_healthy: 'current',
@@ -828,11 +928,18 @@ export type GitOpsIdentityRef =
   | { kind: 'commit'; sha: string; repoUrl: string; ref: string }
   | { kind: 'generation'; id: string }
   | { kind: 'artifact_set'; id: string; qualification: ArtifactQualification; evidenceVersion: number }
-  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null }
+  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null; services?: ServiceArtifactEvidence[] }
   | { kind: 'intent'; id: string; composeContentSha256: string }
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
+  /**
+   * The other side of an invocation comparison: what Compose was actually
+   * invoked with, read back off the running project on the node. A separate
+   * kind from `invocation` rather than a reused one, because naming an
+   * observation `authored` would assert the opposite of what it is.
+   */
+  | { kind: 'observed_invocation'; observed: AuthoredInvocationIdentity; observedAt: number }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
 /**
@@ -920,6 +1027,25 @@ export type GitOpsTargetProjection = {
   health: HealthFacet;
   healthGate: HealthGateFacet;
   lkg: LkgFacet;
+  /**
+   * Whether work already under way is producing the verdict that will replace a
+   * recorded health failure: a live operation on the generation the failure was
+   * recorded against, or a stack-scope health run for that generation that is
+   * still observing. The second arm reads the health-run table, not the target
+   * row, because the run is what the gate holds open.
+   *
+   * Only meaningful while `health.status` is `failed`. It is a fact about the
+   * row columns and the recorded generation, not a tone: the consumer still
+   * decides what to present.
+   *
+   * **Absent means not superseded.** A remote instance on an older build answers
+   * without the field, and the value arrives as `undefined` even though this type
+   * requires a boolean, so a falsy read is what reports the failure there. The
+   * protection against a peer suppressing a failure with a malformed truthy value
+   * is not in how this is read but in `isTargetRecord`, which accepts only an
+   * absent field or a boolean at the remote boundary.
+   */
+  healthFailureSuperseded: boolean;
   tombstoned: boolean;
 };
 
@@ -947,6 +1073,19 @@ export type GitOpsRevisionProjection =
       limitations: readonly GitOpsLimitation[];
       availableActions: [];
       approvals: null;
+      /**
+       * No application, so no approved placement and no rollout scope.
+       * Present rather than missing so a reader never has to tell "no
+       * application" from "a build that said nothing".
+       */
+      approvedRolloutScope: ApprovedRolloutScope;
+      /**
+       * Empty, because an application that does not exist has no configured
+       * policy to report. The field is present rather than absent so a reader
+       * never has to tell "no application" from "an older build said nothing",
+       * and those are different facts about the same endpoint.
+       */
+      authorityPolicies: readonly AuthorityPolicyRead[];
     }
   | {
       schemaVersion: 1;
@@ -954,14 +1093,33 @@ export type GitOpsRevisionProjection =
       applicationId: string;
       lifecycleStatus: GitOpsLifecycleStatus;
       stackName: string | null;
+      /**
+       * The stack whose Git source this application pulls. Direct rows use
+       * their own stack name. A Git-managed Blueprint clears `stackName` and
+       * keeps the source here.
+       */
+      configuredSourceStackName: string | null;
       blueprintId: number | null;
       rolloutGenerationId: string | null;
       approvals: GitOpsApprovalRefs;
+      /**
+       * The rollout scope the placement approval froze, which is what a
+       * dispatch would target. Read here so a confirmation can name it
+       * without re-deriving it, and because it is the same reader execution
+       * goes through.
+       */
+      approvedRolloutScope: ApprovedRolloutScope;
       facets: GitOpsFacets;
       targets: GitOpsTargetProjection[];
       drift: GitOpsDriftItem[];
       limitations: GitOpsLimitation[];
       availableActions: GitOpsAvailableAction[];
+      /**
+       * The three authority policies, configured and effective, in stage order.
+       * See `authorityPolicyProjection` for what each field claims and, more
+       * importantly, what it refuses to claim.
+       */
+      authorityPolicies: AuthorityPolicyRead[];
     };
 
 export type { ArtifactEvidenceJson, ObservedArtifactIdentity, RepoIdentity };

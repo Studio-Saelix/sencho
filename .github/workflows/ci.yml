@@ -69,7 +69,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
           cache: 'npm'
@@ -96,7 +96,7 @@ jobs:
 
       - name: Audit Dependencies
         working-directory: ./backend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
 
   # Real-Docker integration tests, split out of the backend job so their
   # ~1 minute of serial container work runs alongside the unit tests instead
@@ -112,7 +112,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
           cache: 'npm'
@@ -161,7 +161,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
           cache: 'npm'
@@ -185,7 +185,7 @@ jobs:
 
       - name: Audit Dependencies
         working-directory: ./frontend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
 
   docker-validate:
     name: Docker Build & Scan
@@ -299,7 +299,7 @@ jobs:
         # `cancelled()` covers a run stopped by the concurrency group, where
         # GitHub re-evaluates conditions for the job's unfinished steps.
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: playwright-report-shard-${{ matrix.shard }}
           path: |
@@ -341,21 +341,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
 
       - name: Validate workflows
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
         with:
-          args: .github/workflows/release-please.yml .github/workflows/ci.yml
+          args: .github/workflows/release-please.yml .github/workflows/ci.yml .github/workflows/pr-title.yml
 
       - name: Syntax check
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/audit-with-vex.mjs
+          node --check scripts/check-pr-title.mjs
+          node --check scripts/check-version-transition.mjs
 
       - name: Unit tests
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/audit-with-vex.test.mjs
+          node --test scripts/check-pr-title.test.mjs
+          node --test scripts/check-version-transition.test.mjs

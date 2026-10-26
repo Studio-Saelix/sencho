@@ -40,6 +40,10 @@ import {
   isAnatomyMode, sanitizeAnatomyWidth,
   type AnatomyMode,
 } from '@/hooks/use-anatomy-layout';
+import {
+  currentFleetTabLayout, applyFleetTabLayoutValue, isFleetTabLayout, DEFAULT_FLEET_TAB_LAYOUT, FLEET_TAB_LAYOUT_KEY,
+  type FleetTabLayout,
+} from '@/hooks/use-fleet-tab-layout';
 import { recommendedQuickLinkIds } from '@/lib/navigation/appNavRegistry';
 
 export interface AppearanceDocument {
@@ -63,11 +67,12 @@ export interface AppearanceDocument {
   sidebarWidth: number;
   anatomyMode: AnatomyMode;
   anatomyWidth: number;
+  fleetTabLayout: FleetTabLayout;
 }
 
 /** What the raw theme cache key holds: everything except density, log-chip,
  *  sidebar-layout, and Anatomy-layout fields stored under their own keys. */
-export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth' | 'anatomyMode' | 'anatomyWidth'>;
+export type ThemeCacheDocument = Omit<AppearanceDocument, 'density' | 'logChipColorMode' | 'sidebarMode' | 'sidebarWidth' | 'anatomyMode' | 'anatomyWidth' | 'fleetTabLayout'>;
 
 /** Navigation document with unset provenance for the pin list. `unset` means
  *  the hook has never persisted a list (never-seeded or eligibility still
@@ -112,6 +117,7 @@ export function buildAppearanceDocument(): AppearanceDocument {
     sidebarWidth: currentSidebarWidth(),
     anatomyMode: currentAnatomyMode(),
     anatomyWidth: currentAnatomyWidth(),
+    fleetTabLayout: currentFleetTabLayout(),
   };
 }
 
@@ -174,6 +180,7 @@ export function hydrateAppearanceDocument(raw: unknown): void {
   applySidebarWidthValue(sanitizeSidebarWidth(p.sidebarWidth));
   applyAnatomyModeValue(isAnatomyMode(p.anatomyMode) ? p.anatomyMode : 'fixed');
   applyAnatomyWidthValue(sanitizeAnatomyWidth(p.anatomyWidth));
+  applyFleetTabLayoutValue(isFleetTabLayout(p.fleetTabLayout) ? p.fleetTabLayout : DEFAULT_FLEET_TAB_LAYOUT);
 }
 
 /** The documented calm-default appearance document, used for tombstone
@@ -188,9 +195,9 @@ export function defaultAppearanceDocument(): AppearanceDocument {
     monoFont: 'Geist Mono',
     visualStyle: d.visualStyle,
     headingStyle: d.headingStyle,
-    chartStyle: d.chartStyle,
+    chartStyle: 'signature',
     density: 'comfortable',
-    logChipColorMode: 'unified',
+    logChipColorMode: 'per-service',
     borderBoost: BORDER_BOOST.default,
     glow: GLOW.default,
     contrast: CONTRAST.default,
@@ -202,6 +209,7 @@ export function defaultAppearanceDocument(): AppearanceDocument {
     sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
     anatomyMode: 'fixed',
     anatomyWidth: ANATOMY_WIDTH_DEFAULT,
+    fleetTabLayout: DEFAULT_FLEET_TAB_LAYOUT,
   };
 }
 
@@ -241,11 +249,13 @@ export function hydrateNavigationDefaults(): void {
 }
 
 // ── cache keys ─────────────────────────────────────────────────────────────
-/** Every localStorage key the preference domains own. Cleared on identity
- *  switch and when no user is signed in (another account must never see this
- *  browser's cached values); tombstone and corrupt hydration instead rewrite
- *  each key to its default through the apply paths. theme-init.js re-reads the
- *  theme key at next paint, so a cleared key paints defaults. */
+/** Every localStorage key the preference domains own. Cleared when a different
+ *  account claims the browser (another account must never see this browser's
+ *  cached values); a marker-less cache is kept as the first-sync migration
+ *  source, and signing out leaves the cache for the owner's next login.
+ *  Tombstone and corrupt hydration instead rewrite each key to its default
+ *  through the apply paths. theme-init.js re-reads the theme key at next paint,
+ *  so a cleared key paints defaults. */
 export const PREFERENCE_CACHE_KEYS = [
   'sencho.appearance.theme',
   'sencho-theme', // legacy theme key
@@ -255,6 +265,7 @@ export const PREFERENCE_CACHE_KEYS = [
   SIDEBAR_WIDTH_KEY,
   ANATOMY_MODE_KEY,
   ANATOMY_WIDTH_KEY,
+  FLEET_TAB_LAYOUT_KEY,
   TOP_NAV_MODE_KEY,
   TOP_NAV_QUICK_LINKS_KEY,
   TOP_NAV_LABELS_KEY,
@@ -263,6 +274,9 @@ export const PREFERENCE_CACHE_KEYS = [
 
 export const PREFERENCES_OWNER_KEY = 'sencho.preferences.owner';
 
+/** Wipe every preference cache key including the owner marker. Called only
+ *  when a valid marker names a different account; the caller restamps the
+ *  marker for the new owner immediately after. */
 export function clearPreferenceCache(): void {
   if (typeof window === 'undefined') return;
   try {
@@ -289,6 +303,7 @@ export function writePreferenceCacheFromDocuments(): void {
       sidebarWidth: undefined,
       anatomyMode: undefined,
       anatomyWidth: undefined,
+      fleetTabLayout: undefined,
     }));
   } catch {
     // ignore; private mode / quota

@@ -129,6 +129,19 @@ describe('StackOpLockService.runExclusive', () => {
     if (!outcome.ran) expect(outcome.existing.action).toBe('rollback');
   });
 
+  it('skips (ran=false) with image_pull when a pull holds the lock', async () => {
+    const svc = StackOpLockService.getInstance();
+    svc.tryAcquire(1, 'web', 'image_pull', 'admin');
+    let called = false;
+    const outcome = await svc.runExclusive(1, 'web', 'deploy', 'system', async () => {
+      called = true;
+      return 'should not run';
+    });
+    expect(called).toBe(false);
+    expect(outcome.ran).toBe(false);
+    if (!outcome.ran) expect(outcome.existing.action).toBe('image_pull');
+  });
+
   it('releases the lock even when fn throws, then propagates', async () => {
     const svc = StackOpLockService.getInstance();
     await expect(
@@ -144,6 +157,15 @@ describe('stackOpSkipMessage', () => {
   it('names the stack and the conflicting action', () => {
     expect(stackOpSkipMessage('web', 'update')).toBe(
       'Skipped "web": another operation (update) is already in progress.',
+    );
+  });
+
+  // The skip note carries the raw action token. The human-readable participle
+  // ("is already pulling images") is built at the HTTP 409 site instead, so
+  // this asserts the token rather than the prose.
+  it('names image_pull by its raw action token', () => {
+    expect(stackOpSkipMessage('web', 'image_pull')).toBe(
+      'Skipped "web": another operation (image_pull) is already in progress.',
     );
   });
 });

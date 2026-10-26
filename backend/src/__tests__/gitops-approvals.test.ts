@@ -9,6 +9,7 @@ import type {
   GitOpsIntentRevisionRow,
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops approvals', () => {
   let tmpDir: string;
@@ -241,6 +242,8 @@ describe('gitops approvals', () => {
       envelope: { operationId: 'op-place', actor: 'admin', trigger: 'blueprint_apply', at: 50 },
       rolloutGenerationId: 'rgen-place',
       candidateId: 'cand-place',
+      authority: 'operator',
+      policyProvenanceJson: null,
       strategyJson: '{"driftMode":"observe","enabled":true}',
     });
 
@@ -311,9 +314,11 @@ describe('gitops approvals', () => {
       preflight_fingerprint: null,
       preflight_evidence_json: null,
       rollout_strategy_json: '{}',
+      policy_snapshot_json: null,
       provenance: 'legacy_inline',
       supersedes_generation_id: null,
       superseded_at: null,
+      withdrawn_at: null,
       operation_id: 'op-churn-place',
       actor: 'admin',
       trigger: 'blueprint_apply',
@@ -460,8 +465,13 @@ function directApp(id: string, stackName: string): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

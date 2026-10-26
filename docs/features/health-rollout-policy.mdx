@@ -3,7 +3,7 @@ title: "Health rollout policy"
 description: "How a Git-managed Blueprint rollout reacts when a target's health check does not pass: observe, pause, retry once, stop, or roll back that target."
 ---
 
-A Git-managed Blueprint rollout deploys an accepted generation to every node in its approved placement, one after another. By default it keeps going: if one target's health check does not pass, the rollout still moves to the next node. The **health rollout policy** changes that. It is a per-application setting, and it is the only thing that decides what a health outcome does to the queue that remains.
+A [Git-managed Blueprint](/features/git-managed-blueprints) rollout deploys an accepted generation to every node in its approved placement, one after another. By default it keeps going: if one target's health check does not pass, the rollout still moves to the next node. The **health rollout policy** changes that. It is a per-application setting, and it is the only thing that decides what a health outcome does to the queue that remains.
 
 The policy never changes what runs. It cannot accept new source content, pull a different image, or move a workload to a different node. It chooses between five things: record and continue, pause, retry the target that failed once, stop, or put that target back the way it was.
 
@@ -56,16 +56,16 @@ The hold is also what survives a restart. A rollout held by a policy stays held 
 
 ## Remote nodes
 
-The health rollout policy applies to nodes this Sencho instance can observe directly. A remote node's Docker daemon is reached over the HTTP proxy rather than a local socket, so a health verdict for a rollout on a remote node is not something this instance can produce today. Choosing any mode other than **Observe** on an application that includes a remote node stops that whole rollout before anything is deployed, and says why in the deployment log.
+A rollout target on another node is observed by that node. Sencho asks the node for the running containers of the stack it hosts, so a health verdict on a remote target is about the containers that node actually has, never about a Docker daemon on the instance running the rollout.
 
-**Observe** is never blocked this way, so an existing remote rollout keeps working exactly as before.
+Before a rollout under any mode other than **Observe** deploys anything, it checks that every node in the placement can report its runtime facts. A node that cannot is refused for the whole rollout, and the deployment log says why. **Observe** never holds the rollout, so it skips that preflight and records the verdict each target reaches. A node that stops answering once the rollout is under way leaves that target without a verdict, which is never treated as a pass: **Observe** records it and carries on, and every other mode pauses the rollout and waits for you.
 
 ## Relationship to the other policies
 
-Three policies can apply to the same rollout, and they answer different questions:
+Three policies can apply to the same rollout, and they answer different questions. All of them are defined in the [GitOps overview](/features/gitops-overview#who-decides-each-step).
 
-- The **drift policy** (Observe / Suggest / Enforce) decides what Sencho does when a deployed Blueprint drifts away from its approved state.
-- The **source policy** (Manual / Review / Automatic) decides when new Git content is accepted.
+- The **drift mode** (Observe, Suggest, Enforce) decides what Sencho does when a deployed Blueprint drifts away from its approved state.
+- The **source policy** (Manual, Review only, Auto-write files, Auto-deploy on the Git source) decides when new Git content is accepted.
 - The **health rollout policy** decides what a health outcome does to a rollout that is already running.
 
 They are configured separately, and changing one does not re-open the approvals the others granted. Setting a health policy does not invalidate your placement approval or your rollout authorization.

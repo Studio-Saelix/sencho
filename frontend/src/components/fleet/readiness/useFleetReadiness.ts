@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import type { FleetReadinessResponse } from '@/types/readiness';
+import type { FindingDismissal } from '@/types/findingDismissal';
 
 /** The server's own `{ error }` sentence when it sent one, else the fallback. */
 async function serverErrorMessage(res: Response, fallback: string): Promise<string> {
@@ -18,6 +19,11 @@ export interface FleetReadinessState {
   /** True while a request is in flight, including a refresh over existing data. */
   checking: boolean;
   retry: () => void;
+  /**
+   * Apply a dismissal change to the result on screen, so Dismiss and Restore
+   * take effect at once. The next check carries the server's own list.
+   */
+  patchDismissals: (update: (current: FindingDismissal[]) => FindingDismissal[]) => void;
 }
 
 /**
@@ -63,5 +69,8 @@ export function useFleetReadiness(refreshKey: number): FleetReadinessState {
   }, [requestKey]);
 
   const retry = useCallback(() => setAttempt(n => n + 1), []);
-  return { data, error, checking: settledKey !== requestKey, retry };
+  const patchDismissals = useCallback((update: (current: FindingDismissal[]) => FindingDismissal[]) => {
+    setData(current => (current === null ? current : { ...current, dismissals: update(current.dismissals ?? []) }));
+  }, []);
+  return { data, error, checking: settledKey !== requestKey, retry, patchDismissals };
 }

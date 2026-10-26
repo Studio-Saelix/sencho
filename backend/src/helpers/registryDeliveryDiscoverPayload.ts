@@ -18,6 +18,11 @@ function sourceKindForStage(stage: RegistryDeliveryStage): RegistryDeliverySourc
       return 'git-candidate';
     case 'stack-deploy':
       return 'live-project';
+    // Every other stage, including stack-pull-images, is a live-project fetch.
+    // This branch and the matching default in registryDeliverySeam must agree:
+    // the remote recomputes the action-set hash from its own default, so moving a
+    // stage off this default on the hub alone would break every un-upgraded
+    // remote. Add an explicit case on both sides together, never one.
     default:
       return 'live-project';
   }
@@ -45,7 +50,11 @@ export function buildRegistryDiscoverPayload(options: {
 
   const stack = resolveStackName(options.body, classification.stack);
   const stage = classification.stage;
-  const isRollback = Boolean(options.apiPath.match(/^\/api\/stacks\/[^/]+\/rollback$/));
+  // Must accept the same trailing slash as the op classifier. When the two
+  // disagreed, a slashed rollback still classified as eligible but was discovered
+  // as a live-project fetch instead of a restore candidate, so it was answered
+  // with credentials for the wrong image set and failed late with "unauthorized".
+  const isRollback = Boolean(options.apiPath.match(/^\/api\/stacks\/[^/]+\/rollback\/?$/));
   const sourceKind = isRollback ? 'restore-candidate' : sourceKindForStage(stage);
 
   const payload: Record<string, unknown> = {
@@ -78,6 +87,13 @@ export function buildRegistryDiscoverPayload(options: {
       env_path: options.body.env_path,
       auth_type: options.body.auth_type,
       token: options.body.token,
+      // Every credential field the create route accepts must ride discovery too.
+      // The target fetches through this payload before it can answer; omitting
+      // a field makes SSH and private-CA repos fail as if unauthenticated.
+      deploy_key: options.body.deploy_key,
+      ssh_known_hosts_entry: options.body.ssh_known_hosts_entry,
+      ssh_host_key_fingerprint: options.body.ssh_host_key_fingerprint,
+      ca_bundle: options.body.ca_bundle,
       auto_apply_on_webhook: options.body.auto_apply_on_webhook,
       auto_deploy_on_apply: options.body.auto_deploy_on_apply,
     };

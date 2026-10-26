@@ -87,6 +87,7 @@ function target(overrides: Partial<GitOpsTargetProjection>): GitOpsTargetProject
     tombstoned: false,
     runtime: { status: 'synced_and_healthy' },
     health: { status: 'passed', runId: 'run-1', deployedGenerationId: 'gen-1' },
+    healthFailureSuperseded: false,
     lkg: { status: 'none' },
     artifact: { status: 'not_applicable' },
     observedArtifactIdentity: { kind: 'unknown' },
@@ -123,6 +124,7 @@ function liveProjection(overrides?: {
     applicationId: 'app-1',
     lifecycleStatus: 'active',
     stackName: 'web',
+    configuredSourceStackName: 'web',
     blueprintId: null,
     rolloutGenerationId: null,
     approvals: {
@@ -131,6 +133,7 @@ function liveProjection(overrides?: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'not_applicable' },
     facets: {
       source: overrides?.source ?? RESTING_SOURCE,
       artifact: overrides?.artifact ?? artifactAt('artifact_exact'),
@@ -145,6 +148,7 @@ function liveProjection(overrides?: {
     drift: overrides?.drift ?? [],
     limitations: [],
     availableActions: [],
+    authorityPolicies: [],
   };
 }
 
@@ -396,6 +400,34 @@ describe('attentionReasons', () => {
     expect(attentionReasons(projection)).toContain('health_failed');
   });
 
+  it('flags a failure on a target whose projection carries no supersede flag at all', () => {
+    // What a remote instance on an older build answers with. The field is
+    // absent, so it arrives as `undefined` against a type that requires a
+    // boolean, and the failure has to keep being reported rather than being read
+    // as superseded.
+    const projection = liveProjection({
+      targets: [{
+        ...target({ runtime: runtimeAt('deploying'), health: healthAt('failed') }),
+        healthFailureSuperseded: undefined as unknown as boolean,
+      }],
+    });
+    expect(attentionReasons(projection)).toContain('health_failed');
+  });
+
+  it('does not flag a failure a live operation on its own generation is about to replace', () => {
+    const projection = liveProjection({
+      targets: [target({
+        runtime: runtimeAt('deploying'),
+        health: healthAt('failed'),
+        healthFailureSuperseded: true,
+      })],
+    });
+    // No reason at all, rather than a quieter one: any reason here would read as
+    // `attention` and lose the work-in-progress reading the runtime facet has
+    // already proved.
+    expect(attentionReasons(projection)).toEqual([]);
+  });
+
   it('does not flag a target that is merely behind', () => {
     const projection = liveProjection({
       targets: [target({ runtime: runtimeAt('applied_not_deployed') })],
@@ -433,12 +465,14 @@ describe('attentionReasons', () => {
       'preflight_blocked',
       'recovery_failed',
       'recovery_required',
+      'repair_held',
       'rollback_failed',
       'rollout_authorization_pending',
       'rollout_authorization_stale',
       'rollout_completion_unknown',
       'rollout_partial',
       'rollout_paused',
+      'rollout_stale_acknowledgement',
       'source_conflict_blocker',
       'source_failed',
       'source_reconcile_required',

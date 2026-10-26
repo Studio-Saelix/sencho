@@ -8,6 +8,7 @@ import type {
 import { detectSopsContent, isComposePrimaryPath } from './detect';
 import { SopsIdentityStore } from './identityStore';
 import { GitOpsStore } from '../store';
+import { createHash } from 'crypto';
 import { promises as fsPromises } from 'fs';
 import path from 'path';
 
@@ -26,6 +27,94 @@ export function parseSecretCapabilityFromJson(raw: string | null): SecretCapabil
 export function requiredRecipientsFromCapability(cap: SecretCapability | null): string[] {
   if (!cap) return [];
   return cap.requiredRecipients ?? [];
+}
+
+function capabilityInputKey(input: SecretCapability['inputs'][number]): string {
+  return input.materializedPath ?? input.sourcePath ?? '';
+}
+
+/**
+ * True when the computed capability names encrypted inputs or recipients
+ * the stored generation does not. A null stored capability understates
+ * only when the current inputs are encrypted; a plaintext generation with
+ * no stored capability is not stale.
+ */
+export function capabilityUnderstatesEncryption(
+  stored: SecretCapability | null,
+  computed: SecretCapability,
+): boolean {
+  const computedEncrypted = computed.inputs.filter((input) => input.encryption !== 'none');
+  if (computedEncrypted.length === 0 && computed.requiredRecipients.length === 0) return false;
+  if (!stored) return true;
+
+  const storedByKey = new Map<string, SecretCapability['inputs'][number]>();
+  for (const input of stored.inputs) {
+    const key = capabilityInputKey(input);
+    if (key) storedByKey.set(key, input);
+  }
+
+  for (const input of computedEncrypted) {
+    const prior = storedByKey.get(capabilityInputKey(input));
+    if (!prior || prior.encryption !== input.encryption) return true;
+    const priorRecipients = new Set(prior.recipientIds);
+    for (const recipient of input.recipientIds) {
+      if (!priorRecipients.has(recipient)) return true;
+    }
+  }
+
+  const storedRecipients = new Set(stored.requiredRecipients ?? []);
+  for (const recipient of computed.requiredRecipients) {
+    if (!storedRecipients.has(recipient)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when one input names recipients and no identity on this node opens it.
+ * A file encrypted to several recipients is decryptable by any one of them, so
+ * readiness is per input, not per recipient.
+ */
+function inputIsUndecryptable(
+  input: SecretCapability['inputs'][number],
+  available: Set<string>,
+): boolean {
+  const recipients = input.recipientIds ?? [];
+  return input.encryption === 'sops-age'
+    && recipients.length > 0
+    && !recipients.some((recipient) => available.has(recipient));
+}
+
+/** Inputs from this capability that no identity on this node opens, in declared order. */
+export function undecryptableInputs(
+  cap: SecretCapability,
+  available: Set<string>,
+): SecretCapability['inputs'] {
+  return cap.inputs.filter((input) => inputIsUndecryptable(input, available));
+}
+
+/**
+ * Recipients named by inputs no available identity can decrypt, in first-seen
+ * order. The same per-file rule, for a caller that holds inputs rather than a
+ * whole capability (inputs discovered from the files a rollback restored).
+ */
+export function missingRecipientsForInputs(
+  inputs: SecretCapability['inputs'],
+  available: Set<string>,
+): string[] {
+  const missing = new Set<string>();
+  for (const input of inputs) {
+    if (!inputIsUndecryptable(input, available)) continue;
+    for (const recipient of input.recipientIds ?? []) missing.add(recipient);
+  }
+  return [...missing];
+}
+
+/** Recipients named by inputs that no available identity can decrypt. */
+export function missingRecipientsForCapability(
+  cap: SecretCapability,
+  available: Set<string>,
+): string[] {
+  return missingRecipientsForInputs(cap.inputs, available);
 }
 
 export function classifyInputEncryption(
@@ -52,6 +141,26 @@ export function classifyInputEncryption(
     return { encryption: 'sops-unsupported', sopsRecipients: [], refusalReason: detection.reason };
   }
   return { encryption: 'sops-age', sopsRecipients: detection.recipients };
+}
+
+export function syncEnvInputEntry(envContent: string): ComposeInputEntry {
+  const classified = classifyInputEncryption(envContent, 'env');
+  return {
+    sourcePath: null,
+    materializedPath: '.env',
+    role: 'env',
+    dependencyKind: 'sync-env',
+    ownership: 'managed',
+    provenance: 'fetch',
+    sensitivity: 'high',
+    contentSha256: createHash('sha256').update(envContent).digest('hex'),
+    sizeBytes: Buffer.byteLength(envContent, 'utf8'),
+    state: 'present',
+    deletionAuthority: 'sencho',
+    note: classified.refusalReason ?? null,
+    encryption: classified.encryption,
+    sopsRecipients: classified.sopsRecipients,
+  };
 }
 
 export async function classifyInventoryEncryption(
@@ -110,7 +219,7 @@ export function buildSecretCapability(args: {
   const requiredRecipients = new Set<string>();
 
   for (const input of args.inputs) {
-    if (input.sensitivity !== 'high' && input.encryption === 'none') continue;
+    if (input.sensitivity !== 'high' && (input.encryption ?? 'none') === 'none') continue;
     const encryption = input.encryption ?? 'none';
     const recipients = input.sopsRecipients ?? [];
     if (encryption === 'sops-age') {
@@ -138,7 +247,15 @@ export function buildSecretCapability(args: {
         refusal: { reason: 'Unsupported SOPS backend or encrypted compose file', failureClass: 'unsupported_backend' },
       };
     }
-    if (args.policy === 'require_encrypted' && input.sensitivity === 'high' && input.encryption === 'none') {
+    if (
+      args.policy === 'require_encrypted'
+      && input.ownership === 'managed'
+      && input.sensitivity === 'high'
+      && (input.encryption ?? 'none') === 'none'
+    ) {
+      // The policy governs managed repository content. Unmanaged entries are
+      // not materialized by Sencho, so an absent project env file cannot make
+      // every stack fail the policy.
       return {
         capability: {
           policy: args.policy,
@@ -156,15 +273,15 @@ export function buildSecretCapability(args: {
     applicationId: args.applicationId,
     stackName: args.stackName,
     policy: args.policy,
-    requiredRecipients: [...requiredRecipients],
+    inputs: secretInputs,
   });
 
   const capability: SecretCapability = {
     policy: args.policy,
     inputs: secretInputs,
-    ready: requiredRecipients.size === 0 ? true : readiness.ready,
+    ready: readiness.ready,
     failureClass: readiness.failureClass,
-    requiredRecipients: [...requiredRecipients],
+    requiredRecipients: readiness.requiredRecipients,
   };
 
   if (!capability.ready && requiredRecipients.size > 0) {
@@ -186,9 +303,45 @@ export function lkgBlockedByMissingRecipients(
 ): boolean {
   const cap = parseSecretCapabilityFromJson(secretCapabilityJson);
   if (!cap) return false;
-  const required = cap.requiredRecipients ?? [];
-  if (required.length === 0) return false;
-  return required.some((r) => !identityRecipients.has(r));
+  if (cap.inputs.length === 0) {
+    // Legacy capability shape without per-input recipients.
+    const required = cap.requiredRecipients ?? [];
+    return required.some((recipient) => !identityRecipients.has(recipient));
+  }
+  return undecryptableInputs(cap, identityRecipients).length > 0;
+}
+
+/**
+ * Secret capability recorded for one generation on this node.
+ *
+ * `deployed` (the default) starts at `deployed_generation_id`. `applied`
+ * starts at `applied_generation_id`, then `deployed_generation_id` when
+ * nothing has been applied. Both then fall back to the accepted generation,
+ * then the candidate. An explicit `gitopsGenerationId` wins over that chain.
+ * Direct mutation passes `applied`, so a generation that is applied but not
+ * yet deployed still supplies its recipient list.
+ */
+export function resolveActiveCapability(args: {
+  stackName: string;
+  nodeId: number;
+  gitopsGenerationId?: string | null;
+  basis?: 'applied' | 'deployed';
+}): SecretCapability | null {
+  const store = GitOpsStore.getInstance();
+  const app = store.getLiveDirectApplication(args.stackName);
+  if (!app) return null;
+
+  const target = store.getTarget(app.id, args.nodeId);
+  const recorded = args.basis === 'applied'
+    ? target?.applied_generation_id ?? target?.deployed_generation_id
+    : target?.deployed_generation_id;
+  const generationId = args.gitopsGenerationId
+    ?? recorded
+    ?? app.accepted_generation_id
+    ?? app.candidate_generation_id;
+  if (!generationId) return null;
+
+  return parseSecretCapabilityFromJson(store.getGeneration(generationId)?.secret_capability_json ?? null);
 }
 
 /** Union of required age recipients for the generation in scope on this node. */
@@ -196,17 +349,7 @@ export function resolveActiveRequiredRecipients(args: {
   stackName: string;
   nodeId: number;
   gitopsGenerationId?: string | null;
+  basis?: 'applied' | 'deployed';
 }): string[] {
-  const store = GitOpsStore.getInstance();
-  const app = store.getLiveDirectApplication(args.stackName);
-  if (!app) return [];
-
-  const generationId = args.gitopsGenerationId
-    ?? store.getTarget(app.id, args.nodeId)?.deployed_generation_id
-    ?? app.accepted_generation_id
-    ?? app.candidate_generation_id;
-  if (!generationId) return [];
-
-  const cap = parseSecretCapabilityFromJson(store.getGeneration(generationId)?.secret_capability_json ?? null);
-  return cap?.requiredRecipients ?? [];
+  return resolveActiveCapability(args)?.requiredRecipients ?? [];
 }

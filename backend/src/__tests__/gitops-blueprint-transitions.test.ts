@@ -15,11 +15,15 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
+import { attentionReasons } from '../services/gitops/attention';
+import { postureOf } from '../services/gitops/portfolioAggregator';
 import type {
   GitOpsApplicationRow,
   GitOpsIntentRevisionRow,
+  GitOpsRevisionProjection,
   GitOpsRolloutCandidateRow,
 } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops blueprint transitions', () => {
   let tmpDir: string;
@@ -181,6 +185,470 @@ describe('gitops blueprint transitions', () => {
     target = store.getTarget('app-fail', 1)!;
     expect(target.failure_stage).toBeNull();
     expect(target.intent_revision_id).toBe('int-6');
+  });
+
+  it('retires a stale recovery failure when a later deploy is acknowledged', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-rec', 331, 1);
+    tx.intentRevised({ applicationId: 'app-ack-rec', intent: intent('int-ack-rec', 'app-ack-rec', 331), envelope: env('op-int-ack-rec') });
+    // An earlier rollout left the node's recovery failed and parked the
+    // application with it.
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-rec',
+      nodeId: 1,
+      recoveryRef: 'rb-old',
+      recoveryGenerationId: null,
+      envelope: env('op-rec-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-ack-rec',
+      nodeId: 1,
+      recoveryRef: 'rb-old',
+      failureClass: 'partial',
+      envelope: env('op-rec-fail'),
+    });
+    expect(store.getApplication('app-ack-rec')?.recovery_phase).toBe('failed');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-ack-rec',
+      nodeId: 1,
+      intentRevisionId: 'int-ack-rec',
+      rolloutCandidateId: null,
+      envelope: env('op-dep-ack-rec'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-rec',
+      nodeId: 1,
+      intentRevisionId: 'int-ack-rec',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: 2,
+      envelope: env('op-ack-rec'),
+    });
+
+    const target = store.getTarget('app-ack-rec', 1)!;
+    expect(target.recovery_phase).toBeNull();
+    expect(target.recovery_ref).toBeNull();
+    expect(target.failure_stage).toBeNull();
+    expect(target.failure_class).toBeNull();
+    // The workload is the acknowledged generation now. This is not a health
+    // claim: nothing has observed it yet.
+    expect(target.healthy_generation_id).toBeNull();
+    const app = store.getApplication('app-ack-rec')!;
+    expect(app.recovery_phase).toBeNull();
+    expect(app.failure_stage).toBeNull();
+    expect(app.failure_class).toBeNull();
+  });
+
+  it('keeps the application recovery failure while another target still reports one', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-keep', 332, 1);
+    store.upsertTarget(emptyTargetRow('app-ack-keep', 2, 1));
+    tx.intentRevised({ applicationId: 'app-ack-keep', intent: intent('int-ack-keep', 'app-ack-keep', 332), envelope: env('op-int-ack-keep') });
+    for (const nodeId of [1, 2]) {
+      tx.rollbackInProgress({
+        applicationId: 'app-ack-keep',
+        nodeId,
+        recoveryRef: 'rb-keep',
+        recoveryGenerationId: null,
+        envelope: env(`op-open-${nodeId}`),
+      });
+      tx.rollbackPartialFailed({
+        applicationId: 'app-ack-keep',
+        nodeId,
+        recoveryRef: 'rb-keep',
+        failureClass: 'partial',
+        envelope: env(`op-fail-${nodeId}`),
+      });
+    }
+    for (const nodeId of [1, 2]) {
+      tx.blueprintDeployStarted({
+        applicationId: 'app-ack-keep',
+        nodeId,
+        intentRevisionId: 'int-ack-keep',
+        rolloutCandidateId: null,
+        envelope: env(`op-dep-${nodeId}`),
+      });
+    }
+
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-keep',
+      nodeId: 1,
+      intentRevisionId: 'int-ack-keep',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: null,
+      envelope: env('op-ack-1'),
+    });
+
+    expect(store.getTarget('app-ack-keep', 1)?.failure_stage).toBeNull();
+    expect(store.getTarget('app-ack-keep', 2)?.recovery_phase).toBe('failed');
+    // One target still reports the failure, so the application keeps the hold
+    // that surfaces it.
+    expect(store.getApplication('app-ack-keep')?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-ack-keep')?.failure_stage).toBe('recovery');
+  });
+
+  it('keeps the application hold while a sibling restore is still moving', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-moving', 336, 1);
+    store.upsertTarget(emptyTargetRow('app-ack-moving', 2, 1));
+    tx.intentRevised({ applicationId: 'app-ack-moving', intent: intent('int-ack-moving', 'app-ack-moving', 336), envelope: env('op-int-ack-moving') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-moving', nodeId: 1, recoveryRef: 'rb-moving',
+      recoveryGenerationId: null, envelope: env('op-open-1'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-ack-moving', nodeId: 1, recoveryRef: 'rb-moving',
+      failureClass: 'partial', envelope: env('op-fail-1'),
+    });
+    // Node 2 is opened and never terminalised: its restore is still moving.
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-moving', nodeId: 2, recoveryRef: 'rb-moving',
+      recoveryGenerationId: null, envelope: env('op-open-2'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-ack-moving', nodeId: 1, intentRevisionId: 'int-ack-moving',
+      rolloutCandidateId: null, envelope: env('op-dep-1'),
+    });
+
+    // Node 1's acknowledgement retires its own claim. Node 2's restore is still
+    // running, so the application stamp must survive it.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-moving', nodeId: 1, intentRevisionId: 'int-ack-moving',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-ack-1'),
+    });
+
+    expect(store.getTarget('app-ack-moving', 1)?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-ack-moving', 2)?.recovery_phase).toBe('restoring');
+    expect(store.getApplication('app-ack-moving')?.recovery_phase).toBe('restoring');
+  });
+
+  it('releases the application hold when its last claimant is withdrawn', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-wd-hold', 337, 1);
+    tx.intentRevised({ applicationId: 'app-wd-hold', intent: intent('int-wd-hold', 'app-wd-hold', 337), envelope: env('op-int-wd-hold') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-wd-hold', nodeId: 1, recoveryRef: 'rb-wd-hold',
+      recoveryGenerationId: null, envelope: env('op-wd-hold-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-wd-hold', nodeId: 1, recoveryRef: 'rb-wd-hold',
+      failureClass: 'partial', envelope: env('op-wd-hold-fail'),
+    });
+    expect(store.getApplication('app-wd-hold')?.recovery_phase).toBe('failed');
+
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-wd-hold', nodeId: 1, intentRevisionId: 'int-wd-hold',
+      envelope: env('op-wd-hold-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-wd-hold', nodeId: 1, intentRevisionId: 'int-wd-hold',
+      envelope: env('op-wd-hold-done'),
+    });
+
+    // The tombstone stops answering for the hold; the claim itself stays as
+    // residue, so a later revival still knows the restore was never resolved.
+    expect(store.getApplication('app-wd-hold')?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-wd-hold', 1)?.recovery_phase).toBe('failed');
+    expect(store.getTarget('app-wd-hold', 1)?.recovery_failure_class).toBe('partial');
+  });
+
+  it('does not let a refused target pin the application after the last real failure is retired', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-mixed', 335, 1);
+    store.upsertTarget(emptyTargetRow('app-ack-mixed', 2, 1));
+    tx.intentRevised({ applicationId: 'app-ack-mixed', intent: intent('int-ack-mixed', 'app-ack-mixed', 335), envelope: env('op-int-ack-mixed') });
+
+    // Node 1 was refused before any mutation and only carries the visible
+    // marker; node 2 failed after a possible mutation and holds the app.
+    for (const [nodeId, failureClass] of [[1, 'pre_mutation'], [2, 'partial']] as const) {
+      tx.rollbackInProgress({
+        applicationId: 'app-ack-mixed',
+        nodeId,
+        recoveryRef: 'rb-mixed',
+        recoveryGenerationId: null,
+        envelope: env(`op-open-${nodeId}`),
+      });
+      tx.rollbackPartialFailed({
+        applicationId: 'app-ack-mixed',
+        nodeId,
+        recoveryRef: 'rb-mixed',
+        failureClass,
+        envelope: env(`op-fail-${nodeId}`),
+      });
+    }
+    expect(store.getApplication('app-ack-mixed')?.recovery_phase).toBe('failed');
+    for (const nodeId of [1, 2]) {
+      tx.blueprintDeployStarted({
+        applicationId: 'app-ack-mixed',
+        nodeId,
+        intentRevisionId: 'int-ack-mixed',
+        rolloutCandidateId: null,
+        envelope: env(`op-dep-${nodeId}`),
+      });
+    }
+
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-mixed',
+      nodeId: 2,
+      intentRevisionId: 'int-ack-mixed',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: null,
+      envelope: env('op-ack-mixed-2'),
+    });
+
+    // Node 1's refusal never held the application by itself, so it must not
+    // pin it once node 2's real failure is gone.
+    expect(store.getTarget('app-ack-mixed', 1)?.recovery_phase).toBe('failed');
+    expect(store.getTarget('app-ack-mixed', 1)?.failure_class).toBe('pre_mutation');
+    expect(store.getApplication('app-ack-mixed')?.recovery_phase).toBeNull();
+    expect(store.getApplication('app-ack-mixed')?.failure_stage).toBeNull();
+  });
+
+  it('keeps the application hold when the acknowledged node is itself restoring', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-self-moving', 340, 1);
+    store.upsertTarget(emptyTargetRow('app-ack-self-moving', 2, 1));
+    tx.intentRevised({ applicationId: 'app-ack-self-moving', intent: intent('int-self-moving', 'app-ack-self-moving', 340), envelope: env('op-int-self-moving') });
+
+    // Node 2 fails after a possible mutation and owns the application hold.
+    tx.rollbackPartialFailed({
+      applicationId: 'app-ack-self-moving', nodeId: 2, recoveryRef: 'rb-self-other',
+      failureClass: 'partial', envelope: env('op-self-other'),
+    });
+    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('failed');
+
+    // Node 1 is deployed, then a restore opens beside the deploy. The restore
+    // owns the application stamp while it moves.
+    tx.blueprintDeployStarted({
+      applicationId: 'app-ack-self-moving', nodeId: 1, intentRevisionId: 'int-self-moving',
+      rolloutCandidateId: null, envelope: env('op-self-deploy'),
+    });
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-self-moving', nodeId: 1, recoveryRef: 'rb-self-a',
+      recoveryGenerationId: null, envelope: env('op-self-a'),
+    });
+
+    // The acknowledgement retires the deploy's own claim, but the restore on
+    // the same row is still moving and node 2 still holds a moved claim, so the
+    // application stamp and node 2's hold must both stay.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-self-moving', nodeId: 1, intentRevisionId: 'int-self-moving',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-self-ack'),
+    });
+
+    expect(store.getTarget('app-ack-self-moving', 1)?.recovery_phase).toBe('restoring');
+    expect(store.getTarget('app-ack-self-moving', 2)?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-ack-self-moving')?.recovery_phase).toBe('restoring');
+  });
+
+  it('never rewrites a restoring row when an acknowledgement lands beside it', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-beside', 339, 1);
+    tx.intentRevised({ applicationId: 'app-ack-beside', intent: intent('int-beside', 'app-ack-beside', 339), envelope: env('op-int-beside') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-beside', nodeId: 1, recoveryRef: 'rb-beside-a',
+      recoveryGenerationId: null, envelope: env('op-beside-a'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-ack-beside', nodeId: 1, recoveryRef: 'rb-beside-a',
+      failureClass: 'pre_mutation', envelope: env('op-beside-a-terminal'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-ack-beside', nodeId: 1, intentRevisionId: 'int-beside',
+      rolloutCandidateId: null, envelope: env('op-beside-deploy'),
+    });
+    // A retry opens a restore beside the deploy.
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-beside', nodeId: 1, recoveryRef: 'rb-beside-b',
+      recoveryGenerationId: null, envelope: env('op-beside-b'),
+    });
+
+    // The acknowledgement is success evidence for the apply, but the restore
+    // beside it is still moving: its phase, ref and claim survive, and the
+    // marker goes back to it.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-beside', nodeId: 1, intentRevisionId: 'int-beside',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-beside-ack'),
+    });
+    const target = store.getTarget('app-ack-beside', 1)!;
+    expect(target.recovery_phase).toBe('restoring');
+    expect(target.recovery_ref).toBe('rb-beside-b');
+    expect(target.recovery_failure_class).toBe('pre_mutation');
+    expect(target.active_operation_stage).toBe('recovery_started');
+    expect(store.getApplication('app-ack-beside')?.recovery_phase).toBe('restoring');
+  });
+
+  it('keeps a tombstone recovery residue through a revival until the acknowledgement', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-revive-residue', 338, 1);
+    tx.intentRevised({ applicationId: 'app-revive-residue', intent: intent('int-res', 'app-revive-residue', 338), envelope: env('op-int-res') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-revive-residue', nodeId: 1, recoveryRef: 'rb-res',
+      recoveryGenerationId: null, envelope: env('op-res-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-revive-residue', nodeId: 1, recoveryRef: 'rb-res',
+      failureClass: 'partial', envelope: env('op-res-fail'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-revive-residue', nodeId: 1, intentRevisionId: 'int-res',
+      envelope: env('op-res-wd-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-revive-residue', nodeId: 1, intentRevisionId: 'int-res',
+      envelope: env('op-res-wd-done'),
+    });
+    expect(store.getTarget('app-revive-residue', 1)?.target_status).toBe('tombstoned');
+
+    // The revival is a placement, not evidence the abandoned restore resolved.
+    tx.blueprintDeployStarted({
+      applicationId: 'app-revive-residue', nodeId: 1, intentRevisionId: 'int-res',
+      rolloutCandidateId: null, envelope: env('op-res-revive'),
+    });
+    expect(store.getTarget('app-revive-residue', 1)?.target_status).toBe('active');
+    expect(store.getTarget('app-revive-residue', 1)?.recovery_phase).toBe('failed');
+    expect(store.getTarget('app-revive-residue', 1)?.recovery_failure_class).toBe('partial');
+    // The revived row answers for the hold again, so the application holds with
+    // it instead of reporting a failure no surface owns.
+    expect(store.getApplication('app-revive-residue')?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-revive-residue')?.failure_stage).toBe('recovery');
+
+    // The acknowledgement for the new placement is the evidence that retires it.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-revive-residue', nodeId: 1, intentRevisionId: 'int-res',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-res-ack'),
+    });
+    expect(store.getTarget('app-revive-residue', 1)?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-revive-residue', 1)?.recovery_failure_class).toBeNull();
+  });
+
+  it('re-derives the application hold when a state-review observation revives a residue', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-obs-revive', 341, 1);
+    tx.intentRevised({ applicationId: 'app-obs-revive', intent: intent('int-obs-revive', 'app-obs-revive', 341), envelope: env('op-int-obs-revive') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-obs-revive', nodeId: 1, recoveryRef: 'rb-obs-revive',
+      recoveryGenerationId: null, envelope: env('op-obs-revive-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-obs-revive', nodeId: 1, recoveryRef: 'rb-obs-revive',
+      failureClass: 'partial', envelope: env('op-obs-revive-fail'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-obs-revive', nodeId: 1, intentRevisionId: 'int-obs-revive',
+      envelope: env('op-obs-revive-wd-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-obs-revive', nodeId: 1, intentRevisionId: 'int-obs-revive',
+      envelope: env('op-obs-revive-wd-done'),
+    });
+    expect(store.getApplication('app-obs-revive')?.recovery_phase).toBeNull();
+
+    // The state-review observation revives the placement. Both revival paths
+    // share one helper, so the hold comes back here exactly as it does for a
+    // deploy start.
+    tx.blueprintObservation({
+      applicationId: 'app-obs-revive', nodeId: 1, stage: 'blueprint_state_review',
+      envelope: env('op-obs-revive-revive'),
+    });
+
+    expect(store.getTarget('app-obs-revive', 1)?.target_status).toBe('active');
+    expect(store.getTarget('app-obs-revive', 1)?.recovery_failure_class).toBe('partial');
+    expect(store.getApplication('app-obs-revive')?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-obs-revive')?.failure_stage).toBe('recovery');
+  });
+
+  it('retires a non-moving residue on revival instead of masking the placement', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-obs-pre', 342, 1);
+    tx.intentRevised({ applicationId: 'app-obs-pre', intent: intent('int-obs-pre', 'app-obs-pre', 342), envelope: env('op-int-obs-pre') });
+
+    tx.rollbackInProgress({
+      applicationId: 'app-obs-pre', nodeId: 1, recoveryRef: 'rb-obs-pre',
+      recoveryGenerationId: null, envelope: env('op-obs-pre-open'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-obs-pre', nodeId: 1, recoveryRef: 'rb-obs-pre',
+      failureClass: 'pre_mutation', envelope: env('op-obs-pre-fail'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-obs-pre', nodeId: 1, intentRevisionId: 'int-obs-pre',
+      envelope: env('op-obs-pre-wd-start'),
+    });
+    tx.blueprintWithdrawn({
+      applicationId: 'app-obs-pre', nodeId: 1, intentRevisionId: 'int-obs-pre',
+      envelope: env('op-obs-pre-wd-done'),
+    });
+
+    tx.blueprintObservation({
+      applicationId: 'app-obs-pre', nodeId: 1, stage: 'blueprint_state_review',
+      envelope: env('op-obs-pre-revive'),
+    });
+
+    // A refusal that moved nothing holds nothing and would otherwise mask the
+    // placement's own status through the redeploy, so it is retired.
+    expect(store.getTarget('app-obs-pre', 1)?.recovery_phase).toBeNull();
+    expect(store.getTarget('app-obs-pre', 1)?.recovery_failure_class).toBeNull();
+    expect(store.getApplication('app-obs-pre')?.recovery_phase).toBeNull();
+  });
+
+  it('does not retire a recovery failure on an acknowledgement for a superseded intent', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-ack-sup', 334, 1);
+    tx.intentRevised({ applicationId: 'app-ack-sup', intent: intent('int-sup-1', 'app-ack-sup', 334), envelope: env('op-int-sup-1') });
+    tx.rollbackInProgress({
+      applicationId: 'app-ack-sup',
+      nodeId: 1,
+      recoveryRef: 'rb-sup',
+      recoveryGenerationId: null,
+      envelope: env('op-open-sup'),
+    });
+    tx.rollbackPartialFailed({
+      applicationId: 'app-ack-sup',
+      nodeId: 1,
+      recoveryRef: 'rb-sup',
+      failureClass: 'partial',
+      envelope: env('op-fail-sup'),
+    });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-ack-sup',
+      nodeId: 1,
+      intentRevisionId: 'int-sup-1',
+      rolloutCandidateId: null,
+      envelope: env('op-dep-sup'),
+    });
+    tx.intentRevised({ applicationId: 'app-ack-sup', intent: intent('int-sup-2', 'app-ack-sup', 334), envelope: env('op-int-sup-2') });
+
+    tx.blueprintAckRecorded({
+      applicationId: 'app-ack-sup',
+      nodeId: 1,
+      intentRevisionId: 'int-sup-1',
+      rolloutCandidateId: null,
+      legacyAppliedRevision: null,
+      envelope: env('op-ack-sup'),
+    });
+
+    // The ack is real evidence the apply landed, but it names the generation
+    // the application has left; it must not retire a failure about the state
+    // this target still reports.
+    expect(store.getTarget('app-ack-sup', 1)?.recovery_phase).toBe('failed');
+    expect(store.getApplication('app-ack-sup')?.recovery_phase).toBe('failed');
   });
 
   it('withdraws against the intent being removed, not a later one', () => {
@@ -512,6 +980,178 @@ describe('gitops blueprint transitions', () => {
     expect(runtimeStatusOf('app-failfirst')).toBe('failed_after_mutation');
   });
 
+  it('projects a Blueprint deploy and withdrawal in flight as work in progress', () => {
+    // Both stages share the `active_operation_stage` column with the Direct
+    // deploy. Read against the Direct value alone they fell through to the
+    // applied and deployed pointers, so a rollout under way read as whatever
+    // the node last converged on.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-live', 212, 1);
+    tx.intentRevised({ applicationId: 'app-live', intent: intent('int-live', 'app-live', 212), envelope: env('op-int-live') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live',
+      rolloutCandidateId: null, envelope: env('op-live'),
+    });
+    expect(runtimeStatusOf('app-live')).toBe('deploying');
+
+    // A withdrawal cannot start on top of an in-flight deploy, so the node is
+    // acknowledged first, which is the sequence a real rollout follows.
+    tx.blueprintAckRecorded({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-live-ack'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-live', nodeId: 1, intentRevisionId: 'int-live', envelope: env('op-live-wd'),
+    });
+    // Nothing else in the codebase produces this status.
+    expect(runtimeStatusOf('app-live')).toBe('withdrawing');
+  });
+
+  it('does not let an observation mask an operation that is running now', () => {
+    // The same ordering claim as the Direct failure above, on the other side of
+    // it: a start supersedes the observation it replaces, so a stale drift
+    // report must not read through the operation that is under way.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-liveobs', 213, 1);
+    tx.intentRevised({ applicationId: 'app-liveobs', intent: intent('int-liveobs', 'app-liveobs', 213), envelope: env('op-int-liveobs') });
+    tx.blueprintObservation({
+      applicationId: 'app-liveobs', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-liveobs-obs'),
+    });
+    expect(runtimeStatusOf('app-liveobs')).toBe('drifted');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-liveobs', nodeId: 1, intentRevisionId: 'int-liveobs',
+      rolloutCandidateId: null, envelope: env('op-liveobs-dep'),
+    });
+    expect(runtimeStatusOf('app-liveobs')).toBe('deploying');
+  });
+
+  it.each([
+    { stage: 'deploy', class: 'post_mutation', expected: 'failed_after_mutation', blueprintId: 214 },
+    { stage: 'deploy', class: 'name_conflict', expected: 'failed_previous_workload_intact', blueprintId: 215 },
+    { stage: 'deploy', class: 'pre_mutation', expected: 'failed_previous_workload_intact', blueprintId: 216 },
+    { stage: 'deploy', class: 'deploy_failed', expected: 'failed_after_mutation', blueprintId: 219 },
+    { stage: 'deploy', class: 'target_missing', expected: 'failed_previous_workload_intact', blueprintId: 224 },
+    { stage: 'withdraw', class: 'post_mutation', expected: 'failed_after_mutation', blueprintId: 217 },
+    { stage: 'withdraw', class: 'name_conflict', expected: 'failed_previous_workload_intact', blueprintId: 218 },
+  ] as const)('projects a failed Blueprint $stage ($class) as a failure', ({ stage, class: failureClass, expected, blueprintId }) => {
+    // A recorded Blueprint failure that projects as a pointer state is the
+    // sharpest edge of the gap: a failure status is what the attention
+    // classifier keys on, so a failure that missed it reached no queue at all.
+    // The two classes written only by this path carry the whole argument:
+    // `name_conflict` and `target_missing` both refuse before the node is
+    // touched, and read against the Direct vocabulary they matched neither arm.
+    // `deploy_failed` is the opposite: it is recorded for anything that went
+    // wrong once the Compose apply was handed over, so it has to read as
+    // mutated, or a half-replaced workload reports as intact.
+    const tx = GitOpsTransitions.getInstance();
+    // One live application per Blueprint, so each case names its own.
+    const id = `app-bp-${blueprintId}`;
+    seedInline(id, blueprintId, 1);
+    tx.intentRevised({ applicationId: id, intent: intent(`int-${id}`, id, blueprintId), envelope: env(`op-int-${id}`) });
+    if (stage === 'deploy') {
+      tx.blueprintDeployStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, envelope: env(`op-${id}`),
+      });
+      tx.blueprintDeployFailed({
+        applicationId: id, nodeId: 1, failureClass, envelope: env(`op-${id}`),
+      });
+    } else {
+      // A withdrawal answers an acknowledged deployment, so the node is
+      // acknowledged first.
+      tx.blueprintDeployStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, envelope: env(`op-${id}`),
+      });
+      tx.blueprintAckRecorded({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`,
+        rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env(`op-${id}-ack`),
+      });
+      tx.blueprintWithdrawStarted({
+        applicationId: id, nodeId: 1, intentRevisionId: `int-${id}`, envelope: env(`op-${id}-wd`),
+      });
+      tx.blueprintWithdrawFailed({
+        applicationId: id, nodeId: 1, failureClass, envelope: env(`op-${id}-wd`),
+      });
+    }
+
+    expect(runtimeStatusOf(id)).toBe(expected);
+    // The operator-visible half: a recorded failure has to reach the queue.
+    expect(attentionReasons(mustProject(id))).toContain('deploy_failed');
+  });
+
+  it('does not let an observation mask a failure a Blueprint deploy recorded', () => {
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-bpfailfirst', 221, 1);
+    tx.intentRevised({ applicationId: 'app-bpfailfirst', intent: intent('int-bpfailfirst', 'app-bpfailfirst', 221), envelope: env('op-int-bpfailfirst') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-bpfailfirst', nodeId: 1, intentRevisionId: 'int-bpfailfirst',
+      rolloutCandidateId: null, envelope: env('op-bpfailfirst'),
+    });
+    tx.blueprintDeployFailed({
+      applicationId: 'app-bpfailfirst', nodeId: 1, failureClass: 'post_mutation', envelope: env('op-bpfailfirst'),
+    });
+    tx.blueprintObservation({
+      applicationId: 'app-bpfailfirst', nodeId: 1, stage: 'blueprint_drifted', envelope: env('op-bpfailfirst-obs'),
+    });
+
+    expect(runtimeStatusOf('app-bpfailfirst')).toBe('failed_after_mutation');
+    expect(attentionReasons(mustProject('app-bpfailfirst'))).toContain('deploy_failed');
+  });
+
+  it('reads a Blueprint target mid-deploy as in progress in the portfolio', () => {
+    // The in-flight classification keys on `deploying` and `withdrawing`, so a
+    // Blueprint rollout under way was neither in progress nor failed: the
+    // portfolio reported the fleet as settled while it was still rolling out.
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-posture', 222, 1);
+    tx.intentRevised({ applicationId: 'app-posture', intent: intent('int-posture', 'app-posture', 222), envelope: env('op-int-posture') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-posture', nodeId: 1, intentRevisionId: 'int-posture',
+      rolloutCandidateId: null, envelope: env('op-posture'),
+    });
+
+    expect(postureOf(mustProject('app-posture'))).toBe('in_progress');
+  });
+
+  it('retires a recorded withdrawal failure once the node converges again', () => {
+    // The reconciler retries a node it could not withdraw by deploying it, so
+    // clearing only a deploy failure would leave a target that has since
+    // converged reporting its old withdrawal as a standing failure for ever.
+    const tx = GitOpsTransitions.getInstance();
+    const store = GitOpsStore.getInstance();
+    seedInline('app-wdfail', 223, 1);
+    tx.intentRevised({ applicationId: 'app-wdfail', intent: intent('int-wdfail', 'app-wdfail', 223), envelope: env('op-int-wdfail') });
+    tx.blueprintDeployStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, envelope: env('op-wdfail'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-wdfail-ack'),
+    });
+    tx.blueprintWithdrawStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail', envelope: env('op-wdfail-wd'),
+    });
+    tx.blueprintWithdrawFailed({
+      applicationId: 'app-wdfail', nodeId: 1, failureClass: 'post_mutation', envelope: env('op-wdfail-wd'),
+    });
+    expect(store.getTarget('app-wdfail', 1)!.failure_stage).toBe('blueprint_withdraw');
+
+    tx.blueprintDeployStarted({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, envelope: env('op-wdfail-again'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: 'app-wdfail', nodeId: 1, intentRevisionId: 'int-wdfail',
+      rolloutCandidateId: null, legacyAppliedRevision: null, envelope: env('op-wdfail-again-ack'),
+    });
+
+    expect(store.getTarget('app-wdfail', 1)!.failure_stage).toBeNull();
+    expect(attentionReasons(mustProject('app-wdfail'))).not.toContain('deploy_failed');
+  });
+
   it('freezes an Inline revision once: mints generation and set, binds null targets, then no-ops', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -567,7 +1207,7 @@ describe('gitops blueprint transitions', () => {
     expect(store.getGeneration('gen-freeze-2')).toBeUndefined();
   });
 
-  it('clears Inline freeze pointers on a new intent so the next deploy can re-freeze', () => {
+  it('clears Inline freeze pointers on a compose change so the next deploy can re-freeze', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
     seedInline('app-freeze-revise', 322, 1);
@@ -602,7 +1242,7 @@ describe('gitops blueprint transitions', () => {
 
     tx.intentRevised({
       applicationId: 'app-freeze-revise',
-      intent: intent('int-freeze-r2', 'app-freeze-revise', 322),
+      intent: intent('int-freeze-r2', 'app-freeze-revise', 322, 'd'.repeat(64)),
       envelope: env('op-int-r2'),
     });
     const cleared = store.getApplication('app-freeze-revise')!;
@@ -619,6 +1259,157 @@ describe('gitops blueprint transitions', () => {
     expect(again.replayed).toBe(false);
     expect(store.getApplication('app-freeze-revise')?.accepted_generation_id).toBe('gen-freeze-r2');
     expect(store.getApplication('app-freeze-revise')?.artifact_set_id).toBe('art-freeze-r2');
+  });
+
+  it('keeps the Inline freeze across a roster change, so a retained target keeps the generation it runs', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedInline('app-freeze-roster', 323, 1);
+    tx.intentRevised({
+      applicationId: 'app-freeze-roster',
+      intent: intent('int-roster-r1', 'app-freeze-roster', 323),
+      envelope: env('op-int-roster-1'),
+    });
+    deployAndFreezeInline('app-freeze-roster', 1, 'int-roster-r1', 'gen-roster-1', 'c'.repeat(64));
+    const frozen = store.getTarget('app-freeze-roster', 1)!;
+    expect(frozen.applied_generation_id).toBeNull();
+    expect(frozen.desired_generation_id).toBe('gen-roster-1');
+
+    // A label change: a new intent and candidate over the same compose. Nothing
+    // about the materialization moved, so the expectation must not either.
+    tx.intentRevised({
+      applicationId: 'app-freeze-roster',
+      // Same compose digest, different selector: a roster change, not an edit.
+      intent: { ...intent('int-roster-r2', 'app-freeze-roster', 323), selector_json: '{"labels":{"qa-g":[]}}' },
+      envelope: env('op-int-roster-2'),
+    });
+    const kept = store.getApplication('app-freeze-roster')!;
+    expect(kept.accepted_generation_id).toBe('gen-roster-1');
+    expect(store.getArtifactSet('art-gen-roster-1')?.generation_id).toBe('gen-roster-1');
+    expect(store.getTarget('app-freeze-roster', 1)?.expected_artifact_set_id).toBe('art-gen-roster-1');
+    expect(store.getTarget('app-freeze-roster', 1)?.desired_generation_id).toBe('gen-roster-1');
+
+    // And the deploy the roster change triggers re-resolves that same freeze
+    // instead of minting a second generation for the same compose.
+    const replay = tx.inlineRevisionFrozen({
+      applicationId: 'app-freeze-roster',
+      generation: inlineGeneration('gen-roster-2', 'app-freeze-roster', 'c'.repeat(64)),
+      artifactSetId: 'art-roster-2',
+      envelope: env('op-freeze-roster-2'),
+    });
+    expect(replay.replayed).toBe(true);
+    expect(store.getApplication('app-freeze-roster')?.accepted_generation_id).toBe('gen-roster-1');
+  });
+
+  it('leaves a retained Blueprint target converged after a policy placed a node for a roster change', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-place';
+    seedInline(app, 324, 1);
+    // One operator Apply across two nodes, the order a real apply runs in. The
+    // second deploy lands after the freeze, so its target carries an applied
+    // generation and the identity test below has something to read.
+    tx.intentRevised({ applicationId: app, intent: intent('int-place-r1', app, 324), envelope: env('op-int-place-1') });
+    deployAndFreezeInline(app, 1, 'int-place-r1', 'gen-place-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-place-r1', 'gen-place-2', 'c'.repeat(64));
+    const placed = store.getTarget(app, 2)!;
+    expect(placed.applied_generation_id).not.toBeNull();
+    const accepted = store.getApplication(app)!.accepted_generation_id!;
+    expect(placed.applied_generation_id).toBe(accepted);
+
+    // The roster change, then the placement the policy approved for it.
+    tx.intentRevised({ applicationId: app, intent: intent('int-place-r2', app, 324), envelope: env('op-int-place-2') });
+    tx.rolloutCandidateOpened({
+      applicationId: app,
+      // The candidate is what the selector now resolves to: the retained nodes
+      // and the one the policy is about to place.
+      candidate: { ...candidate('cand-place-r2', app, 'int-place-r2'), required_targets_json: '{"nodeIds":[1,2,3]}' },
+      envelope: env('op-cand-place-2'),
+    });
+    store.upsertTarget(emptyTargetRow(app, 3, 1));
+    tx.blueprintDeployStarted({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-place-r2', rolloutCandidateId: 'cand-place-r2',
+      envelope: env('op-dep-place-3'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-place-r2', rolloutCandidateId: 'cand-place-r2',
+      legacyAppliedRevision: 1, envelope: env('op-ack-place-3'),
+    });
+
+    const projection = mustProject(app);
+    expect(attentionReasons(projection)).not.toContain('rollout_stale_acknowledgement');
+    expect(projection.drift).toEqual([]);
+    const retained = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(retained.runtime.status).not.toBe('stale_acknowledgement');
+    expect(retained.appliedGenerationId).toBe(retained.desiredGenerationId);
+  });
+
+  it('still reads a node the candidate dropped as superseded, so a pending withdrawal keeps its signal', () => {
+    // The other half of the roster rule. Same compose, same acknowledgement, but
+    // the candidate no longer requires this node: it is running something nothing
+    // asks for, and the plan is asking for the withdrawal. Reading that as
+    // converged would leave the removal path with no signal at all.
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-drop';
+    seedInline(app, 326, 1);
+    tx.intentRevised({ applicationId: app, intent: intent('int-drop-r1', app, 326), envelope: env('op-int-drop-1') });
+    deployAndFreezeInline(app, 1, 'int-drop-r1', 'gen-drop-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-drop-r1', 'gen-drop-2', 'c'.repeat(64));
+
+    // The roster shrank: node 2 is no longer wanted, and the compose did not move.
+    tx.intentRevised({ applicationId: app, intent: intent('int-drop-r2', app, 326), envelope: env('op-int-drop-2') });
+    tx.rolloutCandidateOpened({
+      applicationId: app,
+      candidate: { ...candidate('cand-drop-r2', app, 'int-drop-r2'), required_targets_json: '{"nodeIds":[1]}' },
+      envelope: env('op-cand-drop-2'),
+    });
+
+    const projection = mustProject(app);
+    const dropped = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(dropped.runtime.status).toBe('stale_acknowledgement');
+    expect(attentionReasons(projection)).toContain('rollout_stale_acknowledgement');
+  });
+
+  it('still reads a retained Blueprint target as stale when the compose it ran has been edited', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    const app = 'app-roster-compose';
+    seedInline(app, 325, 1);
+    tx.intentRevised({ applicationId: app, intent: intent('int-compose-r1', app, 325), envelope: env('op-int-compose-1') });
+    deployAndFreezeInline(app, 1, 'int-compose-r1', 'gen-compose-1', 'c'.repeat(64));
+    deployAndFreezeInline(app, 2, 'int-compose-r1', 'gen-compose-2', 'c'.repeat(64));
+
+    // A compose edit changes the content, so the freeze is dropped and the
+    // retained node really is running something the application has left. The
+    // roster fix must not paper over that.
+    tx.intentRevised({
+      applicationId: app,
+      intent: intent('int-compose-r2', app, 325, 'd'.repeat(64)),
+      envelope: env('op-int-compose-2'),
+    });
+    store.upsertTarget(emptyTargetRow(app, 3, 1));
+    tx.blueprintDeployStarted({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-compose-r2', rolloutCandidateId: null,
+      envelope: env('op-dep-compose-3'),
+    });
+    tx.blueprintAckRecorded({
+      applicationId: app, nodeId: 3, intentRevisionId: 'int-compose-r2', rolloutCandidateId: null,
+      legacyAppliedRevision: 2, envelope: env('op-ack-compose-3'),
+    });
+    tx.inlineRevisionFrozen({
+      applicationId: app,
+      generation: inlineGeneration('gen-compose-3', app, 'd'.repeat(64)),
+      artifactSetId: 'art-compose-3',
+      envelope: env('op-freeze-compose-3'),
+    });
+
+    const projection = mustProject(app);
+    const retained = projection.targets.find((t) => t.nodeId === 2)!;
+    expect(retained.runtime.status).toBe('stale_acknowledgement');
+    expect(attentionReasons(projection)).toContain('rollout_stale_acknowledgement');
+    expect(projection.drift.map((item) => item.reason)).toContain(
+      'the target is running a different generation than the one it was asked to run',
+    );
   });
 
   it('refuses an Inline freeze whose artifact set does not belong to the generation', () => {
@@ -689,9 +1480,13 @@ function inlineGeneration(
 }
 
 function runtimeStatusOf(applicationId: string): string | undefined {
+  return mustProject(applicationId).targets[0]?.runtime.status;
+}
+
+function mustProject(applicationId: string): Extract<GitOpsRevisionProjection, { applicationId: string }> {
   const projection = projectApplication(applicationId, false);
   if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-  return projection.targets[0]?.runtime.status;
+  return projection;
 }
 
 function seedInline(applicationId: string, blueprintId: number, nodeId?: number): void {
@@ -706,12 +1501,63 @@ function env(operationId: string): EventEnvelope {
   return { operationId, actor: 'tester', trigger: 'manual', at: Date.now() };
 }
 
-function intent(id: string, applicationId: string, blueprintId: number): GitOpsIntentRevisionRow {
+/**
+ * One real deploy, acknowledgement and Inline freeze, the sequence the
+ * deployment producer runs for a node the Blueprint placed.
+ *
+ * The order matters and is the point of the helper: the acknowledgement reads
+ * the application's accepted generation before the freeze mints one, so the
+ * first node of an Apply acknowledges against a null pointer and the second
+ * against the generation the first one froze. That is the shape a fleet is in
+ * whenever more than one node was ever placed in one pass.
+ */
+function deployAndFreezeInline(
+  applicationId: string,
+  nodeId: number,
+  intentRevisionId: string,
+  generationId: string,
+  composeContentSha256: string,
+  rolloutCandidateId: string | null = null,
+): void {
+  const store = GitOpsStore.getInstance();
+  const tx = GitOpsTransitions.getInstance();
+  if (!store.getTarget(applicationId, nodeId)) {
+    store.upsertTarget(emptyTargetRow(applicationId, nodeId, 1));
+  }
+  tx.blueprintDeployStarted({
+    applicationId,
+    nodeId,
+    intentRevisionId,
+    rolloutCandidateId,
+    envelope: env(`op-dep-${generationId}-${nodeId}`),
+  });
+  tx.blueprintAckRecorded({
+    applicationId,
+    nodeId,
+    intentRevisionId,
+    rolloutCandidateId,
+    legacyAppliedRevision: 1,
+    envelope: env(`op-ack-${generationId}-${nodeId}`),
+  });
+  tx.inlineRevisionFrozen({
+    applicationId,
+    generation: inlineGeneration(generationId, applicationId, composeContentSha256),
+    artifactSetId: `art-${generationId}`,
+    envelope: env(`op-freeze-${generationId}`),
+  });
+}
+
+function intent(
+  id: string,
+  applicationId: string,
+  blueprintId: number,
+  composeContentSha256 = 'c'.repeat(64),
+): GitOpsIntentRevisionRow {
   return {
     id,
     application_id: applicationId,
     blueprint_id: blueprintId,
-    compose_content_sha256: 'c'.repeat(64),
+    compose_content_sha256: composeContentSha256,
     blueprint_revision: 1,
     deploy_stack_name: 'bp-stack',
     selector_json: '{"nodeIds":[1]}',
@@ -786,8 +1632,13 @@ function inlineApp(id: string, blueprintId: number): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

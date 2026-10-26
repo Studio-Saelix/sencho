@@ -79,6 +79,7 @@ const APPEARANCE_DOC = {
   reducedEffects: true, reducedMotion: true, readability: false,
   sidebarMode: 'fixed', sidebarWidth: 256,
   anatomyMode: 'fixed', anatomyWidth: 640,
+  fleetTabLayout: 'flat',
 };
 
 const NAVIGATION_DOC = {

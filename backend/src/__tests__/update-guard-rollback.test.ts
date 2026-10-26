@@ -20,6 +20,10 @@ vi.mock('../services/NodeRegistry', () => ({
 import {
   aggregateRollbackOverall,
   buildRollbackItems,
+  describeManagedInputs,
+  describeRollbackManagedInputs,
+  describeStoredManagedInputs,
+  storedComposeCoverage,
   type RollbackInputs,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe } from '../services/updateGuard/types';
@@ -46,7 +50,249 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
 const itemById = (inputs: RollbackInputs, id: string) =>
   buildRollbackItems(inputs, NOW).find(i => i.id === id)!;
 
+describe('describeManagedInputs', () => {
+  const entries = [{
+    relativePath: 'compose.yaml',
+    dependencyKind: 'compose-root' as const,
+    provenance: 'authored' as const,
+    sensitivity: 'low' as const,
+    absolutePath: '/x/compose.yaml',
+  }];
+
+  it('reads as covered when nothing is left out', () => {
+    expect(describeManagedInputs({ coverageRefusal: null, uncapturedInputs: [], entries })).toEqual({
+      covered: true,
+      detail: 'Exact authored-project coverage includes 1 managed path(s).',
+    });
+  });
+
+  it('names a refused capture by its reason alone, even when notes are present', () => {
+    expect(describeManagedInputs({
+      coverageRefusal: 'Case-colliding managed paths "A" and "a"',
+      uncapturedInputs: ['ignored'],
+      entries,
+    })).toEqual({ covered: false, detail: 'Case-colliding managed paths "A" and "a"' });
+  });
+
+  it('lists what a partial capture leaves out and says a rollback uses the current content', () => {
+    const result = describeManagedInputs({
+      coverageRefusal: null,
+      uncapturedInputs: ['include ../shared/base.yaml is outside the stack directory and is not captured'],
+      entries,
+    });
+    expect(result.covered).toBe(false);
+    expect(result.detail).toBe(
+      '1 input(s) are not captured and a rollback uses their current content: include ../shared/base.yaml is outside the stack directory and is not captured.',
+    );
+  });
+
+  it('caps a long list and counts the rest', () => {
+    const uncapturedInputs = Array.from({ length: 8 }, (_, i) => `n${i}`);
+    const result = describeManagedInputs({ coverageRefusal: null, uncapturedInputs, entries });
+    expect(result.detail).toContain('8 input(s) are not captured');
+    expect(result.detail).toContain('n0; n1; n2; n3; n4; and 3 more.');
+    expect(result.detail).not.toContain('n5');
+  });
+});
+
+describe('describeStoredManagedInputs', () => {
+  const entry = (relativePath: string) => ({
+    relativePath,
+    dependencyKind: 'compose-root' as const,
+    provenance: 'authored' as const,
+    state: 'present' as const,
+    contentSha256: 'x',
+    sizeBytes: 1,
+    sensitivity: 'low' as const,
+    encrypted: false,
+    mode: null,
+  });
+  const entries = [entry('compose.yaml'), entry('.env')];
+
+  it('reads a generation with no omissions as holding its own entries', () => {
+    expect(describeStoredManagedInputs({ entries, uncapturedInputs: [] })).toEqual({
+      covered: true,
+      detail: 'This recovery generation holds 2 managed path(s).',
+    });
+  });
+
+  it('treats a generation written before omissions were recorded as having none', () => {
+    expect(describeStoredManagedInputs({ entries }).covered).toBe(true);
+  });
+
+  it('lists what the stored generation left out, with the same cap as the live read', () => {
+    const uncapturedInputs = Array.from({ length: 7 }, (_, i) => `n${i}`);
+    const result = describeStoredManagedInputs({ entries, uncapturedInputs });
+    expect(result.covered).toBe(false);
+    expect(result.detail).toContain('7 input(s) are not captured');
+    expect(result.detail).toContain('n0; n1; n2; n3; n4; and 2 more.');
+  });
+});
+
+describe('describeRollbackManagedInputs', () => {
+  const entry = (relativePath: string, state: 'present' | 'tombstoned' = 'present') => ({
+    relativePath,
+    dependencyKind: 'compose-root' as const,
+    provenance: 'authored' as const,
+    state,
+    contentSha256: 'x',
+    sizeBytes: 1,
+    sensitivity: 'low' as const,
+    encrypted: false,
+    mode: null,
+  });
+  const liveOk = { coverageRefusal: null, uncapturedInputs: [], entries: [] };
+
+  it('counts only the paths a generation actually holds', () => {
+    const stored = { entries: [entry('compose.yaml'), entry('gone.env', 'tombstoned')], uncapturedInputs: [] };
+    expect(describeRollbackManagedInputs({ coverage: 'complete', stored, live: liveOk })).toEqual({
+      covered: true,
+      detail: 'This recovery generation holds 1 managed path(s).',
+    });
+  });
+
+  it('describes the live project when no generation is current', () => {
+    expect(describeRollbackManagedInputs({ coverage: null, stored: null, live: liveOk }))
+      .toEqual(describeManagedInputs(liveOk));
+    expect(describeRollbackManagedInputs({ coverage: null, stored: null, live: 'error' })).toBe('error');
+  });
+
+  it('describes a stored generation that omits inputs from itself, whatever the live project says', () => {
+    const stored = { entries: [entry('compose.yaml')], uncapturedInputs: ['include ../x.yaml is outside the stack directory and is not captured'] };
+    const result = describeRollbackManagedInputs({ coverage: 'omits_inputs', stored, live: liveOk });
+    expect(result).toEqual({
+      covered: false,
+      detail: '1 input(s) are not captured and a rollback uses their current content: include ../x.yaml is outside the stack directory and is not captured.',
+    });
+  });
+
+  it('adds that the next capture would be refused without hiding the stored coverage', () => {
+    const stored = { entries: [entry('compose.yaml')], uncapturedInputs: [] };
+    const live = { coverageRefusal: 'Included compose file missing.yaml is unreadable', uncapturedInputs: [], entries: [] };
+    expect(describeRollbackManagedInputs({ coverage: 'complete', stored, live })).toEqual({
+      covered: false,
+      detail: 'This recovery generation holds 1 managed path(s). The next capture would be refused: Included compose file missing.yaml is unreadable.',
+    });
+  });
+
+  it('keeps the stored description when the live read fails', () => {
+    const stored = { entries: [entry('compose.yaml')], uncapturedInputs: [] };
+    expect(describeRollbackManagedInputs({ coverage: 'complete', stored, live: 'error' }))
+      .toEqual({ covered: true, detail: 'This recovery generation holds 1 managed path(s).' });
+  });
+
+  it('is unknown for an unreadable generation and describes the live project when coverage was not recorded', () => {
+    expect(describeRollbackManagedInputs({ coverage: 'unreadable', stored: null, live: liveOk })).toBe('error');
+    expect(describeRollbackManagedInputs({ coverage: 'not_recorded', stored: null, live: 'error' })).toBe('error');
+  });
+
+  it('never reports a generation that recorded nothing as covered, even when the live project is clean', () => {
+    expect(describeRollbackManagedInputs({ coverage: 'not_recorded', stored: null, live: liveOk })).toEqual({
+      covered: false,
+      detail: 'What the current recovery generation holds was not recorded.',
+    });
+    const live = { coverageRefusal: null, uncapturedInputs: ['n0'], entries: [] };
+    expect(describeRollbackManagedInputs({ coverage: 'not_recorded', stored: null, live })).toEqual({
+      covered: false,
+      detail: '1 input(s) are not captured and a rollback uses their current content: n0. What the current recovery generation holds was not recorded.',
+    });
+  });
+});
+
+describe('storedComposeCoverage', () => {
+  const manifest = (composeLayers: string[] | undefined, entries: Array<[string, 'present' | 'tombstoned']>) => ({
+    entries: entries.map(([relativePath, state]) => ({ relativePath, state })),
+    invocation: { composeLayers },
+  }) as unknown as Parameters<typeof storedComposeCoverage>[0];
+
+  it('is held when the generation holds every selected layer', () => {
+    expect(storedComposeCoverage(manifest(
+      ['compose.yaml', 'prod.yaml'],
+      [['compose.yaml', 'present'], ['prod.yaml', 'present']],
+    ))).toBe('held');
+  });
+
+  it('is current_content when a selected layer was deliberately omitted', () => {
+    // A shared main file is selected and pinned but its bytes stay with the
+    // shared target, so the generation only has whatever is there at restore.
+    expect(storedComposeCoverage(manifest(
+      ['compose.yaml'],
+      [['compose.yaml', 'tombstoned']],
+    ))).toBe('current_content');
+  });
+
+  it('is not_recorded when the generation stored no layer set', () => {
+    expect(storedComposeCoverage(manifest(undefined, [['compose.yaml', 'present']]))).toBe('not_recorded');
+    expect(storedComposeCoverage(manifest([], [['compose.yaml', 'present']]))).toBe('not_recorded');
+  });
+});
+
 describe('buildRollbackItems', () => {
+  it.each([
+    ['complete', /^Current recovery generation abc123 is available for exact restore\.$/],
+    ['omits_inputs', /does not hold every input, so a restore is partial/],
+    ['unreadable', /exists, but what it holds could not be read/],
+    ['not_recorded', /^Current recovery generation abc123 is available\. What it holds was not recorded\.$/],
+  ] as const)('words the recovery generation row for %s stored coverage', (restoreCoverage, pattern) => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage },
+    }), 'recovery_generation');
+    expect(item.state).toBe('ready');
+    expect(item.detail).toMatch(pattern);
+  });
+
+  it.each(['omits_inputs', 'unreadable', 'not_recorded'] as const)('makes no exact-restore claim for %s coverage', (restoreCoverage) => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage },
+    }), 'recovery_generation');
+    expect(item.detail).not.toMatch(/exact restore/i);
+  });
+
+  it('does not call the compose files covered when the current generation cannot be read', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'unreadable' },
+    }), 'compose_source');
+    expect(item.state).toBe('unknown');
+  });
+
+  it('names the compose files in the stack directory, not every input, as covered', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'omits_inputs', composeCoverage: 'held' },
+    }), 'compose_source');
+    expect(item.detail).toBe('The compose files in the stack directory are covered by the current recovery generation.');
+  });
+
+  it('does not claim a shared main compose file is held', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: {
+        exists: true,
+        shortId: 'abc123',
+        restoreCoverage: 'omits_inputs',
+        composeCoverage: 'current_content',
+      },
+    }), 'compose_source');
+
+    expect(item.state).toBe('ready');
+    expect(item.detail).toContain('it does not hold');
+    expect(item.detail).toContain("reads that file's current content");
+    expect(item.detail).not.toMatch(/are covered/);
+  });
+
+  it('does not claim coverage for a generation that recorded no layer set', () => {
+    const item = itemById(baseInputs({
+      recoveryGeneration: {
+        exists: true,
+        shortId: 'abc123',
+        restoreCoverage: 'omits_inputs',
+        composeCoverage: 'not_recorded',
+      },
+    }), 'compose_source');
+
+    expect(item.state).toBe('ready');
+    expect(item.detail).toContain('was not recorded');
+    expect(item.detail).not.toMatch(/are covered/);
+  });
+
   it('reports the full set of rollback readiness items', () => {
     const items = buildRollbackItems(baseInputs(), NOW);
     expect(items.map(i => i.id)).toEqual([
@@ -130,11 +376,11 @@ describe('buildRollbackItems', () => {
 
   it('marks policy eligibility blocked and warning states', () => {
     expect(itemById(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc' },
+      recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
       policyEligibility: 'prohibited',
     }), 'policy_eligibility').state).toBe('blocked');
     expect(itemById(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc' },
+      recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
       policyEligibility: 'eligible_with_warning',
     }), 'policy_eligibility').state).toBe('warning');
   });
@@ -142,7 +388,7 @@ describe('buildRollbackItems', () => {
   it('lets recovery_generation supersede the legacy backup slot for compose_source', () => {
     const items = buildRollbackItems(baseInputs({
       backup: { exists: false, timestamp: null },
-      recoveryGeneration: { exists: true, shortId: 'deadbeefcaf0' },
+      recoveryGeneration: { exists: true, shortId: 'deadbeefcaf0', restoreCoverage: 'complete' },
       policyEligibility: 'eligible',
     }), NOW);
     expect(items.find(i => i.id === 'compose_source')!.state).toBe('ready');
@@ -184,9 +430,48 @@ describe('aggregateRollbackOverall', () => {
     const items = buildRollbackItems(baseInputs({ containers: 'error' }), NOW);
     expect(aggregateRollbackOverall(items)).toBe('ready');
   });
+
+  it.each(['omits_inputs', 'not_recorded'] as const)(
+    'is partial when the generation coverage is %s, so the overall state never contradicts the rows',
+    (restoreCoverage) => {
+      const items = buildRollbackItems(baseInputs({
+        recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage },
+        policyEligibility: 'eligible',
+        managedInputs: { covered: false, detail: 'Stored generation is partial or unrecorded.' },
+      }), NOW);
+      expect(items.find(i => i.id === 'managed_inputs')!.state).toBe('warning');
+      expect(aggregateRollbackOverall(items)).toBe('partial');
+    },
+  );
+
+  it('stays ready when the generation recorded complete coverage', () => {
+    const items = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'complete' },
+      policyEligibility: 'eligible',
+    }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('ready');
+  });
+
+  it('leaves an unreadable generation to its existing partial result', () => {
+    const items = buildRollbackItems(baseInputs({
+      recoveryGeneration: { exists: true, shortId: 'abc123', restoreCoverage: 'unreadable' },
+      policyEligibility: 'eligible',
+      managedInputs: 'error',
+    }), NOW);
+    expect(aggregateRollbackOverall(items)).toBe('partial');
+  });
+
+  it.each(['error', null] as const)(
+    'is partial when managed input coverage is %s, so an unread coverage claim is never Ready',
+    (managedInputs) => {
+      const items = buildRollbackItems(baseInputs({ managedInputs }), NOW);
+      expect(items.find(i => i.id === 'managed_inputs')!.state).toBe('unknown');
+      expect(aggregateRollbackOverall(items)).toBe('partial');
+    },
+  );
   it('is not_ready when policy eligibility is blocked', () => {
     const items = buildRollbackItems(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc' },
+      recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
       policyEligibility: 'prohibited',
     }), NOW);
     expect(aggregateRollbackOverall(items)).toBe('not_ready');
@@ -194,12 +479,12 @@ describe('aggregateRollbackOverall', () => {
 
   it('is at best partial when policy eligibility is warning or unknown', () => {
     const warn = buildRollbackItems(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc' },
+      recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
       policyEligibility: 'eligible_with_warning',
     }), NOW);
     expect(aggregateRollbackOverall(warn)).toBe('partial');
     const unk = buildRollbackItems(baseInputs({
-      recoveryGeneration: { exists: true, shortId: 'abc' },
+      recoveryGeneration: { exists: true, shortId: 'abc', restoreCoverage: 'complete' },
       policyEligibility: 'unknown',
     }), NOW);
     expect(aggregateRollbackOverall(unk)).toBe('partial');

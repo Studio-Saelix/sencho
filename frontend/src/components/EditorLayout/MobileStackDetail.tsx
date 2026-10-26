@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ErrorBoundary from '../ErrorBoundary';
@@ -8,6 +8,8 @@ import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './edito
 import { RecoveryPanel } from './RecoveryPanel';
 import { StackOperationBanner } from './StackOperationBanner';
 import { retryHandlerFor } from './recovery-retry';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { lockedServiceUrlReasons } from '@/lib/serviceUrlResolve';
 import type { EditorViewProps } from './EditorView';
 
 const SEGMENTS = [
@@ -34,6 +36,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         content,
         envContent,
         envExists,
+        envInventoryFailed,
         envFiles,
         selectedEnvFile,
         isFileLoading,
@@ -56,6 +59,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         scanStackConfig,
         requestSave,
         requestSaveAndDeploy,
+        requestSaveAndPullImages,
         setContent,
         setEnvContent,
         changeEnvFile,
@@ -69,6 +73,9 @@ export function MobileStackDetail(props: EditorViewProps) {
         serviceUpdateStatuses,
         serviceUpdateInProgress,
         onRequestServiceUpdate,
+        serviceUrlEntry = null,
+        onEditServiceUrl,
+        onRetryServiceUrls,
         setLogsMode,
         setActiveTab,
         setGitSourceOpen,
@@ -92,10 +99,16 @@ export function MobileStackDetail(props: EditorViewProps) {
 
     const [segment, setSegment] = useState<Segment>('logs');
 
+    const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
+    const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
     const safeContainers = containers || [];
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
     const canEditStack = can('stack:edit', 'stack', stackName, activeNode?.id);
+    // Same paired gate as the desktop item: the route requires stack:edit and
+    // stack:deploy, so an edit-only user must not see the affordance at all.
+    const canPullImages =
+        canEditStack && !isSelfStack && can('stack:deploy', 'stack', stackName, activeNode?.id);
 
     // The writable editor layer renders only for an editor; a stale editingCompose
     // while the user lacks stack:edit falls back to the read-only Compose segment.
@@ -110,6 +123,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                     activeTab={activeTab}
                     setActiveTab={setActiveTab}
                     envExists={envExists}
+                    envInventoryFailed={envInventoryFailed}
                     envFiles={envFiles}
                     selectedEnvFile={selectedEnvFile}
                     changeEnvFile={changeEnvFile}
@@ -118,8 +132,10 @@ export function MobileStackDetail(props: EditorViewProps) {
                     canEdit={canEditStack}
                     requestSave={requestSave}
                     requestSaveAndDeploy={requestSaveAndDeploy}
+                    requestSaveAndPullImages={requestSaveAndPullImages}
                     actionsReady={actionsReady}
                     canSaveAndReapply={canSaveAndReapply}
+                    canPullImages={canPullImages}
                     onClose={onCloseEditor}
                     hasUnsavedChanges={hasUnsavedChanges}
                 />
@@ -244,6 +260,12 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                serviceUrlEntry={serviceUrlEntry}
+                                canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                sourceServices={sourceServices}
+                                lockedServices={lockedServices}
+                                onEditServiceUrl={onEditServiceUrl}
+                                onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={props.containersLoadStatus}
                                 containersLoadError={props.containersLoadError}
                                 onRetryContainersLoad={props.onRetryContainersLoad}
@@ -268,10 +290,12 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 content={content}
                                 envContent={envContent}
                                 selectedEnvFile={selectedEnvFile}
+                                serviceUrlEntry={serviceUrlEntry}
                                 gitSourcePending={gitSourcePendingMap[stackName] ?? null}
                                 onEditCompose={openComposeEditor}
                                 onOpenGitSource={() => setGitSourceOpen(true)}
                                 onApplyUpdate={() => { void updateStack(); }}
+                                onRedeploy={() => deployStack()}
                                 applying={loadingAction === 'update'}
                                 canEdit={canEditStack}
                                 notifications={notifications}

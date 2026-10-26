@@ -216,6 +216,54 @@ const CODE_COPY: Record<ReadinessReasonCode, string> = {
   domain_error: 'This check could not run',
 };
 
+/**
+ * One line on what to do about each code, shown under its title. Plain
+ * instruction, not a restatement of the title: it names the next move and, where
+ * the fix lives on another page, which page.
+ */
+const CODE_REMEDIATION: Record<ReadinessReasonCode, string> = {
+  node_unreachable: 'Check that the node is running and reachable from this hub, then test the connection.',
+  pilot_disconnected: 'Check that the Pilot agent is running on the node and can reach this hub.',
+  contact_stale: 'Test the connection. If it keeps going quiet, check the node and the network between it and this hub.',
+  probe_timeout: 'The node is slow or overloaded. Test the connection again shortly.',
+
+  workloads_exited: 'Start the stack, or open it to read why it stopped.',
+  workloads_partial: 'Start the stack, or open it to see which services failed.',
+  workloads_unknown: 'Update this node to a version that matches this hub.',
+  status_evidence_degraded: 'Check again. If it persists, open node details to see what the Docker listing is missing.',
+  status_evidence_stale: 'Check again to refresh the stack state.',
+
+  update_blocked: 'Open the stack to see what blocks the update and clear it first.',
+  update_review_required: 'Review the update before it goes ahead.',
+  update_ready_with_warnings: 'Review the warnings, then update when you are ready.',
+
+  rollback_not_ready: 'Capture a recovery point so this stack can be rolled back.',
+  rollback_partial: 'Open the stack to see which part of its rollback is missing.',
+  snapshot_failed: 'Take a new fleet snapshot to include this node.',
+
+  stacks_unknown: 'Check again. If it persists, open the node to see why its stacks could not be read.',
+  summary_truncated: 'This node has more stacks than one check covers. The rest are not yet verified.',
+  summary_stale: 'Check again to refresh stack readiness.',
+
+  posture_partial: 'Open Security to see which evidence is missing.',
+  posture_action_needed: 'Open Security to see what needs action.',
+  scanner_unavailable: 'Install the scanner from Security.',
+  scans_stale: 'Scan this node again to refresh its results.',
+  scans_never_completed: 'Run the first scan on this node.',
+
+  control_paused: 'Open node settings to see why sync is paused, then re-anchor it if this hub should own the node.',
+  control_degraded: 'Open node settings to read the sync error.',
+  control_unknown: 'Open node settings to check that policy sync can reach this node.',
+
+  capability_absent: 'Update this node so it supports this check.',
+  domain_error: 'Check again. If it keeps failing, open node details.',
+};
+
+/** What to do about a code, or null for one this build does not know. */
+export function codeRemediation(code: ReadinessReasonCode): string | null {
+  return CODE_REMEDIATION[code] ?? null;
+}
+
 /** A code's finding title, with a legible fallback for a code this build does not know. */
 export function codeCopy(code: ReadinessReasonCode): string {
   return CODE_COPY[code] ?? 'This check reported something this version does not recognize';
@@ -226,7 +274,7 @@ export const TARGET_ACTION: Record<ReadinessTarget['surface'], string> = {
   stack: 'Open stack',
   'auto-updates': 'Auto-updates',
   'fleet-snapshots': 'Snapshots',
-  security: 'Security',
-  'node-details': 'Node details',
-  'settings-nodes': 'Settings',
+  security: 'Open Security',
+  'node-details': 'Open node details',
+  'settings-nodes': 'Open node settings',
 };

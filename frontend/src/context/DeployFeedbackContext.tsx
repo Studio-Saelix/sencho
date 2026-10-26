@@ -4,9 +4,9 @@ import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/co
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 import { toast } from '../components/ui/toast-store';
-import { fetchActiveServiceRecovery, requestServiceRestore } from '../lib/serviceUpdate';
+import { fetchActiveServiceRecovery, fetchStackRecoveries, requestServiceRestore, type StackRecoveryEntry } from '../lib/serviceUpdate';
 
-export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan';
+export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan' | 'pull';
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> = {
@@ -17,6 +17,11 @@ export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> 
   stop:    { present: 'Stopping',   past: 'Stopped'   },
   install: { present: 'Installing', past: 'Installed' },
   scan:    { present: 'Scanning',   past: 'Scanned'   },
+  // Acquiring registry images: nothing about the running workload changes, so
+  // this verb never reaches the health gate. No `startGatePolling` call below
+  // passes 'pull': the two that forward a user action are guarded on 'update' or
+  // 'deploy', and the service-restore path hardcodes 'update'.
+  pull:    { present: 'Pulling images', past: 'Pulled images' },
 };
 
 export interface DeployPanelState {
@@ -89,6 +94,50 @@ export interface HealthGateUiState {
 }
 
 const GATE_POLL_INTERVAL_MS = 4_000;
+
+/**
+ * How long a stack watch keeps retrying after its first failed read before it
+ * gives up. Sized to outlast the API rate limiter's one-minute window, so one
+ * burst of 429s (or a 5xx, a proxy blip, or a node predating this route) cannot
+ * cancel every pending Restore offer. A node that will never answer still stops
+ * being polled, one budget later rather than four polls in.
+ */
+const SIBLING_POLL_GIVE_UP_MS = 70_000;
+
+/**
+ * Services whose recovery is still observing, for one (node, stack) pair.
+ *
+ * A watch is owned by its stack, not by the deploy session that discovered it:
+ * a new update, a panel close, or a Restore click must not cancel the Restore
+ * offer a sibling's health gate is still going to earn. It ends on its own once
+ * every watched service reaches a terminal state, expires, or disappears.
+ */
+interface SiblingWatch {
+  stackName: string;
+  nodeId: number | null;
+  services: Set<string>;
+  interval: ReturnType<typeof setInterval> | null;
+  /**
+   * When the current run of failed reads started, or null while reads succeed.
+   * Only a successful read clears it, so a hand-off cannot keep a watch alive
+   * that never manages to read the route.
+   */
+  failingSince: number | null;
+  /** Single-flight guard: a slow remote node must not get overlapping polls. */
+  inFlight: boolean;
+}
+
+const watchKey = (nodeId: number | null, stackName: string): string => `${nodeId ?? 'local'}:${stackName}`;
+
+/**
+ * Stack-scoped actions that end or replace the stack's running containers. After
+ * one of these succeeds, a health gate still observing on the stack can no
+ * longer say anything true about the runtime, and the service snapshots it was
+ * watching are no longer a rollback target, so the stack's watches end with it.
+ * A scan observes without changing anything and is deliberately absent.
+ */
+const STACK_RUNTIME_ENDING_ACTIONS: ReadonlySet<ActionVerb> =
+  new Set<ActionVerb>(['deploy', 'update', 'install', 'down', 'stop', 'restart']);
 
 /** Parameters identifying the operation a runWithLog call drives. */
 export interface RunWithLogParams {
@@ -188,6 +237,11 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   const silentGateRef = useRef(false);
   const offerRestoreToastRef = useRef<(gate: HealthGateUiState) => void>(() => {});
 
+  /** Recovery IDs that already had a Restore toast (cleared on session reset / panel abandon). */
+  const watchedRecoveriesRef = useRef<Set<string>>(new Set());
+  /** Live sibling watches, keyed by `${nodeId ?? 'local'}:${stackName}`. */
+  const siblingWatchesRef = useRef<Map<string, SiblingWatch>>(new Map());
+
   useEffect(() => {
     healthGateRef.current = healthGate;
   }, [healthGate]);
@@ -202,8 +256,114 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     }
   }, []);
 
-  // The provider is app-root today, but do not let the interval depend on it.
-  useEffect(() => stopGatePolling, [stopGatePolling]);
+  /** Build a minimal HealthGateUiState for a failed service recovery toast. */
+  const makeGateState = useCallback((
+    stackName: string,
+    nodeId: number | null,
+    recovery: Pick<
+      StackRecoveryEntry,
+      'serviceName' | 'recoveryId' | 'healthGateId' | 'healthGateReason' | 'healthGateFailureSource'
+    >,
+  ): HealthGateUiState => ({
+    stackName, nodeId,
+    gateId: recovery.healthGateId ?? '', trigger: 'update',
+    status: 'failed', reason: recovery.healthGateReason,
+    windowSeconds: null, startedAt: null,
+    targetScope: 'service', serviceName: recovery.serviceName,
+    failureSource: recovery.healthGateFailureSource,
+    recoveryId: recovery.recoveryId,
+  }), []);
+
+  /** Drops one watch and its interval (it emptied out, or its reads kept failing). */
+  const stopSiblingWatch = useCallback((key: string) => {
+    const watch = siblingWatchesRef.current.get(key);
+    if (watch?.interval) clearInterval(watch.interval);
+    siblingWatchesRef.current.delete(key);
+  }, []);
+
+  /** Drops one service from its stack's watch (its own gate now covers it). */
+  const unwatchSibling = useCallback((stackName: string, nodeId: number | null, serviceName: string) => {
+    const key = watchKey(nodeId, stackName);
+    const watch = siblingWatchesRef.current.get(key);
+    if (!watch) return;
+    watch.services.delete(serviceName);
+    if (watch.services.size === 0) stopSiblingWatch(key);
+  }, [stopSiblingWatch]);
+
+  /**
+   * One poll of a stack's watch. A failed read is not "every sibling vanished":
+   * the watch is kept and retried, so a rate limit, a 5xx, a proxy blip, or a
+   * node predating the route cannot silently cancel a Restore offer the operator
+   * is waiting for. Services that vanish, expire, or leave 'observing' are
+   * dropped; one that reached 'failed' earns its Restore toast.
+   */
+  const pollSiblingWatch = useCallback((key: string) => {
+    void (async () => {
+      const watch = siblingWatchesRef.current.get(key);
+      if (!watch || watch.inFlight) return;
+      const { stackName, nodeId } = watch;
+      watch.inFlight = true;
+      try {
+        const result = await fetchStackRecoveries({ nodeId, stackName });
+        // This exact watch may be gone: a stack-scoped run that replaced the
+        // images, a provider unmount, or a re-create of the same key. A response
+        // for a watch that no longer exists must not offer anything.
+        if (siblingWatchesRef.current.get(key) !== watch) return;
+        if (!result.ok) {
+          watch.failingSince ??= Date.now();
+          console.warn('[DeployFeedback] sibling recovery poll failed:', result.error);
+          if (Date.now() - watch.failingSince >= SIBLING_POLL_GIVE_UP_MS) stopSiblingWatch(key);
+          return;
+        }
+        watch.failingSince = null;
+        for (const serviceName of [...watch.services]) {
+          const found = result.recoveries.find(r => r.serviceName === serviceName);
+          if (!found || found.expiresAt <= Date.now() || found.healthGateStatus !== 'observing') {
+            unwatchSibling(stackName, nodeId, serviceName);
+            if (found?.healthGateStatus === 'failed') {
+              offerRestoreToastRef.current(makeGateState(stackName, nodeId, found));
+            }
+          }
+        }
+        if (watch.services.size === 0) stopSiblingWatch(key);
+      } finally {
+        watch.inFlight = false;
+      }
+    })();
+  }, [makeGateState, stopSiblingWatch, unwatchSibling]);
+
+  /** Adds one service to its stack's watch, starting the poll if it is idle. */
+  const watchSibling = useCallback((stackName: string, nodeId: number | null, serviceName: string) => {
+    const key = watchKey(nodeId, stackName);
+    let watch = siblingWatchesRef.current.get(key);
+    if (!watch) {
+      watch = { stackName, nodeId, services: new Set(), interval: null, failingSince: null, inFlight: false };
+      siblingWatchesRef.current.set(key, watch);
+    }
+    watch.services.add(serviceName);
+    if (watch.interval === null) {
+      watch.interval = setInterval(() => pollSiblingWatch(key), GATE_POLL_INTERVAL_MS);
+    }
+  }, [pollSiblingWatch]);
+
+  /**
+   * Backs the outgoing primary service gate with a stack watch. Called from
+   * every path that takes the single primary gate slot away from a gate that is
+   * still observing (a new session, a Restore click): that gate can still fail,
+   * and once nothing polls it the only way back is the snapshot it captured.
+   */
+  const watchPrimaryGate = useCallback(() => {
+    const gate = healthGateRef.current;
+    if (gate?.targetScope === 'service' && gate.serviceName && gate.status === 'observing') {
+      watchSibling(gate.stackName, gate.nodeId, gate.serviceName);
+    }
+  }, [watchSibling]);
+
+  // The provider is app-root today, but do not let intervals outlive unmount.
+  useEffect(() => () => {
+    stopGatePolling();
+    for (const key of [...siblingWatchesRef.current.keys()]) stopSiblingWatch(key);
+  }, [stopGatePolling, stopSiblingWatch]);
 
   // Idempotent resolver for the current session's deployStarted gate. Set at the
   // start of each runWithLog call; called by onTerminalReady (stream connected),
@@ -295,6 +455,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
 
     sessionIdRef.current += 1;
     silentGateRef.current = false;
+    watchedRecoveriesRef.current.clear();
     stopGatePolling();
     setHealthGate(null);
   }, [stopGatePolling]);
@@ -334,9 +495,18 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       settled = true;
       stopGatePolling();
       setHealthGate(prev => (prev && prev.gateId === gateId ? { ...prev, status: 'unknown', reason } : prev));
+      // An unresolved service gate may still have a live recovery row, and the
+      // stack watch is what keeps that row's Restore offer reachable. It drops
+      // the service on its first poll if the row is gone, expired, or terminal.
+      if (targetScope === 'service' && options?.serviceName) {
+        watchSibling(stackName, nodeId, options.serviceName);
+      }
     };
     const tick = async () => {
       if (sessionIdRef.current !== mySession) {
+        // Something else took the slot. Whatever took it hands this gate to its
+        // stack watch on the way out (a new session, or a Restore click), so
+        // there is nothing to rescue here.
         stopGatePolling();
         return;
       }
@@ -409,77 +579,135 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     };
     void tick();
     gatePollRef.current = setInterval(() => { void tick(); }, GATE_POLL_INTERVAL_MS);
-  }, [stopGatePolling]);
+  }, [stopGatePolling, watchSibling]);
 
-  // Keep the toast helper current without re-creating startGatePolling on every render.
+  // Restore onClick factory for the toast action.
+  const handleRestoreClick = useCallback((gate: HealthGateUiState) => () => {
+    void (async () => {
+      let recoveryId = gate.recoveryId ?? null;
+      if (!recoveryId) {
+        const lookup = await fetchActiveServiceRecovery({
+          nodeId: gate.nodeId,
+          stackName: gate.stackName,
+          serviceName: gate.serviceName!,
+        });
+        if (!lookup.ok) {
+          toast.error(lookup.error);
+          return;
+        }
+        recoveryId = lookup.recovery?.id ?? null;
+      }
+      if (!recoveryId) {
+        toast.error(`No recovery snapshot is available for "${gate.serviceName}".`);
+        return;
+      }
+      // A restore takes over the single primary gate slot, so back the run's
+      // still-observing service gate with a stack watch first. Restoring one
+      // service's recovery must not be what cancels another service's Restore
+      // offer: its gate can still fail, and then the snapshot is the way out.
+      watchPrimaryGate();
+      const loadingId = toast.loading(`Restoring "${gate.serviceName}"...`);
+      try {
+        const result = await requestServiceRestore({
+          nodeId: gate.nodeId,
+          stackName: gate.stackName,
+          serviceName: gate.serviceName!,
+          recoveryId,
+        });
+        toast.dismiss(loadingId);
+        if (!result.ok) {
+          toast.error(result.error);
+          return;
+        }
+        if (result.healthGateId && result.observing) {
+          toast.info(`Service "${gate.serviceName}" restored. Verifying health...`);
+          sessionIdRef.current += 1;
+          startGatePolling(
+            gate.stackName,
+            gate.nodeId,
+            result.healthGateId,
+            'update',
+            sessionIdRef.current,
+            { serviceName: gate.serviceName!, recoveryId: result.recoveryId, silent: true },
+          );
+        } else {
+          toast.success(`Service "${gate.serviceName}" restored successfully`);
+          // Only clear the record for the gate this restore came from. Another
+          // service's terminal banner belongs to its own run and must survive.
+          setHealthGate(prev => (prev && prev.gateId === gate.gateId ? null : prev));
+        }
+      } catch (error) {
+        toast.dismiss(loadingId);
+        toast.error(error instanceof Error ? error.message : `Failed to restore "${gate.serviceName}"`);
+      }
+    })();
+  }, [startGatePolling, watchPrimaryGate]);
+
+  // Toast factory for a failed service gate. Assigned in an effect, not during
+  // render, so the ref is never written as a side effect of rendering.
   useEffect(() => {
     offerRestoreToastRef.current = (gate: HealthGateUiState) => {
       const serviceName = gate.serviceName;
       if (!serviceName) return;
-      toast.error(
-        `Health gate failed for service "${serviceName}"${gate.reason ? `: ${gate.reason}` : ''}.`,
-        {
-          duration: 120_000,
-          action: {
-            label: 'Restore',
-            onClick: () => {
-              void (async () => {
-                let recoveryId = gate.recoveryId ?? null;
-                if (!recoveryId) {
-                  const lookup = await fetchActiveServiceRecovery({
-                    nodeId: gate.nodeId,
-                    stackName: gate.stackName,
-                    serviceName,
-                  });
-                  if (!lookup.ok) {
-                    toast.error(lookup.error);
-                    return;
-                  }
-                  recoveryId = lookup.recovery?.id ?? null;
-                }
-                if (!recoveryId) {
-                  toast.error(`No recovery snapshot is available for "${serviceName}".`);
-                  return;
-                }
-                const loadingId = toast.loading(`Restoring "${serviceName}"...`);
-                try {
-                  const result = await requestServiceRestore({
-                    nodeId: gate.nodeId,
-                    stackName: gate.stackName,
-                    serviceName,
-                    recoveryId,
-                  });
-                  toast.dismiss(loadingId);
-                  if (!result.ok) {
-                    toast.error(result.error);
-                    return;
-                  }
-                  if (result.healthGateId && result.observing) {
-                    toast.info(`Service "${serviceName}" restored. Verifying health...`);
-                    sessionIdRef.current += 1;
-                    startGatePolling(
-                      gate.stackName,
-                      gate.nodeId,
-                      result.healthGateId,
-                      'update',
-                      sessionIdRef.current,
-                      { serviceName, recoveryId: result.recoveryId, silent: true },
-                    );
-                  } else {
-                    toast.success(`Service "${serviceName}" restored successfully`);
-                    setHealthGate(null);
-                  }
-                } catch (error) {
-                  toast.dismiss(loadingId);
-                  toast.error(error instanceof Error ? error.message : `Failed to restore "${serviceName}"`);
-                }
-              })();
-            },
-          },
-        },
-      );
+      // Every path that offers a Restore funnels through here, so this is the
+      // one place that decides a snapshot has already been offered. The set is
+      // cleared per session, which is what lets a later session re-offer a
+      // still-failed recovery while keeping one offer per snapshot in between.
+      if (gate.recoveryId) {
+        if (watchedRecoveriesRef.current.has(gate.recoveryId)) return;
+        watchedRecoveriesRef.current.add(gate.recoveryId);
+      }
+
+      const errorMessage = `Health gate failed for service "${serviceName}"${gate.reason ? `: ${gate.reason}` : ''}.`;
+      toast.error(errorMessage, { duration: 120_000, action: { label: 'Restore', onClick: handleRestoreClick(gate) } });
     };
-  }, [startGatePolling]);
+  }, [handleRestoreClick]);
+
+  /**
+   * Re-surfaces the stack's other recoveries after a service-scoped run: an
+   * already-failed sibling gets its Restore toast, a still-observing one joins
+   * that stack's watch. Deliberately independent of this run's own result, so a
+   * failed or gate-less update cannot leave an earlier service unwatched.
+   */
+  const surfaceSiblingRecoveries = useCallback(
+    async (stackName: string, nodeId: number | null, currentServiceName: string | undefined) => {
+      // Bail out if a newer session started while the fetch was in flight: a
+      // response from the replaced session would arm offers from a stale view.
+      const session = sessionIdRef.current;
+      const result = await fetchStackRecoveries({ nodeId, stackName });
+      if (sessionIdRef.current !== session) return;
+      if (!result.ok) {
+        console.warn('[DeployFeedback] sibling recovery lookup failed:', result.error);
+        return;
+      }
+      // This read answered, so the stack's watch is not on a failing run.
+      const watch = siblingWatchesRef.current.get(watchKey(nodeId, stackName));
+      if (watch) watch.failingSince = null;
+      for (const recovery of result.recoveries) {
+        if (recovery.serviceName === currentServiceName) continue;
+        if (recovery.healthGateStatus === 'observing') {
+          watchSibling(stackName, nodeId, recovery.serviceName);
+        } else if (recovery.healthGateStatus === 'failed') {
+          offerRestoreToastRef.current(makeGateState(stackName, nodeId, recovery));
+        }
+      }
+    },
+    [watchSibling, makeGateState]
+  );
+
+  /**
+   * Stops the stack's watches after a stack-scoped run that ended or replaced
+   * its running containers. The server settles the same operation on its side
+   * (the gates end and the recovery rows retire), so this is polling hygiene
+   * rather than correctness: it stops this tab reading a stack it is no longer
+   * watching, instead of waiting for those reads to come back changed. A run
+   * that changed nothing (it failed) leaves the watches running.
+   */
+  const abandonStackWatches = useCallback((params: RunWithLogParams, result: { ok: boolean }) => {
+    if (!result.ok) return;
+    if (!STACK_RUNTIME_ENDING_ACTIONS.has(params.action)) return;
+    stopSiblingWatch(watchKey(params.nodeId, params.stackName));
+  }, [stopSiblingWatch]);
 
   const runWithLog = useCallback(
     async (
@@ -506,7 +734,11 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           && params.serviceName
           && (params.action === 'update' || params.action === 'deploy')
         ) {
+          // This gate takes the single primary slot, so the one it replaces is
+          // handed to its stack watch first.
+          watchPrimaryGate();
           sessionIdRef.current += 1;
+          watchedRecoveriesRef.current.clear();
           startGatePolling(
             params.stackName,
             params.nodeId,
@@ -515,6 +747,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
             sessionIdRef.current,
             { serviceName: params.serviceName, recoveryId: result.recoveryId, silent: true },
           );
+          unwatchSibling(params.stackName, params.nodeId, params.serviceName);
+        }
+        // Runs whatever this update did, so an earlier service still observing
+        // keeps its Restore offer: see the enabled branch for why a stack-scoped
+        // run is excluded.
+        if (params.serviceName) {
+          void surfaceSiblingRecoveries(params.stackName, params.nodeId, params.serviceName);
+        } else {
+          abandonStackWatches(params, result);
         }
         return result;
       }
@@ -527,11 +768,15 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       // the style between operations.
       const inlineStyle = readDeployFeedbackStyle() === 'inline';
 
-      // Cancel any existing session before starting a new one.
+      // Cancel any existing session before starting a new one. Only the primary
+      // gate slot is torn down: sibling watches belong to their stack, so an
+      // overlapping run cannot cancel another service's pending Restore offer.
       sessionIdRef.current += 1;
       const mySession = sessionIdRef.current;
       streamReadyRef.current = false;
+      watchPrimaryGate();
       stopGatePolling();
+      watchedRecoveriesRef.current.clear();
       setHealthGate(null);
       // Inline style starts with the modal hidden (the banner is the surface);
       // modal style starts visible.
@@ -595,12 +840,34 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
             serviceName: params.serviceName,
             recoveryId: result.recoveryId,
           });
+          if (params.serviceName) {
+            // This run's own gate now covers its service, so the stack watch
+            // for it is redundant polling of the same row.
+            unwatchSibling(params.stackName, params.nodeId, params.serviceName);
+          }
         }
+        // Re-surface the stack's other recoveries whatever this run did, so a
+        // failed or gate-less update leaves no earlier service unwatched. Only a
+        // service-scoped run re-surfaces: a stack-scoped run that ended or
+        // replaced the containers stops the stack's watches instead, since it
+        // retired both those gates and the snapshots they would roll back to.
+        if (params.serviceName) {
+          void surfaceSiblingRecoveries(params.stackName, params.nodeId, params.serviceName);
+        } else {
+          abandonStackWatches(params, result);
+        }
+      } else if (result.ok && result.healthGateId && params.serviceName) {
+        // This run finished with a gate, but a newer session already took the
+        // slot, and the newer session's own read is guarded against this one. Hand
+        // the gate to its stack watch directly, or an update that was replaced
+        // mid-flight (a run on another stack, a panel closed before the gate
+        // existed) would leave its service with no way back.
+        watchSibling(params.stackName, params.nodeId, params.serviceName);
       }
 
       return result;
     },
-    [isEnabled, startGatePolling, stopGatePolling]
+    [isEnabled, startGatePolling, stopGatePolling, surfaceSiblingRecoveries, watchPrimaryGate, watchSibling, unwatchSibling, abandonStackWatches]
   );
 
   return (

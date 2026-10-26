@@ -50,7 +50,8 @@ test('git source panel renders at phone width', async ({ page }) => {
   // No horizontal overflow at phone width.
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
-  // The manifest section renders inside the scrollable dialog.
+  // The manifest section sits on the Source tab of the scrollable dialog.
+  await page.getByRole('dialog').getByRole('tab', { name: 'Source' }).click();
   await expect(page.getByText('Managed project').first()).toBeVisible({ timeout: 5_000 });
   await page.screenshot({ path: 'e2e/report/mobile-panel.png' });
   await page.evaluate(async (name) => {

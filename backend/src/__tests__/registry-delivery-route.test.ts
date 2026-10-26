@@ -8,6 +8,7 @@ import request from 'supertest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setupTestDb } from './helpers/setupTestDb';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
+import { GitSourceError } from '../services/GitSourceService';
 
 let registryDeliveryRouter: typeof import('../routes/registryDelivery').registryDeliveryRouter;
 let machineScope: 'node_proxy' | 'pilot_tunnel' | undefined;
@@ -96,5 +97,41 @@ describe('registry delivery routes', () => {
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'Registry delivery discovery failed' });
     expect(discoverSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a classified git discovery failure to its status, message, and code', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refMessage = 'The configured branch, tag, or commit was not found in the repository.';
+    const discoverSpy = vi.spyOn(RegistryDeliveryService.getInstance(), 'discoverOnTarget')
+      .mockRejectedValue(new GitSourceError('REF_NOT_FOUND', refMessage));
+
+    const res = await request(makeApp()).post('/api/registry-delivery/discover').send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: refMessage, code: 'REF_NOT_FOUND' });
+    expect(discoverSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a git transport failure to 400 instead of flattening it to 500', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const redirectMessage = 'The repository host redirected to a different host than configured.';
+    vi.spyOn(RegistryDeliveryService.getInstance(), 'discoverOnTarget')
+      .mockRejectedValue(new GitSourceError('GIT_ERROR', redirectMessage));
+
+    const res = await request(makeApp()).post('/api/registry-delivery/discover').send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: redirectMessage, code: 'GIT_ERROR' });
+  });
+
+  it('never maps a git auth failure to 401, which would sign the user out', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(RegistryDeliveryService.getInstance(), 'discoverOnTarget')
+      .mockRejectedValue(new GitSourceError('AUTH_FAILED', 'Repository authentication failed.'));
+
+    const res = await request(makeApp()).post('/api/registry-delivery/discover').send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'Repository authentication failed.', code: 'AUTH_FAILED' });
   });
 });

@@ -167,7 +167,7 @@ function buildOverview(
     networkCollisionCount: findings.filter(f =>
       f.kind === 'network-name-collision' || f.kind === 'alias-collision' || f.kind === 'service-name-collision',
     ).length,
-    findingCount: findings.length,
+    findingCount: findings.filter(f => !f.acknowledged).length,
     degradedCache: false,
     renderFailedStacks,
   };

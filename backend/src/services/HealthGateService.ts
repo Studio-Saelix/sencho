@@ -1,19 +1,22 @@
 import { randomUUID } from 'crypto';
-import DockerController from './DockerController';
 import { DatabaseService, type HealthGateRunRow } from './DatabaseService';
 import { AutoHealService } from './AutoHealService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { withTimeout } from '../utils/withTimeout';
 import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
-import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
-import { parseEffectiveModel } from './preflight/effectiveModel';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
 import { GitOpsStore } from './gitops/store';
 import { GitOpsTransitions } from './gitops/transitions';
 import { reportHealthVerdict } from './gitops/healthRolloutExecutor';
 import type { HealthRolloutPolicy } from './gitops/healthPolicy';
-import { ComposeService, getComposeCommandTimeoutMs } from './ComposeService';
+import { getComposeCommandTimeoutMs } from './ComposeService';
+import {
+  readStackDeclaredRestartIntent,
+  readStackHealthFacts,
+  type StackContainerFact,
+  type StackHealthFactsOutcome,
+} from './health/stackHealthFacts';
 
 const POLL_INTERVAL_MS = 5_000;
 // A prepared-but-never-begun token (prepare called, mutation then failed before
@@ -37,27 +40,20 @@ const MAX_WINDOW_SECONDS = 600;
 // updates). Gates past the cap finalize immediately as unknown.
 const MAX_CONCURRENT_GATES = 25;
 
+// Why an observation ended without a verdict. Each names what the gate was
+// actually reading, so a remote node's observation never reports a local
+// Docker socket that was never involved.
+const DOCKER_UNREACHABLE_REASON = 'Docker became unreachable during observation';
+const NODE_UNREADABLE_REASON = 'The target node could not be read during observation.';
+const OBSERVATION_UNSUPPORTED_REASON = 'The target node does not report the runtime facts a health verdict needs.';
+const DECLARED_INTENT_UNAVAILABLE_REASON = 'the declared restart intent could not be read, so a completed one-shot cannot be told from a container that exited';
+
 type GateRole = 'primary' | 'collateral';
 
-interface ObservedContainer {
-  id: string;
-  name: string;
-  startedAt: string | null;
-  /** Docker's raw RestartCount at observation time. */
-  restartCount: number;
+interface ObservedContainer extends StackContainerFact {
   /** Gate-maintained restart tally since the baseline; 0 on a fresh snapshot,
    *  set by poll()'s accounting pass, at most one increment per poll. */
   restarts: number;
-  state: string;
-  health: string | null;
-  /** `com.docker.compose.service` label, when present (service gates only). */
-  service: string | null;
-  /** Image id the container is running (service gates check convergence on it). */
-  imageId: string;
-  /** Inspect State.ExitCode; null when unavailable. */
-  exitCode: number | null;
-  /** HostConfig.RestartPolicy.Name (report/debug only; not used for one-shot intent). */
-  restartPolicy: string | null;
 }
 
 interface ActiveGate {
@@ -102,26 +98,18 @@ interface ActiveGate {
   roleByName: Map<string, GateRole>;
   /**
    * Declared Compose restart intent by service name (normalized). Loaded once
-   * per gate; null until the first load attempt completes. Used for one-shot
-   * recognition instead of Docker inspect (which cannot distinguish omit vs
-   * explicit `restart: "no"`).
+   * per gate. `null` means the intent could not be read, which is not the same
+   * as a loaded map: an exit is then ambiguous (a clean one-shot and a dead
+   * container look identical), so the gate ends unknown rather than failing on
+   * evidence it never had. `declaredRestartRead` says the single attempt has
+   * been made.
    */
   declaredRestartByService: Map<string, string | null> | null;
+  declaredRestartRead: boolean;
 }
 
 /** A pre-mutation baseline container captured at prepare time. */
-interface PreparedBaseline {
-  id: string;
-  name: string;
-  service: string | null;
-  state: string;
-  health: string | null;
-  restartCount: number;
-  startedAt: string | null;
-  imageId: string;
-  exitCode: number | null;
-  restartPolicy: string | null;
-}
+type PreparedBaseline = StackContainerFact;
 
 function isRegressionEligibleSibling(baseline: PreparedBaseline): boolean {
   return baseline.state === 'running' && (baseline.health === null || baseline.health === 'healthy');
@@ -152,6 +140,7 @@ function isObservedContainerSatisfied(
   if (current.state === 'running') return true;
   return isDeclaredCleanOneShot(gate, current);
 }
+
 
 /**
  * One-shot recognition from declared Compose intent only. Unlabeled containers
@@ -199,6 +188,12 @@ export interface PrepareInput {
 export interface BeginPreparedResult {
   runId: string | null;
   observing: boolean;
+  /**
+   * The token was dropped because a container operation replaced the runtime it
+   * would have observed, which is why there is no gate. Distinct from a token
+   * this process never issued or has already swept, so the caller can say which.
+   */
+  droppedByContainerOp: boolean;
 }
 
 /**
@@ -219,6 +214,12 @@ export class HealthGateService {
   private readonly active = new Map<string, ActiveGate>();
   /** Prepare tokens awaiting beginPrepared (service update/restore only). */
   private readonly prepared = new Map<string, PreparedGate>();
+  /**
+   * Prepare tokens a container operation dropped, kept only until the token's
+   * own TTL so `beginPrepared` can say why there is no gate instead of leaving
+   * the update silently ungated.
+   */
+  private readonly droppedPrepared = new Map<string, number>();
   private started = false;
 
   public static getInstance(): HealthGateService {
@@ -383,7 +384,7 @@ export class HealthGateService {
   private supersedeGatesForStack(
     nodeId: number,
     stackName: string,
-    options?: { serviceName?: string | null; stackOnly?: boolean },
+    options?: { serviceName?: string | null; stackOnly?: boolean; reason?: string },
   ): void {
     const serviceName = options?.serviceName;
     const stackOnly = options?.stackOnly === true;
@@ -395,8 +396,153 @@ export class HealthGateService {
       } else if (stackOnly) {
         if (gate.targetScope !== 'stack') continue;
       }
-      this.finalize(gate, 'unknown', 'superseded by a newer operation', []);
+      this.finalize(gate, 'unknown', options?.reason ?? 'superseded by a newer operation', []);
     }
+  }
+
+  /**
+   * Apply a deliberate container operation to the gates it affects, before the
+   * operation runs, so no gate poll can read the replaced containers first and
+   * report the operator's own action as a failed update.
+   *
+   * What a gate may say depends on which of the operation's containers it was
+   * observing. A service gate observes one service's replicas and judges them
+   * against the rest of the stack as collateral, so an operation on a service
+   * is either that gate's own subject, which leaves nothing to say, or context
+   * the gate would misattribute to its own service, which it should stop
+   * watching rather than stop observing.
+   *
+   *   operation                       own service's gate   sibling gates   stack gate
+   *   stop or restart one service     end                  detach it       end
+   *   stop, restart or take down      end                  end             end
+   *   deploy or update a stack        end before the up    end             end
+   *   update or restore one service   the new gate supersedes it; siblings are untouched
+   *
+   * "End" is `finalize(gate, 'unknown', reason)`, naming the operation. That is
+   * the honest verdict: the containers the gate was judging are gone or being
+   * replaced, so nothing was proven either way. "Detach" drops that service's
+   * containers from a sibling's expected, collateral, baseline and role sets, so
+   * the sibling keeps a verdict on its own runtime. Ending a sibling instead
+   * would record `unknown` for a service nobody touched; leaving it to fail
+   * would report the deliberate stop as a failed update and offer a Restore for
+   * a healthy service, which is the recovery path for a fault that never
+   * happened.
+   *
+   * A prepare token that has not begun yet is treated the same way: the
+   * operated service's token is dropped, because a gate armed for a service the
+   * operator just stopped would fail on it; a sibling's token has the operated
+   * service removed from the collateral set it would seed from; and a
+   * stack-wide operation drops every token on the stack, because it has replaced
+   * the runtime all of them would observe.
+   *
+   * With no `serviceNames` the whole stack's runtime is being replaced, so
+   * every gate on the stack ends. `start` is deliberately not a trigger at any
+   * call site: starting a service that was already down does not disturb the
+   * containers a live gate is observing.
+   *
+   * Returns the number of gates ended; detached gates are left observing and so
+   * are not counted. Never throws.
+   *
+   * Covered seams: the compose commands (`runCommand`, `runDown`, `downStack`),
+   * which reach the routes, the scheduler and the webhook; the Engine API
+   * stack- and service-level ops (`containerActionForStack`, which the single
+   * route, the bulk route and the fleet label stop share, plus the label bulk
+   * action), the per-service op (`handleServiceAction`) and the scheduler's
+   * filtered stack restart. Not covered, by design: the single-container
+   * operations that carry no stack identity (the by-id container routes, the
+   * scheduler's container actions), which disturb a container without saying
+   * which stack it belongs to.
+   */
+  public supersedeForContainerOp(
+    nodeId: number,
+    stackName: string,
+    reason: string,
+    serviceNames?: string[],
+  ): number {
+    try {
+      const named = (serviceNames ?? []).filter(name => name.length > 0);
+      const before = this.active.size;
+      if (named.length === 0) {
+        this.supersedeGatesForStack(nodeId, stackName, { reason });
+        // A stack-wide operation replaces every service's containers, so a
+        // prepare that has not begun has nothing left to judge either: arming it
+        // from the pre-operation baseline would fail it on the services that are
+        // now deliberately down. Reachable, because the compose up between a
+        // prepare and its begin is seconds long and a stack-wide stop takes no
+        // per-stack operation lock.
+        for (const prep of [...this.prepared.values()]) {
+          if (prep.nodeId === nodeId && prep.stackName === stackName) this.dropPreparedForContainerOp(prep);
+        }
+        return before - this.active.size;
+      }
+      for (const gate of [...this.active.values()]) {
+        if (gate.nodeId !== nodeId || gate.stackName !== stackName) continue;
+        // A stack gate judges every service on the stack, so the operated
+        // service is part of its subject rather than context: it ends.
+        if (gate.targetScope === 'stack' || named.includes(gate.serviceName ?? '')) {
+          this.finalize(gate, 'unknown', reason, []);
+          continue;
+        }
+        for (const name of named) this.detachServiceFromGate(gate, name);
+      }
+      for (const prep of [...this.prepared.values()]) {
+        if (prep.nodeId !== nodeId || prep.stackName !== stackName) continue;
+        if (named.includes(prep.serviceName)) {
+          this.dropPreparedForContainerOp(prep);
+          continue;
+        }
+        for (const name of named) this.detachServiceFromPrepared(prep, name);
+      }
+      return before - this.active.size;
+    } catch (error) {
+      console.warn(
+        '[HealthGate] Container-op supersede failed for %s on node %d:',
+        sanitizeForLog(stackName),
+        nodeId,
+        getErrorMessage(error, 'unknown'),
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Drop one service's containers from a sibling gate's observed set, so the
+   * deliberate stop or restart of that service cannot fail this gate. The
+   * container names are resolved through the prepare baseline, which is keyed
+   * by name and carries the service each name belongs to.
+   */
+  private detachServiceFromGate(gate: ActiveGate, serviceName: string): void {
+    const names = new Set<string>();
+    for (const name of gate.collateralEligibleNames) {
+      if (gate.collateralBaselineByName.get(name)?.service === serviceName) names.add(name);
+    }
+    // An armed gate may hold a name that is not in the prepare-time eligible
+    // set (a replica that appeared under a new name), so the observed set is
+    // consulted too. A primary is never detached: it belongs to this gate's
+    // own service, not to the operated one.
+    if (gate.expected) {
+      for (const [name, baseline] of gate.expected) {
+        if (baseline.service === serviceName && gate.roleByName.get(name) !== 'primary') names.add(name);
+      }
+    }
+    for (const name of names) {
+      gate.collateralEligibleNames.delete(name);
+      gate.collateralBaselineByName.delete(name);
+      gate.roleByName.delete(name);
+      gate.missingLastPoll.delete(name);
+      gate.restartingLastPoll.delete(name);
+      gate.expected?.delete(name);
+    }
+  }
+
+  /** The same detach on a prepare token that has not begun yet. */
+  private detachServiceFromPrepared(prep: PreparedGate, serviceName: string): void {
+    for (const name of [...prep.collateralEligibleNames]) {
+      if (prep.collateralBaseline.some(b => b.name === name && b.service === serviceName)) {
+        prep.collateralEligibleNames.delete(name);
+      }
+    }
+    prep.collateralBaseline = prep.collateralBaseline.filter(b => b.service !== serviceName);
   }
 
   /** Drop prepare tokens whose TTL elapsed without a beginPrepared (lazy, no standing timer). */
@@ -404,6 +550,20 @@ export class HealthGateService {
     for (const [token, prep] of this.prepared) {
       if (now >= prep.expiresAt) this.prepared.delete(token);
     }
+    for (const [token, expiresAt] of this.droppedPrepared) {
+      if (now >= expiresAt) this.droppedPrepared.delete(token);
+    }
+  }
+
+  /**
+   * Drop a prepare token because a container operation replaced the runtime it
+   * would have observed. Remembered until the token's own TTL so the begin that
+   * follows can report why there is no gate, rather than the update looking
+   * ungated for no stated reason.
+   */
+  private dropPreparedForContainerOp(prep: PreparedGate): void {
+    this.prepared.delete(prep.token);
+    this.droppedPrepared.set(prep.token, prep.expiresAt);
   }
 
   /**
@@ -498,6 +658,7 @@ export class HealthGateService {
         collateralBaselineByName: new Map(),
         roleByName: new Map(),
         declaredRestartByService: null,
+        declaredRestartRead: false,
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
@@ -635,6 +796,7 @@ export class HealthGateService {
       collateralBaselineByName: new Map(),
       roleByName: new Map(),
       declaredRestartByService: null,
+      declaredRestartRead: false,
     };
     this.active.set(key, gate);
     this.scheduleNextPoll(gate);
@@ -809,7 +971,9 @@ export class HealthGateService {
     this.sweepExpiredPrepared(Date.now());
     const prep = this.prepared.get(prepareToken);
     if (!prep) {
-      console.warn('[HealthGate] attachExpectedImage: unknown or expired prepare token');
+      console.warn(this.droppedPrepared.has(prepareToken)
+        ? '[HealthGate] attachExpectedImage: prepare token ended by a container operation'
+        : '[HealthGate] attachExpectedImage: unknown or expired prepare token');
       return;
     }
     prep.expectedImageId = expectedImageId;
@@ -829,13 +993,16 @@ export class HealthGateService {
     const prep = this.prepared.get(input.prepareToken);
     // Always consume the token so a caller cannot begin twice off one prepare.
     if (prep) this.prepared.delete(input.prepareToken);
+    // A token a container operation dropped is reported as such, so the caller
+    // can tell a deliberately ended observation from one that never started.
+    const droppedByContainerOp = this.droppedPrepared.delete(input.prepareToken);
 
-    if (!this.started || !prep) return { runId: null, observing: false };
+    if (!this.started || !prep) return { runId: null, observing: false, droppedByContainerOp };
 
     try {
       const db = DatabaseService.getInstance();
       const settings = this.readSettings();
-      if (!settings.enabled) return { runId: null, observing: false };
+      if (!settings.enabled) return { runId: null, observing: false, droppedByContainerOp };
 
       const key = this.gateKey(prep.nodeId, prep.stackName, 'service', prep.serviceName);
       // Same-service + stack gates only; sibling service observations continue.
@@ -862,7 +1029,7 @@ export class HealthGateService {
 
       if (this.active.size >= MAX_CONCURRENT_GATES) {
         db.insertHealthGateRun({ ...row, status: 'unknown', reason: 'too many concurrent observations', ended_at: startedAt });
-        return { runId, observing: false };
+        return { runId, observing: false, droppedByContainerOp };
       }
 
       db.insertHealthGateRun(row);
@@ -889,14 +1056,15 @@ export class HealthGateService {
         ),
         roleByName: new Map(),
         declaredRestartByService: null,
+        declaredRestartRead: false,
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
-      return { runId, observing: true };
+      return { runId, observing: true, droppedByContainerOp };
     } catch (error) {
       console.error('[HealthGate] beginPrepared failed for %s/%s:',
         sanitizeForLog(prep.stackName), sanitizeForLog(prep.serviceName), error);
-      return { runId: null, observing: false };
+      return { runId: null, observing: false, droppedByContainerOp };
     }
   }
 
@@ -967,26 +1135,11 @@ export class HealthGateService {
   }
 
   private async runPollCycle(gate: ActiveGate, key: string): Promise<void> {
-    let observed: ObservedContainer[];
-    try {
-      observed = await withTimeout(
-        this.observeContainers(gate), OBSERVE_TIMEOUT_MS, 'health gate observe',
-      );
-    } catch (error) {
-      gate.consecutivePollErrors += 1;
-      console.warn(
-        '[HealthGate] poll error %d for %s:',
-        gate.consecutivePollErrors, sanitizeForLog(gate.stackName), getErrorMessage(error, 'unknown'),
-      );
-      if (gate.consecutivePollErrors >= 3) {
-        this.finalize(gate, 'unknown', 'Docker became unreachable during observation', []);
-      }
-      return;
-    }
+    const observed = await this.readPollEvidence(gate, 'poll error', sanitizeForLog(gate.stackName));
+    if (!observed) return;
     // The await above can straddle a supersede or stop; never act on a gate
     // that was finalized mid-flight.
     if (gate.finalized || this.active.get(key) !== gate) return;
-    gate.consecutivePollErrors = 0;
 
     await this.ensureDeclaredRestartMap(gate);
     if (gate.finalized || this.active.get(key) !== gate) return;
@@ -1021,6 +1174,7 @@ export class HealthGateService {
     const summary = this.summarize(gate.expected, byName);
 
     // Second pass: fail fast on a clearly bad state.
+    let ambiguousExit = false;
     for (const [name, baseline] of gate.expected) {
       const current = byName.get(name);
       if (!current) {
@@ -1036,7 +1190,21 @@ export class HealthGateService {
       const cleanOneShot = isDeclaredCleanOneShot(gate, current);
       // An exit with no restart attempt is terminal for the window, unless
       // this is an expected one-shot (exit 0 + explicit declared restart "no").
+      // Without the declared intent, a clean exit is ambiguous: a rollback
+      // policy would restore a workload that may have completed exactly as
+      // declared. A non-zero exit is a failure either way, so it is reported
+      // as one.
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
+        if (this.ambiguousCleanExit(gate, current)) {
+          // Hold the ambiguity until the rest of the set has been inspected:
+          // a peer that is unhealthy or exited non-zero is a definite failure,
+          // and the order Docker listed the containers in must not decide
+          // between unknown and a failure policy. This container's own
+          // residual health is not evidence against it, so its remaining
+          // checks are skipped, exactly as when this ended the cycle.
+          ambiguousExit = true;
+          continue;
+        }
         this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
         return;
       }
@@ -1063,23 +1231,40 @@ export class HealthGateService {
       gate.expected.set(name, current);
     }
 
+    // An ambiguity ends the observation mid-window, because no later poll can
+    // resolve it. At the window end the checks below decide instead, so a
+    // missing or otherwise unsatisfied expected container, which is a definite
+    // failure there, is not softened to unknown by an ambiguous peer.
+    if (ambiguousExit && elapsedMs < gate.windowSeconds * 1000) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary);
+      return;
+    }
+
     if (elapsedMs < gate.windowSeconds * 1000) return;
 
-    // Window complete: pass requires everything running (or a clean one-shot
-    // completion) and healthy wherever a healthcheck exists. A health state
-    // still 'starting' is not a pass (except residual health on a clean one-shot).
+    // Window complete: a definite failure outranks every unknown conclusion.
+    // Every unsatisfied container has to be a clean exit whose declared intent
+    // was never read for the window to end without a verdict; a missing,
+    // restarting, or non-zero-exited container is a failure the gate can name.
+    const notRunning = [...gate.expected.keys()].filter(
+      name => !isObservedContainerSatisfied(gate, byName.get(name)),
+    );
+    if (notRunning.length > 0) {
+      if (notRunning.every(name => this.ambiguousCleanExit(gate, byName.get(name)))) {
+        this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary);
+        return;
+      }
+      this.finalize(gate, 'failed', `not running at the end of the window: ${notRunning.join(', ')}`, summary);
+      return;
+    }
+    // Only then is a healthcheck that never finished starting the remaining
+    // reason the window cannot pass (residual health on a clean one-shot does
+    // not count against it).
     const stillStarting = observed.filter(
       c => c.health === 'starting' && !isDeclaredCleanOneShot(gate, c),
     );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
-      return;
-    }
-    const notRunning = [...gate.expected.keys()].filter(
-      name => !isObservedContainerSatisfied(gate, byName.get(name)),
-    );
-    if (notRunning.length > 0) {
-      this.finalize(gate, 'failed', `not running at the end of the window: ${notRunning.join(', ')}`, summary);
       return;
     }
     this.finalize(gate, 'passed', null, summary);
@@ -1093,25 +1278,11 @@ export class HealthGateService {
    * not expand the observed set.
    */
   private async runServicePollCycle(gate: ActiveGate, key: string): Promise<void> {
-    let observed: ObservedContainer[];
-    try {
-      observed = await withTimeout(
-        this.observeContainers(gate), OBSERVE_TIMEOUT_MS, 'health gate observe',
-      );
-    } catch (error) {
-      gate.consecutivePollErrors += 1;
-      console.warn(
-        '[HealthGate] service poll error %d for %s/%s:',
-        gate.consecutivePollErrors, sanitizeForLog(gate.stackName),
-        sanitizeForLog(gate.serviceName ?? ''), getErrorMessage(error, 'unknown'),
-      );
-      if (gate.consecutivePollErrors >= 3) {
-        this.finalize(gate, 'unknown', 'Docker became unreachable during observation', []);
-      }
-      return;
-    }
+    const observed = await this.readPollEvidence(
+      gate, 'service poll error', `${sanitizeForLog(gate.stackName)}/${sanitizeForLog(gate.serviceName ?? '')}`,
+    );
+    if (!observed) return;
     if (gate.finalized || this.active.get(key) !== gate) return;
-    gate.consecutivePollErrors = 0;
 
     await this.ensureDeclaredRestartMap(gate);
     if (gate.finalized || this.active.get(key) !== gate) return;
@@ -1183,6 +1354,7 @@ export class HealthGateService {
       }
     }
 
+    let ambiguousRole: GateRole | null = null;
     for (const [name, baseline] of gate.expected) {
       const role = gate.roleByName.get(name) ?? 'collateral';
       const noun = role === 'primary' ? 'replica' : 'sibling';
@@ -1199,6 +1371,15 @@ export class HealthGateService {
 
       const cleanOneShot = isDeclaredCleanOneShot(gate, current);
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
+        // Same ambiguity as the stack cycle, and the same limit: only a clean
+        // exit is undecidable without the declared intent. Hold it until the
+        // whole set has been inspected so a definite failure on a later
+        // replica or sibling decides the verdict, and remember the role so an
+        // ambiguity-only outcome keeps its attribution.
+        if (this.ambiguousCleanExit(gate, current)) {
+          ambiguousRole ??= role;
+          continue;
+        }
         this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
         return;
       }
@@ -1222,8 +1403,106 @@ export class HealthGateService {
       gate.expected.set(name, current);
     }
 
+    // A replica of the operated service that appeared after the gate armed is
+    // still evidence, and an unhealthy one fails here, where it is seen: a
+    // healthcheck that recovers would erase the only trace of the failure by the
+    // window end. An exited one persists until the window end, so the checks
+    // below cover it; a container removed before then is not end-state evidence.
+    // The tracked replicas are checked in the loop above.
+    for (const c of observed) {
+      if (c.service !== serviceName || gate.expected.has(c.name)) continue;
+      if (c.state === 'running' && c.health === 'unhealthy') {
+        this.finalize(gate, 'failed', `replica ${c.name} reported unhealthy`, summary, 'primary');
+        return;
+      }
+    }
+
+    // Same window-end precedence as the stack cycle: an ambiguity that is the
+    // only unsatisfied evidence still ends unknown below, while a replica or
+    // sibling the window-end check can name as failed wins over it.
+    if (ambiguousRole !== null && elapsedMs < gate.windowSeconds * 1000) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, ambiguousRole);
+      return;
+    }
+
     if (elapsedMs < gate.windowSeconds * 1000) return;
 
+    // Window complete. A definite failure outranks every unknown conclusion, in
+    // both scopes at once so that neither an ambiguous replica nor an ambiguous
+    // sibling softens the other's definite failure. What the gate tracks is
+    // inspected alongside what the poll returned: a tracked replica the
+    // observation never returned is a definite failure, and one whose place was
+    // taken by an untracked replica still leaves its own exit unexplained.
+    // Keyed by name so one replica is counted once however it was seen. A
+    // scale-0 service has no replicas to account for: a container of it that is
+    // still running is already count drift, and a leftover exited one is not
+    // this rollout's evidence.
+    const replicaByName = new Map<string, ObservedContainer | undefined>();
+    if (gate.expectedReplicas > 0) {
+      for (const name of gate.expected.keys()) {
+        if (gate.roleByName.get(name) === 'primary') replicaByName.set(name, byName.get(name));
+      }
+      for (const c of observed) {
+        if (c.service === serviceName && !gate.expected.has(c.name)) replicaByName.set(c.name, c);
+      }
+    }
+    const unsatisfiedReplicas = [...replicaByName]
+      .map(([name, current]) => ({ name, current }))
+      .filter(replica => !isObservedContainerSatisfied(gate, replica.current));
+    const definiteReplicas = unsatisfiedReplicas.filter(replica => !this.ambiguousCleanExit(gate, replica.current));
+    const collateralNotRunning = [...gate.expected.keys()]
+      .filter(name => gate.roleByName.get(name) === 'collateral')
+      .filter(name => !isObservedContainerSatisfied(gate, byName.get(name)));
+    const definiteCollateral = collateralNotRunning.filter(name => !this.ambiguousCleanExit(gate, byName.get(name)));
+    const satisfiedReplicas = observed.filter(
+      c => c.service === serviceName && isObservedContainerSatisfied(gate, c),
+    ).length;
+
+    if (definiteReplicas.length > 0) {
+      this.finalize(
+        gate, 'failed',
+        satisfiedReplicas === gate.expectedReplicas
+          ? `replica(s) not running at the end of the window: ${definiteReplicas.map(replica => replica.name).join(', ')}`
+          : `service ${serviceName} has ${satisfiedReplicas} satisfied replica(s), expected ${gate.expectedReplicas}`,
+        summary, 'primary',
+      );
+      return;
+    }
+    if (definiteCollateral.length > 0) {
+      this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${definiteCollateral.join(', ')}`, summary, 'collateral');
+      return;
+    }
+    // A shortfall only clean exits explain is the ambiguity the declared intent
+    // would have resolved, and only when those exits can account for all of it:
+    // a replica the gate watched over that never came up is a definite failure
+    // however its peers ended.
+    const replicaDeficit = gate.expectedReplicas - satisfiedReplicas;
+    if (replicaDeficit > 0 && unsatisfiedReplicas.length >= replicaDeficit) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'primary');
+      return;
+    }
+    if (satisfiedReplicas !== gate.expectedReplicas) {
+      this.finalize(
+        gate, 'failed',
+        `service ${serviceName} has ${satisfiedReplicas} satisfied replica(s), expected ${gate.expectedReplicas}`,
+        summary, 'primary',
+      );
+      return;
+    }
+    if (unsatisfiedReplicas.length > 0) {
+      // The count is satisfied, but not by the replicas the gate watched: a
+      // replacement covering the count says nothing about why a tracked replica
+      // left, so the exit stays unexplained rather than becoming a pass.
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'primary');
+      return;
+    }
+    if (collateralNotRunning.length > 0) {
+      this.finalize(gate, 'unknown', DECLARED_INTENT_UNAVAILABLE_REASON, summary, 'collateral');
+      return;
+    }
+    // Only then is a healthcheck that never finished starting the remaining
+    // reason the window cannot pass (residual health on a clean one-shot does
+    // not count against it).
     const stillStarting = observed.filter(
       c => c.health === 'starting'
         && !isDeclaredCleanOneShot(gate, c)
@@ -1231,24 +1510,6 @@ export class HealthGateService {
     );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
-      return;
-    }
-    const satisfiedPrimary = observed.filter(
-      c => c.service === serviceName && isObservedContainerSatisfied(gate, c),
-    );
-    if (satisfiedPrimary.length !== gate.expectedReplicas) {
-      this.finalize(
-        gate, 'failed',
-        `service ${serviceName} has ${satisfiedPrimary.length} satisfied replica(s), expected ${gate.expectedReplicas}`,
-        summary, 'primary',
-      );
-      return;
-    }
-    const collateralNotRunning = [...gate.expected.keys()]
-      .filter(name => gate.roleByName.get(name) === 'collateral')
-      .filter(name => !isObservedContainerSatisfied(gate, byName.get(name)));
-    if (collateralNotRunning.length > 0) {
-      this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${collateralNotRunning.join(', ')}`, summary, 'collateral');
       return;
     }
     this.finalize(gate, 'passed', null, summary);
@@ -1272,92 +1533,140 @@ export class HealthGateService {
     });
   }
 
-  private async observeContainers(gate: ActiveGate): Promise<ObservedContainer[]> {
-    return this.listStackContainers(gate.nodeId, gate.stackName);
-  }
-
   /**
-   * Load declared Compose restart intent once per gate. Fail closed to an empty
-   * map on render/parse errors so inspect "no" cannot false-qualify one-shots.
+   * Read one poll's evidence from the node that hosts the stack, applying the
+   * failure rules the gate has always had.
+   *
+   * Three consecutive unreadable polls end the observation unknown, because a
+   * transient read failure is not a verdict. A node that answers that it does
+   * not serve observations is not transient: every later poll would ask the
+   * same question and hear the same thing, so the gate ends at once with a
+   * reason naming what was actually missing.
+   *
+   * Returns null when there is no evidence to account for, which is also the
+   * case once a failure path has finalized the gate.
    */
-  private async ensureDeclaredRestartMap(gate: ActiveGate): Promise<void> {
-    if (gate.declaredRestartByService !== null) return;
-    gate.declaredRestartByService = new Map();
+  private async readPollEvidence(
+    gate: ActiveGate,
+    logLabel: string,
+    logContext: string,
+  ): Promise<ObservedContainer[] | null> {
+    let read: StackHealthFactsOutcome;
     try {
-      const result = await ComposeService.getInstance(gate.nodeId).renderConfig(gate.stackName);
-      if (result.rendered === null) {
-        console.warn(
-          '[HealthGate] declared restart map unavailable for %s (compose render failed)',
-          sanitizeForLog(gate.stackName),
-        );
-        return;
-      }
-      const model = parseEffectiveModel(JSON.parse(result.rendered), gate.stackName);
-      const declared = declaredFromEffectiveModel(model);
-      gate.declaredRestartByService = new Map(
-        declared.services.map((s) => [s.name, s.restart ?? null]),
+      read = await withTimeout(
+        readStackHealthFacts({ nodeId: gate.nodeId, stackName: gate.stackName }),
+        OBSERVE_TIMEOUT_MS,
+        'health gate observe',
       );
     } catch (error) {
-      console.warn(
-        '[HealthGate] declared restart map load failed for %s:',
-        sanitizeForLog(gate.stackName), getErrorMessage(error, 'unknown'),
+      // The backstop for a read that never answered at all: a hung local Docker
+      // socket, or a remote read that outlived its own bound. The reason names
+      // whichever this gate was actually reading.
+      this.countPollError(
+        gate, logLabel, logContext, getErrorMessage(error, 'unknown'), this.observationCause(gate),
       );
+      return null;
+    }
+    if (read.kind === 'unsupported') {
+      this.finalize(gate, 'unknown', OBSERVATION_UNSUPPORTED_REASON, []);
+      return null;
+    }
+    if (read.kind === 'unavailable') {
+      this.countPollError(gate, logLabel, logContext, read.detail, read.cause);
+      return null;
+    }
+    gate.consecutivePollErrors = 0;
+    return read.containers.map(c => ({ ...c, restarts: 0 }));
+  }
+
+  /** Count a failed poll and end the observation once the error budget is spent. */
+  private countPollError(
+    gate: ActiveGate,
+    logLabel: string,
+    logContext: string,
+    detail: string,
+    cause: 'docker' | 'node',
+  ): void {
+    gate.consecutivePollErrors += 1;
+    console.warn('[HealthGate] %s %d for %s: %s', logLabel, gate.consecutivePollErrors, logContext, detail);
+    if (gate.consecutivePollErrors >= 3) {
+      // Worded for what was being read: a remote node's facts arrive over the
+      // proxy, so naming Docker for one would name a socket this instance never
+      // touched.
+      this.finalize(gate, 'unknown', cause === 'node' ? NODE_UNREADABLE_REASON : DOCKER_UNREACHABLE_REASON, []);
     }
   }
 
-  /** List and inspect a stack's containers into the gate's observation shape. */
-  private async listStackContainers(nodeId: number, stackName: string): Promise<ObservedContainer[]> {
-    const docker = DockerController.getInstance(nodeId).getDocker();
-    const listed = await docker.listContainers({
-      all: true,
-      filters: { label: [`com.docker.compose.project=${stackName}`] },
+  /**
+   * Whether an unsatisfied container could be a clean one-shot whose declared
+   * intent was never read.
+   *
+   * This is the one ambiguity the gate softens a failure into `unknown` over.
+   * Only an exit 0 qualifies: a non-zero exit is a failure whether or not the
+   * compose declared `restart: "no"`, and a container that is missing or still
+   * restarting is a definite failure the gate already reports as one. Without
+   * the intent these clean exits are undecidable, and `failed` is the verdict a
+   * rollback policy acts on.
+   */
+  private ambiguousCleanExit(gate: ActiveGate, current: ObservedContainer | undefined): boolean {
+    return gate.declaredRestartByService === null
+      && current?.state === 'exited'
+      && current.exitCode === 0;
+  }
+
+  /** Which subsystem a gate that gave up was actually reading. */
+  private observationCause(gate: ActiveGate): 'docker' | 'node' {
+    try {
+      return DatabaseService.getInstance().getNode(gate.nodeId)?.type === 'remote' ? 'node' : 'docker';
+    } catch (error) {
+      // The reason is the least of a gate's problems when the node row itself
+      // cannot be read, and a throw here would escape the poll timer: the local
+      // wording is the pre-existing one, and the finalize that follows records
+      // the run either way.
+      console.warn(
+        '[HealthGate] Could not read node %s while wording a poll failure: %s',
+        gate.nodeId,
+        getErrorMessage(error, 'unknown'),
+      );
+      return 'docker';
+    }
+  }
+
+  /**
+   * Load declared Compose restart intent once per gate.
+   *
+   * A read that fails leaves the map null rather than substituting an empty
+   * one, because the two mean opposite things to the checks below: a loaded map
+   * with no entry for a service says an exit is a failure, while a null map says
+   * the intent is unknown, which makes an exit ambiguous and ends the
+   * observation unknown instead of failing a workload that may have completed
+   * exactly as its compose declares.
+   *
+   * Deliberately outside the gate's per-poll ceiling: this is a render rather
+   * than a container list, it happens once per gate, and the gate's window is
+   * measured from arming, so a slow read costs samples instead of shortening
+   * the window a verdict is drawn from.
+   */
+  private async ensureDeclaredRestartMap(gate: ActiveGate): Promise<void> {
+    if (gate.declaredRestartRead) return;
+    gate.declaredRestartRead = true;
+    gate.declaredRestartByService = await readStackDeclaredRestartIntent({
+      nodeId: gate.nodeId,
+      stackName: gate.stackName,
     });
-    const observed = await Promise.all(
-      listed.map(async (info): Promise<ObservedContainer | null> => {
-        try {
-          const inspect = await docker.getContainer(info.Id).inspect();
-          const labels = (info.Labels ?? inspect.Config?.Labels ?? {}) as Record<string, string>;
-          return {
-            id: info.Id,
-            name: info.Names?.[0]?.replace(/^\//, '') ?? info.Id.slice(0, 12),
-            startedAt: inspect.State?.StartedAt ?? null,
-            restartCount: typeof inspect.RestartCount === 'number' ? inspect.RestartCount : 0,
-            restarts: 0,
-            state: inspect.State?.Status ?? info.State ?? 'unknown',
-            health: inspect.State?.Health?.Status ?? null,
-            service: labels['com.docker.compose.service'] ?? null,
-            imageId: inspect.Image ?? '',
-            exitCode: typeof inspect.State?.ExitCode === 'number' ? inspect.State.ExitCode : null,
-            restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
-          };
-        } catch (e: unknown) {
-          // Removed between list and inspect; the missing-container logic will
-          // see its absence on this or the next poll.
-          if ((e as { statusCode?: number })?.statusCode === 404) return null;
-          throw e;
-        }
-      }),
-    );
-    return observed.filter((c): c is ObservedContainer => c !== null);
   }
 
   /** Snapshot the current per-container facts for prepare's primary/collateral partition. */
   private async snapshotBaselines(nodeId: number, stackName: string): Promise<PreparedBaseline[]> {
-    const observed = await withTimeout(
-      this.listStackContainers(nodeId, stackName), OBSERVE_TIMEOUT_MS, 'health gate prepare snapshot',
+    const read = await withTimeout(
+      readStackHealthFacts({ nodeId, stackName }), OBSERVE_TIMEOUT_MS, 'health gate prepare snapshot',
     );
-    return observed.map(c => ({
-      id: c.id,
-      name: c.name,
-      service: c.service,
-      state: c.state,
-      health: c.health,
-      restartCount: c.restartCount,
-      startedAt: c.startedAt,
-      imageId: c.imageId,
-      exitCode: c.exitCode,
-      restartPolicy: c.restartPolicy,
-    }));
+    if (read.kind !== 'ok') {
+      // Never claimed: prepare reports snapshotOk=false so the caller skips
+      // observation rather than arming a gate with an empty baseline.
+      throw new Error(read.kind === 'unavailable' ? read.detail : 'the node does not report runtime facts');
+    }
+    return read.containers;
   }
 
   private summarize(

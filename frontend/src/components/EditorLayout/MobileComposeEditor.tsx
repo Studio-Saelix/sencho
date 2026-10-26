@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { ChevronLeft, Save, Rocket } from 'lucide-react';
+import { ChevronDown, ChevronLeft, Download, Save, Rocket } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '../ui/button';
 import {
@@ -9,7 +9,14 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import type { StackAction } from './EditorView';
+import { ENV_READ_FAILED_NOTICE } from './envNotice';
 
 interface MobileComposeEditorProps {
     content: string;
@@ -19,6 +26,8 @@ interface MobileComposeEditorProps {
     activeTab: 'compose' | 'env' | 'files';
     setActiveTab: (tab: 'compose' | 'env' | 'files') => void;
     envExists: boolean;
+    /** The env inventory request failed; unknown is not the same as absent. */
+    envInventoryFailed: boolean;
     envFiles: string[];
     selectedEnvFile: string;
     changeEnvFile: (file: string) => Promise<void>;
@@ -27,7 +36,11 @@ interface MobileComposeEditorProps {
     canEdit: boolean;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
+    requestSaveAndPullImages: (e: React.MouseEvent) => void;
     canSaveAndReapply?: boolean;
+    /** Both stack:edit and stack:deploy on this stack, and not the self stack:
+     *  gates the image-pull item on the save menu. */
+    canPullImages?: boolean;
     /** False while status evidence is not authoritative; disables Save & Deploy
      *  (Save Only stays available). */
     actionsReady?: boolean;
@@ -50,6 +63,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         activeTab,
         setActiveTab,
         envExists,
+        envInventoryFailed,
         envFiles,
         selectedEnvFile,
         changeEnvFile,
@@ -58,7 +72,9 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         canEdit,
         requestSave,
         requestSaveAndDeploy,
+        requestSaveAndPullImages,
         canSaveAndReapply = false,
+        canPullImages = false,
         actionsReady = false,
         onClose,
         hasUnsavedChanges,
@@ -66,18 +82,18 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
 
     // The save handlers (saveFile) key off the shared editorState.activeTab, so the
     // displayed buffer must match it. The desktop editor can hand off a 'files' tab
-    // (or 'env' with no env file) when it crosses into the mobile breakpoint; left
-    // alone the textarea would show compose while a save silently no-ops on 'files'.
-    // Normalize to 'compose' so the visible edit always saves to the visible file.
+    // when it crosses into the mobile breakpoint; left alone the textarea would
+    // show compose while a save silently no-ops on 'files'. Normalize to 'compose'
+    // so the visible edit always saves to the visible file.
     useEffect(() => {
-        if (activeTab === 'files' || (activeTab === 'env' && !envExists)) {
+        if (activeTab === 'files') {
             setActiveTab('compose');
         }
-    }, [activeTab, envExists, setActiveTab]);
+    }, [activeTab, setActiveTab]);
 
-    // Mirror of the normalization above for this render: 'env' only when an env
-    // file exists, else 'compose'. The effect makes the shared activeTab follow.
-    const tab: 'compose' | 'env' = activeTab === 'env' && envExists ? 'env' : 'compose';
+    // The .env tab stays available without an env file: its first save creates
+    // the default .env, same as the desktop editor.
+    const tab: 'compose' | 'env' = activeTab === 'env' ? 'env' : 'compose';
     const value = tab === 'compose' ? content || '' : envContent || '';
     // Switching the env file refetches and overwrites the env buffer, so block it
     // while there are unsaved edits (matches the desktop selector being disabled
@@ -85,12 +101,14 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
     const envSwitchDisabled = hasUnsavedChanges() || isFileLoading;
     // Plain Save is never gated by status readiness (it is not a lifecycle
     // action); only Save & Deploy / Save & Reapply requires authoritative
-    // runtime evidence.
-    const saveDisabled = isFileLoading || loadingAction === 'deploy';
+    // runtime evidence. An image pull holds the same per-stack lock a deploy
+    // does, so it disables the row too, or a second save could be dispatched
+    // mid-pull.
+    const saveDisabled = isFileLoading || loadingAction === 'deploy' || loadingAction === 'pull';
     const saveAndDeployDisabled = saveDisabled || !actionsReady;
     // Read-only while an env-file fetch is in flight: changeEnvFile overwrites the
     // buffer when it resolves, so edits typed during the load would be silently lost.
-    const editorReadOnly = !canEdit || isFileLoading;
+    const editorReadOnly = !canEdit || isFileLoading || (tab === 'env' && !envExists && envInventoryFailed);
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -107,38 +125,32 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                         <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
                         Cancel
                     </button>
-                    {envExists ? (
-                        <div
-                            role="tablist"
-                            aria-label="File to edit"
-                            className="flex gap-1 rounded-lg border border-card-border bg-well p-1 shadow-[var(--shadow-well)]"
-                        >
-                            {(['compose', 'env'] as const).map(id => {
-                                const on = tab === id;
-                                return (
-                                    <button
-                                        key={id}
-                                        type="button"
-                                        role="tab"
-                                        aria-selected={on}
-                                        onClick={() => setActiveTab(id)}
-                                        className={cn(
-                                            'rounded-md px-3 py-1.5 font-mono text-[11px] lowercase tracking-[0.08em] transition-colors',
-                                            on
-                                                ? 'bg-card text-stat-value shadow-card-bevel'
-                                                : 'text-stat-subtitle hover:text-foreground',
-                                        )}
-                                    >
-                                        {id === 'compose' ? 'compose' : '.env'}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    ) : (
-                        <span className="font-mono text-[11px] lowercase tracking-[0.08em] text-stat-subtitle">
-                            compose.yaml
-                        </span>
-                    )}
+                    <div
+                        role="tablist"
+                        aria-label="File to edit"
+                        className="flex gap-1 rounded-lg border border-card-border bg-well p-1 shadow-[var(--shadow-well)]"
+                    >
+                        {(['compose', 'env'] as const).map(id => {
+                            const on = tab === id;
+                            return (
+                                <button
+                                    key={id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={on}
+                                    onClick={() => setActiveTab(id)}
+                                    className={cn(
+                                        'rounded-md px-3 py-1.5 font-mono text-[11px] lowercase tracking-[0.08em] transition-colors',
+                                        on
+                                            ? 'bg-card text-stat-value shadow-card-bevel'
+                                            : 'text-stat-subtitle hover:text-foreground',
+                                    )}
+                                >
+                                    {id === 'compose' ? 'compose' : '.env'}
+                                </button>
+                            );
+                        })}
+                    </div>
                 </div>
 
                 {tab === 'env' && envFiles.length > 1 && (
@@ -156,7 +168,13 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                     </Select>
                 )}
             </div>
-
+            {tab === 'env' && !envExists && canEdit && (
+                <p className="shrink-0 border-b border-hairline bg-brand/8 px-4 py-2 font-mono text-[11px] leading-snug text-brand">
+                    {envInventoryFailed
+                        ? ENV_READ_FAILED_NOTICE
+                        : 'This stack has no environment file yet. It will be created in the stack directory when you save.'}
+                </p>
+            )}
             {/* Editor */}
             <div className="min-h-0 flex-1 overflow-hidden p-3">
                 <textarea
@@ -196,17 +214,50 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                             <Save className="mr-2 h-4 w-4" strokeWidth={1.5} />
                             Save
                         </Button>
-                        <Button
-                            type="button"
-                            variant="default"
-                            onClick={requestSaveAndDeploy}
-                            disabled={saveAndDeployDisabled}
-                            data-testid="mobile-editor-save-deploy"
-                            className="h-11 flex-1 rounded-lg"
-                        >
-                            <Rocket className="mr-2 h-4 w-4" strokeWidth={1.5} />
-                            {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
-                        </Button>
+                        {/* Split control: a full-width primary plus a narrow menu
+                            trigger, so adding an action never crowds the phone row
+                            or truncates the primary label. */}
+                        <div className="flex flex-1 items-center">
+                            <Button
+                                type="button"
+                                variant="default"
+                                onClick={requestSaveAndDeploy}
+                                disabled={saveAndDeployDisabled}
+                                data-testid="mobile-editor-save-deploy"
+                                className={cn(
+                                    'h-11 flex-1',
+                                    canPullImages ? 'rounded-l-lg rounded-r-none' : 'rounded-lg',
+                                )}
+                            >
+                                <Rocket className="mr-2 h-4 w-4" strokeWidth={1.5} />
+                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
+                            </Button>
+                            {canPullImages && (
+                                <DropdownMenu modal={false}>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button
+                                            type="button"
+                                            variant="default"
+                                            aria-label="More save actions"
+                                            data-testid="mobile-editor-actions-menu"
+                                            disabled={saveDisabled}
+                                            className="h-11 rounded-l-none rounded-r-lg border-l border-primary-foreground/20 px-2"
+                                        >
+                                            <ChevronDown className="h-4 w-4" strokeWidth={1.6} />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                        <DropdownMenuItem
+                                            onClick={requestSaveAndPullImages}
+                                            disabled={!actionsReady}
+                                        >
+                                            <Download className="mr-2 h-4 w-4" strokeWidth={1.5} />
+                                            {'Save & Pull Images'}
+                                        </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            )}
+                        </div>
                     </div>
                 )}
             </div>

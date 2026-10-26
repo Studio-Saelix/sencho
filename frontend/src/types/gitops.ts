@@ -80,11 +80,12 @@ export type GitOpsIdentityRef =
   | { kind: 'commit'; sha: string; repoUrl: string; ref: string }
   | { kind: 'generation'; id: string }
   | { kind: 'artifact_set'; id: string; qualification: ArtifactQualification; evidenceVersion: number }
-  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null }
+  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null; services?: ServiceArtifactEvidence[] }
   | { kind: 'intent'; id: string; composeContentSha256: string }
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
+  | { kind: 'observed_invocation'; observed: AuthoredInvocationIdentity; observedAt: number }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
 export interface GitOpsApprovalRefs {
@@ -93,6 +94,19 @@ export interface GitOpsApprovalRefs {
   rolloutAuthorizationRef: string | null;
   legacyCombinedApprovalRef: string | null;
 }
+
+/**
+ * The rollout scope an approved placement froze, which is what a dispatch would
+ * target. Not the same as `targets`, which are the nodes an application is
+ * observed to run on: a Blueprint approved for a node no rollout has reached yet
+ * has no row there, and a node it was withdrawn from keeps one. A confirmation
+ * that reads `targets` would name somewhere the action will not go.
+ */
+export type ApprovedRolloutScope =
+  | { status: 'not_applicable' }
+  | { status: 'unapproved' }
+  | { status: 'unresolved'; approvalRef: string; reason: 'no_candidate' | 'unreadable_required_targets' | 'approval_does_not_resolve' }
+  | { status: 'approved'; approvalRef: string; nodeIds: number[] };
 
 // --- source facet -----------------------------------------------------------
 
@@ -304,6 +318,7 @@ export type RuntimeFacet =
         | 'evict_blocked'
         | 'drifted'
         | 'correcting'
+        | 'repair_held'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'
@@ -529,6 +544,7 @@ export interface GitOpsRevisionAbsent {
   limitations: readonly GitOpsLimitation[];
   availableActions: readonly [];
   approvals: null;
+  approvedRolloutScope?: ApprovedRolloutScope;
 }
 
 /** A live application. `availableActions` is never empty: "nothing to do" is ['none']. */
@@ -538,9 +554,17 @@ export interface GitOpsRevisionLive {
   applicationId: string;
   lifecycleStatus: GitOpsLifecycleStatus;
   stackName: string | null;
+  /** The stack whose Git source this application pulls. Direct rows copy their stack name here. A Git-managed Blueprint clears stackName and keeps the source stack here. Null when it has none. */
+  configuredSourceStackName: string | null;
   blueprintId: number | null;
   rolloutGenerationId: string | null;
   approvals: GitOpsApprovalRefs;
+  /**
+   * The rollout scope the placement approval froze. Absent on a projection from
+   * a remote running an older build, which reads as "no scope is proven" rather
+   * than as an empty approved scope.
+   */
+  approvedRolloutScope?: ApprovedRolloutScope;
   facets: GitOpsFacets;
   targets: readonly GitOpsTargetProjection[];
   drift: readonly GitOpsDriftItem[];
@@ -548,6 +572,45 @@ export interface GitOpsRevisionLive {
   // the absent arm above.
   limitations: readonly GitOpsLimitation[];
   availableActions: readonly GitOpsAvailableAction[];
+  /**
+   * The three authority policies, configured and effective. Empty on the absent
+   * arm, which is present rather than missing so a reader never has to tell "no
+   * application" from "a build that said nothing".
+   */
+  authorityPolicies: readonly AuthorityPolicyRead[];
+}
+
+// --- authority policies ------------------------------------------------------
+
+/**
+ * What one authority policy is set to, and what it actually did.
+ *
+ * The wire's spelling of the three domains. Kept as its own union rather than
+ * reusing the policy value unions, because a read type has to survive a
+ * vocabulary this build has not seen: `configured` and `effectiveFrozen` are
+ * strings here so an unfamiliar value is displayed as unfamiliar rather than
+ * dropped. A write may not do that, so the write unions live in the API module.
+ */
+export type AuthorityPolicyDomain = 'source' | 'placement' | 'rollout_authorization';
+
+export type AuthorityPolicyDecision =
+  | 'policy_authorized'
+  | 'operator_authorized'
+  | 'awaiting_operator'
+  | 'policy_declined'
+  | 'not_applicable'
+  | (string & {});
+
+export interface AuthorityPolicyRead {
+  domain: AuthorityPolicyDomain;
+  configured: string;
+  /** Null when no readable frozen snapshot exists. Never the current setting. */
+  effectiveFrozen: string | null;
+  decision: AuthorityPolicyDecision;
+  /** A closed decision reason, or null when nothing is outstanding. */
+  reason: string | null;
+  decidedBy: 'operator' | 'configured_policy' | null;
+  decidedAt: number | null;
 }
 
 /** Narrow on `targetMode === 'not_applicable'`; the live modes are disjoint from it. */

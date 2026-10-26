@@ -29,5 +29,7 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // fonts.test.ts uses node:fs. @types/node in this project would change DOM timer types, so tsconfig.node.json typechecks it.
+  "exclude": ["src/fonts.test.ts"]
 }

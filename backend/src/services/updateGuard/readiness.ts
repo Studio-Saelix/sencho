@@ -1,5 +1,6 @@
 import type { PreflightStatus } from '../preflight/types';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
+import type { ResolvedRollbackInventory, RollbackGenerationManifest } from '../../types/rollbackGeneration';
 import type {
   ContainerProbe,
   ReadinessSignal,
@@ -335,13 +336,145 @@ export interface RollbackInputs {
    * Current recovery generation, when one exists. When present, compose_source
    * readiness is driven by this generation rather than the legacy backup slot.
    */
-  recoveryGeneration: { exists: boolean; shortId?: string } | Errored | null;
+  recoveryGeneration: RecoveryGenerationInfo | Errored | null;
   /** Eligibility verdict for the current generation, when assessed. */
   policyEligibility: 'eligible' | 'eligible_with_warning' | 'prohibited' | 'unknown' | Errored | null;
-  /** Whether managed authored inputs are covered by exact inventory. */
+  /** Coverage of the managed authored inputs: of the current recovery generation when it recorded them, else of the live project. */
   managedInputs: { covered: boolean; detail: string } | Errored | null;
   /** Age identity readiness for SOPS-encrypted restore targets; null when not Git-managed. */
   sopsKeys: { ready: boolean; detail: string } | Errored | null;
+}
+
+/**
+ * What the current recovery generation is known to hold.
+ * - complete: no omissions were recorded. Application data and build inputs are
+ *   never held, by design, and are not counted as omissions.
+ * - omits_inputs: it recorded inputs it could not hold.
+ * - unreadable: its stored content could not be read or verified.
+ * - not_recorded: it kept no record of its omissions (a row with no stored
+ *   content, or a generation written before omissions were recorded, which may
+ *   have skipped an outside input silently), so its coverage is not known.
+ */
+export type RestoreCoverage = 'complete' | 'omits_inputs' | 'unreadable' | 'not_recorded';
+
+/** The current recovery generation. */
+export type RecoveryGenerationInfo =
+  | { exists: false }
+  | {
+    exists: true;
+    shortId?: string;
+    restoreCoverage: RestoreCoverage;
+    /** Whether the generation holds the compose layers it selected. */
+    composeCoverage?: StoredComposeCoverage;
+  };
+
+/** What a stored generation holds of the compose layers it selected. */
+export type StoredComposeCoverage = 'held' | 'current_content' | 'not_recorded';
+
+/**
+ * Coverage of the compose layers a stored generation selected. A shared main
+ * file is selected and pinned but deliberately not captured, so the generation
+ * restores its link while a rollback reads the target's current content. Older
+ * generations did not record their layer set, so their content is unknown.
+ */
+export function storedComposeCoverage(
+  manifest: Pick<RollbackGenerationManifest, 'entries' | 'invocation'>,
+): StoredComposeCoverage {
+  const layers = manifest.invocation.composeLayers;
+  if (!layers || layers.length === 0) return 'not_recorded';
+  const held = new Set(
+    manifest.entries
+      .filter((entry) => entry.state === 'present')
+      .map((entry) => entry.relativePath),
+  );
+  return layers.every((layer) => held.has(layer)) ? 'held' : 'current_content';
+}
+
+/** Coverage of a stored generation, from the omissions it recorded. */
+export function storedRestoreCoverage(
+  manifest: Pick<RollbackGenerationManifest, 'uncapturedInputs'>,
+): RestoreCoverage {
+  if (manifest.uncapturedInputs === undefined) return 'not_recorded';
+  return manifest.uncapturedInputs.length > 0 ? 'omits_inputs' : 'complete';
+}
+
+const MAX_LISTED_UNCAPTURED_INPUTS = 5;
+
+function describeUncaptured(uncapturedInputs: readonly string[]): { covered: false; detail: string } {
+  const listed = uncapturedInputs.slice(0, MAX_LISTED_UNCAPTURED_INPUTS).join('; ');
+  const more = uncapturedInputs.length > MAX_LISTED_UNCAPTURED_INPUTS
+    ? `; and ${uncapturedInputs.length - MAX_LISTED_UNCAPTURED_INPUTS} more`
+    : '';
+  return {
+    covered: false,
+    detail: `${uncapturedInputs.length} input(s) are not captured and a rollback uses their current content: ${listed}${more}.`,
+  };
+}
+
+/**
+ * Managed-input coverage of the live project: what the next capture would
+ * hold. A refused capture and a partial one both read as not covered (a
+ * warning), but only the partial one names the inputs a rollback would take
+ * from the live stack.
+ */
+export function describeManagedInputs(
+  inventory: Pick<ResolvedRollbackInventory, 'coverageRefusal' | 'uncapturedInputs' | 'entries'>,
+): { covered: boolean; detail: string } {
+  if (inventory.coverageRefusal !== null) {
+    return { covered: false, detail: inventory.coverageRefusal };
+  }
+  if (inventory.uncapturedInputs.length > 0) return describeUncaptured(inventory.uncapturedInputs);
+  return {
+    covered: true,
+    detail: `Exact authored-project coverage includes ${inventory.entries.length} managed path(s).`,
+  };
+}
+
+/**
+ * Managed-input coverage of the stored recovery generation a rollback would
+ * restore. It is read from that generation, so a later edit to the live
+ * project cannot hide what the generation left out. Call it only for a
+ * generation that recorded its omissions.
+ */
+export function describeStoredManagedInputs(
+  manifest: Pick<RollbackGenerationManifest, 'uncapturedInputs' | 'entries'>,
+): { covered: boolean; detail: string } {
+  if (storedRestoreCoverage(manifest) === 'omits_inputs') return describeUncaptured(manifest.uncapturedInputs!);
+  const held = manifest.entries.filter((e) => e.state === 'present').length;
+  return {
+    covered: true,
+    detail: `This recovery generation holds ${held} managed path(s).`,
+  };
+}
+
+/**
+ * The Managed inputs row. A generation that recorded its omissions is
+ * described from itself, since that is what a rollback restores; the live
+ * project is added only to say that the next capture would be refused. With no
+ * generation (`coverage` null) the live project is all there is to describe.
+ * A generation that recorded nothing is never reported as covered, because the
+ * live project says nothing about what it holds.
+ */
+export function describeRollbackManagedInputs(args: {
+  coverage: RestoreCoverage | null;
+  stored: Pick<RollbackGenerationManifest, 'uncapturedInputs' | 'entries'> | null;
+  live: Pick<ResolvedRollbackInventory, 'coverageRefusal' | 'uncapturedInputs' | 'entries'> | Errored;
+}): { covered: boolean; detail: string } | Errored {
+  const { coverage, stored, live } = args;
+  if (coverage === 'unreadable') return 'error';
+  if (coverage === null) return live === 'error' ? 'error' : describeManagedInputs(live);
+  if (stored === null || coverage === 'not_recorded') {
+    if (live === 'error') return 'error';
+    const notRecorded = 'What the current recovery generation holds was not recorded.';
+    const liveRead = describeManagedInputs(live);
+    return { covered: false, detail: liveRead.covered ? notRecorded : `${liveRead.detail} ${notRecorded}` };
+  }
+  const base = describeStoredManagedInputs(stored);
+  if (live !== 'error' && live.coverageRefusal !== null) {
+    const reason = live.coverageRefusal.replace(/\.?$/, '.');
+    return { covered: false, detail: `${base.detail} The next capture would be refused: ${reason}` };
+  }
+  return base;
 }
 
 export function buildRollbackItems(inputs: RollbackInputs, now: number): RollbackReadinessItem[] {
@@ -356,14 +489,15 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
     items.push({ id: 'recovery_generation', state: 'unknown', label: 'Recovery generation', detail: 'The recovery generation could not be read.' });
   } else if (recoveryInfo?.exists) {
     const short = recoveryInfo.shortId;
-    items.push({
-      id: 'recovery_generation',
-      state: 'ready',
-      label: 'Recovery generation',
-      detail: short
-        ? `Current recovery generation ${short} is available for exact restore.`
-        : 'A current recovery generation is available for exact restore.',
-    });
+    const named = short ? `Current recovery generation ${short}` : 'A current recovery generation';
+    const detailByCoverage: Record<RestoreCoverage, string> = {
+      complete: `${named} is available for exact restore.`,
+      omits_inputs: `${named} is available. It does not hold every input, so a restore is partial (see Managed inputs).`,
+      unreadable: `${named} exists, but what it holds could not be read.`,
+      not_recorded: `${named} is available. What it holds was not recorded.`,
+    };
+    const detail = detailByCoverage[recoveryInfo.restoreCoverage];
+    items.push({ id: 'recovery_generation', state: 'ready', label: 'Recovery generation', detail });
   } else {
     items.push({
       id: 'recovery_generation',
@@ -374,12 +508,23 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
   }
 
   // Supersede rule: when a recovery generation exists, compose_source tracks it.
-  if (recoveryExists) {
+  if (recoveryExists && recoveryInfo?.exists && recoveryInfo.restoreCoverage === 'unreadable') {
+    items.push({
+      id: 'compose_source',
+      state: 'unknown',
+      label: 'Previous compose file',
+      detail: 'The current recovery generation could not be read.',
+    });
+  } else if (recoveryExists) {
     items.push({
       id: 'compose_source',
       state: 'ready',
       label: 'Previous compose file',
-      detail: 'Authored project files are covered by the current recovery generation.',
+      detail: recoveryInfo?.composeCoverage === 'current_content'
+        ? 'The current recovery generation selects a compose file it does not hold; a rollback reads that file\'s current content.'
+        : recoveryInfo?.composeCoverage === 'not_recorded'
+          ? 'What compose files the current recovery generation holds was not recorded.'
+          : 'The compose files in the stack directory are covered by the current recovery generation.',
     });
   } else if (inputs.backup === 'error') {
     items.push({ id: 'compose_source', state: 'unknown', label: 'Previous compose file', detail: 'The backup slot could not be read.' });
@@ -480,8 +625,11 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
 
 /**
  * compose_source gates not_ready; ready additionally requires env coverage and
- * a known previous image tag. volume_data, healthchecks, and last_deploy are
- * disclosures and never gate the overall state.
+ * a known previous image tag. A generation that records its own omissions, or
+ * whose coverage could not be read or was never recorded, restores partially,
+ * so it caps the overall state at partial rather than letting the badge
+ * contradict the rows beneath it. volume_data, healthchecks, and last_deploy
+ * are disclosures and never gate the overall state.
  */
 export function aggregateRollbackOverall(items: RollbackReadinessItem[]): RollbackOverall {
   const byId = new Map(items.map(i => [i.id, i.state]));
@@ -496,7 +644,8 @@ export function aggregateRollbackOverall(items: RollbackReadinessItem[]): Rollba
     return 'partial';
   }
   if (byId.get('env_keys') === 'ready' && byId.get('previous_images') === 'ready') {
-    return 'ready';
+    const managed = byId.get('managed_inputs');
+    return managed === 'warning' || managed === 'unknown' ? 'partial' : 'ready';
   }
   return 'partial';
 }

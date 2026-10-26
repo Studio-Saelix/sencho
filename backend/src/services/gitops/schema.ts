@@ -100,6 +100,10 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   active_generation_id TEXT NULL,
   pause_at INTEGER NULL,
   pause_reason TEXT NULL,
+  -- Who placed the pause. A system hold (a refused dispatch) belongs to the
+  -- rollout it was holding, so a source acceptance clears it when it supersedes
+  -- that rollout; an operator pause and a health-policy hold survive.
+  pause_origin TEXT NOT NULL DEFAULT 'operator' CHECK (pause_origin IN ('operator','system','health')),
   -- Distinct from pause_reason: sourceSuspended/sourceUnsuspended write this
   -- field, not the one rolloutPaused/rolloutUnpaused share across app and
   -- target rows, so suspending a source can never clobber an unrelated
@@ -112,6 +116,43 @@ CREATE TABLE IF NOT EXISTS gitops_applications (
   source_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
     source_policy IN ('manual','review','automatic')
   ),
+  -- Placement policy, independent of source policy. operator is the only safe
+  -- default: automatic placement moves workloads on nodes, and an install that
+  -- has never asked to be automated must not start.
+  placement_policy TEXT NOT NULL DEFAULT 'operator' CHECK (
+    placement_policy IN ('operator','bounded_auto')
+  ),
+  -- Whether rollout authorization is minted by policy or waits for an operator.
+  -- New installs wait, because an install with no rollout history has no
+  -- evidence that any target can take the generation. Existing installations
+  -- are a separate case, handled by the one-time backfill in the migration,
+  -- because they already authorized themselves.
+  rollout_authorization_policy TEXT NOT NULL DEFAULT 'manual' CHECK (
+    rollout_authorization_policy IN ('manual','automatic')
+  ),
+  -- Why bounded automatic placement last declined, and when. Null when no
+  -- bounded-auto evaluation has declined, which is the common case and includes
+  -- every application still on the operator policy.
+  --
+  -- Recorded because the decision is otherwise invisible once the producer
+  -- returns. A placement left waiting for review under an automatic policy with
+  -- no stated reason is indistinguishable from a policy that does nothing, and
+  -- that is exactly how an automatic path reads when it is broken.
+  --
+  -- The vocabulary is the closed decision vocabulary and not a free string, so
+  -- a reason that no decision can produce cannot be stored or projected. Cleared
+  -- when the review is resolved, and when the policy changes, because a reason
+  -- that described the old policy describes nothing now.
+  placement_policy_refusal_reason TEXT NULL CHECK (
+    placement_policy_refusal_reason IS NULL OR placement_policy_refusal_reason IN (
+      'policy_is_operator','no_placement_change','stateless_addition','stateless_removal',
+      'mixed_add_and_remove','multiple_additions','multiple_removals','stateful_workload',
+      'unknown_workload','first_multi_node_placement','pin_driven_placement','cordon_override','cordon_driven_removal',
+      'stale_node','unknown_connectivity','missing_evidence','malformed_evidence',
+      'destructive_effect','conflicting_operation'
+    )
+  ),
+  placement_policy_refused_at INTEGER NULL,
   poll_interval_secs INTEGER NULL,
   next_poll_at INTEGER NULL,
   attempt_seq INTEGER NOT NULL DEFAULT 0,
@@ -302,11 +343,22 @@ CREATE TABLE IF NOT EXISTS gitops_rollout_generations (
   preflight_fingerprint TEXT NULL,
   preflight_evidence_json TEXT NULL,
   rollout_strategy_json TEXT NOT NULL DEFAULT '{}',
+  -- The policy snapshot this generation executes, frozen at the moment the
+  -- generation opened. Nullable with no default on purpose: a row that predates
+  -- the column is SQL NULL, which the decoder reconstructs as the legacy
+  -- behavior those rollouts actually had. An empty-object default would make
+  -- absence impossible and turn every existing generation into a decode failure.
+  policy_snapshot_json TEXT NULL,
   provenance TEXT NOT NULL CHECK (provenance IN (
     'legacy_inline','placement_approval','rollout_authorization'
   )),
   supersedes_generation_id TEXT NULL,
   superseded_at INTEGER NULL,
+  -- Set only by the operator's Supersede or Rollback. A system supersede (a
+  -- preflight drift, a placement invalidation, a re-authorization) leaves this
+  -- null, which is what lets the automatic policy tell a withdrawal from a
+  -- supersede it may re-mint.
+  withdrawn_at INTEGER NULL,
   operation_id TEXT NOT NULL,
   actor TEXT NULL,
   trigger TEXT NOT NULL,
@@ -337,6 +389,12 @@ CREATE TABLE IF NOT EXISTS gitops_approvals (
   fingerprint TEXT NULL,
   blast_json TEXT NULL,
   policy_provenance_json TEXT NULL,
+  -- Present only on a source acceptance. Null means no confirmation object was
+  -- stored. A non-null placement pointer on that same row is still read as a
+  -- confirmation that must wait. A present object names the placement approval,
+  -- which may itself be null, and whether the confirmation allowed a rollout
+  -- to start.
+  source_confirmation_json TEXT NULL,
   actor TEXT NULL,
   created_at INTEGER NOT NULL,
   CHECK (
@@ -429,6 +487,10 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
   expected_artifact_set_id TEXT NULL,
   latest_artifact_set_id TEXT NULL,
   observed_artifact_identity_json TEXT NULL,
+  -- What Compose was actually invoked with on this node, read back off the
+  -- running project. NULL means Sencho has not looked, never a value written
+  -- to stand in for a node that could not be reached. See json.ts.
+  observed_invocation_json TEXT NULL,
   intent_revision_id TEXT NULL,
   rollout_candidate_id TEXT NULL,
   rollout_generation_id TEXT NULL,
@@ -465,6 +527,17 @@ CREATE TABLE IF NOT EXISTS gitops_target_current (
       'capturing','restoring','compensating','complete','failed'
     )
   ),
+  -- The class and time of the recovery failure this row still claims.
+  --
+  -- failure_class is shared with deploy and withdraw failures, so a claim that
+  -- may have moved the target would lose its class and its timestamp the moment
+  -- a later failure wrote the shared slot, and the claim would read as a refusal
+  -- that moved nothing. These columns keep the claim's own record, so a failure
+  -- can record itself beside it without retiring it, and only success evidence
+  -- (an acknowledgement or a bind) or a claim that moved nothing is allowed to
+  -- drop it.
+  recovery_failure_class TEXT NULL,
+  recovery_failure_at INTEGER NULL,
   interruption_stage TEXT NULL CHECK (
     interruption_stage IS NULL OR interruption_stage IN (
       'deploy_started','blueprint_deploy_started','blueprint_withdraw_started','recovery_started'
@@ -578,6 +651,11 @@ CREATE TABLE IF NOT EXISTS gitops_settled_outbox (
 CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_undrained
   ON gitops_settled_outbox(created_at)
   WHERE drained_at IS NULL;
+-- Drained rows are the steady-state majority. The prune deletes them by age on
+-- the monitor tick, and the undrained partial index above cannot serve that scan.
+CREATE INDEX IF NOT EXISTS idx_gitops_settled_outbox_drained
+  ON gitops_settled_outbox(created_at)
+  WHERE drained_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS git_provider_endpoints (
   id TEXT PRIMARY KEY,

@@ -237,6 +237,7 @@ test.describe('Deploy feedback modal', () => {
     test.setTimeout(160_000);
 
     await enableDeployFeedback(page);
+    await setDeployStyle(page, 'modal');
     await setHealthGateWindow(page, 15);
     await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
     await syncDeployFeedbackState(page);
@@ -275,6 +276,7 @@ test.describe('Deploy feedback modal', () => {
     test.setTimeout(120_000);
 
     await enableDeployFeedback(page);
+    await setDeployStyle(page, 'modal');
     await setupDeployStack(page, FAIL_STACK, FAIL_COMPOSE);
     await syncDeployFeedbackState(page);
 
@@ -297,6 +299,7 @@ test.describe('Deploy feedback modal', () => {
     test.setTimeout(120_000);
 
     await enableDeployFeedback(page);
+    await setDeployStyle(page, 'modal');
     await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
     await syncDeployFeedbackState(page);
 
@@ -330,6 +333,7 @@ test.describe('Deploy feedback modal', () => {
     test.setTimeout(120_000);
 
     await enableDeployFeedback(page);
+    await setDeployStyle(page, 'modal');
     await setHealthGateWindow(page, 15);
     await setupDeployStack(page, HAPPY_STACK, HAPPY_COMPOSE);
     await syncDeployFeedbackState(page);
