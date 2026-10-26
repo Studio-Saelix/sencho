@@ -221,6 +221,14 @@ describe('ComposeService SOPS overlay args and mutation guards', () => {
     await expect(compose.updateStack(stackName)).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
   });
 
+  it('refuses a service update and a service recreate of a SOPS-managed stack with the SOPS message, not the endpoint guard\'s render failure', async () => {
+    const stackName = 'sops-refuse-service';
+    seedSopsStack(stackName, 'gen-sops-refuse-service');
+    const compose = ComposeService.getInstance(NodeRegistry.getInstance().getDefaultNodeId());
+    await expect(compose.updateService(stackName, 'web', false)).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
+    await expect(compose.recreateServiceFromLocal(stackName, 'web')).rejects.toThrow(SOPS_DIRECT_MUTATION_MESSAGE);
+  });
+
   it('refuses an image pull of a SOPS-managed stack', async () => {
     // A pull resolves the same project a deploy would, so it inherits the same
     // guard. Without it, ${VAR} in an image reference would resolve against the

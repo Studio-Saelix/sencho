@@ -633,6 +633,26 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect((failure as Error).message).toBe('services.web.image must be a string');
   });
 
+  it('says a render timed out, and withholds Compose\'s diagnostics for an overlay render', async () => {
+    const service = ComposeService.getInstance(1);
+    const render = vi.spyOn(service, 'renderConfig');
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: '', code: null, timedOut: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toBe('docker compose config timed out');
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: 'secret=hunter2 is invalid', code: 1, timedOut: false, withheld: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toContain('diagnostics are withheld');
+    expect((failure as Error).message).not.toContain('hunter2');
+    render.mockRestore();
+  });
+
   it('names the error in the render failure, not a warning Compose printed before it', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);

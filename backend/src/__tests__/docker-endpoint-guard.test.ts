@@ -857,6 +857,7 @@ describe('io.sencho.infrastructure', () => {
       { kind: 'up' },
       { kind: 'update' },
       { kind: 'service', service: 'web' },
+      { kind: 'service', service: 'web', restart: true },
     ] as EndpointMutation[])('refuses %j, whether or not the stack holds the proxy, because the pull policy and wiring cannot be read', async (mutation) => {
       const failing = vi.fn().mockRejectedValue(new Error('render failed'));
 
@@ -1033,7 +1034,7 @@ describe('connection errors while listing the stack', () => {
 });
 
 describe('evaluateDockerEndpointContainer', () => {
-  type Spec = { Id: string; Name: string; labels?: Record<string, string>; networks?: string[]; hostConfig?: Record<string, string> };
+  type Spec = { Id: string; Name: string; labels?: Record<string, string>; networks?: string[]; hostConfig?: Record<string, string>; state?: 'running' | 'exited' };
   const specs: Record<string, Spec> = {
     [PROXY_ID]: { Id: PROXY_ID, Name: '/socket-proxy', labels: { 'com.docker.compose.project': 'sencho', 'com.docker.compose.service': 'socket-proxy' }, networks: ['proxy-net'] },
     [SELF_ID]: { Id: SELF_ID, Name: '/sencho', labels: { 'com.docker.compose.project': 'sencho', 'com.docker.compose.service': 'sencho' }, networks: ['proxy-net'] },
@@ -1048,9 +1049,17 @@ describe('evaluateDockerEndpointContainer', () => {
    */
   function dockerFor(inspectError?: unknown, opts: { failFor?: (ref: string) => unknown; listError?: unknown } = {}) {
     return {
-      listContainers: async () => {
+      // Honors `all` and the label filter (`key` or `key=value`) like the engine, so a wrong option or filter drops containers here too.
+      listContainers: async (options: { all?: boolean; filters?: { label?: string[] } } = {}) => {
         if (opts.listError) throw opts.listError;
-        return Object.values(specs).map(spec => ({ Id: spec.Id, Names: [spec.Name], Labels: spec.labels ?? {} }));
+        const matchesLabel = (spec: Spec) => (options.filters?.label ?? []).every(wanted => {
+          const [key, value] = wanted.split('=');
+          const actual = spec.labels?.[key];
+          return actual !== undefined && (value === undefined || actual === value);
+        });
+        return Object.values(specs)
+          .filter(spec => (options.all === true || (spec.state ?? 'running') === 'running') && matchesLabel(spec))
+          .map(spec => ({ Id: spec.Id, Names: [spec.Name], Labels: spec.labels ?? {} }));
       },
       getContainer: (ref: string) => ({
         inspect: async () => {
@@ -1334,6 +1343,35 @@ describe('evaluateDockerEndpointContainer', () => {
 
       for (const action of ['stop', 'restart'] as const) {
         expect(await evaluate(short, action, onlyFor([short], status))).toMatchObject({ reason: 'provider' });
+      }
+    });
+
+    it('refuses a failure that carries no HTTP status when only the target fails, even though the proxy and Sencho inspect fine', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      const failing = dockerFor(undefined, { failFor: ref => (ref === WEB_ID ? new Error('connect ECONNRESET') : undefined) });
+
+      expect(await evaluate(WEB_ID, 'stop', failing)).toMatchObject({ reason: 'unresolved' });
+    });
+
+    it.each([401, 403])('refuses a container whose inspect is denied (HTTP %i) while Sencho\'s own identity is unresolved', async (status) => {
+      stubSelf('unresolved');
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+      expect(await evaluate(WEB_ID, 'stop', onlyFor([WEB_ID], status))).toMatchObject({ reason: 'unresolved' });
+    });
+
+    it('protects a stopped labeled proxy and one whose label value is not "true", which only a list of every container and label sees', async () => {
+      mockResolveProvider.mockResolvedValue({ state: 'none', unmatched: true, reason: 'No container owns the address.' });
+      specs[PROXY_ID].state = 'exited';
+      specs[PROXY_ID].labels = { ...specs[PROXY_ID].labels, 'io.sencho.infrastructure': 'maybe' };
+      specs[PROXY_ID].hostConfig = { NetworkMode: `container:${WEB_ID}` };
+      try {
+        // The proxy's own inspect is denied, so only the label list can say what it is.
+        expect(await evaluate(PROXY_ID, 'stop', onlyFor([PROXY_ID], 403))).toMatchObject({ reason: 'invalid_label' });
+        // And its owner is protected although the proxy is stopped.
+        expect(await evaluate(WEB_ID, 'stop')).toMatchObject({ reason: 'provider' });
+      } finally {
+        delete specs[PROXY_ID].state;
       }
     });
 

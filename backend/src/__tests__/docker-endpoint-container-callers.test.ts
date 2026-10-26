@@ -83,7 +83,14 @@ beforeEach(() => {
   specs.set(PROXY_ID, { Name: '/socket-proxy' });
   specs.set(VPN_ID, { Name: '/vpn' });
   specs.set(WEB_ID, { Name: '/web' });
-  engine.listContainers.mockImplementation(async () => [...specs].map(([Id, spec]) => ({ Id, Names: [spec.Name], Labels: spec.labels ?? {} })));
+  // Honors the label filter (`key` or `key=value`) like the engine, so a wrong filter drops containers here too.
+  engine.listContainers.mockImplementation(async (options: { filters?: { label?: string[] } } = {}) => [...specs]
+    .filter(([, spec]) => (options.filters?.label ?? []).every(wanted => {
+      const [key, value] = wanted.split('=');
+      const actual = spec.labels?.[key];
+      return actual !== undefined && (value === undefined || actual === value);
+    }))
+    .map(([Id, spec]) => ({ Id, Names: [spec.Name], Labels: spec.labels ?? {} })));
   engine.getContainer.mockImplementation((ref: string) => ({
     inspect: async () => {
       const found = resolveRef(ref);
