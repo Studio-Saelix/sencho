@@ -275,18 +275,17 @@ entries:
     limitation: ''
     featured: false
 
-  - id: recovery-vault
-    name: Recovery Vault (managed off-site snapshots)
+  - id: snapshot-vault-planned
+    name: Sencho Snapshot Vault (managed off-site snapshots)
     tier: admiral
-    availability: shipped
+    availability: planned
     category: recovery
-    publicName: Recovery Vault (managed off-site)
-    publicRoadmapKey: recovery-vault
-    summary: Managed recovery service with durable off-site storage.
-    description: Recovery vault with managed storage, verification, monitoring, retention, and restore-readiness evidence.
-    limitation: 'Requires Admiral; managed continuity pillar.'
-    featured: true
-    homepageOrder: 15
+    publicName: Sencho Snapshot Vault (planned)
+    publicRoadmapKey: snapshot-vault-planned
+    summary: Managed off-site storage for fleet snapshots.
+    description: Managed snapshot storage with verification, monitoring, retention, and restore-readiness evidence.
+    limitation: 'Planned Admiral capability; not yet available in public matrix as shipped.'
+    featured: false
 
   # ===== Business Assurance (Admiral only) =====
   - id: hardened-build

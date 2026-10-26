@@ -19,6 +19,12 @@ vi.mock('@/hooks/useBuildInfo', () => ({
     useBuildInfo: () => useBuildInfoMock(),
 }));
 
+const useExperimentalMock = vi.fn(() => ({ experimental: false, experimentalReady: true }));
+
+vi.mock('@/hooks/useExperimental', () => ({
+    useExperimental: () => useExperimentalMock(),
+}));
+
 vi.mock('@/components/TierBadge', () => ({
     TierBadge: () => <span data-testid="tier-badge">tier</span>,
 }));
@@ -33,7 +39,7 @@ vi.mock('@/lib/api', () => ({
 import { LicenseSection } from '../LicenseSection';
 
 const ASSURANCE =
-    'Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)';
+    'Admiral assurance (priority support, Hardened Build, and governance)';
 
 function baseLicense(overrides: Partial<LicenseInfo> = {}): LicenseInfo {
     return {
@@ -209,5 +215,25 @@ describe('LicenseSection build rows (running identity consistency)', () => {
         render(<LicenseSection />);
         expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
         expect(screen.queryByText('Custom')).toBeNull();
+    });
+});
+
+describe('LicenseSection Sencho Snapshot Vault row', () => {
+    beforeEach(() => {
+        useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+        useBuildInfoMock.mockReturnValue({ buildInfo: null, status: 'ready', retry: vi.fn() });
+    });
+
+    it('hides the row on an Admiral license while the managed vault is experimental-only', () => {
+        mockLicense(baseLicense({ tier: 'paid', status: 'active' }));
+        render(<LicenseSection />);
+        expect(screen.queryByText('Sencho Snapshot Vault')).not.toBeInTheDocument();
+    });
+
+    it('shows the row on an Admiral license when the experimental flag is on', () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        mockLicense(baseLicense({ tier: 'paid', status: 'active' }));
+        render(<LicenseSection />);
+        expect(screen.getByText('Sencho Snapshot Vault')).toBeInTheDocument();
     });
 });

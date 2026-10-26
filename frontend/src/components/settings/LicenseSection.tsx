@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast-store';
 import { useLicense } from '@/context/LicenseContext';
 import { useBuildInfo } from '@/hooks/useBuildInfo';
+import { useExperimental } from '@/hooks/useExperimental';
 import { TierBadge } from '@/components/TierBadge';
 import {
     Crown, CheckCircle, XCircle, Clock, ExternalLink,
@@ -65,6 +66,7 @@ function getTierMastheadValue(tier?: string): string {
 
 export function LicenseSection() {
     const { license, isPaid, activate, deactivate } = useLicense();
+    const { experimental } = useExperimental();
     const { buildInfo, status: buildInfoStatus } = useBuildInfo();
     const [licenseKeyInput, setLicenseKeyInput] = useState('');
     const [isActivating, setIsActivating] = useState(false);
@@ -207,7 +209,7 @@ export function LicenseSection() {
                     label={getTierDisplayName(license?.tier, license?.status)}
                     helper={
                         license?.status === 'expired'
-                            ? 'Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance).'
+                            ? 'Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Hardened Build, and governance).'
                             : license?.status === 'disabled'
                                 ? 'Your license has been disabled. Contact support for assistance.'
                                 : license?.status === 'trial' && license.trialDaysRemaining !== null
@@ -237,14 +239,14 @@ export function LicenseSection() {
                             <ExternalLink className="h-3.5 w-3.5" />
                         </a>
                     </SettingsField>
-                ) : (
-                    <SettingsField label="Recovery Vault" helper="Your Admiral subscription includes Recovery Vault entitlement.">
+                ) : experimental ? (
+                    <SettingsField label="Sencho Snapshot Vault" helper="Your Admiral subscription includes Sencho Snapshot Vault entitlement.">
                         <span className="inline-flex items-center gap-2 text-sm text-success">
                             <CheckCircle className="h-4 w-4" />
                             Included
                         </span>
                     </SettingsField>
-                )}
+                ) : null}
                 {isPaid && channelStatus?.channel !== 'hardened' ? (
                     <SettingsField label="Hardened Build" helper="Review entitlement and registry access before changing image channels.">
                         <SettingsPrimaryButton size="sm" onClick={openPreflight} disabled={preflightLoading}>
@@ -312,7 +314,7 @@ export function LicenseSection() {
                 {license?.status === 'expired' ? (
                     <SettingsField
                         label="Status"
-                        helper="Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)."
+                        helper="Renew to restore Admiral assurance (priority support, Hardened Build, and governance)."
                         tone="error"
                     >
                         <div className="flex items-center gap-2 text-destructive">
@@ -325,7 +327,7 @@ export function LicenseSection() {
                 {license?.status === 'trial' && license.trialDaysRemaining !== null ? (
                     <SettingsField
                         label="Trial countdown"
-                        helper="Activate before the trial ends to keep Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)."
+                        helper="Activate before the trial ends to keep Admiral assurance (priority support, Hardened Build, and governance)."
                         tone="warn"
                     >
                         <div className="flex items-center gap-2">

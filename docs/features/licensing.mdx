@@ -50,7 +50,6 @@ Admiral is arranged directly with Studio Saelix rather than a self-serve checkou
 **Admiral** is the official business assurance plan from Studio Saelix. It includes everything in Community, plus:
 
 - **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts, switched from **Settings → Admiral Account**; see [Switching to Hardened Build](#switching-to-hardened-build) below
-- **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
 - **Assurance and support:** priority email support and Studio Saelix-backed continuity for production fleets
 - **Governance:** extended audit (export as CSV or JSON, anomaly detection, configurable retention beyond the recent window) and planned organizational controls such as advanced identity mapping and approval workflows
 - **Directory integration:** LDAP / Active Directory authentication
@@ -86,7 +85,7 @@ Sencho validates the key and activates your plan. If activation fails, the toast
 **Settings → Admiral Account** opens on the **Plan** section. The page masthead exposes stat pills that vary by license state, and the section below lists your plan details and current image channel.
 
 <Frame>
-  <img src="/images/licensing/license-admiral-active.png" alt="Admiral Account page showing an active lifetime Sencho Admiral license, with Plan, Recovery Vault, Hardened Build, Current image, and Channel rows, plus Customer, Product, and masked License key fields and a Deactivate button" />
+  <img src="/images/licensing/license-admiral-active.png" alt="Admiral Account page showing an active lifetime Sencho Admiral license, with Plan, Hardened Build, Current image, and Channel rows, plus Customer, Product, and masked License key fields and a Deactivate button" />
 </Frame>
 
 The masthead pills:
@@ -106,7 +105,6 @@ The **Plan** card lists:
 
 - **Tier name** (`Sencho Community` or `Sencho Admiral`) with a status line, such as "Community plan. Full AGPLv3 self-hosted control plane.", "Active license on this control plane.", "Trial: X days remaining.", "Your Admiral license has expired...", or "Your license has been disabled...".
 - **License** (Community only): a link to view the AGPLv3 source on GitHub.
-- **Recovery Vault** (Admiral only): confirms the entitlement is included in your subscription.
 - **Hardened Build** (Admiral only): a **Switch to Hardened** button; see [Switching to Hardened Build](#switching-to-hardened-build) below.
 - **Current image** and **Channel**: the image reference and channel (`Community` or `Hardened`) this control plane is currently running. These rows reflect the running build, not the configured target, so a compose edit does not change them until the container is recreated. A hardened image is shown as `Restricted` to non-administrators.
 - **Customer**, **Product**, and **License key** (active licenses only): purchase metadata and your key masked to its last four characters (`****-****-****-XXXX`). The full key is never re-displayed after activation.
@@ -156,10 +154,10 @@ The Admiral Account page renders differently depending on the license status:
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a full key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, **Manage subscription**, and **Deactivate** | Hidden | Hidden |
 | **Active, lifetime** | Same as an active subscription, but no **Manage subscription** button since there's no subscription to manage | Hidden | Hidden |
-| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)." and a destructive **Status: Expired** field | Visible | Visible |
+| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Hardened Build, and governance)." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
-The **Recovery Vault** and **Hardened Build** rows in the Plan card only appear once a license resolves to Admiral (active, trial, or lifetime); Community, expired, and disabled states never show them.
+The **Hardened Build** row in the Plan card only appears once a license resolves to Admiral (active, trial, or lifetime); Community, expired, and disabled states never show them.
 
 The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab.
 

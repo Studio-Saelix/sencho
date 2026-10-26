@@ -211,7 +211,7 @@ export class CloudBackupService {
         if (!licenseKey) return { success: false, error: 'No license key found. Activate an Admiral license first.' };
 
         if (LicenseService.getInstance().getTier() !== 'paid') {
-            return { success: false, error: 'Recovery Vault requires the Admiral tier.' };
+            return { success: false, error: 'Sencho Snapshot Vault requires the Admiral tier.' };
         }
 
         const apiBase = process.env.SENCHO_CLOUD_BACKUP_API || SENCHO_CLOUD_BACKUP_API_DEFAULT;
@@ -237,13 +237,13 @@ export class CloudBackupService {
             return { success: true, quotaBytes: data.quota_bytes };
         } catch (err) {
             const responseError = (err as { response?: { data?: { error?: string } } }).response?.data?.error;
-            return { success: false, error: responseError || getErrorMessage(err, 'Failed to provision Recovery Vault.') };
+            return { success: false, error: responseError || getErrorMessage(err, 'Failed to provision Sencho Snapshot Vault.') };
         }
     }
 
     public async refreshSenchoCloudBackupCredentials(): Promise<void> {
         const result = await this.provisionSenchoCloudBackup();
-        if (!result.success) throw new Error(result.error || 'Failed to refresh Recovery Vault credentials.');
+        if (!result.success) throw new Error(result.error || 'Failed to refresh Sencho Snapshot Vault credentials.');
     }
 
     public async getSenchoCloudBackupUsage(): Promise<{ used_bytes: number; quota_bytes: number; object_count: number }> {

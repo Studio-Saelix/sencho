@@ -99,7 +99,7 @@ function ssoLabel(sec: ConfigurationStatusPayload['security']): string {
 function vaultLabel(backup: ConfigurationStatusPayload['backup']): string {
   if (backup.provider === 'disabled') return 'Off';
   const encrypted = backup.encryptArchives ? ' (encrypted)' : '';
-  if (backup.provider === 'sencho') return `Recovery Vault${encrypted}`;
+  if (backup.provider === 'sencho') return `Sencho Snapshot Vault${encrypted}`;
   return `Custom S3${backup.autoUpload ? ' (auto)' : ''}${encrypted}`;
 }
 

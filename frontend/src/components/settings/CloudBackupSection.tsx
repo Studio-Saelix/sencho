@@ -12,6 +12,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { apiFetch, type ApiFetchOptions } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { useLicense } from '@/context/LicenseContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { Cloud, CloudOff, RefreshCw, CheckCircle2, Loader2, Trash2, Download, FolderInput, ChevronLeft, ChevronRight } from 'lucide-react';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { SettingsField } from './SettingsField';
@@ -82,7 +83,7 @@ const BASE_PROVIDER_OPTIONS = [
     { value: 'custom', label: 'Custom S3 (BYOB)' },
 ];
 
-const SENCHO_PROVIDER_OPTION = { value: 'sencho', label: 'Recovery Vault (included)' };
+const SENCHO_PROVIDER_OPTION = { value: 'sencho', label: 'Sencho Snapshot Vault (included)' };
 
 const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3';
 
@@ -90,12 +91,17 @@ const PAGE_SIZE = 10;
 
 export function CloudBackupSection() {
     const { isPaid } = useLicense();
-    const providerOptions = isPaid
-        ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
-        : BASE_PROVIDER_OPTIONS;
+    const { experimental } = useExperimental();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [provider, setProvider] = useState<Provider>('disabled');
+    // The managed vault is not launched yet: discovery is gated on the
+    // experimental flag, but an instance already configured for it keeps
+    // the option and its panels so the stored mode never loses its label.
+    const senchoVisible = isPaid && (experimental || provider === 'sencho');
+    const providerOptions = senchoVisible
+        ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
+        : BASE_PROVIDER_OPTIONS;
     const [senchoProvisioned, setSenchoProvisioned] = useState(false);
     const [custom, setCustom] = useState<CustomConfig>(EMPTY_CUSTOM);
     const [originalSecretSaved, setOriginalSecretSaved] = useState(false);
@@ -248,7 +254,7 @@ export function CloudBackupSection() {
             const res = await cloudFetch('/cloud-backup/provision', { method: 'POST' });
             const data = await res.json().catch(() => ({}));
             if (!res.ok || data?.error) throw new Error(data?.error || 'Provisioning failed.');
-            toast.success('Recovery Vault activated.');
+            toast.success('Sencho Snapshot Vault activated.');
             setSenchoProvisioned(true);
             await Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
         } catch (err) {
@@ -509,7 +515,7 @@ export function CloudBackupSection() {
                 <div className={PANEL_CLASS}>
                     <div className="flex items-center gap-2">
                         <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                        <span className="font-medium text-sm">Activate Recovery Vault</span>
+                        <span className="font-medium text-sm">Activate Sencho Snapshot Vault</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
                         Activates a 500 MB allowance backed by Cloudflare R2, scoped to this Admiral license.
@@ -526,7 +532,7 @@ export function CloudBackupSection() {
                     <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2">
                             <CheckCircle2 className="w-4 h-4 text-success" strokeWidth={1.5} />
-                            <span className="font-medium text-sm">Recovery Vault</span>
+                            <span className="font-medium text-sm">Sencho Snapshot Vault</span>
                         </div>
                         <div className="flex items-center gap-2">
                             <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
@@ -564,7 +570,7 @@ export function CloudBackupSection() {
                     <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-muted/30 px-3 py-2.5">
                         <Cloud className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} />
                         <p className="text-xs text-muted-foreground">
-                            Auto-upload is on for Recovery Vault. Every fleet snapshot is replicated within seconds.
+                            Auto-upload is on for Sencho Snapshot Vault. Every fleet snapshot is replicated within seconds.
                         </p>
                     </div>
                     {encryptionFields}

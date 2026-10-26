@@ -9,7 +9,10 @@ vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args
 vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
-vi.mock('@/context/LicenseContext', () => ({ useLicense: () => ({ isPaid: true }) }));
+const useLicenseMock = vi.fn(() => ({ isPaid: true }));
+vi.mock('@/context/LicenseContext', () => ({ useLicense: () => useLicenseMock() }));
+const useExperimentalMock = vi.fn(() => ({ experimental: false, experimentalReady: true }));
+vi.mock('@/hooks/useExperimental', () => ({ useExperimental: () => useExperimentalMock() }));
 
 function json(body: unknown, status = 200) {
     return {
@@ -24,6 +27,8 @@ const snapshotKey = 'sencho/instances/inst/snapshots/1.tar.gz.senc';
 
 beforeEach(() => {
     apiFetch.mockReset();
+    useLicenseMock.mockReturnValue({ isPaid: true });
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     vi.mocked(toast.success).mockReset();
     apiFetch.mockImplementation(async (path: string, options?: { method?: string; body?: string; localOnly?: boolean }) => {
         if (path === '/cloud-backup/config') {
@@ -90,5 +95,67 @@ describe('CloudBackupSection archive encryption', () => {
         await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse');
         await user.click(screen.getByRole('button', { name: 'Import' }));
         await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Imported as a new local snapshot.'));
+    });
+});
+
+describe('CloudBackupSection managed vault discovery', () => {
+    function mockProvider(provider: 'disabled' | 'sencho' | 'custom') {
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') {
+                return json({
+                    provider,
+                    sencho_provisioned: provider === 'sencho',
+                    sencho_provisioned_at: null,
+                    custom: {
+                        endpoint: '', region: '', bucket: '', access_key: '', secret_key: '',
+                        path_prefix: 'sencho/', auto_upload: false,
+                    },
+                    encrypt_archives: false,
+                    archive_passphrase: '',
+                });
+            }
+            if (path === '/cloud-backup/usage') return json({ used_bytes: 0, quota_bytes: 100, object_count: 0 });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            return json({ error: 'unexpected' }, 500);
+        });
+    }
+
+    async function openStorageModes() {
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('combobox'));
+        return screen;
+    }
+
+    it('offers only Custom S3 when the experimental flag is off and nothing is configured', async () => {
+        mockProvider('disabled');
+        render(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
+        expect(screen.queryByText('Sencho Snapshot Vault (included)')).not.toBeInTheDocument();
+    });
+
+    it('offers Sencho Snapshot Vault to Admiral when the experimental flag is on', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        mockProvider('disabled');
+        render(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText('Sencho Snapshot Vault (included)')).toBeInTheDocument();
+    });
+
+    it('never offers it on Community, even with the experimental flag on', async () => {
+        useLicenseMock.mockReturnValue({ isPaid: false });
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        mockProvider('disabled');
+        render(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
+        expect(screen.queryByText('Sencho Snapshot Vault (included)')).not.toBeInTheDocument();
+    });
+
+    it('keeps the managed option visible for an instance already configured for it', async () => {
+        mockProvider('sencho');
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Sencho Snapshot Vault (included)')).toBeInTheDocument();
+        expect(screen.getByText('Sencho Snapshot Vault')).toBeInTheDocument();
     });
 });

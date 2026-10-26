@@ -222,7 +222,7 @@
               "tutorials/enroll-a-remote-node",
               "tutorials/set-up-fleet-secrets",
               "tutorials/set-up-fleet-federation",
-              "tutorials/configure-recovery-vault-backups"
+              "tutorials/configure-snapshot-vault-backups"
             ]
           },
           {

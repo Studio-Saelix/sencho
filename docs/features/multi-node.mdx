@@ -202,7 +202,7 @@ When you select a remote node in the switcher, the Settings hub filters to the p
 | Support | Same everywhere | Diagnostics bundle, docs links, and contact channels; identical regardless of the active node. |
 | About | Same everywhere | Build metadata, release notes, and licence attributions; identical regardless of the active node. |
 
-Panels that manage control-plane concerns (Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Recovery Vault, Routing, Mute Rules, Webhooks, Recovery) are hub-only and are hidden when a remote node is active.
+Panels that manage control-plane concerns (Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Snapshot Vault, Routing, Mute Rules, Webhooks, Recovery) are hub-only and are hidden when a remote node is active.
 
 ## License enforcement across nodes
 
@@ -334,6 +334,6 @@ Sencho takes the opposite approach: infrastructure-level encryption (VPN, revers
     The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Admiral features on every remote, even if the remote itself has its own Admiral license. Activate an Admiral license on the control instance to lift the gate fleet-wide. The reverse case (Admiral control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
   </Accordion>
   <Accordion title="Settings panels disappear when I switch to a remote">
-    That is intentional. Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Recovery Vault, Routing, Mute Rules, Webhooks, and Recovery are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
+    That is intentional. Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Snapshot Vault, Routing, Mute Rules, Webhooks, and Recovery are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
   </Accordion>
 </AccordionGroup>

@@ -114,7 +114,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   // Cloud backup
   'PUT /cloud-backup/config': 'Updated cloud backup config',
   'POST /cloud-backup/test': 'Tested cloud backup connection',
-  'POST /cloud-backup/provision': 'Provisioned Recovery Vault',
+  'POST /cloud-backup/provision': 'Provisioned Sencho Snapshot Vault',
   'POST /cloud-backup/upload': 'Uploaded snapshot to cloud',
   'POST /cloud-backup/object/*/import': 'Imported cloud snapshot',
   'DELETE /cloud-backup/object': 'Deleted cloud snapshot',
