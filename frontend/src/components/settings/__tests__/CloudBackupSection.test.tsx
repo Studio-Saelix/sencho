@@ -321,4 +321,35 @@ describe('CloudBackupSection managed vault discovery', () => {
         await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
         expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
     });
+
+    it.each([
+        ['an endpoint without a scheme', { ...FILLED_CUSTOM, endpoint: 's3.example.com' }],
+        ['a whitespace-only bucket', { ...FILLED_CUSTOM, bucket: '   ' }],
+        ['a missing access key', { ...FILLED_CUSTOM, access_key: '' }],
+    ])('opens the Custom S3 form without saving when the stored config has %s', async (_label, stored) => {
+        mockProvider('disabled', 400, stored);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        expect(await screen.findByText('Custom S3 Configuration')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+        expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('rolls back to Custom S3 after a toggle on the unsaved form wrote it to the server', async () => {
+        mockProvider('disabled', [200, 500]);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await user.type(await screen.findByPlaceholderText('https://s3.us-east-1.amazonaws.com'), 'https://s3.example.com');
+        await user.type(screen.getByPlaceholderText('my-sencho-backups'), 'snap-bucket');
+        await user.type(screen.getByPlaceholderText('AKIA...'), 'AKIAEXAMPLE');
+        await user.click(screen.getAllByRole('switch')[0]);
+        await waitFor(() => expect(apiFetch.mock.calls.filter(call => call[1]?.method === 'PUT')).toHaveLength(1));
+
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Disabled'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Custom S3 (BYOB)');
+    });
 });

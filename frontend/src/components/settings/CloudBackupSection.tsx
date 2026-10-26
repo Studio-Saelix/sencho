@@ -109,6 +109,7 @@ export function CloudBackupSection() {
     // confirmed server state to roll back to, so the picker stays locked until
     // a retry succeeds.
     const [loadFailed, setLoadFailed] = useState(false);
+    const [retrying, setRetrying] = useState(false);
     // Admiral only: the managed vault is discoverable with the experimental
     // flag on, or when the last-loaded config had provider 'sencho'. In that
     // case the option stays for the session, so switching away (or a failed
@@ -308,6 +309,7 @@ export function CloudBackupSection() {
             const err = await res.json().catch(() => ({}));
             throw new Error(err?.error || 'Failed to save archive encryption');
         }
+        savedProviderRef.current = provider;
     };
 
     const handleEncryptToggle = async (next: boolean) => {
@@ -410,6 +412,7 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to update auto-upload');
             }
+            savedProviderRef.current = 'custom';
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to update auto-upload.');
             setCustom(c => ({ ...c, auto_upload: !next }));
@@ -435,8 +438,12 @@ export function CloudBackupSection() {
     };
 
     const handleRetryLoad = async () => {
-        setLoading(true);
-        await loadConfig();
+        setRetrying(true);
+        try {
+            await loadConfig();
+        } finally {
+            setRetrying(false);
+        }
     };
 
     useMastheadStats(
@@ -539,11 +546,11 @@ export function CloudBackupSection() {
                     Choose where fleet snapshots are replicated.
                 </p>
                 {loadFailed && (
-                    <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                         <p className="text-xs text-destructive">
                             The stored configuration could not be read, so the storage mode is locked.
                         </p>
-                        <Button size="sm" variant="outline" onClick={handleRetryLoad}>
+                        <Button size="sm" variant="outline" onClick={handleRetryLoad} disabled={retrying}>
                             Retry
                         </Button>
                     </div>
