@@ -24,21 +24,25 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * nothing about the mutation that follows it), when the Compose model of a
  * stack that is deployed, updated, or changed per service cannot be rendered,
  * and when Compose's recreate decision cannot be predicted. It otherwise lets
- * the operation through: when the stack provably holds neither protected
- * container, for a remote node (its own Sencho guards it), and for a restart of
- * Sencho itself, which stays allowed even when inspecting it fails (a stop
- * does not).
+ * the operation through: when the stack holds no protected container, no owner
+ * of a namespace one runs in, and nothing the operation would recreate that
+ * they depend on; for a remote node (its own Sencho guards it); and for a
+ * restart of Sencho itself, which stays allowed even when inspecting it fails
+ * (a stop does not).
  *
- * The one failed container inspect that does not refuse is a missing container
- * (HTTP 404, the operation then fails by itself) and, for a container that is
- * not known to be protected, an inspect the endpoint denies (HTTP 401 or 403):
- * that container is then judged from the provider's and Sencho's own namespaces
- * and from the containers carrying the infrastructure label.
+ * A failed container inspect refuses, except for a missing container (HTTP 404,
+ * the operation then fails by itself), a restart of Sencho, a restart that
+ * Auto-Heal asked to let the resolved provider through, and an inspect the
+ * endpoint denies (HTTP 401 or 403) of a container that is not known to be
+ * protected: that container is then judged from the provider's and Sencho's own
+ * namespaces and from the containers carrying the infrastructure label, and
+ * refused when any of them cannot be read.
  *
- * One evaluator, two call sites: the mutating Compose entry points
- * (`ComposeService`) and container stop/restart/removal (`DockerController`).
- * Scheduler, webhook, GitOps, Blueprint, mesh, and bulk update all reach one of
- * the two.
+ * Two evaluators share these rules: `evaluateDockerEndpointGuard` for the
+ * mutating Compose entry points (`ComposeService`) and
+ * `evaluateDockerEndpointContainer` for container stop/restart/removal
+ * (`DockerController`). Scheduler, webhook, GitOps, Blueprint, mesh, and bulk
+ * update all reach one of the two.
  */
 
 export {
@@ -65,8 +69,18 @@ export type EndpointMutation =
   | { kind: 'stop' }
   /** Restart: the provider is refused, and so is the owner of a namespace the provider or Sencho runs in; Sencho itself is not (restarting Sencho is the intended way to bounce it). */
   | { kind: 'restart' }
-  /** A service-scoped operation: refused only when it targets a protected service. */
-  | { kind: 'service'; service: string; restart?: boolean };
+  /**
+   * A service-scoped operation: refused when it targets a protected service, and
+   * when the stack's Compose model cannot be rendered. `restart` marks a restart
+   * of that service; `engineOnly` marks a stop or restart driven through the
+   * Engine API, which does not need the render (like a stack-level stop).
+   */
+  | { kind: 'service'; service: string; restart?: boolean; engineOnly?: boolean };
+
+/** A stop or restart that never asks Compose, so it is decided from the running containers and must work while the file is broken. */
+function isEngineDriven(mutation: EndpointMutation): boolean {
+  return mutation.kind === 'stop' || mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.engineOnly === true);
+}
 
 type ListedContainer = {
   Id?: string;
@@ -513,7 +527,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   // A stack with nothing deployed yet has nothing to stop, but a first deploy
   // creates containers, so its labels are validated like any other.
   if (stackContainers.length === 0) {
-    if (mutation.kind === 'stop' || mutation.kind === 'restart') return null;
+    if (isEngineDriven(mutation)) return null;
     const firstRender = await readRendered(input.probes);
     return firstRender.state === 'failed' ? renderFailureRefusal(stackName, firstRender.detail) : invalidRenderedLabel(firstRender.services);
   }
@@ -558,9 +572,9 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   // (pull policy, wiring, labels), so one that cannot be rendered is refused
   // rather than guessed: Compose does not always fail by itself (a render that
   // times out or overflows its cap, while `up` has a far longer budget). A stop
-  // or restart is decided from the running containers alone, and must stay
-  // possible while the file is broken.
-  if (renderResult.state === 'failed' && mutation.kind !== 'stop' && mutation.kind !== 'restart') {
+  // or restart does not need the render: a failed one falls back to the running
+  // containers, so it stays possible while the file is broken.
+  if (renderResult.state === 'failed' && !isEngineDriven(mutation)) {
     return renderFailureRefusal(stackName, renderResult.detail);
   }
   const rendered = renderResult.services;
@@ -692,7 +706,7 @@ async function readRendered(probes: EndpointGuardProbes): Promise<RenderResult> 
   try {
     const rendered = await probes.renderConfig();
     if (rendered) return { state: 'ok', services: readRenderedServices(rendered) };
-    console.warn('[DockerEndpointGuard] Compose config could not be rendered; %s is read from running containers only', INFRASTRUCTURE_LABEL);
+    console.warn('[DockerEndpointGuard] Compose config could not be rendered; %s is not read from the file', INFRASTRUCTURE_LABEL);
     return { state: 'failed', detail: 'Compose returned no configuration', services: new Map() };
   } catch (error) {
     const detail = getErrorMessage(error, 'render failed');
@@ -706,7 +720,7 @@ function renderFailureRefusal(stackName: string, detail: string): DockerEndpoint
     reason: 'unresolved',
     service: null,
     message: `Sencho could not render the Compose configuration of "${stackName}" (${detail}), so it cannot tell whether this operation would stop or recreate the container that carries its Docker connection. `
-      + 'Fix the configuration, or make it render within 20 seconds, then retry.',
+      + 'Fix the configuration (rendering it must also take under 20 seconds), then retry.',
   };
 }
 
@@ -724,10 +738,11 @@ export interface InspectsContainers {
 
 export interface ContainerGuardOptions {
   /**
-   * Let a restart of the provider itself through. Auto-Heal restarts the proxy
-   * when its health check fails; nothing else is exempt, so a stop or removal
-   * of the provider, the owner of a namespace the provider or Sencho runs in, a
-   * labeled container, and a mislabeled one are still refused.
+   * Let a restart of the detected provider itself through. Auto-Heal restarts
+   * the proxy when its health check fails; nothing else is exempt, so a stop or
+   * removal of the provider, the owner of a namespace the provider or Sencho
+   * runs in, a labeled container that is not the detected provider, and a
+   * mislabeled one are still refused.
    */
   allowProvider?: boolean;
 }
@@ -743,7 +758,8 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
 /**
  * Container-level guard for stop, restart, and removal (removal is evaluated as
  * a stop). It mirrors the stack level: the provider (by id, by Compose service,
- * or by label) is always refused; a container that may be the provider when it
+ * or by label) is refused on stop and removal, and on restart unless
+ * `allowProvider` is set; a container that may be the provider when it
  * cannot be told apart is refused; the Sencho container is refused on stop and
  * removal only (a restart brings it back, which is the one intended way to
  * bounce Sencho). The owner of a network, pid, or ipc namespace that the
@@ -751,10 +767,11 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
  * is refused as well, whatever the action.
  *
  * A container that cannot be inspected is refused, except one that does not
- * exist (HTTP 404, the operation then fails by itself), a restart of Sencho,
- * and one whose inspect the endpoint denies (HTTP 401 or 403) and that is not
- * the provider: that one is let through only when the provider, Sencho, and the
- * labeled containers can be read and none of them is it or runs in its namespace.
+ * exist (HTTP 404, the operation then fails by itself), a restart of Sencho, a
+ * restart of the resolved provider under `allowProvider`, and one whose inspect
+ * the endpoint denies (HTTP 401 or 403) and that is not the provider: that one
+ * is let through only when the provider, Sencho, and the labeled containers can
+ * be read and none of them is it or runs in its namespace.
  */
 export async function evaluateDockerEndpointContainer(
   containerId: string,

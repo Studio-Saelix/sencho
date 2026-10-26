@@ -329,21 +329,27 @@ export interface LabelInventoryRow {
   inspectFailed: boolean;
 }
 
-/** Options for container stop and restart. */
-export interface ContainerOpOptions {
-  /**
-   * How the Docker endpoint guard treats this call. One field rather than two
-   * flags, so the two intents cannot be combined into a silent full bypass.
-   *
-   * - `batch-checked`: skip the guard, for a caller that has just checked the
-   *   whole batch with `assertNoDockerEndpointContainers` and must not pay for
-   *   every check twice.
-   * - `allow-provider-restart`: run the guard but let a restart of the Docker
-   *   endpoint provider itself through. For Auto-Heal, which restarts an
-   *   unhealthy proxy on purpose: bouncing it is the fix. A stop, the owner of
-   *   a namespace the provider or Sencho runs in, a labeled container, and a
-   *   mislabeled one are still refused.
-   */
+/**
+ * How the Docker endpoint guard treats a stop. One field rather than loose
+ * flags, so intents cannot be combined into a silent full bypass.
+ *
+ * - `batch-checked`: skip the guard, for a caller that has just checked the
+ *   whole batch with `assertNoDockerEndpointContainers` and must not pay for
+ *   every check twice.
+ */
+export interface StopContainerOptions {
+  endpointGuard?: 'batch-checked';
+}
+
+/**
+ * How the Docker endpoint guard treats a restart: `batch-checked` as for a
+ * stop, or `allow-provider-restart`, which runs the guard but lets a restart of
+ * the Docker endpoint provider itself through. For Auto-Heal, which restarts an
+ * unhealthy proxy on purpose: bouncing it is the fix. The owner of a namespace
+ * the provider or Sencho runs in, a labeled container, and a mislabeled one are
+ * still refused.
+ */
+export interface RestartContainerOptions {
   endpointGuard?: 'batch-checked' | 'allow-provider-restart';
 }
 
@@ -3205,7 +3211,7 @@ class DockerController {
   private async assertNotDockerEndpointContainer(
     containerId: string,
     action: 'stop' | 'restart',
-    options?: ContainerOpOptions,
+    options?: RestartContainerOptions,
   ): Promise<void> {
     if (options?.endpointGuard === 'batch-checked') return;
     const { evaluateDockerEndpointContainer } = await import('../helpers/dockerEndpointGuard');
@@ -3223,15 +3229,14 @@ class DockerController {
   public async assertNoDockerEndpointContainers(
     containerIds: string[],
     action: 'stop' | 'restart',
-    options?: ContainerOpOptions,
   ): Promise<void> {
     for (const id of containerIds) {
-      await this.assertNotDockerEndpointContainer(id, action, options);
+      await this.assertNotDockerEndpointContainer(id, action);
     }
   }
 
   // State-safe: silently ignores 304 "already stopped" errors
-  public async stopContainer(containerId: string, options?: ContainerOpOptions) {
+  public async stopContainer(containerId: string, options?: StopContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'stop', options);
     try {
       const container = this.docker.getContainer(containerId);
@@ -3245,7 +3250,7 @@ class DockerController {
     }
   }
 
-  public async restartContainer(containerId: string, options?: ContainerOpOptions) {
+  public async restartContainer(containerId: string, options?: RestartContainerOptions) {
     await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
     const container = this.docker.getContainer(containerId);
     await container.restart();

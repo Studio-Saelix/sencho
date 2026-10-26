@@ -189,6 +189,13 @@ const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 /** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
 const EMPTY_ENV_FILE = '/dev/null';
 
+/** The error line of `docker compose config` stderr: Compose prints warnings (`level=warning`, `WARN`) before the failure. */
+function renderErrorLine(stderr: string): string {
+  const lines = stderr.split('\n').map(line => line.trim()).filter(Boolean);
+  const isWarning = (line: string) => /level=warning|^warn/i.test(line);
+  return (lines.find(line => !isWarning(line)) ?? lines[0] ?? '').slice(0, 300);
+}
+
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
@@ -315,7 +322,7 @@ export class ComposeService {
           // diagnostics are withheld for an overlay render (they quote secrets).
           const why = result.timedOut ? 'docker compose config timed out'
             : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
-              : result.stderr.trim().split('\n')[0]?.slice(0, 300) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+              : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
           throw new Error(why);
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
@@ -1537,13 +1544,15 @@ export class ComposeService {
       }
     }
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
+    // Before the guard: a render that fails on a missing required variable
+    // should say so, not that the guard could not read the model.
+    await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     await this.assertDockerEndpointSafe(
       stackName,
       { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
       ctx?.overlayDir,
     );
     const stackDir = this.resolveStackDir(stackName, ctx);
-    await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     // The overlay is the project this deploy will actually run, so the guard
     // reads it rather than the live stack.
     await this.assertSafePilotBindMapping(stackName, ctx?.overlayDir);
@@ -2549,8 +2558,8 @@ export class ComposeService {
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
@@ -2861,8 +2870,8 @@ export class ComposeService {
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -2890,8 +2899,8 @@ export class ComposeService {
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {

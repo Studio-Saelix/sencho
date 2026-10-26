@@ -534,11 +534,14 @@ export class AutoHealService {
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
 
-            // A restart the Docker endpoint guard refused (the owner of a namespace
-            // the proxy or Sencho runs in) is refused on purpose and will be again,
-            // so it is not a failure toward auto-disable: that would switch off a
-            // stack-wide policy and stop healing the stack's ordinary services.
-            const refused = isDockerEndpointProtectedError(err);
+            // A restart the guard refused on purpose (the owner of a namespace the
+            // proxy or Sencho runs in, a labeled or mislabeled container) will be
+            // refused again, so it is not a failure toward auto-disable: that would
+            // switch off a stack-wide policy and stop healing its ordinary services.
+            // A refusal because the guard could not read Docker (`unresolved`) is
+            // transient and counts like any failed restart. Either way the attempt
+            // is recorded and notified as failed.
+            const refused = isDockerEndpointProtectedError(err) && err.reason !== 'unresolved';
             if (!refused) db.incrementConsecutiveFailures(policy.id!);
             // Re-read to get updated consecutive_failures count
             const updated = db.getAutoHealPolicy(policy.id!);

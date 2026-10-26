@@ -304,14 +304,14 @@ describe('AutoHealService.evaluate', () => {
         expect(history[0]).toMatchObject({ action: 'failed', success: 0 });
     });
 
-    it('does not count a restart the Docker endpoint guard refused toward auto-disable, so a stack-wide policy keeps healing the rest', async () => {
+    it.each(['provider', 'sencho', 'invalid_label'] as const)('does not count a restart the Docker endpoint guard refused on purpose (%s) toward auto-disable, so a stack-wide policy keeps healing the rest', async (reason) => {
         const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
         const db = DatabaseService.getInstance();
         // One more counted failure would reach auto_disable_after_failures (2) and switch the policy off.
         const policy = makePolicy(db, { consecutive_failures: 1 });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
         const restartContainer = vi.fn().mockRejectedValue(new DockerEndpointProtectedError({
-            reason: 'provider',
+            reason,
             service: 'vpn',
             message: 'Service "vpn" owns a network, pid, or ipc namespace that service "socket-proxy" runs in.',
         }));
@@ -345,6 +345,39 @@ describe('AutoHealService.evaluate', () => {
         expect(history).toHaveLength(1);
         expect(history[0]).toMatchObject({ action: 'failed', success: 0 });
         expect(history[0].error).toContain('owns a network, pid, or ipc namespace');
+    });
+
+    it('counts a restart the guard refused because it could not read Docker toward auto-disable, since that clears on its own and is a real failure until it does', async () => {
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        const db = DatabaseService.getInstance();
+        const policy = makePolicy(db, { consecutive_failures: 0 });
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+        const restartContainer = vi.fn().mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'unresolved',
+            service: null,
+            message: 'Sencho could not inspect container "vpn-1" (HTTP 500), so it cannot tell whether this operation would stop the container that carries its Docker connection.',
+        }));
+        vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+            getAllContainers: vi.fn().mockResolvedValue([{
+                Id: 'vpn-1',
+                Names: ['/heal-stack-vpn-1'],
+                Labels: { 'com.docker.compose.project': 'heal-stack', 'com.docker.compose.service': 'vpn' },
+                State: 'running',
+                Status: 'Up 1 minute (unhealthy)',
+            }]),
+            restartContainer,
+        } as unknown as ReturnType<typeof DockerController.getInstance>);
+        vi.spyOn(DockerEventManager.getInstance(), 'getService').mockReturnValue({
+            getContainerState: () => undefined,
+        } as unknown as ReturnType<ReturnType<typeof DockerEventManager.getInstance>['getService']>);
+
+        const service = resetAutoHealSingleton();
+        (service as unknown as { observedUnhealthySince: Map<string, number> }).observedUnhealthySince
+            .set('1:vpn-1', Date.now() - 2 * 60_000);
+
+        await service.evaluate();
+
+        expect(db.getAutoHealPolicy(policy.id!)).toMatchObject({ consecutive_failures: 1 });
     });
 
     it('records Docker unavailable history once per throttle window when listing containers fails', async () => {

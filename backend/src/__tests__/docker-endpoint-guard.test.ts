@@ -821,7 +821,12 @@ describe('io.sencho.infrastructure', () => {
         expect(refusal?.message).toContain('could not render the Compose configuration of "blog"');
       });
 
-      it.each([{ kind: 'stop' }, { kind: 'restart' }] as EndpointMutation[])('lets a %j of a stack that was never deployed through', async (mutation) => {
+      it.each([
+        { kind: 'stop' },
+        { kind: 'restart' },
+        { kind: 'service', service: 'web', restart: false, engineOnly: true },
+        { kind: 'service', service: 'web', restart: true, engineOnly: true },
+      ] as EndpointMutation[])('lets a %j of a stack that was never deployed through', async (mutation) => {
         expect(await run(mutation, probes({ renderConfig: failing() }), 'blog')).toBeNull();
       });
 
@@ -839,7 +844,12 @@ describe('io.sencho.infrastructure', () => {
       mockListContainers.mockResolvedValue([container(WEB_ID, 'web', { project: 'blog' })]);
     });
 
-    it.each([{ kind: 'stop' }, { kind: 'restart' }] as EndpointMutation[])('can still be changed with a %j, which the running containers decide', async (mutation) => {
+    it.each([
+      { kind: 'stop' },
+      { kind: 'restart' },
+      { kind: 'service', service: 'web', restart: false, engineOnly: true },
+      { kind: 'service', service: 'web', restart: true, engineOnly: true },
+    ] as EndpointMutation[])('can still be changed with a %j, which the running containers decide', async (mutation) => {
       expect(await run(mutation, probes({ renderConfig: vi.fn().mockRejectedValue(new Error('render failed')) }), 'blog')).toBeNull();
     });
 
@@ -851,6 +861,17 @@ describe('io.sencho.infrastructure', () => {
       const failing = vi.fn().mockRejectedValue(new Error('render failed'));
 
       expect(await run(mutation, probes({ renderConfig: failing }), 'blog')).toMatchObject({ reason: 'unresolved' });
+    });
+
+    it('still refuses an engine-driven stop or restart of the proxy while the file cannot be rendered', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      mockListContainers.mockResolvedValue([proxyContainer]);
+      const failing = vi.fn().mockRejectedValue(new Error('render failed'));
+
+      for (const restart of [false, true]) {
+        expect(await run({ kind: 'service', service: 'socket-proxy', restart, engineOnly: true }, probes({ renderConfig: failing }), 'sencho'))
+          .toMatchObject({ reason: 'provider' });
+      }
     });
 
     it('refuses an up of the proxy that a build pull policy would rebuild, instead of reading an empty model', async () => {

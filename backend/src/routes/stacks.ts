@@ -2547,7 +2547,7 @@ async function handleServiceAction(
     res.status(400).json({ error: 'Invalid service name' });
     return;
   }
-  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart' })) return;
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart', engineOnly: true })) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const all = await dockerController.getContainersByStack(stackName);

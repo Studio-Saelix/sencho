@@ -633,6 +633,24 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect((failure as Error).message).toBe('services.web.image must be a string');
   });
 
+  it('names the error in the render failure, not a warning Compose printed before it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('time="2026-10-26T00:00:00Z" level=warning msg="The \\"FOO\\" variable is not set"\nWARN[0000] version is obsolete\nrequired variable BAR is missing a value: set BAR'));
+    proc.emit('close', 1);
+    await check;
+
+    expect((failure as Error).message).toBe('required variable BAR is missing a value: set BAR');
+  });
+
   it('turns a guard check that cannot run into a refusal, never a pass', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     mockEvaluateDockerEndpointGuard.mockRejectedValue(new Error('node lookup failed'));
@@ -1983,6 +2001,9 @@ describe('ComposeService - deployStack', () => {
     // The refusal came before anything was pulled, created, or started.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(mockResolveMissingExternalNetworks).not.toHaveBeenCalled();
+    // The variable check speaks before the endpoint guard: a render that fails on
+    // a missing required variable is reported as that, not as an unreadable model.
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
     // The check is handed no stream to read at all, so the diagnostic could not
     // be collected even by a later change: this is not a promise about the code
     // that runs today, it is the shape of the spawn.
