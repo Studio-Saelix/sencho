@@ -160,8 +160,9 @@ async function buildLocalConfigurationStatus(
     },
     backup: {
       // Snapshot Vault has a per-provider tier: Custom S3 is open to every
-      // tier; Sencho Snapshot Vault requires a paid license and is surfaced in
-      // the UI only under the experimental flag. The row is rendered
+      // tier; Sencho Snapshot Vault requires a paid license and is hidden from
+      // discovery unless the experimental flag is on (an instance already
+      // configured for it keeps it). The row is rendered
       // for every tier because Custom S3 is universally configurable, so no
       // dashboard-level lock is meaningful.
       provider: cloudProvider,

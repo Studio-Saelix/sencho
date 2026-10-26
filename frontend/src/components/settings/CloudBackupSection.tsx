@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { BusyButton } from '@/components/ui/busy-button';
 import { Input } from '@/components/ui/input';
@@ -96,10 +96,14 @@ export function CloudBackupSection() {
     const [saving, setSaving] = useState(false);
     const [provider, setProvider] = useState<Provider>('disabled');
     const [loadedProvider, setLoadedProvider] = useState<Provider>('disabled');
+    // Last provider the server confirmed, so a failed save returns the picker
+    // to what is actually stored rather than to an unsaved local selection.
+    const savedProviderRef = useRef<Provider>('disabled');
+    const [loadFailed, setLoadFailed] = useState(false);
     // The managed vault is discoverable only with the experimental flag on.
-    // An Admiral instance whose stored mode was already 'sencho' when the page
-    // loaded keeps the option for the session, so switching away (or a failed
-    // save) never removes the way back.
+    // An Admiral instance whose last-loaded config had provider 'sencho' keeps
+    // the option for the session, so switching away (or a failed save) never
+    // removes the way back.
     const senchoVisible = isPaid && (experimental || loadedProvider === 'sencho');
     const providerOptions = senchoVisible
         ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
@@ -136,6 +140,8 @@ export function CloudBackupSection() {
             const data: ConfigResponse = await res.json();
             setProvider(data.provider);
             setLoadedProvider(data.provider);
+            savedProviderRef.current = data.provider;
+            setLoadFailed(false);
             setSenchoProvisioned(data.sencho_provisioned);
             setCustom({ ...data.custom, secret_key: '' });
             setOriginalSecretSaved(!!data.custom.secret_key);
@@ -143,6 +149,7 @@ export function CloudBackupSection() {
             setPassphraseSaved(data.archive_passphrase === '***');
             setPendingEnable(false);
         } catch (err) {
+            setLoadFailed(true);
             toast.error((err as Error)?.message || 'Failed to load cloud backup config.');
         } finally {
             setLoading(false);
@@ -182,7 +189,6 @@ export function CloudBackupSection() {
 
     const handleProviderChange = async (next: string) => {
         const nextProvider = next as Provider;
-        const previousProvider = provider;
         setProvider(nextProvider);
         if (nextProvider === 'sencho' && !senchoProvisioned) return;
         setSaving(true);
@@ -196,9 +202,10 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to save provider');
             }
+            savedProviderRef.current = nextProvider;
             toast.success('Cloud backup provider updated.');
         } catch (err) {
-            setProvider(previousProvider);
+            setProvider(savedProviderRef.current);
             toast.error((err as Error)?.message || 'Failed to update provider.');
         } finally {
             setSaving(false);
@@ -228,6 +235,7 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to save configuration');
             }
+            savedProviderRef.current = 'custom';
             toast.success('Custom S3 configuration saved.');
             setCustom(c => ({ ...c, secret_key: '' }));
             setOriginalSecretSaved(true);
@@ -509,7 +517,7 @@ export function CloudBackupSection() {
                     options={providerOptions}
                     value={provider}
                     onValueChange={handleProviderChange}
-                    disabled={saving}
+                    disabled={saving || loadFailed}
                 />
                 <p className="text-xs text-muted-foreground">
                     Choose where fleet snapshots are replicated.

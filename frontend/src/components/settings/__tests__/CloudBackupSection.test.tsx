@@ -30,6 +30,7 @@ beforeEach(() => {
     useLicenseMock.mockReturnValue({ isPaid: true });
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     vi.mocked(toast.success).mockReset();
+    vi.mocked(toast.error).mockReset();
     apiFetch.mockImplementation(async (path: string, options?: { method?: string; body?: string; localOnly?: boolean }) => {
         if (path === '/cloud-backup/config') {
             return json({
@@ -99,9 +100,10 @@ describe('CloudBackupSection archive encryption', () => {
 });
 
 describe('CloudBackupSection managed vault discovery', () => {
-    function mockProvider(provider: 'disabled' | 'sencho' | 'custom', putStatus = 200) {
+    function mockProvider(provider: 'disabled' | 'sencho' | 'custom', putStatus: number | 'network-error' = 200) {
         apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
             if (path === '/cloud-backup/config' && options?.method === 'PUT') {
+                if (putStatus === 'network-error') throw new Error('network down');
                 return json(putStatus < 400 ? {} : { error: 'save refused' }, putStatus);
             }
             if (path === '/cloud-backup/config') {
@@ -207,5 +209,48 @@ describe('CloudBackupSection managed vault discovery', () => {
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
         expect(screen.getByRole('combobox')).toHaveTextContent(MANAGED_OPTION);
         expect(screen.queryByText('Custom S3 Configuration')).not.toBeInTheDocument();
+    });
+
+    it('does not offer the managed option to an Admiral instance on Custom S3 while the flag is off', async () => {
+        mockProvider('custom');
+        render(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText('Disabled')).toBeInTheDocument();
+        expect(screen.queryByText(MANAGED_OPTION)).not.toBeInTheDocument();
+    });
+
+    it('returns to the stored provider when the save throws a network error', async () => {
+        mockProvider('sencho', 'network-error');
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        expect(screen.getByRole('combobox')).toHaveTextContent(MANAGED_OPTION);
+    });
+
+    it('rolls back to the server-confirmed provider after an unsaved managed selection', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        mockProvider('disabled', 500);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText(MANAGED_OPTION));
+        expect(await screen.findByText('Activate Sencho Snapshot Vault')).toBeInTheDocument();
+        expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Disabled');
+        expect(screen.queryByText('Activate Sencho Snapshot Vault')).not.toBeInTheDocument();
+    });
+
+    it('locks the storage mode picker when the stored configuration could not be read', async () => {
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') return json({ error: 'boom' }, 500);
+            return json([]);
+        });
+        render(<CloudBackupSection />);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to load config (500)'));
+        expect(await screen.findByRole('combobox')).toBeDisabled();
     });
 });

@@ -450,6 +450,7 @@ describe('Sencho Snapshot Vault provisioning', () => {
     afterEach(() => {
         vi.restoreAllMocks();
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+        DatabaseService.getInstance().setSystemState('license_key', '');
     });
 
     it('records the provision call as "Provisioned Sencho Snapshot Vault" in the audit log', async () => {
