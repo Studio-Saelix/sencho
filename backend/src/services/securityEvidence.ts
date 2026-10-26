@@ -350,8 +350,65 @@ export const LEGACY_VOCABULARY_MAPPINGS: readonly LegacyVocabularyMapping[] = [
     },
 ];
 
+/** Operator-facing name of each evidence source; the identifier stays in the record. */
+const EVIDENCE_SOURCE_LABEL: Readonly<Record<SecurityEvidenceSource, string>> = {
+    scanner_availability: 'Scanner availability',
+    vulnerability_scan: 'Vulnerability scan',
+    vulnerability_database: 'Vulnerability database',
+    exploit_intelligence: 'Exploit intelligence',
+    image_exposure_map: 'Image exposure map',
+    image_trust: 'Image trust',
+};
+
+/**
+ * What an evidence state reads as after a colon, so "failed" never has to follow
+ * "was" ("the scan was failed"). Distinct from `describeEvidenceState`, which is
+ * a capitalised title for alerts and the UI.
+ */
+const EVIDENCE_STATE_PHRASE: Readonly<Record<SecurityEvidenceState, string>> = {
+    current: 'current',
+    stale: 'too old',
+    unavailable: 'unavailable',
+    failed: 'failed',
+    partial: 'incomplete',
+    unsupported: 'not supported on this node',
+    not_evaluated: 'never evaluated',
+    unknown: 'indeterminate',
+};
+
+const OUTCOME_PAST_TENSE: Readonly<Record<EvidenceAvailabilityOutcome, string>> = {
+    allow: 'allowed',
+    warn: 'warned about',
+    block: 'blocked',
+};
+
+/** The control an operator changes for each rule clause (`key=outcome`). */
+const EVIDENCE_RULE_LABEL: Readonly<Record<string, string>> = {
+    security_scanner_unavailable: 'the Scanner unavailable setting',
+    security_scan_failure: 'the Scan failed setting',
+    security_candidate_unproven: 'the Candidate not evaluated setting',
+};
+
+/**
+ * Turn an audit clause such as `security_scan_failure=block` into the setting an
+ * operator can find on screen. An unrecognised clause passes through unchanged,
+ * so a future rule is shown as it is rather than hidden.
+ */
+function describeEvidenceRule(rule: string): string {
+    const [key, outcome] = rule.split('=');
+    const label = EVIDENCE_RULE_LABEL[key];
+    if (!label) return rule;
+    return outcome ? `${label}, set to ${outcome}` : label;
+}
+
 /**
  * One sentence naming every rule that acted, safe to show an operator verbatim.
+ *
+ * Worded for the screen, not the audit trail: the identifiers (`vulnerability_scan`,
+ * `security_scan_failure=block`) stay on each application's own fields, where the
+ * audit rows read them, and this sentence names the source and the setting as the
+ * operator sees them. Identical sentences collapse, because a multi-image stack
+ * applies the same rule once per image and the images are named separately.
  *
  * Split out from `decideEvidenceGate` because a caller may add an application
  * of its own and set the outcome the caller actually reached. Folding the new
@@ -362,11 +419,13 @@ export const LEGACY_VOCABULARY_MAPPINGS: readonly LegacyVocabularyMapping[] = [
 export function summarizeEvidenceApplications(
   applications: readonly EvidenceRuleApplication[],
 ): string {
-  return applications.length === 0
-    ? 'No security evidence was required for this decision'
-    : applications
-        .map((a) => `${describeEvidenceState(a.state)} evidence for ${a.source}: ${a.outcome} (${a.rule})`)
-        .join('; ');
+  if (applications.length === 0) return 'No security evidence was required for this decision';
+  const sentences = applications.map(
+    (a) =>
+      `${EVIDENCE_SOURCE_LABEL[a.source] ?? a.source}: ${EVIDENCE_STATE_PHRASE[a.state] ?? a.state}, ` +
+      `${OUTCOME_PAST_TENSE[a.outcome]} by ${describeEvidenceRule(a.rule)}`,
+  );
+  return [...new Set(sentences)].join('; ');
 }
 
 /**

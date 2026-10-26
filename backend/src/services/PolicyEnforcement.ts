@@ -309,7 +309,7 @@ function decideScannerUnavailable(
             ok: false,
             bypassed: false,
             policy,
-            violations: [unavailableViolation('(scanner unavailable)', decision.summary)],
+            violations: [unavailableViolation('(scanner unavailable)', classification.reason ?? 'The vulnerability scanner is not available on this node')],
             evidence: decision,
         };
     }

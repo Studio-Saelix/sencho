@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { SeverityChip } from '@/components/VulnerabilityScanSheet';
 import type { VulnSeverity } from '@/types/security';
+import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/lib/events';
 import { buildEvidenceLines } from './policyBlockEvidence';
 
 /** Risk inputs a deploy gate can block on; mirrors the backend reason set. */
@@ -142,6 +143,15 @@ export function PolicyBlockDialog({
   // send the operator to a control that changes nothing for this block.
   const governedBySetting = (payload?.evidence?.applications ?? []).some((a) => a.outcome === 'block');
 
+  // Navigation does not switch nodes, and this dialog only ever opens for the
+  // active node, so the Policies tab it lands on edits the node that ran the deploy.
+  const openEvidenceSettings = () => {
+    onClose();
+    window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+      detail: { view: 'security', tab: 'policies' },
+    }));
+  };
+
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
       <ModalDestructiveHeader
@@ -244,7 +254,14 @@ export function PolicyBlockDialog({
             </ul>
             {governedBySetting && (
               <p className="text-xs text-muted-foreground mt-2">
-                Change this on the Security page &rarr; Policies tab, under Evidence availability. The setting belongs to the node that ran this deploy, so select that node first.
+                This setting belongs to this node only.{' '}
+                <button
+                  type="button"
+                  onClick={openEvidenceSettings}
+                  className="font-medium text-brand hover:underline"
+                >
+                  Open Evidence availability &rarr;
+                </button>
               </p>
             )}
           </div>

@@ -153,7 +153,9 @@ describe('scanner unavailability policy', () => {
         expect(gate.ok).toBe(false);
         expect(gate.trivyMissing).toBeUndefined();
         expect(gate.violations[0].imageRef).toBe('(scanner unavailable)');
-        expect(gate.violations[0].error).toContain('security_scanner_unavailable=block');
+        // The row an operator reads names the cause, not the rule identifier.
+        expect(gate.violations[0].error).toBe('The vulnerability scanner is not available on this node');
+        expect(gate.evidence?.summary).toBe('Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block');
     });
 
     it('keeps the admin bypass available even when blocking on an unavailable scanner', async () => {
@@ -409,14 +411,18 @@ describe('candidate acceptance applies its own rule', () => {
         expect(candidate.evidence?.outcome).toBe('allow');
         // The summary names every rule that acted, including the one that let it
         // through, and none of them reports a block.
-        expect(candidate.evidence?.summary).toContain('security_candidate_unproven=allow');
+        expect(candidate.evidence?.summary).toContain('the Candidate not evaluated setting, set to allow');
         // The deploy-gate rules stay visible in their own right; what must not
         // appear is one reporting an outcome the candidate decision overrode.
-        expect(candidate.evidence?.summary).not.toContain('security_candidate_unproven=block');
+        expect(candidate.evidence?.summary).not.toContain('the Candidate not evaluated setting, set to block');
         // Every application in the decision is represented in the sentence, so the
         // summary cannot describe a subset of what the record holds.
+        const labelFor: Record<string, string> = {
+            'security_scan_failure=block': 'the Scan failed setting, set to block',
+            'security_candidate_unproven=allow': 'the Candidate not evaluated setting, set to allow',
+        };
         for (const application of candidate.evidence?.applications ?? []) {
-            expect(candidate.evidence?.summary).toContain(application.rule);
+            expect(candidate.evidence?.summary).toContain(labelFor[application.rule]);
         }
     });
 

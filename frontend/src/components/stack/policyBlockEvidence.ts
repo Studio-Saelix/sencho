@@ -16,7 +16,10 @@ const OUTCOME_PAST_TENSE: Record<'allow' | 'warn' | 'block', string> = {
   block: 'blocked',
 };
 
-/** Human wording for one evidence state, for the block dialog's explanation. */
+/**
+ * Human wording for one evidence state. It follows a colon ("Vulnerability scan:
+ * failed"), never "was", so no state needs a past participle that is not a word.
+ */
 const EVIDENCE_STATE_LABEL: Record<string, string> = {
   current: 'current',
   stale: 'too old',
@@ -27,6 +30,31 @@ const EVIDENCE_STATE_LABEL: Record<string, string> = {
   not_evaluated: 'never evaluated',
   unknown: 'indeterminate',
 };
+
+/** Operator-facing name of each evidence source; the identifier stays in the record. */
+const EVIDENCE_SOURCE_LABEL: Record<string, string> = {
+  scanner_availability: 'Scanner availability',
+  vulnerability_scan: 'Vulnerability scan',
+  vulnerability_database: 'Vulnerability database',
+  exploit_intelligence: 'Exploit intelligence',
+  image_exposure_map: 'Image exposure map',
+  image_trust: 'Image trust',
+};
+
+function describeSource(source: string): string {
+  if (EVIDENCE_SOURCE_LABEL[source]) return EVIDENCE_SOURCE_LABEL[source];
+  const spaced = source.replace(/_/g, ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function describeState(state: string): string {
+  return EVIDENCE_STATE_LABEL[state] ?? state.replace(/_/g, ' ');
+}
+
+/** A reason is a clause from the server; end it like a sentence without doubling a stop. */
+function sentence(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
 
 export interface EvidenceLine {
   key: string;
@@ -91,31 +119,35 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
   const lines: EvidenceLine[] = [];
   const explained = new Set<string>();
 
+  const records = evidence.records ?? [];
+
   for (const a of evidence.applications ?? []) {
     if (a.state === 'current') continue;
-    const what = a.source.replace(/_/g, ' ');
-    const state = EVIDENCE_STATE_LABEL[a.state] ?? a.state.replace(/_/g, ' ');
     const who = a.target ? ` for ${describeTarget(a.target)}` : '';
+    // A node-wide application carries no target, so the record of the same
+    // source and state is what says why. Its reason is folded into this line
+    // rather than printed again as a second line about the same fact.
+    const nodeWide = a.target ? undefined : records.find((r) => r.source === a.source && r.state === a.state);
+    const why = nodeWide?.reason ? ` ${sentence(nodeWide.reason)}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
-      text: `${what} evidence${who} was ${state}, so it was ${OUTCOME_PAST_TENSE[a.outcome]} by ${describeRule(a.rule)}.`,
+      text: `${describeSource(a.source)}${who}: ${describeState(a.state)}, ${OUTCOME_PAST_TENSE[a.outcome]} by ${describeRule(a.rule)}.${why}`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),
     // and collapsing them would drop the second explanation.
     if (a.target) explained.add(`${a.source}:${a.state}:${a.target}`);
+    else if (nodeWide) explained.add(`${nodeWide.source}:${nodeWide.state}:${nodeWide.target}`);
   }
 
-  for (const r of evidence.records ?? []) {
+  for (const r of records) {
     if (r.state === 'current') continue;
     // Skip a record already described by an application, so the same evidence is
     // not explained twice in one dialog.
     if (explained.has(`${r.source}:${r.state}:${r.target}`)) continue;
-    const what = r.source.replace(/_/g, ' ');
-    const state = EVIDENCE_STATE_LABEL[r.state] ?? r.state.replace(/_/g, ' ');
     lines.push({
       key: `rec:${r.source}:${r.state}:${r.target}`,
-      text: `${what} evidence for ${describeTarget(r.target)} was ${state}${r.reason ? `: ${r.reason}` : '.'}`,
+      text: `${describeSource(r.source)} for ${describeTarget(r.target)}: ${describeState(r.state)}.${r.reason ? ` ${sentence(r.reason)}` : ''}`,
     });
   }
 

@@ -46,7 +46,7 @@ describe('buildEvidenceLines', () => {
     const lines = buildEvidenceLines(evidence);
     expect(lines).toHaveLength(1);
     expect(lines[0].text).toBe(
-      'scanner availability evidence was unavailable, so it was blocked by the Scanner unavailable setting, set to block.',
+      'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block.',
     );
     // The raw key belongs in the decision record, not in front of an operator.
     expect(lines[0].text).not.toContain('security_scanner_unavailable');
@@ -78,9 +78,9 @@ describe('buildEvidenceLines', () => {
         records: [],
         applications: [{ source: 'vulnerability_scan', state: 'stale', outcome, rule: 'unknown_key' }],
       })[0].text;
-    expect(textFor('block')).toContain('it was blocked');
-    expect(textFor('allow')).toContain('it was allowed');
-    expect(textFor('warn')).toContain('it was warned about');
+    expect(textFor('block')).toContain('too old, blocked by');
+    expect(textFor('allow')).toContain('too old, allowed by');
+    expect(textFor('warn')).toContain('too old, warned about by');
     for (const outcome of ['allow', 'warn', 'block'] as const) {
       expect(textFor(outcome)).not.toMatch(/allowd|warnd|blockd/);
     }
@@ -223,11 +223,37 @@ describe('buildEvidenceLines', () => {
     const lines = buildEvidenceLines({
       outcome: 'block',
       records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null, reason: 'not responding' }],
-      applications: [{ source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' }],
+      applications: [],
       summary: '',
     });
     expect(lines.map((l) => l.text).join(' ')).toContain('for this node');
     expect(lines.map((l) => l.text).join(' ')).not.toContain('(node)');
+  });
+
+  it('explains a node-wide refusal once, with its cause', () => {
+    // The application carries no target and the record carries the sentinel, so
+    // matching on target alone printed one fact twice: the rule that acted and
+    // then the same state again with the scanner's reason.
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null, reason: 'The vulnerability scanner is not available on this node' }],
+      applications: [{ source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' }],
+      summary: '',
+    });
+    expect(lines.map((l) => l.text)).toEqual([
+      'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block. The vulnerability scanner is not available on this node.',
+    ]);
+  });
+
+  it('words a failed scan without "was failed"', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: null, reason: 'The scan did not complete.' }],
+      applications: [{ source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.27' }],
+      summary: '',
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0].text).toBe('Vulnerability scan for nginx:1.27: failed, blocked by the Scan failed setting, set to block.');
   });
 
   it('still shows an image that happens to be called node', () => {

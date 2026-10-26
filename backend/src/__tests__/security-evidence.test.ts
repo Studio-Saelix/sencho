@@ -202,8 +202,25 @@ describe('decideEvidenceGate', () => {
         const decision = decideEvidenceGate([record('unavailable')], [
             { source: 'scanner_availability', state: 'unavailable', outcome: 'allow', rule: 'security_scanner_unavailable=allow' },
         ]);
-        expect(decision.summary).toContain('Unavailable');
-        expect(decision.summary).toContain('security_scanner_unavailable=allow');
+        expect(decision.summary).toBe('Scanner availability: unavailable, allowed by the Scanner unavailable setting, set to allow');
+        // The identifiers stay on the application for the audit; the sentence an
+        // operator reads does not carry them.
+        expect(decision.summary).not.toMatch(/scanner_availability|security_scanner_unavailable/);
+        expect(decision.applications[0].rule).toBe('security_scanner_unavailable=allow');
+    });
+
+    it('words each state so none reads "was failed", and passes an unknown rule through', () => {
+        const decision = decideEvidenceGate([record('failed')], [
+            { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'a:1' },
+            { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'b:1' },
+            { source: 'image_trust', state: 'partial', outcome: 'warn', rule: 'future_rule=warn' },
+        ]);
+        // One sentence per distinct fact: two images under the same rule are one
+        // sentence, because the images are named elsewhere.
+        expect(decision.summary).toBe(
+            'Vulnerability scan: failed, blocked by the Scan failed setting, set to block; ' +
+            'Image trust: incomplete, warned about by future_rule=warn',
+        );
     });
 
     it('says plainly when no evidence was required', () => {

@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { describePolicyBlock } from '../helpers/policyGate';
+import { decideEvidenceGate } from '../services/securityEvidence';
 import type { PolicyViolation } from '../services/PolicyEnforcement';
 import type { ScanPolicy } from '../services/DatabaseService';
 
@@ -33,7 +34,7 @@ describe('describePolicyBlock', () => {
             target: 'nginx:1.14',
           },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('required security evidence was unavailable');
@@ -65,7 +66,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('1 image(s) matched');
@@ -87,7 +88,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.14' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('required security evidence was unavailable');
@@ -112,7 +113,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('1 image(s) matched');
@@ -152,7 +153,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('1 image(s) matched');
@@ -175,10 +176,24 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'node' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
       },
     );
     expect(msg).toContain('images=[node]');
+  });
+
+  it('puts operator wording, not source or rule identifiers, in the unattended message', () => {
+    // The sentence is the only account an auto-update alert or a Git source gives,
+    // so it carries the same wording the dialog does. Built through the real
+    // decision function so a change to the summary cannot leave this fixture
+    // describing a sentence the gate no longer produces.
+    const evidence = decideEvidenceGate(
+      [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null }],
+      [{ source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' }],
+    );
+    const msg = describePolicyBlock(policy, [violation({ imageRef: '(scanner unavailable)', error: 'The vulnerability scanner is not available on this node' })], 'update', evidence);
+    expect(msg).toContain('Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block');
+    expect(msg).not.toMatch(/scanner_availability|security_scanner_unavailable|=block/);
   });
 
   it('keeps a node-wide refusal out of the image list', () => {
@@ -186,7 +201,7 @@ describe('describePolicyBlock', () => {
     // scanner outage would be reported as though it were an image.
     const msg = describePolicyBlock(
       policy,
-      [violation({ imageRef: '(scanner unavailable)', error: 'Failed evidence for vulnerability_scan: block (security_scanner_unavailable=block)' })],
+      [violation({ imageRef: '(scanner unavailable)', error: 'The vulnerability scanner is not available on this node' })],
       'deploy',
       {
         outcome: 'block',
@@ -194,7 +209,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
         ],
-        summary: 'Unavailable evidence for scanner_availability: block (security_scanner_unavailable=block)',
+        summary: 'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block',
       },
     );
     expect(msg).toContain('required security evidence was unavailable');
@@ -235,7 +250,7 @@ describe('describePolicyBlock', () => {
         applications: [
           { source: 'vulnerability_scan', state: 'failed', outcome: 'warn', rule: 'security_scan_failure=warn', target: 'nginx:1.14' },
         ],
-        summary: 'Failed evidence for vulnerability_scan: warn (security_scan_failure=warn)',
+        summary: 'Vulnerability scan: failed, warned about by the Scan failed setting, set to warn',
       },
     );
     expect(msg).not.toContain('security_scan_failure=warn');

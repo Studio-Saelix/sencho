@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
 import { PolicyBlockDialog, type PolicyBlockPayload } from '../PolicyBlockDialog';
 
 const publicPayload: PolicyBlockPayload = {
@@ -15,11 +17,11 @@ describe('PolicyBlockDialog evidence', () => {
     error: 'blocked',
     policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
     violations: [
-      { imageRef: '(scanner unavailable)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'Unavailable evidence for scanner availability: block (security_scanner_unavailable=block)' },
+      { imageRef: '(scanner unavailable)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'The vulnerability scanner is not available on this node' },
     ],
     evidence: {
       outcome: 'block',
-      summary: 'Unavailable evidence for scanner availability: block (security_scanner_unavailable=block)',
+      summary: 'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block',
       applications: [
         { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
       ],
@@ -42,8 +44,34 @@ describe('PolicyBlockDialog evidence', () => {
     // The modal portals to document.body, so read it there rather than off the
     // render container.
     const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
-    expect(rows.some((t) => t.includes('scanner availability evidence was unavailable'))).toBe(true);
-    expect(rows.some((t) => t.includes('it was blocked by the Scanner unavailable setting, set to block'))).toBe(true);
+    expect(rows.some((t) => t.includes('Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block'))).toBe(true);
+  });
+
+  it('shows no raw source or rule identifier anywhere in the dialog', () => {
+    // The class behind the raw-identifier defect: the violation row, the
+    // summary and the evidence lines are three places the gate's vocabulary can
+    // leak. Whatever a payload carries, the screen shows operator wording.
+    renderDialog(unavailablePayload);
+    const text = document.body.textContent ?? '';
+    expect(text).not.toMatch(/scanner_availability|security_scanner_unavailable|security_scan_failure/);
+    expect(text).not.toMatch(/\w=(allow|warn|block)\b/);
+  });
+
+  it('never says a state "was failed"', () => {
+    renderDialog({
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', reason: 'The scan did not complete' }],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.27' },
+        ],
+      },
+    });
+    const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
+    expect(text).toContain('Vulnerability scan for nginx:1.27: failed, blocked by the Scan failed setting, set to block');
+    expect(text).not.toMatch(/was failed|was unavailable/);
   });
 
   it('spells every outcome rather than appending a suffix', () => {
@@ -59,16 +87,27 @@ describe('PolicyBlockDialog evidence', () => {
     };
     renderDialog(warned);
     const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
-    expect(text).toContain('it was warned about by the Scan failed setting, set to warn');
+    expect(text).toContain('too old, warned about by the Scan failed setting, set to warn');
     expect(text).not.toContain('warnd');
     expect(text).not.toContain('allowd');
   });
 
-  it('points at the place to change it', () => {
-    renderDialog(unavailablePayload);
-    expect(screen.getByText(/Policies tab, under Evidence availability/i)).toBeInTheDocument();
-    // The setting is per node, so the pointer must say which node's it is.
-    expect(screen.getByText(/belongs to the node that ran this deploy, so select that node first/i)).toBeInTheDocument();
+  it('opens the Policies tab on this node and closes the dialog', async () => {
+    const onClose = vi.fn();
+    const navigate = vi.fn();
+    window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    try {
+      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
+      expect(screen.getByText(/belongs to this node only/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(navigate).toHaveBeenCalledTimes(1);
+      // No nodeId: the active node is the one that ran the deploy, and a
+      // node id here would be read as a node filter, not a node switch.
+      expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ view: 'security', tab: 'policies' });
+    } finally {
+      window.removeEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    }
   });
 
   it('shows no evidence section for a genuine policy match', () => {

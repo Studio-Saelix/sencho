@@ -95,6 +95,19 @@ it('sends only the changed field', async () => {
   });
 });
 
+it('pushes every row control to the right edge, including one that wraps below its label', async () => {
+  // At phone width a long label plus the three-option control no longer fits on
+  // one line, and a wrapped item of a space-between row falls to the left
+  // edge, so one row's control sat apart from its siblings'. jsdom has no
+  // layout, so this asserts the class that keeps each control right-aligned in
+  // the wrapped case; on one line it is a no-op.
+  render(<EvidencePolicyPanel />);
+  await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Candidate not evaluated' })).toBeInTheDocument());
+  for (const name of ['Scanner unavailable', 'Scan failed', 'Candidate not evaluated']) {
+    expect(screen.getByRole('radiogroup', { name })).toHaveClass('ml-auto');
+  }
+});
+
 it('shows a layout-matched placeholder while loading rather than a blank pane', async () => {
   // The panel sits inside a tab, so returning nothing would pop it into
   // existence and shift the tab when the policy arrived.

@@ -112,6 +112,7 @@ function PolicyRow({
           onChange={onChange}
           disabled={disabled || busy}
           ariaLabel={label}
+          className="ml-auto"
         />
       </div>
       <p className="text-xs text-muted-foreground mt-1">{help}</p>
@@ -248,7 +249,7 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
           {[0, 1, 2].map((row) => (
             <div key={row} className="flex flex-wrap items-center justify-between gap-2">
               <Skeleton className="h-4 w-48" />
-              <Skeleton className="h-7 w-40 rounded-md" />
+              <Skeleton className="h-7 w-40 rounded-md ml-auto" />
             </div>
           ))}
         </div>
