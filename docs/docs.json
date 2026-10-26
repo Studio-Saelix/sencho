@@ -258,6 +258,7 @@
           {
             "group": "Secure & integrate",
             "pages": [
+              "tutorials/run-sencho-behind-a-reverse-proxy",
               "tutorials/set-up-sso",
               "tutorials/grant-scoped-stack-access",
               "tutorials/configure-environment-guardrails",
