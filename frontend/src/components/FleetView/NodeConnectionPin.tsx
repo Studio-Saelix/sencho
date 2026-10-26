@@ -1,22 +1,10 @@
 import { cn } from '@/lib/utils';
-
-export type NodeConnection = 'local' | 'proxy' | 'pilot';
-
-const PIN_TITLE: Record<Exclude<NodeConnection, 'local'>, string> = {
-    pilot: 'Pilot agent: this node connects out to the control instance over a tunnel',
-    proxy: 'Proxy: the control instance reaches this node over its API',
-};
-
-/** How the control instance reaches a node: itself, over its API, or over a Pilot tunnel. */
-export function nodeConnection(type: 'local' | 'remote', mode?: string | null): NodeConnection {
-    if (type === 'local') return 'local';
-    return mode === 'pilot_agent' ? 'pilot' : 'proxy';
-}
+import { nodeConnection, PIN_TITLE } from './nodeConnection';
 
 interface NodeConnectionPinProps {
     type: 'local' | 'remote';
     mode?: string | null;
-    /** Positioning only; the pin's own type and tone stay fixed. */
+    /** Layout only (position, shrink); do not pass type or color classes. */
     className?: string;
 }
 

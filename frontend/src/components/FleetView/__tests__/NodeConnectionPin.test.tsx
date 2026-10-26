@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { NodeConnectionPin, nodeConnection } from '../NodeConnectionPin';
+import { NodeConnectionPin } from '../NodeConnectionPin';
+import { nodeConnection } from '../nodeConnection';
 
 describe('nodeConnection', () => {
   it('maps the local node to local whatever its mode says', () => {

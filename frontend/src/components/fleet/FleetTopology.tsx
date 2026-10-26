@@ -97,7 +97,7 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
         && node.nodeMode === 'pilot_agent'
         && typeof node.pilotLastSeen === 'number'
         && Date.now() - node.pilotLastSeen > PILOT_STALE_MS;
-    // Exception-only status (DESIGN.md 9.5): a healthy node shows only its dot.
+    // Exception-only status: a healthy node shows only its dot.
     const statusWord = isOffline ? 'Offline' : node.critical ? 'Critical' : null;
     const showLatency = !isLocal && !isOffline && typeof node.latencyMs === 'number';
 

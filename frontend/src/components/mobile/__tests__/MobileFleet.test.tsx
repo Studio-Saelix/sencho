@@ -167,7 +167,7 @@ describe('MobileFleet node identity', () => {
   const edge = (overrides: Partial<FleetNode> = {}) =>
     makeNode({ id: 2, name: 'Edge', type: 'remote', ...overrides });
 
-  it('pins Local, Proxy and Pilot in the same corner vocabulary as the desktop card', async () => {
+  it('pins Local, Proxy and Pilot with the same labels as the desktop card', async () => {
     setupFetch(
       [makeNode(), edge({ mode: 'proxy' }), edge({ id: 3, name: 'Tunnel', mode: 'pilot_agent' })],
       [],
@@ -184,7 +184,7 @@ describe('MobileFleet node identity', () => {
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
 
     await screen.findByText('★ Local');
-    expect(screen.queryByText('online')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^online$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/you are here/i)).not.toBeInTheDocument();
   });
 
@@ -217,5 +217,50 @@ describe('MobileFleet node identity', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
     expect(await screen.findByText(/^pilot · 1 stacks/)).toBeInTheDocument();
+  });
+
+  it('prefers the registry connection mode in the node detail meta line', async () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'proxy' }],
+      activeNode: null,
+      nodeMeta: new Map(),
+      hasCapability: vi.fn(() => false),
+    });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
+    expect(await screen.findByText(/^proxy · 1 stacks/)).toBeInTheDocument();
+  });
+
+  it('says critical on an online node over the critical threshold, and cordoned alone on a cordoned healthy node', async () => {
+    const hot = { cpu: { usage: '97.0', cores: 4 } };
+    setupFetch(
+      [
+        makeNode({ systemStats: { ...makeNode().systemStats!, ...hot } }),
+        edge({ mode: 'proxy', cordoned: true }),
+      ],
+      [],
+    );
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('critical')).toBeInTheDocument();
+    expect(screen.getByText('cordoned')).toBeInTheDocument();
+    expect(screen.queryByText(/offline/)).not.toBeInTheDocument();
+  });
+
+  it('gives a healthy node dot an accessible status, since it carries no state word', async () => {
+    setupFetch([edge({ mode: 'proxy' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByRole('img', { name: 'Online' })).toBeInTheDocument();
+  });
+
+  it('gives no accessible online status to an offline node', async () => {
+    setupFetch([edge({ mode: 'proxy', status: 'offline' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('offline');
+    expect(screen.queryByRole('img', { name: 'Online' })).not.toBeInTheDocument();
   });
 });

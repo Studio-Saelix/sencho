@@ -7,14 +7,15 @@ import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { BusyButton } from '@/components/ui/busy-button';
-import { formatBytes } from '@/lib/utils';
+import { cn, formatBytes } from '@/lib/utils';
 import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConfirmDialog';
 import { ReconnectingOverlay } from '@/components/FleetView/ReconnectingOverlay';
 import { useFleetUpdateStatus } from '@/components/FleetView/hooks/useFleetUpdateStatus';
 import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
-import { NodeConnectionPin, nodeConnection } from '@/components/FleetView/NodeConnectionPin';
+import { NodeConnectionPin } from '@/components/FleetView/NodeConnectionPin';
+import { nodeConnection } from '@/components/FleetView/nodeConnection';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
 
@@ -99,12 +100,18 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Exception-only status: a healthy node carries no state word (DESIGN.md 9.5).
-function nodeExceptions(node: FleetNode): string[] {
-  const exceptions: string[] = [];
-  if (node.status !== 'online') exceptions.push('offline');
-  else if (isCritical(node)) exceptions.push('critical');
-  if (node.cordoned) exceptions.push('cordoned');
+interface NodeException {
+  label: 'offline' | 'critical' | 'cordoned';
+  tone: 'destructive' | 'warning';
+}
+
+// Exception-only status: offline or critical (never both), plus cordoned on top.
+// A healthy, uncordoned node returns [] and shows no state word.
+function nodeExceptions(node: FleetNode): NodeException[] {
+  const exceptions: NodeException[] = [];
+  if (node.status !== 'online') exceptions.push({ label: 'offline', tone: 'destructive' });
+  else if (isCritical(node)) exceptions.push({ label: 'critical', tone: 'warning' });
+  if (node.cordoned) exceptions.push({ label: 'cordoned', tone: 'warning' });
   return exceptions;
 }
 
@@ -120,21 +127,28 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
       <div className="flex items-center gap-2.5 px-[13px] pb-2.5 pt-3">
-        <StateDot tone={tone} size={7} glow />
+        {exceptions.length === 0 ? (
+          // No state word on a healthy node, so the dot carries the status for assistive tech.
+          <span role="img" aria-label="Online" className="inline-flex">
+            <StateDot tone={tone} size={7} glow />
+          </span>
+        ) : (
+          <StateDot tone={tone} size={7} glow />
+        )}
         <span className="min-w-0 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
         {isActive && !local ? (
-          <span className="rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
+          <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
             active
           </span>
         ) : null}
         {isDevImage ? (
-          <span className="flex items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
+          <span className="flex shrink-0 items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
             <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
           </span>
         ) : null}
         {exceptions.length > 0 ? (
-          <Kicker className={node.status !== 'online' ? 'text-destructive' : 'text-warning'}>
-            {exceptions.join(' · ')}
+          <Kicker className={cn('shrink-0 whitespace-nowrap', exceptions.some(e => e.tone === 'destructive') ? 'text-destructive' : 'text-warning')}>
+            {exceptions.map(e => e.label).join(' · ')}
           </Kicker>
         ) : null}
         <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
