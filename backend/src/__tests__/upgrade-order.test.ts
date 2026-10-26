@@ -46,8 +46,9 @@ describe('WebSocket upgrade dispatch order', () => {
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
     sessionCookie = `sencho_token=${token}`;
 
-    // Default to an active license; the Mesh Community describe block
-    // flips to community per test to prove the tunnel ignores the tier.
+    // Default to an active license; the '/api/mesh/proxy-tunnel is not
+    // tier-gated' block flips to community per test to prove the tunnel
+    // ignores the tier.
     DatabaseService.getInstance().setSystemState('license_status', 'active');
   });
 

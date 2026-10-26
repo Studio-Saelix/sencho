@@ -5,12 +5,12 @@
  * permission-gated. Stack membership remains Admin-only because a membership
  * change redeploys every affected mesh stack. The read routes (status,
  * aliases, activity, diagnostics) need only the read permission (node:read),
- * not Admin, which is what lets a non-admin see a read-only
- * Routing tab. The node-to-node routes that central calls over the proxy on the
- * operator's behalf (local-override PUT/DELETE, alias test) are intentionally
- * not admin-gated. These tests lock that split so the backend
- * can never silently diverge from the matching frontend render gate (a button
- * that 403s, or a feature an owner cannot see).
+ * not Admin, which is what lets a non-admin see a read-only Routing tab. The
+ * node-to-node routes that central calls over the proxy on the operator's
+ * behalf (local-override PUT/DELETE, alias test) are intentionally not
+ * admin-gated. These tests lock that split so the backend can never silently
+ * diverge from the matching frontend render gate (a button that 403s, or a
+ * feature an owner cannot see).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
@@ -41,6 +41,7 @@ beforeAll(async () => {
 
     const viewerHash = await bcrypt.hash('password123', 1);
     DatabaseService.getInstance().addUser({ username: 'mesh-viewer', password_hash: viewerHash, role: 'viewer' });
+    DatabaseService.getInstance().addUser({ username: 'mesh-deployer', password_hash: viewerHash, role: 'deployer' });
     defaultNodeId = DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
 
     ({ app } = await import('../index'));
@@ -65,8 +66,9 @@ describe('mesh is not tier-gated', () => {
     });
 
     // Every route except the SSE activity stream, which never ends a response;
-    // the stream has its own test below. Handlers may still 4xx/5xx for other reasons in the test environment;
-    // only a tier rejection is asserted absent.
+    // the stream has its own test below. Handlers may still 4xx/5xx for
+    // other reasons in the test environment; only a tier rejection is
+    // asserted absent.
     const everyRoute: { method: 'get' | 'post' | 'put' | 'delete'; path: () => string }[] = [
         { method: 'get', path: () => '/api/mesh/status' },
         { method: 'post', path: () => '/api/mesh/regen-overrides' },
@@ -95,13 +97,13 @@ describe('mesh is not tier-gated', () => {
 
     // Opens the stream, reads only the response head, then drops the socket so
     // the handler's close listener unsubscribes.
-    async function openActivityStream(token: string): Promise<{ status: number; headers: Record<string, string>; code?: string }> {
+    async function openActivityStream(token: string): Promise<{ status: number; headers: Record<string, string> }> {
         const req = request(app).get('/api/mesh/activity/stream')
             .set('Authorization', `Bearer ${token}`)
             .buffer(false);
         return new Promise((resolve, reject) => {
             req.on('response', r => {
-                resolve({ status: r.status, headers: r.headers as Record<string, string>, code: r.body?.code });
+                resolve({ status: r.status, headers: r.headers as Record<string, string> });
                 r.destroy();
             });
             req.on('error', reject);
@@ -111,7 +113,6 @@ describe('mesh is not tier-gated', () => {
 
     it('opens the activity stream for a Community admin', async () => {
         const res = await openActivityStream(userToken(TEST_USERNAME));
-        expect(res.code).not.toBe('PAID_REQUIRED');
         expect(res.status).toBe(200);
         expect(res.headers['content-type']).toContain('text/event-stream');
     });
@@ -155,6 +156,20 @@ describe('mesh read routes are visible to a non-admin user', () => {
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body.nodes)).toBe(true);
     });
+});
+
+describe('mesh read routes still need the read permission', () => {
+    // A deployer holds stack:read and stack:deploy but not node:read. Dropping
+    // the tier gate must not have dropped this check.
+    for (const path of ['/api/mesh/status', '/api/mesh/aliases', '/api/mesh/activity', '/api/mesh/activity/stream']) {
+        it(`GET ${path} rejects a user without node:read`, async () => {
+            const res = await request(app)
+                .get(path)
+                .set('Authorization', `Bearer ${userToken('mesh-deployer')}`);
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('PERMISSION_DENIED');
+        });
+    }
 });
 
 describe('mesh mutation authorization', () => {

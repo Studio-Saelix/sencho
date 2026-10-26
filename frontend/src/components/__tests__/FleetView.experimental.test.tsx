@@ -92,7 +92,15 @@ vi.mock('../FleetView/NodeUpdatesSheet', () => ({ NodeUpdatesSheet: () => null }
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
 vi.mock('../FleetSnapshots', () => ({ default: () => null }));
 vi.mock('../fleet/FleetReadiness', () => ({ FleetReadiness: () => null }));
-vi.mock('../fleet/RoutingTab', () => ({ RoutingTab: () => <div data-testid="routing-tab" /> }));
+const routingTabProps = vi.hoisted(() => ({
+  current: null as null | { canManageNode: (nodeId: number) => boolean; canManageMembership: boolean },
+}));
+vi.mock('../fleet/RoutingTab', () => ({
+  RoutingTab: (props: { canManageNode: (nodeId: number) => boolean; canManageMembership: boolean }) => {
+    routingTabProps.current = props;
+    return <div data-testid="routing-tab" />;
+  },
+}));
 vi.mock('../fleet/FederationTab', () => ({ FederationTab: () => <div data-testid="federation-tab" /> }));
 vi.mock('../blueprints/DeploymentsTab', () => ({ DeploymentsTab: () => <div data-testid="deployments-tab" /> }));
 vi.mock('../fleet/FleetActions/FleetActionsTab', () => ({ FleetActionsTab: () => <div data-testid="actions-tab" /> }));
@@ -125,6 +133,21 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     );
     expect(screen.getByTestId('routing-tab')).toBeTruthy();
     expect(onTab).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Routing panel read-only for a user without manage permission', () => {
+    useAuthMock.mockReturnValue({ isAdmin: false, can: () => false });
+    render(
+      <FleetView
+        onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
+        fleetActiveTab="routing"
+        onFleetActiveTabChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('routing-tab')).toBeTruthy();
+    expect(routingTabProps.current?.canManageMembership).toBe(false);
+    expect(routingTabProps.current?.canManageNode(1)).toBe(false);
   });
 
   it('keeps a Routing deep link and panel while the license is still loading', () => {

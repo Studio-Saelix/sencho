@@ -12,6 +12,11 @@ vi.mock('@/hooks/useExperimental', () => ({
   useExperimental: () => useExperimentalMock(),
 }));
 
+// Community license: the dashboard poll must not depend on a paid tier.
+vi.mock('@/context/LicenseContext', () => ({
+  useLicense: () => ({ isPaid: false, isAdmiral: false, licenseStatus: 'ready' as const }),
+}));
+
 vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/utils')>('@/lib/utils');
   return {
