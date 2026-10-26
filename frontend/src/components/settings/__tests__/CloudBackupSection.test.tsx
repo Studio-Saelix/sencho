@@ -100,18 +100,30 @@ describe('CloudBackupSection archive encryption', () => {
 });
 
 describe('CloudBackupSection managed vault discovery', () => {
-    function mockProvider(provider: 'disabled' | 'sencho' | 'custom', putStatus: number | 'network-error' = 200) {
+    const FILLED_CUSTOM = {
+        endpoint: 'https://s3.example.com', region: 'us-east-1', bucket: 'b', access_key: 'a', secret_key: '',
+        path_prefix: 'sencho/', auto_upload: false,
+    };
+
+    function mockProvider(
+        provider: 'disabled' | 'sencho' | 'custom',
+        putStatus: number | 'network-error' | number[] = 200,
+        customConfig: typeof FILLED_CUSTOM | null = null,
+    ) {
+        let putCount = 0;
         apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
             if (path === '/cloud-backup/config' && options?.method === 'PUT') {
-                if (putStatus === 'network-error') throw new Error('network down');
-                return json(putStatus < 400 ? {} : { error: 'save refused' }, putStatus);
+                const status = Array.isArray(putStatus) ? putStatus[Math.min(putCount, putStatus.length - 1)] : putStatus;
+                putCount += 1;
+                if (status === 'network-error') throw new Error('network down');
+                return json(status < 400 ? {} : { error: 'save refused' }, status);
             }
             if (path === '/cloud-backup/config') {
                 return json({
                     provider,
                     sencho_provisioned: provider === 'sencho',
                     sencho_provisioned_at: null,
-                    custom: {
+                    custom: customConfig ?? {
                         endpoint: '', region: '', bucket: '', access_key: '', secret_key: '',
                         path_prefix: 'sencho/', auto_upload: false,
                     },
@@ -192,7 +204,7 @@ describe('CloudBackupSection managed vault discovery', () => {
     });
 
     it('keeps the managed option after switching away from it in the same session', async () => {
-        mockProvider('sencho');
+        mockProvider('sencho', 200, FILLED_CUSTOM);
         render(<CloudBackupSection />);
         const user = await openStorageModes();
         await user.click(await screen.findByText('Custom S3 (BYOB)'));
@@ -202,7 +214,7 @@ describe('CloudBackupSection managed vault discovery', () => {
     });
 
     it('returns to the stored provider when saving the switch fails', async () => {
-        mockProvider('sencho', 500);
+        mockProvider('sencho', 500, FILLED_CUSTOM);
         render(<CloudBackupSection />);
         const user = await openStorageModes();
         await user.click(await screen.findByText('Custom S3 (BYOB)'));
@@ -220,7 +232,7 @@ describe('CloudBackupSection managed vault discovery', () => {
     });
 
     it('returns to the stored provider when the save throws a network error', async () => {
-        mockProvider('sencho', 'network-error');
+        mockProvider('sencho', 'network-error', FILLED_CUSTOM);
         render(<CloudBackupSection />);
         const user = await openStorageModes();
         await user.click(await screen.findByText('Custom S3 (BYOB)'));
@@ -230,7 +242,7 @@ describe('CloudBackupSection managed vault discovery', () => {
 
     it('rolls back to the server-confirmed provider after an unsaved managed selection', async () => {
         useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
-        mockProvider('disabled', 500);
+        mockProvider('disabled', 500, FILLED_CUSTOM);
         render(<CloudBackupSection />);
         const user = await openStorageModes();
         await user.click(await screen.findByText(MANAGED_OPTION));
@@ -252,5 +264,61 @@ describe('CloudBackupSection managed vault discovery', () => {
         render(<CloudBackupSection />);
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to load config (500)'));
         expect(await screen.findByRole('combobox')).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    });
+
+    it('shows the blank Custom S3 form without saving a selection the server would reject', async () => {
+        mockProvider('disabled', 400);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        expect(await screen.findByText('Custom S3 Configuration')).toBeInTheDocument();
+        expect(screen.getByRole('combobox')).toHaveTextContent('Custom S3 (BYOB)');
+        expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
+        expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('saves the Custom S3 selection when a complete configuration is already stored', async () => {
+        mockProvider('disabled', 200, FILLED_CUSTOM);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Cloud backup provider updated.'));
+        expect(apiFetch.mock.calls.filter(call => call[1]?.method === 'PUT')).toHaveLength(1);
+    });
+
+    it('rolls back to the last saved provider, not the one loaded, after a later failed save', async () => {
+        mockProvider('disabled', [200, 500], FILLED_CUSTOM);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Cloud backup provider updated.'));
+
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Disabled'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Custom S3 (BYOB)');
+    });
+
+    it('unlocks the picker when a retry reads the stored configuration', async () => {
+        let attempts = 0;
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') {
+                attempts += 1;
+                if (attempts === 1) return json({ error: 'boom' }, 500);
+                return json({
+                    provider: 'disabled', sencho_provisioned: false, sencho_provisioned_at: null,
+                    custom: { endpoint: '', region: '', bucket: '', access_key: '', secret_key: '', path_prefix: 'sencho/', auto_upload: false },
+                    encrypt_archives: false, archive_passphrase: '',
+                });
+            }
+            return json([]);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        expect(await screen.findByText('The stored configuration could not be read, so the storage mode is locked.')).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Retry' }));
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
+        expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument();
     });
 });

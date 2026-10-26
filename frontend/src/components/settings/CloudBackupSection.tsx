@@ -89,6 +89,12 @@ const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-t
 
 const PAGE_SIZE = 10;
 
+// Mirrors what PUT /cloud-backup/config requires for a custom provider, so the
+// picker only saves a selection the server will accept.
+function isCustomConfigSavable(c: CustomConfig): boolean {
+    return !!c.endpoint.trim() && !!c.bucket.trim() && !!c.access_key.trim() && /^https?:\/\//i.test(c.endpoint.trim());
+}
+
 export function CloudBackupSection() {
     const { isPaid } = useLicense();
     const { experimental } = useExperimental();
@@ -99,11 +105,14 @@ export function CloudBackupSection() {
     // Last provider the server confirmed, so a failed save returns the picker
     // to what is actually stored rather than to an unsaved local selection.
     const savedProviderRef = useRef<Provider>('disabled');
+    // Set when the stored configuration could not be read: there is no
+    // confirmed server state to roll back to, so the picker stays locked until
+    // a retry succeeds.
     const [loadFailed, setLoadFailed] = useState(false);
-    // The managed vault is discoverable only with the experimental flag on.
-    // An Admiral instance whose last-loaded config had provider 'sencho' keeps
-    // the option for the session, so switching away (or a failed save) never
-    // removes the way back.
+    // Admiral only: the managed vault is discoverable with the experimental
+    // flag on, or when the last-loaded config had provider 'sencho'. In that
+    // case the option stays for the session, so switching away (or a failed
+    // save) never removes the way back.
     const senchoVisible = isPaid && (experimental || loadedProvider === 'sencho');
     const providerOptions = senchoVisible
         ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
@@ -191,6 +200,8 @@ export function CloudBackupSection() {
         const nextProvider = next as Provider;
         setProvider(nextProvider);
         if (nextProvider === 'sencho' && !senchoProvisioned) return;
+        // A blank custom form is filled in and saved with Save, not by the picker.
+        if (nextProvider === 'custom' && !isCustomConfigSavable(custom)) return;
         setSaving(true);
         try {
             const body = nextProvider === 'custom' ? { provider: nextProvider, custom: { ...custom, secret_key: '' } } : { provider: nextProvider };
@@ -423,8 +434,13 @@ export function CloudBackupSection() {
         }
     };
 
+    const handleRetryLoad = async () => {
+        setLoading(true);
+        await loadConfig();
+    };
+
     useMastheadStats(
-        loading
+        loading || loadFailed
             ? null
             : [
                 {
@@ -522,6 +538,16 @@ export function CloudBackupSection() {
                 <p className="text-xs text-muted-foreground">
                     Choose where fleet snapshots are replicated.
                 </p>
+                {loadFailed && (
+                    <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs text-destructive">
+                            The stored configuration could not be read, so the storage mode is locked.
+                        </p>
+                        <Button size="sm" variant="outline" onClick={handleRetryLoad}>
+                            Retry
+                        </Button>
+                    </div>
+                )}
             </div>
 
             {isPaid && provider === 'sencho' && !senchoProvisioned && (
