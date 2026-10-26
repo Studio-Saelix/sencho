@@ -101,7 +101,7 @@ function executionSize(execution: FleetPruneNodeResult): string {
   return bytes > 0 || removed === 0 ? formatBytes(bytes) : `${removed} removed`;
 }
 
-/** Names the items a finished node did not remove, so a collapsed node still shows its exceptions. */
+/** Counts the items a finished node failed or skipped, so a collapsed node still shows its exceptions. */
 function unremovedSummary(outcomes: PruneItemOutcome[]): string {
   const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;
   const failed = outcomes.filter((outcome) => outcome.status === 'failed').length;

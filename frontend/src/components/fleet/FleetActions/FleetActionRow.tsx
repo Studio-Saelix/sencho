@@ -1,5 +1,7 @@
+import { useId } from 'react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 import type { ActionHint } from './useFleetActionHints';
 
 interface Props {
@@ -14,17 +16,21 @@ interface Props {
 
 /** One action on the Actions list: what it does, one live fact, and the verb that opens it. */
 export function FleetActionRow({ name, description, hint, verb, onOpen }: Props) {
+  const nameId = useId();
+  const descriptionId = useId();
+  // A fast estimate never flashes the skeleton; the slot just stays reserved until the delay passes.
+  const { showBusy } = useVisualBusy(hint?.kind === 'loading');
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_minmax(8rem,auto)_auto] items-center gap-6 px-6 py-5">
       <div className="min-w-0">
-        <div className="text-[15px] font-medium text-stat-value">{name}</div>
-        <div className="mt-0.5 text-[13px] text-stat-subtitle">{description}</div>
+        <div id={nameId} className="text-[15px] font-medium text-stat-value">{name}</div>
+        <div id={descriptionId} className="mt-0.5 text-[13px] text-stat-subtitle">{description}</div>
       </div>
       <div className="text-right font-mono text-xs tabular-nums text-stat-title">
-        {hint?.kind === 'loading' && <Skeleton className="ml-auto h-4 w-24" aria-hidden />}
+        {hint?.kind === 'loading' && showBusy && <Skeleton className="ml-auto h-4 w-24" aria-hidden />}
         {hint?.kind === 'ready' && hint.text}
       </div>
-      <Button variant="outline" size="sm" onClick={onOpen}>
+      <Button variant="outline" size="sm" onClick={onOpen} aria-describedby={`${nameId} ${descriptionId}`}>
         {verb}
       </Button>
     </li>

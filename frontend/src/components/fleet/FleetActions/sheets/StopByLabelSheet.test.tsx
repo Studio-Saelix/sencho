@@ -374,7 +374,7 @@ it('does not crash when fleet-stop returns a malformed 200 body', async () => {
   await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
   await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
   // Reported as an unexpected response, not masqueraded as "No reachable nodes".
-  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Fleet stop returned an unexpected response. Check the server logs and retry.'));
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Stop stacks returned an unexpected response. Check the server logs and retry.'));
   expect(toastWarning).not.toHaveBeenCalled();
   expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeInTheDocument();
 });
@@ -481,4 +481,155 @@ it('keeps Stop disabled when the session may not stop a resolved stack', async (
   await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
   expect(await screen.findByText('Stops 1 stack', undefined, WAIT)).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+const suggestionsRoute = (url: string) => url === '/fleet/labels/suggestions'
+  ? Promise.resolve(jsonResponse(200, { suggestions: [{ name: 'production', scope: 'stack', nodeCount: 1, stackCount: 1 }] }))
+  : null;
+
+it('closes the suggestions on Escape without closing the sheet', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => suggestionsRoute(url) ?? Promise.resolve(jsonResponse(404, {})));
+  const { onOpenChange } = renderSheet();
+  await user.click(screen.getByPlaceholderText(PLACEHOLDER));
+  expect(await screen.findByRole('button', { name: /production/ })).toBeInTheDocument();
+  await user.keyboard('{Escape}');
+  expect(screen.queryByRole('button', { name: /production/ })).not.toBeInTheDocument();
+  expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  // With the suggestions closed, the next Escape closes the sheet as usual.
+  await user.keyboard('{Escape}');
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+it('closes the suggestions when the input loses focus', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => suggestionsRoute(url) ?? Promise.resolve(jsonResponse(404, {})));
+  renderSheet();
+  await user.click(screen.getByPlaceholderText(PLACEHOLDER));
+  expect(await screen.findByRole('button', { name: /production/ })).toBeInTheDocument();
+  await user.tab();
+  expect(screen.queryByRole('button', { name: /production/ })).not.toBeInTheDocument();
+});
+
+it('resolves a typed label with one preview request, not one per keystroke', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') return Promise.resolve(previewOf([centralWeb], { nodes: 1, stacks: 1 }));
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await screen.findByText('Stops 1 stack', undefined, WAIT);
+  const previews = mockedFetch.mock.calls.filter(c => c[0] === '/fleet/labels/match-preview');
+  expect(previews).toHaveLength(1);
+  expect(JSON.parse(previews[0][1].body)).toEqual({ labelName: 'prod' });
+});
+
+it('says why Stop is unavailable when the session may not stop a resolved stack', async () => {
+  const user = userEvent.setup();
+  can.mockReturnValue(false);
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') return Promise.resolve(previewOf([centralWeb], { nodes: 1, stacks: 1 }));
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  expect(await screen.findByText('You do not have permission to stop every stack listed, so Stop is unavailable.', undefined, WAIT)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+it('does not report a stop that only hit unreachable nodes as "no stack carried the label"', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') return Promise.resolve(previewOf([centralWeb], { nodes: 1, stacks: 1 }));
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: false, matched: false, stackResults: [], error: 'Pilot tunnel is disconnected' }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop stacks' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), WAIT);
+  await user.click(stopBtn);
+  expect(await screen.findByText('Nothing was stopped')).toBeInTheDocument();
+  expect(screen.getByText('1 node unreachable, so the stacks there were not stopped.')).toBeInTheDocument();
+  expect(screen.queryByText(/No stack carried/)).not.toBeInTheDocument();
+});
+
+it('leaves out stacks whose dry run failed and keeps the unreachable nodes on the answer', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [
+          {
+            nodeId: 1, nodeName: 'central', reachable: true, matched: true,
+            stackResults: [{ stackName: 'web', success: true, dryRun: true }, { stackName: 'db', success: false, error: 'dry run failed' }],
+          },
+          { nodeId: 2, nodeName: 'edge-1', reachable: false, matched: false, stackResults: [], error: 'Remote node not configured' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('Stops 1 stack')).toBeInTheDocument();
+  expect(screen.getByText('on 1 node · web')).toBeInTheDocument();
+  expect(screen.getByText('1 unreachable, left out · 1 could not be resolved')).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith('Resolved 1 stack; 1 could not be resolved. 1 node unreachable.'));
+  await user.click(screen.getByRole('button', { name: 'Stop stacks' }));
+  await waitFor(() => {
+    const call = mockedFetch.mock.calls.filter(c => c[0] === '/fleet/labels/fleet-stop').map(c => JSON.parse(c[1].body)).find(b => !b.dryRun);
+    expect(call.targets).toEqual([{ nodeId: 1, stackNames: ['web'] }]);
+  });
+});
+
+it('answers "No stacks match" after a dry run that resolved nothing', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: false, stackResults: [] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('No stacks match')).toBeInTheDocument();
+  expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+it('locks the label while a stop runs and cannot be dismissed until it finishes', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') return Promise.resolve(previewOf([centralWeb], { nodes: 1, stacks: 1 }));
+    if (url === '/fleet/labels/fleet-stop') return new Promise<Response>((resolve) => { finish = resolve; });
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  const { onOpenChange } = renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop stacks' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), WAIT);
+  await user.click(stopBtn);
+  await waitFor(() => expect(finish).not.toBeNull());
+
+  expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeDisabled();
+  await user.keyboard('{Escape}');
+  expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+  await act(async () => {
+    finish!(jsonResponse(200, {
+      results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] }],
+    }));
+  });
+  expect(await screen.findByText('Stopped 1 stack')).toBeInTheDocument();
 });

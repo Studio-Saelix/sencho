@@ -10,9 +10,8 @@ interface LabelAutocompleteProps {
   placeholder?: string;
 }
 
-// Free-form text input with a Sencho-styled suggestion popover. Replaces the
-// browser-native <datalist> so the dropdown matches the rest of the kit (same
-// surface tokens as <Combobox>). Each suggestion is a stack label and carries
+// Free-form text input with a Sencho-styled suggestion popover that uses the
+// same surface tokens as <Combobox>. Each suggestion is a stack label and carries
 // its stack/node counts so the scope is unmistakable. The operator can still
 // type a name that was not suggested; the server-side match-preview resolves it
 // or reports 0 matching stacks.
@@ -40,10 +39,12 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
       }
     };
     document.addEventListener('mousedown', onClick);
-    document.addEventListener('keydown', onKey, true);
+    // Window capture runs before the sheet's own Escape listener on the document,
+    // so closing the suggestions does not also close the sheet.
+    window.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('mousedown', onClick);
-      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keydown', onKey, true);
     };
   }, [open]);
 

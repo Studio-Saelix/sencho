@@ -26,9 +26,10 @@ export function StopByLabelSheet({ open, onOpenChange }: Props) {
   return (
     <SystemSheet
       open={open}
-      onOpenChange={onOpenChange}
+      // A run in flight cannot be dismissed: closing would drop its result and let a second stop start.
+      onOpenChange={(next) => { if (next || !running) onOpenChange(next); }}
       size="lg"
-      crumb={['Fleet', 'Actions', 'Stop by label']}
+      crumb={['Fleet', 'Actions', 'Stop']}
       name="Stop stacks by label"
       meta="stack label · per-node fan-out · only the stacks listed below"
       primaryAction={done ? { label: 'Done', onClick: () => onOpenChange(false) } : undefined}
@@ -64,15 +65,28 @@ export function StopByLabelSheet({ open, onOpenChange }: Props) {
       <SheetSection title={done ? 'Result' : 'Plan'}>
         {outcome
           ? <OutcomePath outcome={outcome} />
-          : <PlanPath preview={preview} targets={flow.resolvedTargets} label={flow.trimmed} showBusy={showBusy} />}
+          : (
+            <PlanPath
+              preview={preview}
+              targets={flow.resolvedTargets}
+              unreachable={flow.unreachable}
+              failedToResolve={flow.failedToResolve}
+              denied={flow.denied}
+              label={flow.trimmed}
+              showBusy={showBusy}
+            />
+          )}
       </SheetSection>
     </SystemSheet>
   );
 }
 
-function PlanPath({ preview, targets, label, showBusy }: {
+function PlanPath({ preview, targets, unreachable, failedToResolve, denied, label, showBusy }: {
   preview: PreviewState;
   targets: ResolvedTarget[] | null;
+  unreachable: MatchPreviewNode[];
+  failedToResolve: number;
+  denied: boolean;
   label: string;
   showBusy: boolean;
 }) {
@@ -84,15 +98,27 @@ function PlanPath({ preview, targets, label, showBusy }: {
       ? <div aria-busy="true" className="space-y-2"><Skeleton className="h-14 w-full" /><Skeleton className="h-4 w-28" /></div>
       : <div className="h-[88px]" aria-hidden />;
   }
-  const unreachable = preview.kind === 'ready' ? preview.data.perNode.filter(n => !n.reachable) : [];
-  const marker = unreachable.length > 0 ? `${unreachable.length} unreachable, left out` : undefined;
+  const marker = [
+    unreachable.length > 0 && `${unreachable.length} unreachable, left out`,
+    failedToResolve > 0 && `${failedToResolve} could not be resolved`,
+  ].filter(Boolean).join(' · ') || undefined;
 
   if (targets && targets.some(t => t.stackNames.length > 0)) {
     return (
       <StatusPath
-        answer={stopAnswer(targets, marker)}
+        answer={stopAnswer(targets, marker, denied)}
         stages={[]}
         proof={{ label: 'Stacks per node', children: <TargetsList targets={targets} unreachable={unreachable} /> }}
+      />
+    );
+  }
+  if (targets !== null && preview.kind !== 'ready') {
+    // A dry run resolved the label to nothing, which is an answer, not a missing preview.
+    return (
+      <StatusPath
+        answer={{ tone: 'neutral', title: 'No stacks match', line: 'The dry run found no stack carrying this label on a reachable node.', marker }}
+        stages={[]}
+        proof={unreachable.length > 0 ? { label: 'Unreachable nodes', children: <UnreachableList nodes={unreachable} /> } : undefined}
       />
     );
   }
@@ -117,7 +143,7 @@ function PlanPath({ preview, targets, label, showBusy }: {
   );
 }
 
-function stopAnswer(targets: ResolvedTarget[], marker: string | undefined): StatusPathAnswer {
+function stopAnswer(targets: ResolvedTarget[], marker: string | undefined, denied: boolean): StatusPathAnswer {
   const names = targets.flatMap(t => t.stackNames);
   const shown = names.slice(0, EXAMPLE_LIMIT).join(', ');
   const rest = names.length - EXAMPLE_LIMIT;
@@ -126,13 +152,17 @@ function stopAnswer(targets: ResolvedTarget[], marker: string | undefined): Stat
     title: `Stops ${plural(names.length, 'stack')}`,
     line: `on ${plural(targets.length, 'node')} · ${shown}${rest > 0 ? ` +${rest} more` : ''}`,
     marker,
+    // Stop is disabled for stacks the session may not stop; say why instead of leaving a dead button.
+    detail: denied ? 'You do not have permission to stop every stack listed, so Stop is unavailable.' : undefined,
   };
 }
 
 function OutcomePath({ outcome }: { outcome: StopOutcome }) {
   const { ok, failed, unreachable, matchedNodes, label } = outcome;
   let answer: StatusPathAnswer;
-  if (ok === 0 && failed === 0) {
+  if (ok === 0 && failed === 0 && unreachable > 0) {
+    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(unreachable, 'node')} unreachable, so the stacks there were not stopped.` };
+  } else if (ok === 0 && failed === 0) {
     answer = { tone: 'neutral', title: 'Nothing was stopped', line: `No stack carried “${label}” on a reachable node.` };
   } else if (failed === 0 && unreachable === 0) {
     answer = { tone: 'success', title: `Stopped ${plural(ok, 'stack')}`, line: `on ${plural(matchedNodes, 'node')}` };

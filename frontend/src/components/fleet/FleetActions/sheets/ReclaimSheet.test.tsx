@@ -324,7 +324,7 @@ it('names skipped items on the result without hiding the reclaimed bytes', async
   expect(onPruned).not.toHaveBeenCalled();
 });
 
-it('rejects an incomplete successful execute response and builds a fresh plan', async () => {
+it('rejects an incomplete successful execute response, refreshes the estimate and builds a fresh plan', async () => {
   const user = userEvent.setup();
   routePrune(() => jsonResponse(200, { results: [planResult] }), () => jsonResponse(200, { results: [] }));
   const { onPruned } = renderSheet();
@@ -332,8 +332,10 @@ it('rejects an incomplete successful execute response and builds a fresh plan', 
 
   await waitFor(() => expect(toastError).toHaveBeenCalledWith('Fleet prune returned an incomplete node result set'));
   expect(toastSuccess).not.toHaveBeenCalledWith(expect.stringContaining('Reclaimed'));
-  expect(onPruned).not.toHaveBeenCalled();
+  // The request was accepted, so some nodes may already have pruned: the list estimate must refresh.
+  expect(onPruned).toHaveBeenCalledTimes(1);
   await waitFor(() => expect(pruneCalls(true)).toHaveLength(2));
+  expect(await screen.findByText(/Some nodes may already have pruned/)).toBeInTheDocument();
 });
 
 it.each([
@@ -355,4 +357,153 @@ it.each([
   await pruneNow(user);
   await waitFor(() => expect(toastError).toHaveBeenCalledWith('Fleet prune returned an incomplete node result set'));
   expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+});
+
+it('builds the first plan at once, without waiting for the input debounce', async () => {
+  renderSheet();
+  await waitFor(() => expect(pruneCalls(true)).toHaveLength(1), { timeout: 200 });
+});
+
+it('coalesces rapid option changes into one rebuild', async () => {
+  const user = userEvent.setup();
+  renderSheet();
+  await waitForPlan();
+  await user.click(screen.getByRole('checkbox', { name: 'Volumes' }));
+  await user.click(screen.getByRole('checkbox', { name: 'Networks' }));
+  await waitFor(() => expect(pruneCalls(true)).toHaveLength(2));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(pruneCalls(true)).toHaveLength(2);
+  expect(pruneCalls(true)[1].targets).toEqual(['images', 'networks', 'volumes']);
+});
+
+it('ignores an older plan that resolves after a newer one', async () => {
+  const user = userEvent.setup();
+  const pending: Array<(response: Response) => void> = [];
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune' || !JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(404, {}));
+    return new Promise<Response>((resolve) => { pending.push(resolve); });
+  });
+  renderSheet();
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await user.click(screen.getByRole('checkbox', { name: 'Volumes' }));
+  await waitFor(() => expect(pending).toHaveLength(2));
+
+  const volumePlan = {
+    ...planResult,
+    items: [...planResult.items, { target: 'volumes', id: 'vol', name: 'data', sizeBytes: 1024, managed: true, reason: 'unused', volume: {} }],
+    reclaimableBytes: 5120,
+    targets: [...planResult.targets, { target: 'volumes', success: true, reclaimedBytes: 1024, dryRun: true }],
+  };
+  await act(async () => { pending[1](jsonResponse(200, { results: [volumePlan] })); });
+  expect(await screen.findByText('5 KB to reclaim')).toBeInTheDocument();
+  await act(async () => { pending[0](jsonResponse(200, { results: [planResult] })); });
+  expect(screen.getByText('5 KB to reclaim')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Prune' })).toBeEnabled();
+});
+
+it('reports a plan that does not cover every reachable node instead of showing a blank section', async () => {
+  routePrune(() => jsonResponse(200, { results: [] }));
+  renderSheet();
+  expect(await screen.findByText('Plan unavailable')).toBeInTheDocument();
+  expect(screen.getByText('The plan did not cover every reachable node. Rebuild to try again.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Prune' })).toBeDisabled();
+});
+
+it('asks for a target when every option is unticked and builds nothing', async () => {
+  const user = userEvent.setup();
+  renderSheet();
+  await waitForPlan();
+  await user.click(screen.getByRole('checkbox', { name: 'Images' }));
+  expect(await screen.findByText('Pick at least one target to build a plan.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Prune' })).toBeDisabled();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  expect(pruneCalls(true)).toHaveLength(1);
+});
+
+it('sends every reviewed node but only the reachable ones with a fingerprint', async () => {
+  const user = userEvent.setup();
+  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'offline' }] as unknown as FleetNode[];
+  const edgeDown = { nodeId: 2, nodeName: 'edge', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+  routePrune(() => jsonResponse(200, { results: [planResult, edgeDown] }), () => jsonResponse(200, { results: [removedResult] }));
+  renderSheet({ nodes: twoNodes });
+  await pruneNow(user);
+  await screen.findByText('Reclaimed 4 KB');
+  expect(pruneCalls(false)[0]).toMatchObject({
+    reviewedNodes: [{ nodeId: 1, reachable: true }, { nodeId: 2, reachable: false }],
+    plans: [{ nodeId: 1, fingerprint: 'reviewed-fingerprint' }],
+  });
+});
+
+it('drops the plan at once after a refused run, so Prune cannot be clicked again on it', async () => {
+  const user = userEvent.setup();
+  let dryRuns = 0;
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(404, {}));
+    if (!JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(500, { error: 'Docker is busy' }));
+    dryRuns += 1;
+    // The rebuild after the refusal stays in flight, so only the dropped plan can keep Prune off.
+    return dryRuns === 1 ? Promise.resolve(jsonResponse(200, { results: [planResult] })) : new Promise<Response>(() => {});
+  });
+  renderSheet();
+  await pruneNow(user);
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Docker is busy'));
+  expect(screen.getByRole('button', { name: 'Prune' })).toBeDisabled();
+  await waitFor(() => expect(pruneCalls(true)).toHaveLength(2));
+  expect(pruneCalls(false)).toHaveLength(1);
+});
+
+it('explains a refused run on the plan it rebuilds', async () => {
+  const user = userEvent.setup();
+  routePrune(() => jsonResponse(200, { results: [planResult] }), () => jsonResponse(500, { error: 'Docker is busy' }));
+  renderSheet();
+  await pruneNow(user);
+  expect(await screen.findByText(/Docker is busy\. Review the new plan\./)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Prune' })).toBeEnabled();
+});
+
+it('keeps the running prune and then the result when the node roster changes', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(404, {}));
+    if (JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(200, { results: [planResult] }));
+    return new Promise<Response>((resolve) => { finish = resolve; });
+  });
+  const view = renderSheet();
+  await pruneNow(user);
+  await waitFor(() => expect(finish).not.toBeNull());
+
+  view.rerender(<ReclaimSheet open onOpenChange={vi.fn()} nodes={[{ ...nodes[0], status: 'offline' }] as FleetNode[]} onPruned={vi.fn()} />);
+  await act(async () => { finish!(jsonResponse(200, { results: [removedResult] })); });
+  expect(await screen.findByText('Reclaimed 4 KB')).toBeInTheDocument();
+  // No plan was queued by the roster change while the prune ran.
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  expect(pruneCalls(true)).toHaveLength(1);
+  expect(screen.getByText('Reclaimed 4 KB')).toBeInTheDocument();
+
+  // And a later roster change leaves the finished result alone.
+  view.rerender(<ReclaimSheet open onOpenChange={vi.fn()} nodes={nodes} onPruned={vi.fn()} />);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  expect(screen.getByText('Reclaimed 4 KB')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
+  expect(pruneCalls(true)).toHaveLength(1);
+});
+
+it('cannot be dismissed while a prune is running, and closes from Done afterwards', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(404, {}));
+    if (JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(200, { results: [planResult] }));
+    return new Promise<Response>((resolve) => { finish = resolve; });
+  });
+  const { onOpenChange } = renderSheet();
+  await pruneNow(user);
+  await waitFor(() => expect(finish).not.toBeNull());
+  await user.keyboard('{Escape}');
+  expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+  await act(async () => { finish!(jsonResponse(200, { results: [removedResult] })); });
+  await user.click(await screen.findByRole('button', { name: 'Done' }));
+  expect(onOpenChange).toHaveBeenCalledWith(false);
 });

@@ -3,7 +3,7 @@ title: "Stack Labels"
 description: "Per-node tags that group your stacks by purpose, surface them under collapsible headers in the sidebar, and enable cross-stack bulk actions across the fleet."
 ---
 
-A **Stack Label** is a per-node tag (name plus color) applied to any stack. A labeled stack groups under that label's header in the sidebar instead of the flat list, and Fleet View can filter the overview by tag. Admins also get two label-driven fleet actions (stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot) plus one-click shortcuts for muting a label's notifications.
+A **Stack Label** is a per-node tag (name plus color) applied to any stack. A labeled stack groups under that label's header in the sidebar instead of the flat list, and Fleet View can filter the overview by tag. The Fleet view offers two label-driven fleet actions (stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot), and admins also get one-click shortcuts for muting a label's notifications.
 
 <Note>
   Stack Labels are a different feature from **Compose Labels** (the raw `labels:` key-value metadata Docker Compose services declare) and from **Node Labels** (used for Blueprint placement). See [Docker Label Audit](/features/docker-label-audit) for the former; Stack Labels never read or write Compose-level labels.
@@ -109,7 +109,7 @@ None of these delete or hide the underlying alerts; they only affect delivery to
 ## Fleet · Fleet Actions
 
 <Note>
-  The label-based Fleet Actions require the admin role.
+  Stop stacks by label needs permission to deploy, and Label stacks permission to edit, every stack they touch.
 </Note>
 
 Two actions in the **Fleet · Actions** tab use labels to drive cross-node operations. See [Fleet Actions](/features/fleet-actions) for the full reference.
@@ -149,7 +149,7 @@ When the chosen label name exists with different colors on different nodes, the 
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
 - **Bulk assign size cap**: a single Apply is capped at 1,000 total stack assignments across every selected node; the request is rejected past that so one accidental fleet-wide selection can't force an unbounded number of writes.
-- **Permissions**: every signed-in user can view labels: sidebar grouping, the Settings panel (read-only), and the Fleet View Tags filter all work for every user. Creating, renaming, recoloring, deleting labels, and toggling a label's assignment on a stack (including from the context menu) requires the **admin** or **node-admin** role. The label-based Fleet Actions (Stop stacks by label, Label stacks) and the mute shortcuts require the **admin** role.
+- **Permissions**: every signed-in user can view labels: sidebar grouping, the Settings panel (read-only), and the Fleet View Tags filter all work for every user. Creating, renaming, recoloring, deleting labels, and toggling a label's assignment on a stack (including from the context menu) requires the **admin** or **node-admin** role. Stop stacks by label and Label stacks need permission to deploy and edit, respectively, every stack they touch, and the mute shortcuts require the **admin** role.
 
 <Tip>
   Beyond the UI, an admin can drive one label at a time on the current node through the API: `POST /api/labels/:id/action` with `{ "action": "deploy" | "stop" | "restart", "dryRun": true }` runs that action across every stack carrying the label, node-locked against other bulk operations the same way the fleet cards are. There's no button for this yet, so it's reachable only via a **Full Admin** API token or a direct request from an admin session; see [API Tokens](/features/api-tokens) for how to mint one.
@@ -183,7 +183,7 @@ When the chosen label name exists with different colors on different nodes, the 
     Confirm the node was reachable when you applied: an unreachable node is shown in the target list and reported in the per-node results rather than silently skipped. If the node was reachable, the label is created there by name with the chosen color and assigned; re-run to retry any node that failed.
   </Accordion>
   <Accordion title="A Fleet Action returns an error when I click Apply or Stop stacks">
-    The label-based Fleet Actions require the admin role. Confirm the active user has the admin role under **Settings · Users**; all other roles cannot run these actions.
+    Stop stacks by label needs permission to deploy, and Label stacks permission to edit, every stack in the selection. When one is out of reach the button stays disabled and the Plan section says so. Confirm the active user's role under **Settings · Users**.
   </Accordion>
   <Accordion title="I don't see a Mute option on a label">
     Label muting requires the **admin** role and the active node advertising the `notification-suppression` capability. Update the node if it's on an older version, or confirm your role under **Settings · Users**.

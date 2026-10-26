@@ -40,7 +40,8 @@ export function ReclaimSheet({ open, onOpenChange, nodes, onPruned }: Props) {
   return (
     <SystemSheet
       open={open}
-      onOpenChange={onOpenChange}
+      // A run in flight cannot be dismissed: closing would drop its result and let a second prune start.
+      onOpenChange={(next) => { if (next || !running) onOpenChange(next); }}
       size="lg"
       crumb={['Fleet', 'Actions', 'Reclaim']}
       name="Reclaim disk space"

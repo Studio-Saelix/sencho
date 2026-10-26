@@ -2380,13 +2380,13 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 
 // ─── Fleet Actions: blast-radius preview endpoints (non-destructive) ───
 //
-// Power the live readouts in the Fleet Action cards. Same auth gates as the
+// Power the live plans in the Fleet Actions sheets. Same auth gates as the
 // destructive endpoints above so the surface stays uniform: an operator who
 // can fire `fleet-stop` is also the operator who can ask how big it would be.
 
 // Per-label fleet preview. Fans out to every node authoritatively (local DB +
 // live remote reads via collectFleetLabelSummaries) and reports, per node, the
-// matching stacks, whether the label exists at all, and reachability. The card
+// matching stacks, whether the label exists at all, and reachability. The sheet
 // uses these to distinguish "0 matching stacks" from "label exists but no
 // stacks assigned" from "remote unavailable".
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -2435,7 +2435,7 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
 // `/api/node-labels` namespace) are deliberately never folded in, because
 // fleet-stop targets stack labels only; the `scope: 'stack'` tag makes that
 // explicit. Labels with zero matching stacks fleet-wide are dropped (stopping
-// them is a no-op). `unreachableNodes`/`partial` tell the card the counts cover
+// them is a no-op). `unreachableNodes`/`partial` tell the sheet the counts cover
 // only the nodes it could reach.
 fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;

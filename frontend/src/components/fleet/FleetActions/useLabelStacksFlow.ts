@@ -56,12 +56,13 @@ async function loadNode(node: FleetNode): Promise<NodeData> {
       fetchForNode(`/fleet/node/${node.id}/stacks`, node.id),
       fetchForNode('/labels', node.id),
     ]);
-    const stacks = stacksRes.ok ? ((await stacksRes.json()) as string[]) : [];
-    const labels = labelsRes.ok ? ((await labelsRes.json()) as Label[]) : [];
-    if (!stacksRes.ok || !labelsRes.ok) {
+    const stacks: unknown = stacksRes.ok ? await stacksRes.json() : null;
+    const labels: unknown = labelsRes.ok ? await labelsRes.json() : null;
+    if (!Array.isArray(stacks) || !Array.isArray(labels)) {
       console.warn(`[LabelStacks] node ${node.id} (${node.name}) load incomplete: stacks ${stacksRes.status}, labels ${labelsRes.status}`);
+      return { node, reachable: false, stacks: [], labels: [] };
     }
-    return { node, reachable: stacksRes.ok && labelsRes.ok, stacks, labels };
+    return { node, reachable: true, stacks: stacks as string[], labels: labels as Label[] };
   } catch (err) {
     console.error(`[LabelStacks] failed to load node ${node.id} (${node.name}):`, err);
     return { node, reachable: false, stacks: [], labels: [] };
@@ -136,12 +137,15 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
   const nodesRef = useRef(nodes);
   useEffect(() => { nodesRef.current = nodes; });
   const nodeIds = nodes.map(n => n.id).join(',');
+  // A finished or running assign must not be wiped by a roster change.
+  const lockedRef = useRef(false);
+  useEffect(() => { lockedRef.current = running || outcome !== null; }, [running, outcome]);
 
   // Reload when the node set changes or the operator refreshes. Resets the
   // selection because a refreshed fleet can no longer guarantee the previously
   // picked stacks still exist.
   useEffect(() => {
-    if (!open) return;
+    if (!open || lockedRef.current) return;
     let cancelled = false;
     async function load() {
       setLoading(true);
@@ -168,6 +172,8 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
     [...selected].every(([nodeId, stackNames]) =>
       [...stackNames].every(stackName => can('stack:edit', 'stack', stackName, nodeId))),
   [selected, can]);
+
+  const denied = totalSelected > 0 && !canApplySelection;
 
   const previewNodes = useMemo(() => {
     if (!selectedTemplate) return [];
@@ -225,7 +231,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
       if (!res.ok) {
-        toast.error(body.error || 'Bulk label assign failed');
+        toast.error(body.error || 'Label stacks failed');
         return;
       }
       // A 200 with a missing or non-array `results` is a server/contract bug,
@@ -233,7 +239,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
       // zero counts. Log it and tell the operator it was unexpected.
       if (!Array.isArray(body.results)) {
         console.error('[LabelStacks] bulk-assign returned a malformed body', body);
-        toast.error('Bulk label assign returned an unexpected response. Check the server logs and retry.');
+        toast.error('Label stacks returned an unexpected response. Check the server logs and retry.');
         return;
       }
       const apiResults = body.results as AssignNodeResult[];
@@ -245,7 +251,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
         // Every node reported zero stack results for a non-empty request: a
         // contract break the success path must not absorb.
         console.error('[LabelStacks] bulk-assign returned no stack results', apiResults);
-        toast.error('Bulk label assign returned no results. Check the server logs and retry.');
+        toast.error('Label stacks returned no results. Check the server logs and retry.');
         return;
       }
       setOutcome({ label: selectedTemplate.name, rows: toRows(apiResults), ok, failed, unreachable, nodes: apiResults.length });
@@ -261,7 +267,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
 
   return {
     nodeData, loading, templates, selectedTemplate, selected, search, running, outcome,
-    totalSelected, canApplySelection, previewNodes,
+    totalSelected, canApplySelection, denied, previewNodes,
     setSelectedTemplate, setSearch, toggleStack, toggleAllForNode, reset, run,
     refresh: () => setRefreshKey(k => k + 1),
   };

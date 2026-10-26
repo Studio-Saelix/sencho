@@ -8,9 +8,22 @@ import {
   isSuggestion,
   type FleetStopLabelSuggestion,
   type FleetStopNodeResult,
+  type MatchPreviewNode,
   type PreviewState,
   type ResolvedTarget,
 } from './stopByLabel';
+
+/** Wait for the operator to finish typing before resolving the label. */
+const PREVIEW_DEBOUNCE_MS = 500;
+
+// What a dry run resolved for one label: the stacks it could resolve, the
+// nodes it could not reach, and how many stacks failed to resolve.
+interface DryRunSnapshot {
+  label: string;
+  targets: ResolvedTarget[];
+  unreachable: MatchPreviewNode[];
+  failed: number;
+}
 
 export interface StopOutcome {
   label: string;
@@ -50,7 +63,7 @@ function toRows(apiResults: FleetStopNodeResult[]): ResultRow[] {
   });
 }
 
-/** Stack-label stop across the fleet: live match preview, dry-run fallback, and the confirmed-target stop. */
+/** Stack-label stop across the fleet: live match preview, dry-run fallback, and the resolved-target stop. */
 export function useStopByLabelFlow(open: boolean) {
   const { can } = useAuth();
   const [labelName, setLabelName] = useState('');
@@ -62,7 +75,7 @@ export function useStopByLabelFlow(open: boolean) {
   // Snapshot of the most recent dry run's resolved targets, keyed by the label
   // it ran for. Stands in for the live preview when the match-preview endpoint is
   // unavailable, so a successful dry run still unblocks the real stop.
-  const [dryRunResolved, setDryRunResolved] = useState<{ label: string; targets: ResolvedTarget[] } | null>(null);
+  const [dryRunResolved, setDryRunResolved] = useState<DryRunSnapshot | null>(null);
   const trimmed = labelName.trim();
 
   // Stack-label suggestions for the target picker. The fleet endpoint queries
@@ -70,7 +83,8 @@ export function useStopByLabelFlow(open: boolean) {
   // can never appear here and remote-only stack labels do. `unreachableNodes`
   // flags that the counts cover only the nodes Sencho could reach. A non-ok or
   // malformed response leaves the list empty rather than crashing: the endpoint
-  // is admin-only, so a viewer simply gets no suggestions and can type a name.
+  // needs node:read, so a session without it gets no suggestions and can still
+  // type a name.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
@@ -83,7 +97,8 @@ export function useStopByLabelFlow(open: boolean) {
           setSuggestions(list);
           setSuggestUnreachable(typeof data?.unreachableNodes === 'number' ? data.unreachableNodes : 0);
         }
-      } catch {
+      } catch (err) {
+        console.error('[FleetStop] suggestions failed', err);
         if (!cancelled) { setSuggestions([]); setSuggestUnreachable(0); }
       }
     }
@@ -117,6 +132,7 @@ export function useStopByLabelFlow(open: boolean) {
         });
         if (cancelled) return;
         if (!res.ok) {
+          console.warn(`[FleetStop] match-preview returned ${res.status}`);
           setPreview({ kind: 'unavailable' });
           return;
         }
@@ -129,7 +145,7 @@ export function useStopByLabelFlow(open: boolean) {
           setPreview({ kind: 'unavailable' });
           return;
         }
-        setPreview({ kind: 'ready', data });
+        setPreview({ kind: 'ready', data, label: trimmed });
       } catch (err) {
         if (cancelled) return;
         // Non-destructive readout: the operator can still resolve the targets
@@ -138,7 +154,7 @@ export function useStopByLabelFlow(open: boolean) {
         console.error('[FleetStop] match-preview failed', err);
         setPreview({ kind: 'unavailable' });
       }
-    }, 500);
+    }, PREVIEW_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -150,7 +166,7 @@ export function useStopByLabelFlow(open: boolean) {
   // not resolved. Null until one resolves, which keeps the destructive Stop
   // disabled until the affected nodes/stacks are known.
   const resolvedTargets = useMemo<ResolvedTarget[] | null>(() => {
-    if (preview.kind === 'ready') {
+    if (preview.kind === 'ready' && preview.label === trimmed) {
       return preview.data.perNode
         .filter(n => n.reachable && n.stackCount > 0)
         .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackNames }));
@@ -161,14 +177,21 @@ export function useStopByLabelFlow(open: boolean) {
     return null;
   }, [preview, dryRunResolved, trimmed]);
 
+  // The nodes the resolved plan left out, from the same source as the targets.
+  const unreachable = useMemo<MatchPreviewNode[]>(() => {
+    if (preview.kind === 'ready' && preview.label === trimmed) return preview.data.perNode.filter(n => !n.reachable);
+    if (dryRunResolved && dryRunResolved.label === trimmed) return dryRunResolved.unreachable;
+    return [];
+  }, [preview, dryRunResolved, trimmed]);
+  const failedToResolve = dryRunResolved && dryRunResolved.label === trimmed && preview.kind !== 'ready' ? dryRunResolved.failed : 0;
+
   // Stop is enabled only once the blast radius is resolved to at least one
   // stack the session may stop, and never while a run is in flight.
-  const canStop = !running
-    && outcome === null
-    && resolvedTargets !== null
-    && resolvedTargets.some(t => t.stackNames.length > 0)
-    && resolvedTargets.every(target => target.stackNames.every(stackName =>
-      can('stack:deploy', 'stack', stackName, target.nodeId)));
+  const hasTargets = resolvedTargets !== null && resolvedTargets.some(t => t.stackNames.length > 0);
+  const permitted = resolvedTargets !== null && resolvedTargets.every(target => target.stackNames.every(stackName =>
+    can('stack:deploy', 'stack', stackName, target.nodeId)));
+  const canStop = !running && outcome === null && hasTargets && permitted;
+  const denied = hasTargets && !permitted;
 
   async function run(opts: { dryRun: boolean; targets?: { nodeId: number; stackNames: string[] }[] }) {
     if (!trimmed) return;
@@ -178,7 +201,7 @@ export function useStopByLabelFlow(open: boolean) {
     const toastId = toast.loading(`${verb} stacks with the stack label "${trimmed}" across the fleet…`);
     setRunning(true);
     try {
-      // The real stop carries the exact node + stack list the operator saw, so
+      // The real stop carries the exact node + stack list the plan resolved, so
       // execution cannot expand to a node that has since reconnected nor to a
       // stack that gained the label after the preview. The dry run sends no
       // allowlist and scans the fleet.
@@ -189,7 +212,7 @@ export function useStopByLabelFlow(open: boolean) {
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
       if (!res.ok) {
-        toast.error(body.error || 'Fleet stop failed');
+        toast.error(body.error || 'Stop stacks failed');
         return;
       }
       // A 200 with a non-array `results` is a server/contract bug, not an empty
@@ -197,16 +220,11 @@ export function useStopByLabelFlow(open: boolean) {
       // outcome (a valid empty array below still reports that honestly).
       if (!Array.isArray(body.results)) {
         console.error('[FleetStop] fleet-stop returned a malformed body', body);
-        toast.error('Fleet stop returned an unexpected response. Check the server logs and retry.');
+        toast.error('Stop stacks returned an unexpected response. Check the server logs and retry.');
         return;
       }
       const apiResults = body.results as FleetStopNodeResult[];
-      if (opts.dryRun) {
-        const targets = apiResults
-          .filter(n => n.reachable && n.matched && Array.isArray(n.stackResults) && n.stackResults.length > 0)
-          .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackResults.map(s => s.stackName) }));
-        setDryRunResolved({ label: trimmed, targets });
-      }
+      if (opts.dryRun) setDryRunResolved(snapshotOf(trimmed, apiResults));
       reportStop(apiResults, opts.dryRun, trimmed, setOutcome);
     } catch (err) {
       toast.dismiss(toastId);
@@ -216,15 +234,34 @@ export function useStopByLabelFlow(open: boolean) {
     }
   }
 
+  // A preview resolved for another label (one render after an edit) reads as loading.
+  const shownPreview: PreviewState = preview.kind === 'ready' && preview.label !== trimmed ? { kind: 'loading' } : preview;
+
   return {
-    labelName, setLabelName, trimmed, suggestions, suggestUnreachable, preview, resolvedTargets,
-    canStop, running, outcome,
+    labelName, setLabelName, trimmed, suggestions, suggestUnreachable, preview: shownPreview, resolvedTargets,
+    canStop, denied, unreachable, failedToResolve, running, outcome,
     resolve: () => run({ dryRun: true }),
     stop: () => run({
       dryRun: false,
       targets: (resolvedTargets ?? []).map(t => ({ nodeId: t.nodeId, stackNames: t.stackNames })),
     }),
   };
+}
+
+function snapshotOf(label: string, apiResults: FleetStopNodeResult[]): DryRunSnapshot {
+  const targets: ResolvedTarget[] = [];
+  let failed = 0;
+  for (const n of apiResults) {
+    if (!n.reachable || !n.matched || !Array.isArray(n.stackResults)) continue;
+    // A stack whose dry run errored is not part of the blast radius Stop may run against.
+    const resolved = n.stackResults.filter(s => s.success);
+    failed += n.stackResults.length - resolved.length;
+    if (resolved.length > 0) targets.push({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: resolved.map(s => s.stackName) });
+  }
+  const unreachable = apiResults
+    .filter(n => !n.reachable)
+    .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, reachable: false, labelExists: false, stackCount: 0, stackNames: [], error: n.error }));
+  return { label, targets, unreachable, failed };
 }
 
 function reportStop(
@@ -244,7 +281,8 @@ function reportStop(
   if (matchedNodes === 0) {
     if (reachable.length === 0) toast.warning(`No reachable nodes.${unreachableSuffix}`);
     else toast.info(`No reachable node carries a stack label by that name.${unreachableSuffix}`);
-  } else if (dryRun) toast.success(`Resolved ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
+  } else if (dryRun && failed > 0) toast.warning(`Resolved ${ok} stack${ok === 1 ? '' : 's'}; ${failed} could not be resolved.${unreachableSuffix}`);
+  else if (dryRun) toast.success(`Resolved ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
   else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
   else if (ok === 0 && failed === 0) toast.info(`Stack label matched but no stacks were assigned to it.${unreachableSuffix}`);
   else toast.warning(`${ok} stopped, ${failed} failed. See the result.${unreachableSuffix}`);

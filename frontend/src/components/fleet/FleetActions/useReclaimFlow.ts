@@ -7,7 +7,7 @@ import type { FleetPruneNodeResult, FleetPruneTarget, PruneScope } from '@/lib/p
 import { executeResultsAreValid, reviewStateIsValid, type ReviewedPlanState } from './pruneReview';
 import { outcomeSummary, summarizePlan } from './pruneAnswer';
 
-/** Wait for the operator to finish ticking options before building a plan. */
+/** Wait for the operator to finish ticking options before rebuilding the plan. */
 const PLAN_DEBOUNCE_MS = 300;
 
 export type ReclaimPhase =
@@ -52,6 +52,9 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
   useEffect(() => { nodesRef.current = nodes; });
   const settledRef = useRef(false);
   const runningRef = useRef(false);
+  // The key of the last plan effect run: a repeat of the same key (open, Rebuild,
+  // a retry) builds at once, only a changed input waits for the operator to finish.
+  const lastKeyRef = useRef<string | null>(null);
   useEffect(() => { settledRef.current = phase.kind === 'done'; }, [phase.kind]);
 
   const selectedTargets = useMemo(() => [...targets].sort(), [targets]);
@@ -68,6 +71,8 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
       return;
     }
     let cancelled = false;
+    const delay = lastKeyRef.current === null || lastKeyRef.current === reviewKey ? 0 : PLAN_DEBOUNCE_MS;
+    lastKeyRef.current = reviewKey;
     setPhase({ kind: 'building' });
     const timer = setTimeout(async () => {
       try {
@@ -83,6 +88,7 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
         if (reviewStateIsValid(review, reviewKey, nodesRef.current, selectedTargets)) {
           setPhase({ kind: 'ready', review });
         } else {
+          console.error('Fleet prune plan did not cover every reachable node', { reviewKey, nodes: results.length });
           setPhase({ kind: 'failed', message: 'The plan did not cover every reachable node. Rebuild to try again.' });
         }
       } catch (error) {
@@ -91,7 +97,7 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
           setPhase({ kind: 'failed', message: error instanceof Error ? error.message : 'Failed to build fleet prune plans' });
         }
       }
-    }, PLAN_DEBOUNCE_MS);
+    }, delay);
     return () => {
       cancelled = true;
       clearTimeout(timer);
@@ -122,6 +128,8 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
     ? phase.review
     : null;
   const canPrune = !running && review !== null && summarizePlan(review.results).items > 0;
+  // A plan that no longer matches the inputs or roster is not shown: it reads as building.
+  const shownPhase: ReclaimPhase = phase.kind === 'ready' && review === null ? { kind: 'building' } : phase;
 
   const execute = async () => {
     if (!review || !canPrune) return;
@@ -155,6 +163,9 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
         throw new Error(data?.error || 'Fleet prune failed');
       }
       if (!executeResultsAreValid(data?.results, review.results, selectedTargets)) {
+        // The request was accepted, so some nodes may already have pruned.
+        onPruned();
+        setNotice('Some nodes may already have pruned. Review the new plan.');
         throw new Error('Fleet prune returned an incomplete node result set');
       }
       finished = true;
@@ -163,17 +174,23 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
       if (outcomeSummary(data.results).removedAny) onPruned();
     } catch (error) {
       console.error('Fleet prune failed', error);
-      toast.error(error instanceof Error ? error.message : 'Fleet prune failed');
+      const message = error instanceof Error ? error.message : 'Fleet prune failed';
+      toast.error(message);
+      setNotice((current) => current ?? `${message}. Review the new plan.`);
     } finally {
       toast.dismiss(toastId);
       runningRef.current = false;
       setRunning(false);
-      // A refused or failed run leaves no authorization behind: build a fresh plan.
-      if (!finished) rebuild();
+      // A refused or failed run leaves no authorization behind: drop the plan now
+      // (so Prune cannot be clicked again on it) and build a fresh one.
+      if (!finished) {
+        setPhase({ kind: 'building' });
+        rebuild();
+      }
     }
   };
 
-  return { targets, selectedTargets, scope, phase, review, running, notice, canPrune, toggleTarget, changeScope, rebuild, execute };
+  return { targets, selectedTargets, scope, phase: shownPhase, review, running, notice, canPrune, toggleTarget, changeScope, rebuild, execute };
 }
 
 function reportOutcome(results: FleetPruneNodeResult[]): void {

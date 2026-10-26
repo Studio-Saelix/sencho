@@ -12,7 +12,7 @@ Three actions ship today: **Reclaim disk space**, **Label stacks**, and **Stop s
 </Frame>
 
 <Note>
-Fleet Actions runs admin-only. Operator and viewer roles cannot run these actions.
+Reclaim disk space needs the admin role. Stop stacks by label needs permission to deploy, and Label stacks permission to edit, every stack they touch; a session without it sees the action disabled with a note saying why.
 </Note>
 
 ## What Fleet Actions covers (and what it doesn't)
@@ -46,7 +46,7 @@ All three actions share one execution model, and understanding it explains every
 | Label stacks | `POST /api/fleet/labels/bulk-assign` | (computed client-side from `/api/labels` and `/api/fleet/node/:id/stacks` per node) | Only the nodes whose stacks you select |
 | Reclaim disk space | `POST /api/fleet/labels/fleet-prune` | `POST /api/fleet/labels/fleet-prune` with `dryRun: true`; `POST /api/fleet/prune/estimate` for the amount on the list row | Every configured node |
 
-Every action is admin-only and available on every license tier. Stop and Prune iterate every node in **Settings → Nodes**; Label stacks iterates only the nodes whose stacks you actually checked. Each action runs the authoritative work on the executing node (the local node in process, every remote over the node proxy). Stop and Label stacks report unreachable nodes without blocking work elsewhere. Prune excludes unreachable nodes during review, then rejects execution if that reviewed reachability changes.
+Every action is available on every license tier. Stop and Prune iterate every node in **Settings → Nodes**; Label stacks iterates only the nodes whose stacks you actually checked. Each action runs the authoritative work on the executing node (the local node in process, every remote over the node proxy). Stop and Label stacks report unreachable nodes without blocking work elsewhere. Prune excludes unreachable nodes during review, then rejects execution if that reviewed reachability changes.
 
 ## Stop stacks by label
 
@@ -88,7 +88,7 @@ This binding requires the remote node to understand the confirmed-target contrac
 
 - The endpoint always returns `200` with a `results` array. Partial failures live inside that array; the HTTP status is not the place to look.
 - Each remote node call carries a 60-second timeout. A slow remote with many stacks can produce a clean per-stack list or a timeout row, depending on whether the remote streamed a response before the timeout fired.
-- Every node, local or remote, runs the stop under a per-node bulk-action lock shared with the per-label action endpoint (`POST /api/labels/:id/action`), so a fleet stop and a per-label stop aimed at the same node serialize cleanly instead of double-stopping the same containers.
+- Every node, local or remote, runs the stop under a per-node bulk-action lock shared with the per-label action endpoint (`POST /api/labels/:id/action`), so a stop here and a per-label stop aimed at the same node serialize cleanly instead of double-stopping the same containers.
 
 ## Label stacks
 
@@ -170,7 +170,6 @@ If a remote reports only its reclaimed total, the node shows that total without 
 | Requirement | Why it matters |
 |---|---|
 | **Configured remote nodes in Settings → Nodes** | Stop and Prune iterate the configured node list; Label stacks iterates whichever nodes you select stacks on. Stop and Label stacks report an unreachable node without blocking other nodes. Prune excludes it from the reviewed plan and rejects execution if its reachability later changes. |
-| **Admin role** | Every action requires the admin role to run. |
 | **Labels you intend to target** | Stop stacks by label and its autocomplete depend on stack labels existing on at least one node; Label stacks depends on at least one stack label existing anywhere in the fleet. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
 ## Behaviour and lifecycle
@@ -246,14 +245,14 @@ Open **Reclaim disk space** with **Images** selected and **Managed only** scope.
   <Accordion title="A real Stop stacks by label refuses to run against one node with an upgrade message">
     That remote is running a Sencho version that doesn't advertise support for confirmed-target binding, the mechanism that binds the real stop to exactly the stacks you saw in the preview. Upgrade the remote node and retry; resolving with a dry run is unaffected and works against any version.
   </Accordion>
-  <Accordion title="Fleet stop or bulk assign timed out on one remote node">
+  <Accordion title="Stop stacks by label or Label stacks timed out on one remote node">
     Each remote node call carries a 60-second timeout. A remote with many stacks or a slow Docker daemon can outlast that budget. Check the affected remote's logs; the action usually completed on the remote even though the control instance stopped waiting. Re-running is safe for Stop: stacks that are already stopped return the per-stack error *No containers found for this stack* and do not toggle anything else.
   </Accordion>
   <Accordion title="Prune across fleet reports 'A prune is already running on this node'">
     The per-node prune lock is held while the first prune is in flight. Wait for the first run to finish, then re-run. The lock is released automatically when the first run exits.
   </Accordion>
   <Accordion title="An action returns a permission error even though I can see it">
-    Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**; operator and viewer roles cannot run these actions.
+    Reclaim disk space needs the admin role; Stop stacks by label and Label stacks need permission on every stack they touch. Confirm the active user's role under **Settings → Users**.
   </Accordion>
   <Accordion title="A node is reported as unreachable">
     The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop stacks by label reports one `<node> (unreachable)` row. Reclaim disk space keeps the node visible as excluded from the reviewed plan; its target rows carry the same reachability error. Open **Settings → Nodes** on the control instance and test the connection for the remote; fix the credential or reachability, then click **Rebuild**.
@@ -287,6 +286,6 @@ Fleet Actions is one slice of the Fleet view. Each adjacent surface answers a di
     The masthead, tab strip, and node grid that host the Actions tab.
   </Card>
   <Card title="Licensing" icon="key" href="/features/licensing">
-    Community and Admiral plans. Fleet Actions is available on every tier; only the admin role check applies.
+    Community and Admiral plans. Fleet Actions is available on every tier.
   </Card>
 </CardGroup>

@@ -54,7 +54,7 @@ export interface OutcomeSummary {
   reclaimed: number;
 }
 
-/** The Answer once Prune has run: bytes reclaimed, with skipped or failed items named. */
+/** The Answer once Prune has run: bytes reclaimed, with skipped or failed items counted. */
 export function outcomeSummary(results: FleetPruneNodeResult[]): OutcomeSummary {
   const outcomes = results.flatMap((result) => result.outcomes ?? []);
   const removed = outcomes.filter((outcome) => outcome.status === 'removed').length;

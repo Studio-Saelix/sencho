@@ -9,7 +9,7 @@ export interface FleetStopNodeResult {
 }
 
 // Stop-by-label targets stack labels only. The `scope: 'stack'` tag keeps node
-// labels (a separate namespace) from ever being fed into this destructive card,
+// labels (a separate namespace) from ever being fed into this destructive action,
 // and the counts make the stack scope tangible in the picker. `nodes` lists the
 // nodes that carry the label so the operator can see the spread before acting.
 export interface FleetStopLabelSuggestion { name: string; scope: 'stack'; nodeCount: number; stackCount: number; nodes: string[] }
@@ -21,11 +21,13 @@ export type PreviewState =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'unavailable' }
-  | { kind: 'ready'; data: MatchPreviewResponse };
+  /** `label` is the name the preview was resolved for, so a preview never gates Stop for a different label. */
+  | { kind: 'ready'; data: MatchPreviewResponse; label: string };
 
 // One node and the stacks the resolved blast radius would stop on it. The
 // destructive Stop stays disabled until this is known, so the operator always
-// confirms against a concrete node/stack list rather than a label name alone.
+// acts on a concrete node/stack list shown in the Plan section rather than a
+// label name alone.
 export interface ResolvedTarget { nodeId: number; nodeName: string; stackNames: string[] }
 
 
@@ -40,7 +42,7 @@ export function isSuggestion(value: unknown): value is FleetStopLabelSuggestion 
     && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number' && nodesOk;
 }
 
-// The preview section renders `perNode` (filter/some/flatMap) outside any
+// The Plan section renders `perNode` (filter/some) outside any
 // try/catch, so a malformed success body would throw during render rather than
 // degrade. Validate the load-bearing shape before trusting it; anything off
 // falls to the "unavailable" state.
@@ -56,6 +58,7 @@ export function isMatchPreviewResponse(value: unknown): value is MatchPreviewRes
       && typeof node.nodeName === 'string'
       && typeof node.reachable === 'boolean'
       && typeof node.stackCount === 'number'
-      && Array.isArray(node.stackNames);
+      && Array.isArray(node.stackNames)
+      && node.stackNames.every((name) => typeof name === 'string');
   });
 }

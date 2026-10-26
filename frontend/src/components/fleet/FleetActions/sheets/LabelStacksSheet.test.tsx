@@ -7,7 +7,7 @@
  * the sheet into a per-node result (created vs reused) with no silent failure.
  */
 import { it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
@@ -109,8 +109,9 @@ it('names what Apply will do before it runs, including where the label is create
   expect(screen.getByText('Adds “prod” to 2 stacks')).toBeInTheDocument();
   expect(screen.getByText('on 2 nodes · creates the label on 1 node')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Per-node detail' }));
-  expect(screen.getByText('create')).toBeInTheDocument();
-  expect(screen.getByText('reuse')).toBeInTheDocument();
+  // The local node already has the label (reuse); the remote does not (create).
+  expect(within(screen.getByText('central', { selector: 'span.text-\\[11px\\]' }).parentElement as HTMLElement).getByText('reuse')).toBeInTheDocument();
+  expect(within(screen.getByText('edge', { selector: 'span.text-\\[11px\\]' }).parentElement as HTMLElement).getByText('create')).toBeInTheDocument();
 });
 
 it('applies in one click, sends the template plus per-node targets, and shows per-node results', async () => {
@@ -147,11 +148,14 @@ it('applies in one click, sends the template plus per-node targets, and shows pe
 
 it('prefers the local node color when the same label name has different colors across nodes', async () => {
   const user = userEvent.setup();
+  // Two remotes carry teal and the local node blue: only the local preference yields blue.
+  const threeNodes = [...nodes, { id: 3, name: 'edge-b', type: 'remote', status: 'online' }] as unknown as FleetNode[];
   mockedFetchForNode.mockImplementation((path: string, nodeId: number) => {
-    if (path === '/labels' && nodeId === 2) return Promise.resolve(jsonResponse(200, [{ id: 20, name: 'prod', color: 'teal' }]));
+    if (path === '/labels' && (nodeId === 2 || nodeId === 3)) return Promise.resolve(jsonResponse(200, [{ id: 20 + nodeId, name: 'prod', color: 'teal' }]));
+    if (path === '/fleet/node/3/stacks') return Promise.resolve(jsonResponse(200, []));
     return defaultReads(path, nodeId);
   });
-  renderSheet();
+  renderSheet({ nodes: threeNodes });
   await screen.findByText('web');
 
   await user.click(screen.getByText('prod'));
@@ -216,7 +220,7 @@ it('rejects a malformed 200 instead of reporting a clean assign', async () => {
   await user.click(screen.getByText('web'));
   await user.click(screen.getByRole('button', { name: 'Apply' }));
 
-  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Bulk label assign returned an unexpected response. Check the server logs and retry.'));
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Label stacks returned an unexpected response. Check the server logs and retry.'));
   expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
 });
 
@@ -242,4 +246,96 @@ it('re-reads every node from Refresh and clears the selection', async () => {
   await user.click(screen.getByRole('button', { name: 'Refresh' }));
   await waitFor(() => expect(mockedFetchForNode.mock.calls.length).toBe(readsBefore * 2));
   await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled());
+});
+
+it('does not offer the stacks of a node whose labels could not be read', async () => {
+  mockedFetchForNode.mockImplementation((path: string, nodeId: number) => {
+    if (path === '/labels' && nodeId === 2) return Promise.resolve(jsonResponse(500, { error: 'boom' }));
+    return defaultReads(path, nodeId);
+  });
+  renderSheet();
+  await screen.findByText('web');
+  await waitFor(() => expect(screen.getByText('unreachable')).toBeInTheDocument());
+  expect(screen.queryByText('api')).not.toBeInTheDocument();
+});
+
+it('treats a malformed stacks or labels body as an unreachable node instead of crashing', async () => {
+  mockedFetchForNode.mockImplementation((path: string, nodeId: number) => {
+    if (path === '/fleet/node/2/stacks') return Promise.resolve(jsonResponse(200, { stacks: ['api'] }));
+    return defaultReads(path, nodeId);
+  });
+  renderSheet();
+  await screen.findByText('web');
+  await waitFor(() => expect(screen.getByText('unreachable')).toBeInTheDocument());
+  expect(screen.queryByText('api')).not.toBeInTheDocument();
+});
+
+it('says why Apply is unavailable when the session may not edit a selected stack', async () => {
+  const user = userEvent.setup();
+  can.mockImplementation(((_action: string, _type: string, stackName: string) => stackName !== 'api') as () => boolean);
+  renderSheet();
+  await screen.findByText('api');
+  await user.click(screen.getByText('prod'));
+  await user.click(screen.getByText('api'));
+  expect(screen.getByText('You do not have permission to edit every selected stack, so Apply is unavailable.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+});
+
+it('reports a response with no stack results as an error, not a clean assign', async () => {
+  const user = userEvent.setup();
+  mockedApiFetch.mockResolvedValue(jsonResponse(200, {
+    results: [{ nodeId: 1, nodeName: 'central', reachable: true, created: false, stackResults: [] }],
+  }));
+  renderSheet();
+  await screen.findByText('web');
+  await user.click(screen.getByText('prod'));
+  await user.click(screen.getByText('web'));
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith('Label stacks returned no results. Check the server logs and retry.'));
+  expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
+});
+
+it('keeps the result when the node roster changes after Apply', async () => {
+  const user = userEvent.setup();
+  mockedApiFetch.mockResolvedValue(jsonResponse(200, {
+    results: [{ nodeId: 1, nodeName: 'central', reachable: true, created: false, stackResults: [{ stackName: 'web', success: true }] }],
+  }));
+  const view = renderSheet();
+  await screen.findByText('web');
+  await user.click(screen.getByText('prod'));
+  await user.click(screen.getByText('web'));
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await screen.findByText('Assigned “prod” to 1 stack');
+
+  const more = [...nodes, { id: 3, name: 'edge-b', type: 'remote', status: 'online' }] as unknown as FleetNode[];
+  view.rerender(<LabelStacksSheet open onOpenChange={vi.fn()} nodes={more} />);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(screen.getByText('Assigned “prod” to 1 stack')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
+});
+
+it('keeps the selection while Apply runs, and cannot be dismissed until it finishes', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedApiFetch.mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const { onOpenChange, rerender } = renderSheet();
+  await screen.findByText('web');
+  await user.click(screen.getByText('prod'));
+  await user.click(screen.getByText('web'));
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await waitFor(() => expect(finish).not.toBeNull());
+
+  const more = [...nodes, { id: 3, name: 'edge-b', type: 'remote', status: 'online' }] as unknown as FleetNode[];
+  rerender(<LabelStacksSheet open onOpenChange={onOpenChange} nodes={more} />);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(screen.getByRole('checkbox', { name: 'web' })).toBeChecked();
+  await user.keyboard('{Escape}');
+  expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+  await act(async () => {
+    finish!(jsonResponse(200, {
+      results: [{ nodeId: 1, nodeName: 'central', reachable: true, created: false, stackResults: [{ stackName: 'web', success: true }] }],
+    }));
+  });
+  expect(await screen.findByText('Assigned “prod” to 1 stack')).toBeInTheDocument();
 });

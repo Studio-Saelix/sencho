@@ -29,9 +29,10 @@ export function LabelStacksSheet({ open, onOpenChange, nodes }: Props) {
   return (
     <SystemSheet
       open={open}
-      onOpenChange={onOpenChange}
+      // A run in flight cannot be dismissed: closing would drop its result and let a second apply start.
+      onOpenChange={(next) => { if (next || !running) onOpenChange(next); }}
       size="lg"
-      crumb={['Fleet', 'Actions', 'Label stacks']}
+      crumb={['Fleet', 'Actions', 'Label']}
       name="Label stacks"
       meta="one label · stacks on many nodes · keeps existing labels"
       primaryAction={done
@@ -83,6 +84,7 @@ export function LabelStacksSheet({ open, onOpenChange, nodes }: Props) {
           value={flow.search}
           onChange={(e) => flow.setSearch(e.target.value)}
           placeholder="Filter stacks…"
+          aria-label="Filter stacks"
           className="mb-2 h-9 text-sm"
           disabled={running || done}
           autoComplete="off"
@@ -136,17 +138,18 @@ export function LabelStacksSheet({ open, onOpenChange, nodes }: Props) {
       <SheetSection title={done ? 'Result' : 'Plan'}>
         {outcome
           ? <OutcomePath outcome={outcome} />
-          : <PlanPath label={selectedTemplate?.name} stacks={totalSelected} nodes={nodesWithSelection} previewNodes={flow.previewNodes} />}
+          : <PlanPath label={selectedTemplate?.name} stacks={totalSelected} nodes={nodesWithSelection} previewNodes={flow.previewNodes} denied={flow.denied} />}
       </SheetSection>
     </SystemSheet>
   );
 }
 
-function PlanPath({ label, stacks, nodes, previewNodes }: {
+function PlanPath({ label, stacks, nodes, previewNodes, denied }: {
   label: string | undefined;
   stacks: number;
   nodes: number;
   previewNodes: PreviewNode[];
+  denied: boolean;
 }) {
   if (!label || stacks === 0) {
     return <StatusPath answer={{ tone: 'neutral', title: 'Nothing selected', line: 'Pick a label, then the stacks to add it to.' }} stages={[]} />;
@@ -156,6 +159,8 @@ function PlanPath({ label, stacks, nodes, previewNodes }: {
     tone: 'brand',
     title: `Adds “${label}” to ${plural(stacks, 'stack')}`,
     line: `on ${plural(nodes, 'node')} · ${creates > 0 ? `creates the label on ${plural(creates, 'node')}` : 'reuses it everywhere'}`,
+    // Apply is disabled for a selection the session may not edit; say why instead of leaving a dead button.
+    detail: denied ? 'You do not have permission to edit every selected stack, so Apply is unavailable.' : undefined,
   };
   return (
     <StatusPath
