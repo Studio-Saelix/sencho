@@ -1,0 +1,251 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
+import { useAuth } from '@/context/AuthContext';
+import type { ResultRow } from './ResultsList';
+import {
+  isMatchPreviewResponse,
+  isSuggestion,
+  type FleetStopLabelSuggestion,
+  type FleetStopNodeResult,
+  type PreviewState,
+  type ResolvedTarget,
+} from './stopByLabel';
+
+export interface StopOutcome {
+  label: string;
+  rows: ResultRow[];
+  ok: number;
+  failed: number;
+  unreachable: number;
+  matchedNodes: number;
+}
+
+function toRows(apiResults: FleetStopNodeResult[]): ResultRow[] {
+  return apiResults.map((node) => {
+    if (!node.reachable) {
+      return {
+        key: `node-${node.nodeId}`,
+        label: `${node.nodeName} (unreachable)`,
+        success: false,
+        error: node.error || 'Node unreachable',
+        sub: [],
+      };
+    }
+    const stackResults = Array.isArray(node.stackResults) ? node.stackResults : [];
+    return {
+      key: `node-${node.nodeId}`,
+      label: node.matched
+        ? `${node.nodeName} · ${stackResults.length} stack${stackResults.length === 1 ? '' : 's'}`
+        : `${node.nodeName} (no matching stack label)`,
+      success: node.matched && stackResults.every(s => s.success),
+      error: node.matched ? undefined : 'Stack label not present',
+      sub: stackResults.map((s, i) => ({
+        key: `${node.nodeId}-${s.stackName}-${i}`,
+        label: s.stackName,
+        success: s.success,
+        error: s.error,
+      })),
+    };
+  });
+}
+
+/** Stack-label stop across the fleet: live match preview, dry-run fallback, and the confirmed-target stop. */
+export function useStopByLabelFlow(open: boolean) {
+  const { can } = useAuth();
+  const [labelName, setLabelName] = useState('');
+  const [suggestions, setSuggestions] = useState<FleetStopLabelSuggestion[]>([]);
+  const [suggestUnreachable, setSuggestUnreachable] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [outcome, setOutcome] = useState<StopOutcome | null>(null);
+  const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
+  // Snapshot of the most recent dry run's resolved targets, keyed by the label
+  // it ran for. Stands in for the live preview when the match-preview endpoint is
+  // unavailable, so a successful dry run still unblocks the real stop.
+  const [dryRunResolved, setDryRunResolved] = useState<{ label: string; targets: ResolvedTarget[] } | null>(null);
+  const trimmed = labelName.trim();
+
+  // Stack-label suggestions for the target picker. The fleet endpoint queries
+  // every node authoritatively (local DB + live remote reads), so node labels
+  // can never appear here and remote-only stack labels do. `unreachableNodes`
+  // flags that the counts cover only the nodes Sencho could reach. A non-ok or
+  // malformed response leaves the list empty rather than crashing: the endpoint
+  // is admin-only, so a viewer simply gets no suggestions and can type a name.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    async function loadSuggestions() {
+      try {
+        const res = await apiFetch('/fleet/labels/suggestions');
+        const data = res.ok ? await res.json().catch(() => null) : null;
+        const list = Array.isArray(data?.suggestions) ? data.suggestions.filter(isSuggestion) : [];
+        if (!cancelled) {
+          setSuggestions(list);
+          setSuggestUnreachable(typeof data?.unreachableNodes === 'number' ? data.unreachableNodes : 0);
+        }
+      } catch {
+        if (!cancelled) { setSuggestions([]); setSuggestUnreachable(0); }
+      }
+    }
+    loadSuggestions();
+    return () => { cancelled = true; };
+  }, [open]);
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    // `cancelled` guards against an out-of-order response: once the debounce
+    // timer fires, the request is in-flight and clearing the timer no longer
+    // stops it. If the label changes before it resolves, this effect's cleanup
+    // flips `cancelled` so the stale response cannot set `preview` for a label
+    // that is no longer current and gate Stop against the wrong blast radius.
+    let cancelled = false;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    // Any edit to the label invalidates a prior dry run's snapshot, so editing
+    // away and back to the same name cannot re-enable Stop from a stale blast
+    // radius. A fresh preview or dry run must resolve the current label again.
+    setDryRunResolved(null);
+    if (!open || trimmed.length === 0) {
+      setPreview({ kind: 'idle' });
+      return;
+    }
+    setPreview({ kind: 'loading' });
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await apiFetch('/fleet/labels/match-preview', {
+          method: 'POST',
+          body: JSON.stringify({ labelName: trimmed }),
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          setPreview({ kind: 'unavailable' });
+          return;
+        }
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (!isMatchPreviewResponse(data)) {
+          // A 200 with a shape we can't render is a server/contract bug, not a
+          // transport miss; log it like the catch path so it's diagnosable.
+          console.error('[FleetStop] match-preview returned a malformed body', data);
+          setPreview({ kind: 'unavailable' });
+          return;
+        }
+        setPreview({ kind: 'ready', data });
+      } catch (err) {
+        if (cancelled) return;
+        // Non-destructive readout: the operator can still resolve the targets
+        // with a dry run, so we degrade to "unavailable" rather than toasting,
+        // but leave a console trail so a recurring failure is diagnosable.
+        console.error('[FleetStop] match-preview failed', err);
+        setPreview({ kind: 'unavailable' });
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [open, trimmed]);
+
+  // The resolved blast radius the operator commits to. Sourced from the live
+  // preview, or from a dry run of the *current* label when the live preview has
+  // not resolved. Null until one resolves, which keeps the destructive Stop
+  // disabled until the affected nodes/stacks are known.
+  const resolvedTargets = useMemo<ResolvedTarget[] | null>(() => {
+    if (preview.kind === 'ready') {
+      return preview.data.perNode
+        .filter(n => n.reachable && n.stackCount > 0)
+        .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackNames }));
+    }
+    if (dryRunResolved && dryRunResolved.label === trimmed && trimmed.length > 0) {
+      return dryRunResolved.targets;
+    }
+    return null;
+  }, [preview, dryRunResolved, trimmed]);
+
+  // Stop is enabled only once the blast radius is resolved to at least one
+  // stack the session may stop, and never while a run is in flight.
+  const canStop = !running
+    && outcome === null
+    && resolvedTargets !== null
+    && resolvedTargets.some(t => t.stackNames.length > 0)
+    && resolvedTargets.every(target => target.stackNames.every(stackName =>
+      can('stack:deploy', 'stack', stackName, target.nodeId)));
+
+  async function run(opts: { dryRun: boolean; targets?: { nodeId: number; stackNames: string[] }[] }) {
+    if (!trimmed) return;
+    if (opts.targets?.some(target => target.stackNames.some(stackName =>
+      !can('stack:deploy', 'stack', stackName, target.nodeId)))) return;
+    const verb = opts.dryRun ? 'Resolving' : 'Stopping';
+    const toastId = toast.loading(`${verb} stacks with the stack label "${trimmed}" across the fleet…`);
+    setRunning(true);
+    try {
+      // The real stop carries the exact node + stack list the operator saw, so
+      // execution cannot expand to a node that has since reconnected nor to a
+      // stack that gained the label after the preview. The dry run sends no
+      // allowlist and scans the fleet.
+      const res = await apiFetch('/fleet/labels/fleet-stop', {
+        method: 'POST',
+        body: JSON.stringify({ labelName: trimmed, dryRun: opts.dryRun, ...(opts.targets ? { targets: opts.targets } : {}) }),
+      });
+      const body = await res.json().catch(() => ({}));
+      toast.dismiss(toastId);
+      if (!res.ok) {
+        toast.error(body.error || 'Fleet stop failed');
+        return;
+      }
+      // A 200 with a non-array `results` is a server/contract bug, not an empty
+      // fleet: don't let it masquerade as the legitimate "No reachable nodes"
+      // outcome (a valid empty array below still reports that honestly).
+      if (!Array.isArray(body.results)) {
+        console.error('[FleetStop] fleet-stop returned a malformed body', body);
+        toast.error('Fleet stop returned an unexpected response. Check the server logs and retry.');
+        return;
+      }
+      const apiResults = body.results as FleetStopNodeResult[];
+      if (opts.dryRun) {
+        const targets = apiResults
+          .filter(n => n.reachable && n.matched && Array.isArray(n.stackResults) && n.stackResults.length > 0)
+          .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackResults.map(s => s.stackName) }));
+        setDryRunResolved({ label: trimmed, targets });
+      }
+      reportStop(apiResults, opts.dryRun, trimmed, setOutcome);
+    } catch (err) {
+      toast.dismiss(toastId);
+      toast.error(err instanceof Error ? err.message : 'Network error');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return {
+    labelName, setLabelName, trimmed, suggestions, suggestUnreachable, preview, resolvedTargets,
+    canStop, running, outcome,
+    resolve: () => run({ dryRun: true }),
+    stop: () => run({
+      dryRun: false,
+      targets: (resolvedTargets ?? []).map(t => ({ nodeId: t.nodeId, stackNames: t.stackNames })),
+    }),
+  };
+}
+
+function reportStop(
+  apiResults: FleetStopNodeResult[],
+  dryRun: boolean,
+  label: string,
+  setOutcome: (outcome: StopOutcome) => void,
+): void {
+  const reachable = apiResults.filter(n => n.reachable);
+  const unreachable = apiResults.length - reachable.length;
+  const matchedNodes = reachable.filter(n => n.matched).length;
+  const stacksTouched = apiResults.flatMap(n => Array.isArray(n.stackResults) ? n.stackResults : []);
+  const ok = stacksTouched.filter(s => s.success).length;
+  const failed = stacksTouched.length - ok;
+  const unreachableSuffix = unreachable > 0 ? ` ${unreachable} node${unreachable === 1 ? '' : 's'} unreachable.` : '';
+  if (!dryRun) setOutcome({ label, rows: toRows(apiResults), ok, failed, unreachable, matchedNodes });
+  if (matchedNodes === 0) {
+    if (reachable.length === 0) toast.warning(`No reachable nodes.${unreachableSuffix}`);
+    else toast.info(`No reachable node carries a stack label by that name.${unreachableSuffix}`);
+  } else if (dryRun) toast.success(`Resolved ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
+  else if (failed === 0 && ok > 0) toast.success(`Stopped ${ok} stack${ok === 1 ? '' : 's'} across ${matchedNodes} node${matchedNodes === 1 ? '' : 's'}.${unreachableSuffix}`);
+  else if (ok === 0 && failed === 0) toast.info(`Stack label matched but no stacks were assigned to it.${unreachableSuffix}`);
+  else toast.warning(`${ok} stopped, ${failed} failed. See the result.${unreachableSuffix}`);
+}
