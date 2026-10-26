@@ -205,7 +205,7 @@ describe('MobileFleet node identity', () => {
     setupFetch([edge({ mode: 'pilot_agent', status: 'offline', cordoned: true })], []);
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
 
-    expect(await screen.findByText('offline · cordoned')).toBeInTheDocument();
+    expect(await screen.findByText('offline · cordoned')).toHaveClass('text-destructive');
     expect(screen.getByText('Pilot')).toBeInTheDocument();
   });
 
@@ -233,7 +233,7 @@ describe('MobileFleet node identity', () => {
     expect(await screen.findByText(/^proxy · 1 stacks/)).toBeInTheDocument();
   });
 
-  it('says critical on an online node over the critical threshold, and cordoned alone on a cordoned healthy node', async () => {
+  it('marks an online node over the threshold critical, and a cordoned healthy node cordoned', async () => {
     const hot = { cpu: { usage: '97.0', cores: 4 } };
     setupFetch(
       [
@@ -244,9 +244,11 @@ describe('MobileFleet node identity', () => {
     );
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
 
-    expect(await screen.findByText('critical')).toBeInTheDocument();
-    expect(screen.getByText('cordoned')).toBeInTheDocument();
+    expect(await screen.findByText('critical')).toHaveClass('text-warning');
+    expect(screen.getByText('cordoned')).toHaveClass('text-warning');
     expect(screen.queryByText(/offline/)).not.toBeInTheDocument();
+    // Only the cordoned node is online and not critical, so only its dot announces Online.
+    expect(screen.getAllByRole('img', { name: 'Online' })).toHaveLength(1);
   });
 
   it('gives a healthy node dot an accessible status, since it carries no state word', async () => {

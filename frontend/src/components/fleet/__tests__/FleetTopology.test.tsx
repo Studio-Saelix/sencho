@@ -70,7 +70,7 @@ describe('FleetTopology node header', () => {
     expect(within(screen.getByTestId('node-1')).getByText('★ Local')).toBeInTheDocument();
   });
 
-  it('names Critical and Offline, and hides the dot from assistive tech when a word is shown', async () => {
+  it('names Critical and Offline, and does not announce Online when a word is shown', async () => {
     renderTopology([
       topologyNode({ id: 1, name: 'Local' }),
       topologyNode({ id: 2, name: 'Hot', type: 'remote', nodeMode: 'proxy', critical: true }),

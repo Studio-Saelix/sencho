@@ -100,18 +100,21 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-interface NodeException {
-  label: 'offline' | 'critical' | 'cordoned';
-  tone: 'destructive' | 'warning';
-}
+type NodeException = 'offline' | 'critical' | 'cordoned';
+
+const EXCEPTION_TONE: Record<NodeException, 'destructive' | 'warning'> = {
+  offline: 'destructive',
+  critical: 'warning',
+  cordoned: 'warning',
+};
 
 // Exception-only status: offline or critical (never both), plus cordoned on top.
 // A healthy, uncordoned node returns [] and shows no state word.
 function nodeExceptions(node: FleetNode): NodeException[] {
   const exceptions: NodeException[] = [];
-  if (node.status !== 'online') exceptions.push({ label: 'offline', tone: 'destructive' });
-  else if (isCritical(node)) exceptions.push({ label: 'critical', tone: 'warning' });
-  if (node.cordoned) exceptions.push({ label: 'cordoned', tone: 'warning' });
+  if (node.status !== 'online') exceptions.push('offline');
+  else if (isCritical(node)) exceptions.push('critical');
+  if (node.cordoned) exceptions.push('cordoned');
   return exceptions;
 }
 
@@ -127,8 +130,9 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
       <div className="flex items-center gap-2.5 px-[13px] pb-2.5 pt-3">
-        {exceptions.length === 0 ? (
-          // No state word on a healthy node, so the dot carries the status for assistive tech.
+        {node.status === 'online' && !isCritical(node) ? (
+          // An online node that is not critical has no offline or critical word, so the dot
+          // carries "Online" for assistive tech (a cordoned word, if any, is announced beside it)."
           <span role="img" aria-label="Online" className="inline-flex">
             <StateDot tone={tone} size={7} glow />
           </span>
@@ -147,8 +151,8 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
           </span>
         ) : null}
         {exceptions.length > 0 ? (
-          <Kicker className={cn('shrink-0 whitespace-nowrap', exceptions.some(e => e.tone === 'destructive') ? 'text-destructive' : 'text-warning')}>
-            {exceptions.map(e => e.label).join(' · ')}
+          <Kicker className={cn('shrink-0 whitespace-nowrap', exceptions.some(e => EXCEPTION_TONE[e] === 'destructive') ? 'text-destructive' : 'text-warning')}>
+            {exceptions.join(' · ')}
           </Kicker>
         ) : null}
         <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
