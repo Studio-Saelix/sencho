@@ -123,7 +123,7 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
       className={`relative w-full overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card text-left shadow-card-bevel ${node.status === 'online' ? '' : 'opacity-60'}`}
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
-      <div className="flex items-center gap-2.5 px-[13px] pb-2.5 pt-3">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 px-[13px] pb-2.5 pt-3">
         {tone === 'success' ? (
           // An online node that is not critical has no offline or critical word, so the dot
           // carries "Online" for assistive tech (a cordoned word, if any, is announced beside it).
@@ -133,7 +133,7 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
         ) : (
           <StateDot tone={tone} size={7} glow />
         )}
-        <span className="min-w-0 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
+        <span className="min-w-24 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
         {isActive && !local ? (
           <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
             active
