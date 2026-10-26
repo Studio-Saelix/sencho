@@ -1484,6 +1484,13 @@ describe('evaluateDockerEndpointContainer', () => {
 
       expect(await allowing(WEB_ID, 'restart')).toBeNull();
     });
+
+    it('still refuses a stop of the provider, whatever the option says', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+      expect(await allowing(PROXY_ID, 'stop')).toMatchObject({ reason: 'provider' });
+      expect(await allowing('socket-proxy', 'stop')).toMatchObject({ reason: 'provider' });
+    });
   });
 });
 

@@ -295,9 +295,9 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 }
                 // The batch was just checked as a whole, so each container skips its own check.
                 if (action === 'stop') {
-                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id, { allowEndpointContainer: true })));
+                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 } else {
-                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id, { allowEndpointContainer: true })));
+                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 }
               },
             );

@@ -178,16 +178,16 @@ describe('a label-only proxy (detection found no provider)', () => {
   });
 });
 
-describe('Auto-Heal (allowEndpointProvider)', () => {
+describe('Auto-Heal (endpointGuard: allow-provider-restart)', () => {
   it('restarts the proxy', async () => {
-    await controller().restartContainer(PROXY_ID, { allowEndpointProvider: true });
+    await controller().restartContainer(PROXY_ID, { endpointGuard: 'allow-provider-restart' });
 
     expect(ops).toEqual([`restart ${PROXY_ID}`]);
   });
 
   it('does not restart the owner of the proxy\'s network, and still restarts an ordinary sibling', async () => {
-    await expect(controller().restartContainer(VPN_ID, { allowEndpointProvider: true })).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
-    await controller().restartContainer(WEB_ID, { allowEndpointProvider: true });
+    await expect(controller().restartContainer(VPN_ID, { endpointGuard: 'allow-provider-restart' })).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await controller().restartContainer(WEB_ID, { endpointGuard: 'allow-provider-restart' });
 
     expect(ops).toEqual([`restart ${WEB_ID}`]);
   });

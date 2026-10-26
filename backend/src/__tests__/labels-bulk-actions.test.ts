@@ -143,7 +143,7 @@ describe('Stack Labels bulk actions', () => {
       { stackName: 'alpha', success: true },
       { stackName: 'beta', success: false, error: 'socket permission denied' },
     ]);
-    expect(stopContainer).toHaveBeenCalledWith('alpha-1', { allowEndpointContainer: true });
+    expect(stopContainer).toHaveBeenCalledWith('alpha-1', { endpointGuard: 'batch-checked' });
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
   });
 
@@ -166,7 +166,7 @@ describe('Stack Labels bulk actions', () => {
     ]);
     expect(assertNoDockerEndpointContainers).toHaveBeenCalledWith(['alpha-1', 'alpha-proxy'], 'stop');
     expect(stopContainer).not.toHaveBeenCalledWith('alpha-1', expect.anything());
-    expect(stopContainer).toHaveBeenCalledWith('beta-1', { allowEndpointContainer: true });
+    expect(stopContainer).toHaveBeenCalledWith('beta-1', { endpointGuard: 'batch-checked' });
   });
 
   it('refuses a restart whose stack includes the Docker endpoint container before restarting any of them', async () => {

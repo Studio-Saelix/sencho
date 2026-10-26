@@ -2455,8 +2455,8 @@ export async function containerActionForStack(
     }
     // The batch was just checked as a whole, so each container skips its own check.
     const op =
-      action === 'restart' ? (id: string) => dockerController.restartContainer(id, { allowEndpointContainer: true })
-        : action === 'stop' ? (id: string) => dockerController.stopContainer(id, { allowEndpointContainer: true })
+      action === 'restart' ? (id: string) => dockerController.restartContainer(id, { endpointGuard: 'batch-checked' })
+        : action === 'stop' ? (id: string) => dockerController.stopContainer(id, { endpointGuard: 'batch-checked' })
           : (id: string) => dockerController.startContainer(id);
     await Promise.all(containers.map(c => op(c.Id)));
     return { kind: 'ok', count: containers.length };

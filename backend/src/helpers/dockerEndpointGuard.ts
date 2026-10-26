@@ -724,10 +724,10 @@ export interface InspectsContainers {
 
 export interface ContainerGuardOptions {
   /**
-   * Let the provider itself through. Auto-Heal restarts the proxy when its
-   * health check fails; nothing else is exempt, so the owner of a namespace
-   * the provider or Sencho runs in, a labeled container, and a mislabeled one
-   * are still refused.
+   * Let a restart of the provider itself through. Auto-Heal restarts the proxy
+   * when its health check fails; nothing else is exempt, so a stop or removal
+   * of the provider, the owner of a namespace the provider or Sencho runs in, a
+   * labeled container, and a mislabeled one are still refused.
    */
   allowProvider?: boolean;
 }
@@ -766,7 +766,7 @@ export async function evaluateDockerEndpointContainer(
   const selfState = await self.ensureResolved();
   const provider = viewOf(await resolveDockerEndpointProvider());
   const providerVerdict = (service: string, resolved: DockerEndpointContainer, selfProject: string | null): DockerEndpointRefusal | null =>
-    options.allowProvider ? null : refusalFor('provider', service, resolved, selfProject);
+    options.allowProvider && action === 'restart' ? null : refusalFor('provider', service, resolved, selfProject);
 
   // Null when the endpoint denied the inspect and the container is judged without it.
   let info: InspectedContainer | null = null;

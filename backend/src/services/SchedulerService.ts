@@ -548,7 +548,7 @@ export class SchedulerService {
             targetServices ?? undefined,
         );
 
-        await Promise.all(filtered.map(c => docker.restartContainer(c.Id, { allowEndpointContainer: true })));
+        await Promise.all(filtered.map(c => docker.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
         const servicesSuffix = targetServices
             ? ` (services: ${targetServices.join(', ')})`
             : '';

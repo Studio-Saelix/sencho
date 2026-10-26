@@ -196,8 +196,8 @@ describe('a refused lifecycle request', () => {
     expect(restart.status).toBe(200);
     expect(mockAssertNoEndpointContainers).toHaveBeenNthCalledWith(1, ['c1'], 'stop');
     expect(mockAssertNoEndpointContainers).toHaveBeenNthCalledWith(2, ['c1'], 'restart');
-    expect(mockStopContainer).toHaveBeenCalledWith('c1', { allowEndpointContainer: true });
-    expect(mockRestartContainer).toHaveBeenCalledWith('c1', { allowEndpointContainer: true });
+    expect(mockStopContainer).toHaveBeenCalledWith('c1', { endpointGuard: 'batch-checked' });
+    expect(mockRestartContainer).toHaveBeenCalledWith('c1', { endpointGuard: 'batch-checked' });
   });
 
   it('does not consult the guard for start, which never stops anything', async () => {
