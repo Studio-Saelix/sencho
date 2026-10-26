@@ -92,7 +92,7 @@ const PAGE_SIZE = 10;
 // Mirrors what PUT /cloud-backup/config requires for a custom provider, so the
 // picker only saves a selection the server will accept.
 function isCustomConfigSavable(c: CustomConfig): boolean {
-    return !!c.endpoint.trim() && !!c.bucket.trim() && !!c.access_key.trim() && /^https?:\/\//i.test(c.endpoint.trim());
+    return /^https?:\/\//i.test(c.endpoint.trim()) && !!c.bucket.trim() && !!c.access_key.trim();
 }
 
 export function CloudBackupSection() {

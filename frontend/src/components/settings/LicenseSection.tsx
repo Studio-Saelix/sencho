@@ -239,7 +239,8 @@ export function LicenseSection() {
                             <ExternalLink className="h-3.5 w-3.5" />
                         </a>
                     </SettingsField>
-                ) : experimental ? (
+                ) : null}
+                {isPaid && experimental ? (
                     <SettingsField label="Sencho Snapshot Vault" helper="Your Admiral subscription includes Sencho Snapshot Vault entitlement.">
                         <span className="inline-flex items-center gap-2 text-sm text-success">
                             <CheckCircle className="h-4 w-4" />

@@ -202,7 +202,7 @@ export class CloudBackupService {
         };
     }
 
-    // ─── Sencho Snapshot Vault lifecycle ─────────────────────────────────────────
+    // ─── Sencho Snapshot Vault lifecycle ───────────────────────────────────────
 
     public async provisionSenchoCloudBackup(): Promise<ProvisionResult> {
         const db = DatabaseService.getInstance();
