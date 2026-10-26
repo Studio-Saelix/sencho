@@ -251,6 +251,7 @@
               "tutorials/work-the-gitops-portfolio",
               "tutorials/schedule-an-operation",
               "tutorials/configure-auto-update-policies",
+              "tutorials/restore-a-stack-from-its-rollback-point",
               "tutorials/configure-auto-heal-policies",
               "tutorials/set-up-deploy-enforcement"
             ]
