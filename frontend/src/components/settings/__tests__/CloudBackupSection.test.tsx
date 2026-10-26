@@ -99,8 +99,11 @@ describe('CloudBackupSection archive encryption', () => {
 });
 
 describe('CloudBackupSection managed vault discovery', () => {
-    function mockProvider(provider: 'disabled' | 'sencho' | 'custom') {
-        apiFetch.mockImplementation(async (path: string) => {
+    function mockProvider(provider: 'disabled' | 'sencho' | 'custom', putStatus = 200) {
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config' && options?.method === 'PUT') {
+                return json(putStatus < 400 ? {} : { error: 'save refused' }, putStatus);
+            }
             if (path === '/cloud-backup/config') {
                 return json({
                     provider,
@@ -123,15 +126,17 @@ describe('CloudBackupSection managed vault discovery', () => {
     async function openStorageModes() {
         const user = userEvent.setup();
         await user.click(await screen.findByRole('combobox'));
-        return screen;
+        return user;
     }
+
+    const MANAGED_OPTION = 'Sencho Snapshot Vault (included)';
 
     it('offers only Custom S3 when the experimental flag is off and nothing is configured', async () => {
         mockProvider('disabled');
         render(<CloudBackupSection />);
         await openStorageModes();
         expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
-        expect(screen.queryByText('Sencho Snapshot Vault (included)')).not.toBeInTheDocument();
+        expect(screen.queryByText(MANAGED_OPTION)).not.toBeInTheDocument();
     });
 
     it('offers Sencho Snapshot Vault to Admiral when the experimental flag is on', async () => {
@@ -139,7 +144,22 @@ describe('CloudBackupSection managed vault discovery', () => {
         mockProvider('disabled');
         render(<CloudBackupSection />);
         await openStorageModes();
-        expect(await screen.findByText('Sencho Snapshot Vault (included)')).toBeInTheDocument();
+        expect(await screen.findByText(MANAGED_OPTION)).toBeInTheDocument();
+    });
+
+    it('shows the option once the experimental flag resolves after the first render', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
+        mockProvider('disabled');
+        const { rerender } = render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
+        expect(screen.queryByText(MANAGED_OPTION)).not.toBeInTheDocument();
+        await user.keyboard('{Escape}');
+
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        rerender(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText(MANAGED_OPTION)).toBeInTheDocument();
     });
 
     it('never offers it on Community, even with the experimental flag on', async () => {
@@ -149,13 +169,43 @@ describe('CloudBackupSection managed vault discovery', () => {
         render(<CloudBackupSection />);
         await openStorageModes();
         expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
-        expect(screen.queryByText('Sencho Snapshot Vault (included)')).not.toBeInTheDocument();
+        expect(screen.queryByText(MANAGED_OPTION)).not.toBeInTheDocument();
+    });
+
+    it('shows no managed option or panel when Community has a stored managed provider', async () => {
+        useLicenseMock.mockReturnValue({ isPaid: false });
+        mockProvider('sencho');
+        render(<CloudBackupSection />);
+        await openStorageModes();
+        expect(await screen.findByText('Custom S3 (BYOB)')).toBeInTheDocument();
+        expect(screen.queryByText(MANAGED_OPTION)).not.toBeInTheDocument();
+        expect(screen.queryByText('Sencho Snapshot Vault')).not.toBeInTheDocument();
     });
 
     it('keeps the managed option visible for an instance already configured for it', async () => {
         mockProvider('sencho');
         render(<CloudBackupSection />);
-        expect(await screen.findByText('Sencho Snapshot Vault (included)')).toBeInTheDocument();
+        expect(await screen.findByText(MANAGED_OPTION)).toBeInTheDocument();
         expect(screen.getByText('Sencho Snapshot Vault')).toBeInTheDocument();
+    });
+
+    it('keeps the managed option after switching away from it in the same session', async () => {
+        mockProvider('sencho');
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Cloud backup provider updated.'));
+        await openStorageModes();
+        expect(await screen.findByText(MANAGED_OPTION)).toBeInTheDocument();
+    });
+
+    it('returns to the stored provider when saving the switch fails', async () => {
+        mockProvider('sencho', 500);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent(MANAGED_OPTION);
+        expect(screen.queryByText('Custom S3 Configuration')).not.toBeInTheDocument();
     });
 });

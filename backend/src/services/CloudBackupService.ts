@@ -2,7 +2,7 @@
  * CloudBackupService: off-site replication for fleet snapshots.
  *
  * Two providers share the same S3-compatible code path:
- *   - 'sencho' : managed Sencho Cloud Backup. Credentials provisioned by
+ *   - 'sencho' : managed Sencho Snapshot Vault. Credentials provisioned by
  *                sencho.io/api/cloud-backup/provision and stored in system_state.
  *   - 'custom' : bring-your-own-bucket. Credentials user-configured in global_settings.
  *
@@ -202,7 +202,7 @@ export class CloudBackupService {
         };
     }
 
-    // ─── Sencho Cloud Backup lifecycle ─────────────────────────────────────────
+    // ─── Sencho Snapshot Vault lifecycle ─────────────────────────────────────────
 
     public async provisionSenchoCloudBackup(): Promise<ProvisionResult> {
         const db = DatabaseService.getInstance();

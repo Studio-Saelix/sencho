@@ -11,7 +11,7 @@ const SCOPE_MESSAGE = 'API tokens cannot manage cloud backup configuration.';
 const SECRET_REDACTED = '***';
 const VALID_PROVIDERS = new Set(['disabled', 'sencho', 'custom']);
 
-// Provider-aware tier gates. The managed Sencho Cloud Backup target requires
+// Provider-aware tier gates. The managed Sencho Snapshot Vault target requires
 // a paid license; the bring-your-own-bucket Custom S3 target is available on
 // every tier. These wrappers short-circuit to requirePaid only when the
 // operation actually touches the 'sencho' provider.

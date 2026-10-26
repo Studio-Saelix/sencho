@@ -114,7 +114,7 @@ describe('Cloud backup tier gating', () => {
         expect(res.body.code).toBe('PAID_REQUIRED');
     });
 
-    // POST /provision is paid-only by definition (Sencho Cloud Backup activation).
+    // POST /provision is paid-only by definition (Sencho Snapshot Vault activation).
     it('POST /provision is rejected on Community', async () => {
         mockCommunity();
         const res = await request(app).post('/api/cloud-backup/provision').set('Cookie', authCookie);
@@ -437,5 +437,49 @@ describe('Cloud backup test endpoint', () => {
         const res = await request(app).post('/api/cloud-backup/test').set('Cookie', authCookie).send({});
         expect(res.status).toBe(200);
         expect(res.body.success).toBe(true);
+    });
+});
+
+describe('Sencho Snapshot Vault provisioning', () => {
+    let CloudBackupService: typeof import('../services/CloudBackupService').CloudBackupService;
+
+    beforeAll(async () => {
+        ({ CloudBackupService } = await import('../services/CloudBackupService'));
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+    });
+
+    it('records the provision call as "Provisioned Sencho Snapshot Vault" in the audit log', async () => {
+        vi.spyOn(CloudBackupService.getInstance(), 'provisionSenchoCloudBackup').mockResolvedValue({ success: true, quotaBytes: 1024 });
+        const res = await request(app).post('/api/cloud-backup/provision').set('Cookie', authCookie);
+        expect(res.status).toBe(200);
+        const { entries } = DatabaseService.getInstance().getAuditLogs({ limit: 50 });
+        const entry = entries.find(e => e.path.includes('/cloud-backup/provision') && e.method === 'POST');
+        expect(entry).toBeDefined();
+        expect(entry!.summary).toBe('Provisioned Sencho Snapshot Vault');
+    });
+
+    it('names Sencho Snapshot Vault when provisioning throws unexpectedly', async () => {
+        vi.spyOn(CloudBackupService.getInstance(), 'provisionSenchoCloudBackup').mockRejectedValue(new Error('boom'));
+        const res = await request(app).post('/api/cloud-backup/provision').set('Cookie', authCookie);
+        expect(res.status).toBe(500);
+        expect(res.body.error).toBe('Failed to provision Sencho Snapshot Vault');
+    });
+
+    it('refuses provisioning below Admiral at the service level with the renamed message', async () => {
+        DatabaseService.getInstance().setSystemState('license_key', 'AAAAA-BBBBB-CCCCC-DDDDD');
+        mockCommunity();
+        const result = await CloudBackupService.getInstance().provisionSenchoCloudBackup();
+        expect(result).toEqual({ success: false, error: 'Sencho Snapshot Vault requires the Admiral tier.' });
+    });
+
+    it('GET /usage names Sencho Snapshot Vault when another provider is saved', async () => {
+        DatabaseService.getInstance().updateGlobalSetting('cloud_backup_provider', 'custom');
+        const res = await request(app).get('/api/cloud-backup/usage').set('Cookie', authCookie);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('Usage is only available for Sencho Snapshot Vault');
     });
 });

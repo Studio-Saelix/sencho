@@ -236,4 +236,17 @@ describe('LicenseSection Sencho Snapshot Vault row', () => {
         render(<LicenseSection />);
         expect(screen.getByText('Sencho Snapshot Vault')).toBeInTheDocument();
     });
+
+    it('never shows the row on Community, even with the experimental flag on', () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        mockLicense(baseLicense());
+        render(<LicenseSection />);
+        expect(screen.queryByText('Sencho Snapshot Vault')).not.toBeInTheDocument();
+    });
+
+    it('keeps the other Admiral rows when the vault row is hidden', () => {
+        mockLicense(baseLicense({ tier: 'paid', status: 'active' }));
+        render(<LicenseSection />);
+        expect(screen.getByText('Hardened Build')).toBeInTheDocument();
+    });
 });

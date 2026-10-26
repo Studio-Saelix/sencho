@@ -275,6 +275,17 @@ entries:
     limitation: ''
     featured: false
 
+  - id: snapshot-vault
+    name: Snapshot Vault (S3-compatible off-site snapshots)
+    tier: community
+    availability: shipped
+    category: recovery
+    publicName: Snapshot Vault (S3-compatible)
+    publicRoadmapKey: snapshot-vault
+    summary: Mirror fleet snapshots to an S3-compatible bucket you control.
+    limitation: ''
+    featured: false
+
   - id: snapshot-vault-planned
     name: Sencho Snapshot Vault (managed off-site snapshots)
     tier: admiral

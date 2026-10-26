@@ -95,10 +95,12 @@ export function CloudBackupSection() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [provider, setProvider] = useState<Provider>('disabled');
-    // The managed vault is not launched yet: discovery is gated on the
-    // experimental flag, but an instance already configured for it keeps
-    // the option and its panels so the stored mode never loses its label.
-    const senchoVisible = isPaid && (experimental || provider === 'sencho');
+    const [loadedProvider, setLoadedProvider] = useState<Provider>('disabled');
+    // The managed vault is discoverable only with the experimental flag on.
+    // An Admiral instance whose stored mode was already 'sencho' when the page
+    // loaded keeps the option for the session, so switching away (or a failed
+    // save) never removes the way back.
+    const senchoVisible = isPaid && (experimental || loadedProvider === 'sencho');
     const providerOptions = senchoVisible
         ? [BASE_PROVIDER_OPTIONS[0], SENCHO_PROVIDER_OPTION, BASE_PROVIDER_OPTIONS[1]]
         : BASE_PROVIDER_OPTIONS;
@@ -133,6 +135,7 @@ export function CloudBackupSection() {
             if (!res.ok) throw new Error(`Failed to load config (${res.status})`);
             const data: ConfigResponse = await res.json();
             setProvider(data.provider);
+            setLoadedProvider(data.provider);
             setSenchoProvisioned(data.sencho_provisioned);
             setCustom({ ...data.custom, secret_key: '' });
             setOriginalSecretSaved(!!data.custom.secret_key);
@@ -179,6 +182,7 @@ export function CloudBackupSection() {
 
     const handleProviderChange = async (next: string) => {
         const nextProvider = next as Provider;
+        const previousProvider = provider;
         setProvider(nextProvider);
         if (nextProvider === 'sencho' && !senchoProvisioned) return;
         setSaving(true);
@@ -194,6 +198,7 @@ export function CloudBackupSection() {
             }
             toast.success('Cloud backup provider updated.');
         } catch (err) {
+            setProvider(previousProvider);
             toast.error((err as Error)?.message || 'Failed to update provider.');
         } finally {
             setSaving(false);
