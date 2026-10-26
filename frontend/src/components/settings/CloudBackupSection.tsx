@@ -490,7 +490,7 @@ export function CloudBackupSection() {
                     id="archive-encryption"
                     aria-label="Encrypt archives"
                     checked={encryptArchives}
-                    disabled={savingEncryption}
+                    disabled={savingEncryption || saving}
                     onChange={handleEncryptToggle}
                 />
             </SettingsField>
@@ -540,7 +540,7 @@ export function CloudBackupSection() {
                     options={providerOptions}
                     value={provider}
                     onValueChange={handleProviderChange}
-                    disabled={saving || loadFailed}
+                    disabled={saving || savingEncryption || loadFailed}
                 />
                 <p className="text-xs text-muted-foreground">
                     Choose where fleet snapshots are replicated.
@@ -550,9 +550,9 @@ export function CloudBackupSection() {
                         <p className="text-xs text-destructive">
                             The stored configuration could not be read, so the storage mode is locked.
                         </p>
-                        <Button size="sm" variant="outline" onClick={handleRetryLoad} disabled={retrying}>
+                        <BusyButton size="sm" variant="outline" pending={retrying} busyLabel="Retrying" onClick={handleRetryLoad}>
                             Retry
-                        </Button>
+                        </BusyButton>
                     </div>
                 )}
             </div>
