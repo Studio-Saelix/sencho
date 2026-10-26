@@ -29,7 +29,7 @@ describe('PolicyBlockDialog evidence', () => {
   };
 
   const renderDialog = (p: PolicyBlockPayload) =>
-    render(<PolicyBlockDialog open payload={p} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    render(<PolicyBlockDialog open payload={p} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
 
   it('says the block was not a proven vulnerability', () => {
     renderDialog(unavailablePayload);
@@ -97,17 +97,27 @@ describe('PolicyBlockDialog evidence', () => {
     const navigate = vi.fn();
     window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
     try {
-      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
+      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} canEditSettings bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
       expect(screen.getByText(/belongs to this node only/i)).toBeInTheDocument();
       await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
       expect(onClose).toHaveBeenCalledTimes(1);
       expect(navigate).toHaveBeenCalledTimes(1);
+      // Dispatched first, so the explanation is never dismissed without a destination.
+      expect(navigate.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0]);
       // No nodeId: the active node is the one that ran the deploy, and a
       // node id here would be read as a node filter, not a node switch.
       expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ view: 'security', tab: 'policies' });
     } finally {
       window.removeEventListener(SENCHO_NAVIGATE_EVENT, navigate);
     }
+  });
+
+  it('offers no link to someone who cannot change the setting, and says who can', () => {
+    // The Evidence availability card is read-only for a non-admin, so a button
+    // that closes the dialog and opens it would be a dead end.
+    renderDialog(unavailablePayload);
+    expect(screen.queryByRole('button', { name: /Open Evidence availability/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/An administrator can change it under Evidence availability/i)).toBeInTheDocument();
   });
 
   it('shows no evidence section for a genuine policy match', () => {
@@ -133,7 +143,7 @@ describe('PolicyBlockDialog evidence', () => {
       violations: [...unavailablePayload.violations, publicPayload.violations[0]],
     };
     const { unmount } = render(
-      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.queryByText(/blocked because the images above could not be evaluated/i)).not.toBeInTheDocument();
     // And the replacement still tells the operator the failed image needs
@@ -146,7 +156,7 @@ describe('PolicyBlockDialog evidence', () => {
     // On an evidence-only payload the sentence is the whole account of the block,
     // so it has to be there.
     render(
-      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
   });
@@ -176,7 +186,7 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
     // No rule was applied, so no setting governs this block and none is offered.
     expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/could not be obtained/i)).not.toBeInTheDocument();
   });
 
@@ -200,7 +210,7 @@ describe('PolicyBlockDialog evidence', () => {
     renderDialog(mixed);
     expect(screen.getByText(/evidence that could not be checked/i)).toBeInTheDocument();
     expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
   });
 
   it('does not offer the settings when the only applied rule allowed', () => {
@@ -220,7 +230,7 @@ describe('PolicyBlockDialog evidence', () => {
       },
     };
     renderDialog(allowedPlusFailure);
-    expect(screen.queryByText(/under Evidence availability/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
     expect(screen.getByText(/stopped because the images could not be evaluated/i)).toBeInTheDocument();
   });
 
@@ -357,7 +367,7 @@ describe('PolicyBlockDialog evidence', () => {
 describe('PolicyBlockDialog', () => {
   it('describes the active inputs (KEV + fixable, not the severity threshold)', () => {
     render(
-      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     const desc = screen.getAllByText(/known-exploited CVE \(KEV\)/i);
     expect(desc.length).toBeGreaterThan(0);
@@ -366,7 +376,7 @@ describe('PolicyBlockDialog', () => {
 
   it('renders a reason badge per matched input on the violation row', () => {
     render(
-      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText('KEV')).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
@@ -385,7 +395,7 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The matched row keeps its counts and reason badges.
     expect(screen.getByText(/1 KEV/)).toBeInTheDocument();
@@ -408,7 +418,7 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={failed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={failed} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The actual failure reason is shown, not an unexplained "0 critical 0 high".
     expect(screen.getByText(/Pre-flight scan failed: trivy crashed/i)).toBeInTheDocument();
@@ -424,7 +434,7 @@ describe('PolicyBlockDialog', () => {
       violations: [{ imageRef: 'redis:7', severity: 'HIGH', criticalCount: 0, highCount: 1, kevCount: 0, fixableCount: 0, reasons: [], scanId: 2 }],
     };
     render(
-      <PolicyBlockDialog open payload={legacy} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={legacy} stackName="web" canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getAllByText(/severity at or above HIGH/i).length).toBeGreaterThan(0);
   });

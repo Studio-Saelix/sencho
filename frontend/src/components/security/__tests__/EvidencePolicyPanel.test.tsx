@@ -123,6 +123,8 @@ it('shows a layout-matched placeholder while loading rather than a blank pane', 
   // Layout-matched, not a bare placeholder: it carries the same card material as
   // the loaded panel, so there is no shift when the real content arrives.
   expect(container.querySelector('[class*="shadow-card-bevel"]')).not.toBeNull();
+  // The placeholder rows align like the loaded ones, so the wrap does not jump.
+  expect(container.querySelectorAll('[class*="animate-pulse"].ml-auto').length).toBe(3);
 
   release?.(jsonResponse(200, payload()));
   // Loaded: the placeholder is gone and the controls are usable.

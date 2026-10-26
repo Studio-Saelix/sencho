@@ -243,6 +243,7 @@ export function ShellOverlays({
         payload={policyBlock?.payload ?? null}
         stackName={policyBlock?.stackName ?? ''}
         canBypass={isAdmin}
+        canEditSettings={isAdmin}
         bypassing={policyBypassing}
         onClose={() => setPolicyBlock(null)}
         onBypass={stackActions.bypassPolicyAndRetry}

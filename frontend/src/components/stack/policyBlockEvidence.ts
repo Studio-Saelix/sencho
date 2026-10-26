@@ -18,7 +18,9 @@ const OUTCOME_PAST_TENSE: Record<'allow' | 'warn' | 'block', string> = {
 
 /**
  * Human wording for one evidence state. It follows a colon ("Vulnerability scan:
- * failed"), never "was", so no state needs a past participle that is not a word.
+ * failed"), never "was", so a state cannot read as "the scan was failed". The
+ * source, state and setting names mirror the backend's evidence summary and the
+ * row labels on the Evidence availability card; keep the three in step.
  */
 const EVIDENCE_STATE_LABEL: Record<string, string> = {
   current: 'current',
@@ -42,13 +44,18 @@ const EVIDENCE_SOURCE_LABEL: Record<string, string> = {
 };
 
 function describeSource(source: string): string {
-  if (EVIDENCE_SOURCE_LABEL[source]) return EVIDENCE_SOURCE_LABEL[source];
+  if (Object.hasOwn(EVIDENCE_SOURCE_LABEL, source)) return EVIDENCE_SOURCE_LABEL[source];
   const spaced = source.replace(/_/g, ' ');
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 function describeState(state: string): string {
-  return EVIDENCE_STATE_LABEL[state] ?? state.replace(/_/g, ' ');
+  return Object.hasOwn(EVIDENCE_STATE_LABEL, state) ? EVIDENCE_STATE_LABEL[state] : state.replace(/_/g, ' ');
+}
+
+/** An outcome this build does not know is shown as sent rather than as "undefined". */
+function describeOutcome(outcome: string): string {
+  return Object.hasOwn(OUTCOME_PAST_TENSE, outcome) ? OUTCOME_PAST_TENSE[outcome as keyof typeof OUTCOME_PAST_TENSE] : outcome;
 }
 
 /** A reason is a clause from the server; end it like a sentence without doubling a stop. */
@@ -83,8 +90,8 @@ function describeRule(rule: string): string {
     // not fail; a split on a missing string would.
     if (typeof rule !== 'string' || rule === '') return 'an unknown rule';
     const [key, value] = rule.split('=');
+    if (!Object.hasOwn(RULE_LABEL, key)) return rule;
     const label = RULE_LABEL[key];
-    if (!label) return rule;
     return value ? `${label}, set to ${value}` : label;
 }
 
@@ -113,6 +120,9 @@ function describeTarget(target: string): string {
  * Applications come first because they explain why the gate acted. A record
  * covers what no setting governs: partial evidence, for instance, is a state the
  * gate fails closed on by definition, so it produces no application at all.
+ * A node-wide application (scanner availability) carries no target, so it also
+ * stands for the node-wide record of the same source and state; that record is
+ * not listed again, and its reason is the violation row's text.
  */
 export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): EvidenceLine[] {
   if (!evidence) return [];
@@ -124,20 +134,16 @@ export function buildEvidenceLines(evidence: PolicyBlockPayload['evidence']): Ev
   for (const a of evidence.applications ?? []) {
     if (a.state === 'current') continue;
     const who = a.target ? ` for ${describeTarget(a.target)}` : '';
-    // A node-wide application carries no target, so the record of the same
-    // source and state is what says why. Its reason is folded into this line
-    // rather than printed again as a second line about the same fact.
-    const nodeWide = a.target ? undefined : records.find((r) => r.source === a.source && r.state === a.state);
-    const why = nodeWide?.reason ? ` ${sentence(nodeWide.reason)}` : '';
     lines.push({
       key: `app:${a.source}:${a.state}:${a.target ?? ''}`,
-      text: `${describeSource(a.source)}${who}: ${describeState(a.state)}, ${OUTCOME_PAST_TENSE[a.outcome]} by ${describeRule(a.rule)}.${why}`,
+      text: `${describeSource(a.source)}${who}: ${describeState(a.state)}, ${describeOutcome(a.outcome)} by ${describeRule(a.rule)}.`,
     });
     // Keyed by state as well as target: one image can legitimately have two
     // distinct problems (a stale scan whose finding rows were also truncated),
     // and collapsing them would drop the second explanation.
-    if (a.target) explained.add(`${a.source}:${a.state}:${a.target}`);
-    else if (nodeWide) explained.add(`${nodeWide.source}:${nodeWide.state}:${nodeWide.target}`);
+    for (const target of a.target ? [a.target] : NODE_WIDE_TARGETS) {
+      explained.add(`${a.source}:${a.state}:${target}`);
+    }
   }
 
   for (const r of records) {

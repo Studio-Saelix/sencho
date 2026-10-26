@@ -230,10 +230,10 @@ describe('buildEvidenceLines', () => {
     expect(lines.map((l) => l.text).join(' ')).not.toContain('(node)');
   });
 
-  it('explains a node-wide refusal once, with its cause', () => {
+  it('explains a node-wide refusal once', () => {
     // The application carries no target and the record carries the sentinel, so
     // matching on target alone printed one fact twice: the rule that acted and
-    // then the same state again with the scanner's reason.
+    // then the same state again. The cause is the violation row's text.
     const lines = buildEvidenceLines({
       outcome: 'block',
       records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null, reason: 'The vulnerability scanner is not available on this node' }],
@@ -241,8 +241,30 @@ describe('buildEvidenceLines', () => {
       summary: '',
     });
     expect(lines.map((l) => l.text)).toEqual([
-      'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block. The vulnerability scanner is not available on this node.',
+      'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block.',
     ]);
+  });
+
+  it('does not let a target-less application swallow an image-specific record', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: null, reason: 'The scan did not complete' }],
+      applications: [{ source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block' }],
+      summary: '',
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[1].text).toBe('Vulnerability scan for nginx:1.27: failed. The scan did not complete.');
+  });
+
+  it('shows an outcome, source, state or rule this build does not know as sent', () => {
+    const lines = buildEvidenceLines({
+      outcome: 'block',
+      records: [],
+      applications: [{ source: 'constructor', state: 'toString', outcome: 'quarantine', rule: 'hasOwnProperty=x' } as never],
+      summary: '',
+    });
+    expect(lines[0].text).toBe('Constructor: toString, quarantine by hasOwnProperty=x.');
+    expect(lines[0].text).not.toMatch(/undefined|function/);
   });
 
   it('words a failed scan without "was failed"', () => {

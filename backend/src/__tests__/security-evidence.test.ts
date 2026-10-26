@@ -223,6 +223,19 @@ describe('decideEvidenceGate', () => {
         );
     });
 
+    it('degrades to what was sent for a rule, outcome or source it does not know', () => {
+        // A decision forwarded by a build with a wider vocabulary must still read
+        // as a sentence: no "undefined", no function text from an inherited key.
+        const decision = decideEvidenceGate([], [
+            { source: 'scanner_availability', state: 'unavailable', outcome: 'quarantine' as never, rule: '' },
+            { source: 'image_trust', state: 'partial', outcome: 'block', rule: 'constructor=block' },
+        ]);
+        expect(decision.summary).toBe(
+            'Scanner availability: unavailable, quarantine by an unknown rule; ' +
+            'Image trust: incomplete, blocked by constructor=block',
+        );
+    });
+
     it('says plainly when no evidence was required', () => {
         expect(decideEvidenceGate([], []).summary).toBe('No security evidence was required for this decision');
     });

@@ -103,6 +103,8 @@ interface PolicyBlockDialogProps {
   payload: PolicyBlockPayload | null;
   stackName: string;
   canBypass: boolean;
+  /** Whether the viewer may change the Evidence availability settings the block points at. */
+  canEditSettings: boolean;
   bypassing: boolean;
   onClose: () => void;
   onBypass: () => void;
@@ -120,6 +122,7 @@ export function PolicyBlockDialog({
   payload,
   stackName,
   canBypass,
+  canEditSettings,
   bypassing,
   onClose,
   onBypass,
@@ -145,11 +148,13 @@ export function PolicyBlockDialog({
 
   // Navigation does not switch nodes, and this dialog only ever opens for the
   // active node, so the Policies tab it lands on edits the node that ran the deploy.
+  // Dispatched before closing so the block explanation is never dismissed without
+  // somewhere to go.
   const openEvidenceSettings = () => {
-    onClose();
     window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
       detail: { view: 'security', tab: 'policies' },
     }));
+    onClose();
   };
 
   return (
@@ -255,13 +260,17 @@ export function PolicyBlockDialog({
             {governedBySetting && (
               <p className="text-xs text-muted-foreground mt-2">
                 This setting belongs to this node only.{' '}
-                <button
-                  type="button"
-                  onClick={openEvidenceSettings}
-                  className="font-medium text-brand hover:underline"
-                >
-                  Open Evidence availability &rarr;
-                </button>
+                {canEditSettings ? (
+                  <button
+                    type="button"
+                    onClick={openEvidenceSettings}
+                    className="font-medium text-brand hover:underline"
+                  >
+                    Open Evidence availability &rarr;
+                  </button>
+                ) : (
+                  'An administrator can change it under Evidence availability on the Security page.'
+                )}
               </p>
             )}
           </div>

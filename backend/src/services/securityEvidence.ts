@@ -111,7 +111,11 @@ export interface EvidenceRuleApplication {
     source: SecurityEvidenceSource;
     state: SecurityEvidenceState;
     outcome: EvidenceAvailabilityOutcome;
-    /** The configured rule that produced `outcome`, as an audit-readable clause. */
+    /**
+     * The configured rule that produced `outcome`, as the raw `key=outcome` clause.
+     * Kept verbatim for audit rows; operator wording is derived from it in
+     * `describeEvidenceRule` and never stored back here.
+     */
     rule: string;
     /**
      * The target this application is about, when it is about one. Present so a
@@ -131,7 +135,11 @@ export interface EvidenceGateDecision {
     outcome: EvidenceAvailabilityOutcome;
     records: SecurityEvidenceRecord[];
     applications: EvidenceRuleApplication[];
-    /** One sentence naming why, safe to show an operator verbatim. */
+    /**
+     * Operator wording for why, joined by '; ', one clause per distinct source,
+     * state and rule (images are named separately). Safe to show verbatim: it
+     * carries no source or rule identifiers, which stay on `applications`.
+     */
     summary: string;
 }
 
@@ -387,6 +395,7 @@ const EVIDENCE_RULE_LABEL: Readonly<Record<string, string>> = {
     security_scanner_unavailable: 'the Scanner unavailable setting',
     security_scan_failure: 'the Scan failed setting',
     security_candidate_unproven: 'the Candidate not evaluated setting',
+    security_partial_evidence: 'partial evidence handling',
 };
 
 /**
@@ -395,14 +404,15 @@ const EVIDENCE_RULE_LABEL: Readonly<Record<string, string>> = {
  * so a future rule is shown as it is rather than hidden.
  */
 function describeEvidenceRule(rule: string): string {
+    if (typeof rule !== 'string' || rule === '') return 'an unknown rule';
     const [key, outcome] = rule.split('=');
+    if (!Object.hasOwn(EVIDENCE_RULE_LABEL, key)) return rule;
     const label = EVIDENCE_RULE_LABEL[key];
-    if (!label) return rule;
     return outcome ? `${label}, set to ${outcome}` : label;
 }
 
 /**
- * One sentence naming every rule that acted, safe to show an operator verbatim.
+ * Clauses naming every rule that acted, safe to show an operator verbatim.
  *
  * Worded for the screen, not the audit trail: the identifiers (`vulnerability_scan`,
  * `security_scan_failure=block`) stay on each application's own fields, where the
@@ -421,9 +431,11 @@ export function summarizeEvidenceApplications(
 ): string {
   if (applications.length === 0) return 'No security evidence was required for this decision';
   const sentences = applications.map(
+    // The `??` fallbacks cover a decision persisted or forwarded by a build with
+    // a wider vocabulary: an unknown value is shown as sent, never as "undefined".
     (a) =>
       `${EVIDENCE_SOURCE_LABEL[a.source] ?? a.source}: ${EVIDENCE_STATE_PHRASE[a.state] ?? a.state}, ` +
-      `${OUTCOME_PAST_TENSE[a.outcome]} by ${describeEvidenceRule(a.rule)}`,
+      `${OUTCOME_PAST_TENSE[a.outcome] ?? a.outcome} by ${describeEvidenceRule(a.rule)}`,
   );
   return [...new Set(sentences)].join('; ');
 }

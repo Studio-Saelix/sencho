@@ -415,7 +415,7 @@ describe('candidate acceptance applies its own rule', () => {
         // The deploy-gate rules stay visible in their own right; what must not
         // appear is one reporting an outcome the candidate decision overrode.
         expect(candidate.evidence?.summary).not.toContain('the Candidate not evaluated setting, set to block');
-        // Every application in the decision is represented in the sentence, so the
+        // Every rule in the decision is represented in the sentence, so the
         // summary cannot describe a subset of what the record holds.
         const labelFor: Record<string, string> = {
             'security_scan_failure=block': 'the Scan failed setting, set to block',

@@ -309,6 +309,8 @@ function decideScannerUnavailable(
             ok: false,
             bypassed: false,
             policy,
+            // The row names the cause; the rule that decided is in `evidence` and
+            // is shown in its own section, so it is not repeated in this text.
             violations: [unavailableViolation('(scanner unavailable)', classification.reason ?? 'The vulnerability scanner is not available on this node')],
             evidence: decision,
         };
