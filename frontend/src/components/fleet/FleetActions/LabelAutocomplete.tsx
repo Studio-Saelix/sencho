@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
+import { plural } from '@/lib/blueprintTargets';
 import type { FleetStopLabelSuggestion } from './stopByLabel';
 
 interface LabelAutocompleteProps {
@@ -92,7 +93,7 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
                   <span className="flex w-full items-center gap-2">
                     <span className="flex-1 min-w-0 truncate text-left">{s.name}</span>
                     <span className="shrink-0 text-[10px] text-stat-subtitle">
-                      {s.stackCount} stack{s.stackCount === 1 ? '' : 's'} · {s.nodeCount} node{s.nodeCount === 1 ? '' : 's'}
+                      {plural(s.stackCount, 'stack')} · {plural(s.nodeCount, 'node')}
                     </span>
                   </span>
                   {nodes.length > 0 && (

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
+import { plural } from '@/lib/blueprintTargets';
 import type { FleetNode } from '@/components/FleetView/types';
 import { type Label, type LabelColor, LABEL_COLORS } from '@/components/label-types';
 import type { ResultRow } from './ResultsList';
@@ -106,7 +107,7 @@ function toRows(apiResults: AssignNodeResult[]): ResultRow[] {
       key: `node-${node.nodeId}`,
       label: unreachable
         ? `${node.nodeName} (unreachable)`
-        : `${node.nodeName} · ${node.created ? 'label created' : 'label reused'} · ${ok}/${node.stackResults.length} stack${node.stackResults.length === 1 ? '' : 's'}`,
+        : `${node.nodeName} · ${node.created ? 'label created' : 'label reused'} · ${ok}/${plural(node.stackResults.length, 'stack')}`,
       success: !unreachable && node.stackResults.length > 0 && node.stackResults.every(s => s.success),
       error: unreachable ? (node.error ?? 'Node unreachable') : undefined,
       sub: node.stackResults.map((s, i) => ({
@@ -238,7 +239,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
     const targets = Array.from(selected.entries())
       .filter(([, set]) => set.size > 0)
       .map(([nodeId, set]) => ({ nodeId, stackNames: Array.from(set) }));
-    const toastId = toast.loading(`Assigning "${selectedTemplate.name}" to ${totalSelected} stack${totalSelected === 1 ? '' : 's'} across ${targets.length} node${targets.length === 1 ? '' : 's'}…`);
+    const toastId = toast.loading(`Assigning "${selectedTemplate.name}" to ${plural(totalSelected, 'stack')} across ${plural(targets.length, 'node')}…`);
     setRunning(true);
     try {
       const res = await apiFetch('/fleet/labels/bulk-assign', {
@@ -272,8 +273,8 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
         return;
       }
       setOutcome({ label: selectedTemplate.name, rows: toRows(apiResults), ok, failed, unreachable, nodes: apiResults.length });
-      if (failed === 0 && unreachable === 0) toast.success(`Assigned "${selectedTemplate.name}" to ${ok} stack${ok === 1 ? '' : 's'} across ${apiResults.length} node${apiResults.length === 1 ? '' : 's'}.`);
-      else toast.warning(`${ok} assigned, ${failed} failed${unreachable > 0 ? `, ${unreachable} node${unreachable === 1 ? '' : 's'} unreachable` : ''}. See the result.`);
+      if (failed === 0 && unreachable === 0) toast.success(`Assigned "${selectedTemplate.name}" to ${plural(ok, 'stack')} across ${plural(apiResults.length, 'node')}.`);
+      else toast.warning(`${ok} assigned, ${failed} failed${unreachable > 0 ? `, ${plural(unreachable, 'node')} unreachable` : ''}. See the result.`);
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');

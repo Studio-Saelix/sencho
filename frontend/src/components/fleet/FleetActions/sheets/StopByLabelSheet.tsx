@@ -102,6 +102,9 @@ function PlanPath({ preview, targets, unreachable, failedToResolve, denied, labe
     unreachable.length > 0 && `${unreachable.length} unreachable, left out`,
     failedToResolve > 0 && `${failedToResolve} could not be resolved`,
   ].filter(Boolean).join(' · ') || undefined;
+  const unreachableProof = unreachable.length > 0
+    ? { label: 'Unreachable nodes', children: <UnreachableList nodes={unreachable} /> }
+    : undefined;
 
   if (targets && targets.some(t => t.stackNames.length > 0)) {
     return (
@@ -120,7 +123,7 @@ function PlanPath({ preview, targets, unreachable, failedToResolve, denied, labe
           ? { tone: 'warning', title: 'Nothing could be resolved', line: `${plural(failedToResolve, 'stack')} carrying this label failed their dry run.`, marker }
           : { tone: 'neutral', title: 'No stacks match', line: 'The dry run found no stack carrying this label on a reachable node.', marker }}
         stages={[]}
-        proof={unreachable.length > 0 ? { label: 'Unreachable nodes', children: <UnreachableList nodes={unreachable} /> } : undefined}
+        proof={unreachableProof}
       />
     );
   }
@@ -133,7 +136,7 @@ function PlanPath({ preview, targets, unreachable, failedToResolve, denied, labe
       <StatusPath
         answer={{ tone: 'neutral', title: 'No stacks match', line, marker }}
         stages={[]}
-        proof={unreachable.length > 0 ? { label: 'Unreachable nodes', children: <UnreachableList nodes={unreachable} /> } : undefined}
+        proof={unreachableProof}
       />
     );
   }

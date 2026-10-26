@@ -1,3 +1,4 @@
+import { plural } from '@/lib/blueprintTargets';
 import { cn, formatBytes } from '@/lib/utils';
 import type {
   FleetPruneNodeResult,
@@ -92,7 +93,7 @@ function ItemRow({ item, outcome }: { item: PrunePlanItem; outcome?: PruneItemOu
 function planSize(plan: FleetPruneNodeResult): string {
   const bytes = plan.reclaimableBytes ?? 0;
   const items = plan.items?.length ?? 0;
-  return bytes > 0 || items === 0 ? formatBytes(bytes) : `${items} item${items === 1 ? '' : 's'}`;
+  return bytes > 0 || items === 0 ? formatBytes(bytes) : plural(items, 'item');
 }
 
 function executionSize(execution: FleetPruneNodeResult): string {

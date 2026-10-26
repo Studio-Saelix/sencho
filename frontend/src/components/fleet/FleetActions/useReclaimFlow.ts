@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { plural } from '@/lib/blueprintTargets';
 import { formatBytes } from '@/lib/utils';
 import type { FleetNode } from '@/components/FleetView/types';
 import type { FleetPruneNodeResult, FleetPruneTarget, PruneScope } from '@/lib/prunePlan';
@@ -204,6 +205,6 @@ function reportOutcome(results: FleetPruneNodeResult[]): void {
   } else if (failedAny) {
     toast.warning(`Fleet prune completed with item failures. ${formatBytes(reclaimed)} reclaimed.`);
   } else {
-    toast.success(`${answer.title} across ${results.length} node${results.length === 1 ? '' : 's'}.`);
+    toast.success(`${answer.title} across ${plural(results.length, 'node')}.`);
   }
 }

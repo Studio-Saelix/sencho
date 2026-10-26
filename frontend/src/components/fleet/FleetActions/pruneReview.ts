@@ -36,21 +36,21 @@ export function executeResultsAreValid(
   return value.every((result) => {
     if (!result || typeof result !== 'object') return false;
     const entry = result as Partial<FleetPruneNodeResult>;
-    if (!Number.isInteger(entry.nodeId) || seen.has(entry.nodeId as number)) return false;
-    seen.add(entry.nodeId as number);
-    if (!expectedIds.includes(entry.nodeId as number)) return false;
+    const { nodeId } = entry;
+    if (typeof nodeId !== 'number' || !Number.isInteger(nodeId) || seen.has(nodeId) || !expectedIds.includes(nodeId)) return false;
+    seen.add(nodeId);
     if (typeof entry.nodeName !== 'string' || typeof entry.reachable !== 'boolean' || !Array.isArray(entry.targets)) return false;
     const targetIds = new Set<FleetPruneTarget>();
     for (const target of entry.targets) {
       if (!target || typeof target !== 'object') return false;
       const row = target as Partial<FleetPruneNodeResult['targets'][number]>;
-      if (!selectedTargets.includes(row.target as FleetPruneTarget) || targetIds.has(row.target as FleetPruneTarget)
+      if (row.target === undefined || !selectedTargets.includes(row.target) || targetIds.has(row.target)
         || typeof row.success !== 'boolean' || row.dryRun !== false
         || typeof row.reclaimedBytes !== 'number' || !Number.isFinite(row.reclaimedBytes) || row.reclaimedBytes < 0) return false;
       for (const count of [row.removed, row.skipped, row.failed]) {
         if (count !== undefined && (!Number.isInteger(count) || count < 0)) return false;
       }
-      targetIds.add(row.target as FleetPruneTarget);
+      targetIds.add(row.target);
     }
     if (targetIds.size !== selectedTargets.length) return false;
     if (entry.reclaimedBytes !== undefined
