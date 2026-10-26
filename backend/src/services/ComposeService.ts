@@ -308,7 +308,16 @@ export class ComposeService {
       stackName,
       mutation,
       probes: {
-        renderConfig: async () => (await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined)).rendered,
+        renderConfig: async () => {
+          const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
+          if (result.rendered) return result.rendered;
+          // The guard refuses what it cannot see, so say why the render failed. The
+          // diagnostics are withheld for an overlay render (they quote secrets).
+          const why = result.timedOut ? 'docker compose config timed out'
+            : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+              : result.stderr.trim().split('\n')[0]?.slice(0, 300) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+          throw new Error(why);
+        },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
         localImage: (imageRef) => this.localImageLookup(imageRef),
       },
@@ -1527,12 +1536,12 @@ export class ComposeService {
         );
       }
     }
+    await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     await this.assertDockerEndpointSafe(
       stackName,
       { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
       ctx?.overlayDir,
     );
-    await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
     const stackDir = this.resolveStackDir(stackName, ctx);
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
     // The overlay is the project this deploy will actually run, so the guard
@@ -2539,8 +2548,8 @@ export class ComposeService {
     ws?: WebSocket,
     atomic?: boolean,
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
-    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -2851,8 +2860,8 @@ export class ComposeService {
    * prune here; the orchestrator owns per-service post-update reconciliation.
    */
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -2880,8 +2889,8 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
-    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSopsOverlayOrRefuse(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);

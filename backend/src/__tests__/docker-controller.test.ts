@@ -204,7 +204,7 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
     const call = action === 'stop' ? dc.stopContainer('abc123') : dc.restartContainer('abc123');
 
     await expect(call).rejects.toMatchObject({ name: 'DockerEndpointProtectedError', code: 'docker_endpoint_protected' });
-    expect(evaluate).toHaveBeenCalledWith('abc123', action, expect.anything());
+    expect(evaluate).toHaveBeenCalledWith('abc123', action, expect.anything(), { allowProvider: undefined });
     expect(op).not.toHaveBeenCalled();
   });
 
@@ -218,7 +218,7 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
 
     expect(results[0]).toMatchObject({ id: 'proxy', success: false, refused: true, error: refusal.message });
     expect(results[1]).toEqual({ id: 'orphan', success: true });
-    expect(guardSpy).toHaveBeenCalledWith('proxy', 'stop', expect.anything());
+    expect(guardSpy).toHaveBeenCalledWith('proxy', 'stop', expect.anything(), { allowProvider: undefined });
     expect(remove).toHaveBeenCalledTimes(1);
   });
 
@@ -234,7 +234,7 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
     expect(stop).not.toHaveBeenCalled();
   });
 
-  it('lets Auto-Heal restart a container on purpose', async () => {
+  it('skips the check for a caller that has just checked the whole batch', async () => {
     const evaluate = await spyOnGuard(refusal);
     const restart = vi.fn().mockResolvedValue(undefined);
     mockDocker.getContainer.mockReturnValue({ restart });
@@ -243,6 +243,19 @@ describe('DockerController - Docker endpoint guard on stop and restart', () => {
 
     expect(evaluate).not.toHaveBeenCalled();
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the check for Auto-Heal and lets only the provider through, so a refusal still stops the restart', async () => {
+    const evaluate = await spyOnGuard(refusal);
+    const restart = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ restart });
+
+    await expect(
+      DockerController.getInstance(1).restartContainer('abc123', { allowEndpointProvider: true }),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(evaluate).toHaveBeenCalledWith('abc123', 'restart', expect.anything(), { allowProvider: true });
+    expect(restart).not.toHaveBeenCalled();
   });
 
   it('proceeds when the guard has no objection', async () => {

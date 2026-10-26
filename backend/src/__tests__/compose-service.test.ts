@@ -614,6 +614,25 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect(rendered).toContain('io.sencho.infrastructure');
   });
 
+  it('tells the guard why the Compose config could not be rendered, so a failed render is a refusal and not an empty model', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('services.web.image must be a string\nsecond line'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('services.web.image must be a string');
+  });
+
   it('turns a guard check that cannot run into a refusal, never a pass', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     mockEvaluateDockerEndpointGuard.mockRejectedValue(new Error('node lookup failed'));

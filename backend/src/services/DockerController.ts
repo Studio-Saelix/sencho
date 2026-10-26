@@ -332,12 +332,18 @@ export interface LabelInventoryRow {
 /** Options for container stop and restart. */
 export interface ContainerOpOptions {
   /**
-   * Skip the Docker endpoint guard. For automation that restarts an unhealthy
-   * container on purpose (Auto-Heal), where bouncing the container is the fix,
-   * and for a caller that has just checked the whole batch with
-   * `assertNoDockerEndpointContainers` and must not pay for every check twice.
+   * Skip the Docker endpoint guard, for a caller that has just checked the whole
+   * batch with `assertNoDockerEndpointContainers` and must not pay for every
+   * check twice.
    */
   allowEndpointContainer?: boolean;
+  /**
+   * Run the guard but let the Docker endpoint provider itself through. For
+   * Auto-Heal, which restarts an unhealthy proxy on purpose: bouncing it is the
+   * fix. The owner of a namespace the provider or Sencho runs in, a labeled
+   * container, and a mislabeled one are still refused.
+   */
+  allowEndpointProvider?: boolean;
 }
 
 class DockerController {
@@ -3202,7 +3208,7 @@ class DockerController {
   ): Promise<void> {
     if (options?.allowEndpointContainer) return;
     const { evaluateDockerEndpointContainer } = await import('../helpers/dockerEndpointGuard');
-    const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker);
+    const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker, { allowProvider: options?.allowEndpointProvider });
     if (refusal) throw new DockerEndpointProtectedError(refusal);
   }
 
