@@ -14,6 +14,7 @@ import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConf
 import { ReconnectingOverlay } from '@/components/FleetView/ReconnectingOverlay';
 import { useFleetUpdateStatus } from '@/components/FleetView/hooks/useFleetUpdateStatus';
 import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
+import { NodeConnectionPin, nodeConnection } from '@/components/FleetView/NodeConnectionPin';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
 
@@ -98,10 +99,19 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
+// Exception-only status: a healthy node carries no state word (DESIGN.md 9.5).
+function nodeExceptions(node: FleetNode): string[] {
+  const exceptions: string[] = [];
+  if (node.status !== 'online') exceptions.push('offline');
+  else if (isCritical(node)) exceptions.push('critical');
+  if (node.cordoned) exceptions.push('cordoned');
+  return exceptions;
+}
+
+function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNode; mode: string | undefined; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
   const tone = nodeTone(node);
   const local = node.type === 'local';
-  const stateLabel = node.status !== 'online' ? 'offline' : isCritical(node) ? 'critical' : 'online';
+  const exceptions = nodeExceptions(node);
   return (
     <button
       type="button"
@@ -110,13 +120,8 @@ function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isA
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
       <div className="flex items-center gap-2.5 px-[13px] pb-2.5 pt-3">
-        <StateDot tone={tone} size={7} glow pulse={local} />
+        <StateDot tone={tone} size={7} glow />
         <span className="min-w-0 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
-        {local ? (
-          <span className="rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
-            you are here
-          </span>
-        ) : null}
         {isActive && !local ? (
           <span className="rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
             active
@@ -127,9 +132,12 @@ function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isA
             <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
           </span>
         ) : null}
-        <Kicker className={tone === 'destructive' ? 'text-destructive' : tone === 'warning' ? 'text-warning' : 'text-stat-subtitle'}>
-          {node.cordoned ? 'cordoned' : stateLabel}
-        </Kicker>
+        {exceptions.length > 0 ? (
+          <Kicker className={node.status !== 'online' ? 'text-destructive' : 'text-warning'}>
+            {exceptions.join(' · ')}
+          </Kicker>
+        ) : null}
+        <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
       </div>
       <div className="flex items-stretch divide-x divide-hairline border-t border-hairline">
         <StatCell label="stacks" value={`${node.stacks?.length ?? 0}`} />
@@ -233,7 +241,7 @@ function NodeDetail({
           <StatePill tone={tone} live={!online}>{node.cordoned ? 'cordoned' : online ? (isCritical(node) ? 'degraded' : 'online') : 'offline'}</StatePill>
         </div>
         <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">
-          {`${node.type} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - lastSeen)}` : ''}`}
+          {`${nodeConnection(node.type, registryNode?.mode ?? node.mode)} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - lastSeen)}` : ''}`}
         </div>
       </div>
 
@@ -319,7 +327,7 @@ function NodeDetail({
 
 export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: MobileFleetProps) {
   const { nodes, loading, lastSyncAt, refetch } = useMobileFleet();
-  const { activeNode } = useNodes();
+  const { activeNode, nodes: registryNodes } = useNodes();
   const { isAdmin } = useAuth();
   const updateStatus = useFleetUpdateStatus();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -437,6 +445,7 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
                   <div key={node.id} className="flex flex-col gap-2.5">
                     <NodeCard
                       node={node}
+                      mode={registryNodes.find(n => n.id === node.id)?.mode ?? node.mode}
                       isActive={activeNode?.id === node.id}
                       isDevImage={Boolean(nodeUpdateStatus?.isDevImage)}
                       onOpen={() => setSelectedId(node.id)}

@@ -130,9 +130,9 @@ Switch the segmented control to **Topology** to swap the grid for a hub-and-spok
 
 Each node card in the topology graph carries:
 
-- A **status pill** at the top reading `Online`, `Critical`, or `Offline`, with a coloured dot.
-- A **Local** or **Remote** label in the top-right.
-- A **lightning icon** when the node is critical; a clock icon when a pilot-tunnel node's heartbeat has gone stale; the card frame mutes when the node is offline.
+- A **status dot** at the top. A healthy node shows only the dot; a node that needs attention adds `Critical` or `Offline` beside it.
+- The same corner marker as the grid cards in the top-right: `★ Local`, `Proxy`, or `Pilot`, showing how the control instance reaches the node.
+- A clock icon when a pilot-tunnel node's heartbeat has gone stale; the card frame mutes when the node is offline.
 - The node name with a server icon.
 - A row of **node label** pills, when the node carries any (matching the labels set in **Settings · Infrastructure · Nodes**), with a `+N` overflow tooltip past the first few.
 - Three compact **CPU / MEM / DISK** bars with the percent value at the right of each row.

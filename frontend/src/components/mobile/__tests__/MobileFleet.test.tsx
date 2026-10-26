@@ -162,3 +162,60 @@ describe('MobileFleet dev-build capability', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('MobileFleet node identity', () => {
+  const edge = (overrides: Partial<FleetNode> = {}) =>
+    makeNode({ id: 2, name: 'Edge', type: 'remote', ...overrides });
+
+  it('pins Local, Proxy and Pilot in the same corner vocabulary as the desktop card', async () => {
+    setupFetch(
+      [makeNode(), edge({ mode: 'proxy' }), edge({ id: 3, name: 'Tunnel', mode: 'pilot_agent' })],
+      [],
+    );
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('★ Local')).toBeInTheDocument();
+    expect(screen.getByText('Proxy')).toBeInTheDocument();
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('shows no state word on a healthy node and no separate you-are-here chip', async () => {
+    setupFetch([makeNode(), edge()], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('★ Local');
+    expect(screen.queryByText('online')).not.toBeInTheDocument();
+    expect(screen.queryByText(/you are here/i)).not.toBeInTheDocument();
+  });
+
+  it('prefers the registry connection mode over the fleet payload', async () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'proxy' }],
+      activeNode: null,
+      hasCapability: vi.fn(() => false),
+    });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('Proxy')).toBeInTheDocument();
+    expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
+  });
+
+  it('says offline and cordoned together for an offline cordoned node, keeping its pin', async () => {
+    setupFetch([edge({ mode: 'pilot_agent', status: 'offline', cordoned: true })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    expect(await screen.findByText('offline · cordoned')).toBeInTheDocument();
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('names the connection, not local or remote, in the node detail meta line', async () => {
+    // The detail screen mounts NodeDetailsSheet, which reads nodeMeta from the node context.
+    useNodesMock.mockReturnValue({ nodes: [], activeNode: null, nodeMeta: new Map(), hasCapability: vi.fn(() => false) });
+    setupFetch([edge({ mode: 'pilot_agent' })], []);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Edge/ }));
+    expect(await screen.findByText(/^pilot · 1 stacks/)).toBeInTheDocument();
+  });
+});
