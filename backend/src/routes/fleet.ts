@@ -2380,9 +2380,9 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 
 // ─── Fleet Actions: blast-radius preview endpoints (non-destructive) ───
 //
-// Power the live plans in the Fleet Actions sheets. Same auth gates as the
-// destructive endpoints above so the surface stays uniform: an operator who
-// can fire `fleet-stop` is also the operator who can ask how big it would be.
+// Power the live plans in the Fleet Actions sheets and the amount on the Actions
+// list row. Each preview has its own gate: node:read for the label previews,
+// admin for the prune estimate.
 
 // Per-label fleet preview. Fans out to every node authoritatively (local DB +
 // live remote reads via collectFleetLabelSummaries) and reports, per node, the

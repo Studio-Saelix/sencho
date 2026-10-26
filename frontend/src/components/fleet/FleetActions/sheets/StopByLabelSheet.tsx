@@ -116,7 +116,9 @@ function PlanPath({ preview, targets, unreachable, failedToResolve, denied, labe
     // A dry run resolved the label to nothing, which is an answer, not a missing preview.
     return (
       <StatusPath
-        answer={{ tone: 'neutral', title: 'No stacks match', line: 'The dry run found no stack carrying this label on a reachable node.', marker }}
+        answer={failedToResolve > 0
+          ? { tone: 'warning', title: 'Nothing could be resolved', line: `${plural(failedToResolve, 'stack')} carrying this label failed their dry run.`, marker }
+          : { tone: 'neutral', title: 'No stacks match', line: 'The dry run found no stack carrying this label on a reachable node.', marker }}
         stages={[]}
         proof={unreachable.length > 0 ? { label: 'Unreachable nodes', children: <UnreachableList nodes={unreachable} /> } : undefined}
       />

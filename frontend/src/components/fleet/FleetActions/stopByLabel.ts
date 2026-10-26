@@ -42,7 +42,7 @@ export function isSuggestion(value: unknown): value is FleetStopLabelSuggestion 
     && typeof s.nodeCount === 'number' && typeof s.stackCount === 'number' && nodesOk;
 }
 
-// The Plan section renders `perNode` (filter/some) outside any
+// The Stop flow and the Plan section read `perNode` (filter/some) outside any
 // try/catch, so a malformed success body would throw during render rather than
 // degrade. Validate the load-bearing shape before trusting it; anything off
 // falls to the "unavailable" state.
@@ -59,6 +59,7 @@ export function isMatchPreviewResponse(value: unknown): value is MatchPreviewRes
       && typeof node.reachable === 'boolean'
       && typeof node.stackCount === 'number'
       && Array.isArray(node.stackNames)
-      && node.stackNames.every((name) => typeof name === 'string');
+      && node.stackNames.every((name) => typeof name === 'string')
+      && (node.error === undefined || typeof node.error === 'string');
   });
 }

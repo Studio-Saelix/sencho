@@ -25,8 +25,11 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
     return suggestions.filter(s => s.name.toLowerCase().includes(q));
   }, [value, suggestions]);
 
+  // A list that is not on screen (nothing matches, or the input is disabled) has no Escape to claim.
+  const listVisible = open && !disabled && filtered.length > 0;
+
   useEffect(() => {
-    if (!open) return;
+    if (!listVisible) return;
     const onClick = (e: MouseEvent) => {
       if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
         setOpen(false);
@@ -46,7 +49,7 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
       document.removeEventListener('mousedown', onClick);
       window.removeEventListener('keydown', onKey, true);
     };
-  }, [open]);
+  }, [listVisible]);
 
   const handleSelect = (next: string) => {
     onChange(next);
@@ -71,7 +74,7 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
         autoComplete="off"
         spellCheck={false}
       />
-      {open && filtered.length > 0 && (
+      {listVisible && (
         <div className="absolute left-0 top-full mt-1 z-50 w-full rounded-md border border-glass-border bg-popover text-popover-foreground shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
           <ul className="max-h-[200px] overflow-y-auto overflow-x-hidden p-1">
             {filtered.map((s) => {

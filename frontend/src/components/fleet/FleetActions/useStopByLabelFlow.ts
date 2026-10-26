@@ -148,7 +148,7 @@ export function useStopByLabelFlow(open: boolean) {
         setPreview({ kind: 'ready', data, label: trimmed });
       } catch (err) {
         if (cancelled) return;
-        // Non-destructive readout: the operator can still resolve the targets
+        // Non-destructive preview: the operator can still resolve the targets
         // with a dry run, so we degrade to "unavailable" rather than toasting,
         // but leave a console trail so a recurring failure is diagnosable.
         console.error('[FleetStop] match-preview failed', err);
@@ -168,7 +168,7 @@ export function useStopByLabelFlow(open: boolean) {
   const resolvedTargets = useMemo<ResolvedTarget[] | null>(() => {
     if (preview.kind === 'ready' && preview.label === trimmed) {
       return preview.data.perNode
-        .filter(n => n.reachable && n.stackCount > 0)
+        .filter(n => n.reachable && n.stackNames.length > 0)
         .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackNames }));
     }
     if (dryRunResolved && dryRunResolved.label === trimmed && trimmed.length > 0) {
@@ -252,7 +252,11 @@ function snapshotOf(label: string, apiResults: FleetStopNodeResult[]): DryRunSna
   const targets: ResolvedTarget[] = [];
   let failed = 0;
   for (const n of apiResults) {
-    if (!n.reachable || !n.matched || !Array.isArray(n.stackResults)) continue;
+    if (!n.reachable || !n.matched) continue;
+    if (!Array.isArray(n.stackResults)) {
+      failed += 1;
+      continue;
+    }
     // A stack whose dry run errored is not part of the blast radius Stop may run against.
     const resolved = n.stackResults.filter(s => s.success);
     failed += n.stackResults.length - resolved.length;

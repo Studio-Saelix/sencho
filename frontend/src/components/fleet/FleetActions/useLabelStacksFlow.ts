@@ -58,7 +58,10 @@ async function loadNode(node: FleetNode): Promise<NodeData> {
     ]);
     const stacks: unknown = stacksRes.ok ? await stacksRes.json() : null;
     const labels: unknown = labelsRes.ok ? await labelsRes.json() : null;
-    if (!Array.isArray(stacks) || !Array.isArray(labels)) {
+    const wellFormed = Array.isArray(stacks) && Array.isArray(labels)
+      && stacks.every((stack) => typeof stack === 'string')
+      && labels.every((label) => typeof label?.name === 'string' && typeof label?.color === 'string');
+    if (!wellFormed) {
       console.warn(`[LabelStacks] node ${node.id} (${node.name}) load incomplete: stacks ${stacksRes.status}, labels ${labelsRes.status}`);
       return { node, reachable: false, stacks: [], labels: [] };
     }
@@ -137,15 +140,28 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
   const nodesRef = useRef(nodes);
   useEffect(() => { nodesRef.current = nodes; });
   const nodeIds = nodes.map(n => n.id).join(',');
-  // A finished or running assign must not be wiped by a roster change.
+  // A finished or running assign must not be wiped by a roster change. A change
+  // that arrives while locked is replayed once the lock releases.
   const lockedRef = useRef(false);
-  useEffect(() => { lockedRef.current = running || outcome !== null; }, [running, outcome]);
+  const reloadPendingRef = useRef(false);
+  useEffect(() => {
+    lockedRef.current = running || outcome !== null;
+    if (!lockedRef.current && reloadPendingRef.current) {
+      reloadPendingRef.current = false;
+      setRefreshKey((key) => key + 1);
+    }
+  }, [running, outcome]);
 
-  // Reload when the node set changes or the operator refreshes. Resets the
+  // Reload when the node set changes or the operator refreshes, unless a run is
+  // in flight or finished (the change is replayed once it releases). Resets the
   // selection because a refreshed fleet can no longer guarantee the previously
   // picked stacks still exist.
   useEffect(() => {
-    if (!open || lockedRef.current) return;
+    if (!open) return;
+    if (lockedRef.current) {
+      reloadPendingRef.current = true;
+      return;
+    }
     let cancelled = false;
     async function load() {
       setLoading(true);
@@ -217,6 +233,7 @@ export function useLabelStacksFlow({ open, nodes }: Options) {
   }
 
   async function run() {
+    if (running || outcome !== null) return;
     if (!selectedTemplate || totalSelected === 0 || !canApplySelection) return;
     const targets = Array.from(selected.entries())
       .filter(([, set]) => set.size > 0)

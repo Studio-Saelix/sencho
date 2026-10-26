@@ -320,8 +320,8 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
 });
 
 // Non-destructive size estimate for a prune target/scope. The Fleet Actions
-// "Reclaim disk space" row calls this on each remote node to show how much a
-// prune would free before the operator opens the sheet. Reuses the same Docker
+// "Reclaim disk space" row's fleet estimate calls this on each remote node to
+// show how much a prune would free before the operator opens the sheet. Reuses the same Docker
 // enumeration as `/prune/system` so the estimate matches what the destructive
 // path would reclaim.
 systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Response) => {

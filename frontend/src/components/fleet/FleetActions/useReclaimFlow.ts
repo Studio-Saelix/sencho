@@ -53,7 +53,7 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
   const settledRef = useRef(false);
   const runningRef = useRef(false);
   // The key of the last plan effect run: a repeat of the same key (open, Rebuild,
-  // a retry) builds at once, only a changed input waits for the operator to finish.
+  // a retry) builds at once, a changed key (options or roster) waits out the debounce.
   const lastKeyRef = useRef<string | null>(null);
   useEffect(() => { settledRef.current = phase.kind === 'done'; }, [phase.kind]);
 
@@ -136,6 +136,7 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
     const toastId = toast.loading(`Pruning ${selectedTargets.join(', ')} across the fleet…`);
     runningRef.current = true;
     setRunning(true);
+    setNotice(null);
     let finished = false;
     try {
       const response = await apiFetch('/fleet/labels/fleet-prune', {
@@ -164,7 +165,6 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
       }
       if (!executeResultsAreValid(data?.results, review.results, selectedTargets)) {
         // The request was accepted, so some nodes may already have pruned.
-        onPruned();
         setNotice('Some nodes may already have pruned. Review the new plan.');
         throw new Error('Fleet prune returned an incomplete node result set');
       }
@@ -176,7 +176,9 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
       console.error('Fleet prune failed', error);
       const message = error instanceof Error ? error.message : 'Fleet prune failed';
       toast.error(message);
-      setNotice((current) => current ?? `${message}. Review the new plan.`);
+      setNotice((current) => current ?? `${message.replace(/\.$/, '')}. Review the new plan.`);
+      // A refusal other than a stale plan may still have left a partial prune behind.
+      onPruned();
     } finally {
       toast.dismiss(toastId);
       runningRef.current = false;

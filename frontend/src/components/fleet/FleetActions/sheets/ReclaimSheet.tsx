@@ -83,10 +83,10 @@ export function ReclaimSheet({ open, onOpenChange, nodes, onPruned }: Props) {
       </SheetSection>
 
       <SheetSection title={done ? 'Result' : 'Plan'}>
-        {phase.kind === 'building' && (showBusy ? <PlanSkeleton /> : <div className="h-[88px]" aria-hidden />)}
+        {phase.kind === 'building' && (showBusy ? <PlanSkeleton /> : <div data-testid="plan-building" className="h-[88px]" aria-hidden />)}
         {phase.kind === 'idle' && <p className="text-xs text-stat-subtitle">Pick at least one target to build a plan.</p>}
         {phase.kind === 'failed' && (
-          <StatusPath answer={{ tone: 'destructive', title: 'Plan unavailable', line: phase.message }} stages={[]} />
+          <StatusPath answer={{ tone: 'destructive', title: 'Plan unavailable', line: phase.message, detail: flow.notice }} stages={[]} />
         )}
         {phase.kind === 'ready' && flow.review && (
           <StatusPath
@@ -105,7 +105,7 @@ export function ReclaimSheet({ open, onOpenChange, nodes, onPruned }: Props) {
 
 function PlanSkeleton() {
   return (
-    <div aria-busy="true" className="space-y-2">
+    <div data-testid="plan-building" aria-busy="true" className="space-y-2">
       <Skeleton className="h-14 w-full" />
       <Skeleton className="h-4 w-28" />
     </div>

@@ -633,3 +633,88 @@ it('locks the label while a stop runs and cannot be dismissed until it finishes'
   });
   expect(await screen.findByText('Stopped 1 stack')).toBeInTheDocument();
 });
+
+it('keeps the unreachable marker and node list on a dry run that resolved nothing', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [
+          { nodeId: 1, nodeName: 'central', reachable: true, matched: false, stackResults: [] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: false, matched: false, stackResults: [], error: 'Remote node not configured' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('No stacks match')).toBeInTheDocument();
+  expect(screen.getByText('1 unreachable, left out')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Unreachable nodes' }));
+  expect(screen.getByText('edge-1')).toBeInTheDocument();
+});
+
+it('does not call a dry run where every stack failed "no stacks match"', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: false, error: 'busy' }] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('Nothing could be resolved')).toBeInTheDocument();
+  expect(screen.getByText('1 stack carrying this label failed their dry run.')).toBeInTheDocument();
+  expect(screen.queryByText('No stacks match')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+it('counts a node with a malformed dry-run body as failed instead of dropping it', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [
+          { nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: true, matched: true, stackResults: 'nope' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('Stops 1 stack')).toBeInTheDocument();
+  expect(screen.getByText('1 could not be resolved')).toBeInTheDocument();
+});
+
+it('treats a preview with non-string stack names as unavailable', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(previewOf([{ ...centralWeb, stackNames: [42] }], { nodes: 1, stacks: 1 }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  expect(await screen.findByText('Preview unavailable', undefined, WAIT)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+it('lets the first Escape close the sheet when no suggestion list is on screen', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => suggestionsRoute(url) ?? Promise.resolve(jsonResponse(404, {})));
+  const { onOpenChange } = renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'zzz');
+  expect(screen.queryByRole('button', { name: /production/ })).not.toBeInTheDocument();
+  await user.keyboard('{Escape}');
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});

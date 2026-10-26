@@ -156,3 +156,9 @@ it('refreshes the Reclaim hint after a prune and opens Reclaim fresh the next ti
   expect(within(reopened).queryByRole('button', { name: 'Done' })).not.toBeInTheDocument();
   expect(await within(reopened).findByRole('button', { name: 'Prune' })).toBeInTheDocument();
 });
+
+it('describes each verb by its action name and description', () => {
+  render(<FleetActionsTab nodes={nodes} />);
+  const stop = screen.getByRole('button', { name: 'Stop…' });
+  expect(stop).toHaveAccessibleDescription('Stop stacks by label Every stack with a label, on every node');
+});

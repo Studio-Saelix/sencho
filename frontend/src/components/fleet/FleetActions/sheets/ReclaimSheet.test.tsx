@@ -434,7 +434,7 @@ it('sends every reviewed node but only the reachable ones with a fingerprint', a
   });
 });
 
-it('drops the plan at once after a refused run, so Prune cannot be clicked again on it', async () => {
+it('does not let Prune be clicked again on the old plan after a refused run', async () => {
   const user = userEvent.setup();
   let dryRuns = 0;
   mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
@@ -506,4 +506,78 @@ it('cannot be dismissed while a prune is running, and closes from Done afterward
   await act(async () => { finish!(jsonResponse(200, { results: [removedResult] })); });
   await user.click(await screen.findByRole('button', { name: 'Done' }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+it('shows the building placeholder, not a blank section, when the roster changes while Prune runs', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(404, {}));
+    if (JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(200, { results: [planResult] }));
+    return new Promise<Response>((resolve) => { finish = resolve; });
+  });
+  const view = renderSheet();
+  await pruneNow(user);
+  await waitFor(() => expect(finish).not.toBeNull());
+  expect(screen.queryByTestId('plan-building')).not.toBeInTheDocument();
+
+  view.rerender(<ReclaimSheet open onOpenChange={vi.fn()} nodes={[{ ...nodes[0], status: 'offline' }] as FleetNode[]} onPruned={vi.fn()} />);
+  expect(await screen.findByTestId('plan-building')).toBeInTheDocument();
+  await act(async () => { finish!(jsonResponse(200, { results: [removedResult] })); });
+  await screen.findByText('Reclaimed 4 KB');
+});
+
+it('clears a refusal notice when the options change', async () => {
+  const user = userEvent.setup();
+  routePrune(() => jsonResponse(200, { results: [planResult] }), () => jsonResponse(500, { error: 'Docker is busy' }));
+  renderSheet();
+  await pruneNow(user);
+  expect(await screen.findByText(/Docker is busy\. Review the new plan\./)).toBeInTheDocument();
+  await user.click(screen.getByRole('checkbox', { name: 'Volumes' }));
+  await waitFor(() => expect(screen.queryByText(/Docker is busy/)).not.toBeInTheDocument());
+});
+
+it('refreshes the estimate after a refused run, because nodes may already have pruned', async () => {
+  const user = userEvent.setup();
+  routePrune(() => jsonResponse(200, { results: [planResult] }), () => jsonResponse(500, { error: 'Docker is busy' }));
+  const { onPruned } = renderSheet();
+  await pruneNow(user);
+  await waitFor(() => expect(onPruned).toHaveBeenCalledTimes(1));
+});
+
+it('keeps the refusal notice on the failure when the rebuilt plan cannot be built either', async () => {
+  const user = userEvent.setup();
+  let dryRuns = 0;
+  mockedFetch.mockImplementation((url: string, init?: RequestInit) => {
+    if (url !== '/fleet/labels/fleet-prune') return Promise.resolve(jsonResponse(404, {}));
+    if (!JSON.parse(String(init?.body)).dryRun) return Promise.resolve(jsonResponse(500, { error: 'Docker is busy' }));
+    dryRuns += 1;
+    return Promise.resolve(dryRuns === 1 ? jsonResponse(200, { results: [planResult] }) : jsonResponse(500, { error: 'Docker is down' }));
+  });
+  renderSheet();
+  await pruneNow(user);
+  expect(await screen.findByText('Plan unavailable')).toBeInTheDocument();
+  expect(screen.getByText('Docker is down')).toBeInTheDocument();
+  expect(screen.getByText(/Docker is busy\. Review the new plan\./)).toBeInTheDocument();
+});
+
+it('replaces an earlier stale-plan notice with the failure of the next run', async () => {
+  const user = userEvent.setup();
+  let executes = 0;
+  routePrune(
+    () => jsonResponse(200, { results: [planResult] }),
+    () => {
+      executes += 1;
+      return executes === 1
+        ? jsonResponse(409, { code: 'PRUNE_PLAN_STALE', nodeId: 1, error: 'The prune plan changed on central after the dry run' })
+        : jsonResponse(500, { error: 'Docker is busy' });
+    },
+  );
+  renderSheet();
+  await pruneNow(user);
+  expect(await screen.findByText(/The plan changed on “central”/)).toBeInTheDocument();
+  await waitForPlan();
+  await user.click(screen.getByRole('button', { name: 'Prune' }));
+  expect(await screen.findByText(/Docker is busy\. Review the new plan\./)).toBeInTheDocument();
+  expect(screen.queryByText(/The plan changed on “central”/)).not.toBeInTheDocument();
 });

@@ -339,3 +339,38 @@ it('keeps the selection while Apply runs, and cannot be dismissed until it finis
   });
   expect(await screen.findByText('Assigned “prod” to 1 stack')).toBeInTheDocument();
 });
+
+it('treats stack names or labels of the wrong type as an unreachable node', async () => {
+  mockedFetchForNode.mockImplementation((path: string, nodeId: number) => {
+    if (path === '/fleet/node/2/stacks') return Promise.resolve(jsonResponse(200, [1, 2]));
+    return defaultReads(path, nodeId);
+  });
+  renderSheet();
+  await screen.findByText('web');
+  await waitFor(() => expect(screen.getByText('unreachable')).toBeInTheDocument());
+});
+
+it('reloads for a roster change that arrived while an assign was running and then failed', async () => {
+  const user = userEvent.setup();
+  let finish: ((response: Response) => void) | null = null;
+  mockedApiFetch.mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const { onOpenChange, rerender } = renderSheet();
+  await screen.findByText('web');
+  await user.click(screen.getByText('prod'));
+  await user.click(screen.getByText('web'));
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await waitFor(() => expect(finish).not.toBeNull());
+
+  const more = [...nodes, { id: 3, name: 'edge-b', type: 'remote', status: 'online' }] as unknown as FleetNode[];
+  rerender(<LabelStacksSheet open onOpenChange={onOpenChange} nodes={more} />);
+  const readsDuringRun = mockedFetchForNode.mock.calls.length;
+  await act(async () => { finish!(jsonResponse(500, { error: 'assign failed' })); });
+  await waitFor(() => expect(mockedFetchForNode.mock.calls.length).toBeGreaterThan(readsDuringRun));
+  expect(mockedFetchForNode.mock.calls.some((call) => call[1] === 3)).toBe(true);
+});
+
+it('names the stack filter for assistive technology', async () => {
+  renderSheet();
+  await screen.findByText('web');
+  expect(screen.getByRole('textbox', { name: 'Filter stacks' })).toBeInTheDocument();
+});
