@@ -4,8 +4,8 @@
  * Mesh is not tier-gated. Node enable/disable and override regeneration are
  * permission-gated. Stack membership remains Admin-only because a membership
  * change redeploys every affected mesh stack. The read routes (status,
- * aliases, activity, diagnostics) need only the read permission (node:read /
- * stack:read), not Admin, which is what lets a non-admin see a read-only
+ * aliases, activity, diagnostics) need only the read permission (node:read),
+ * not Admin, which is what lets a non-admin see a read-only
  * Routing tab. The node-to-node routes that central calls over the proxy on the
  * operator's behalf (local-override PUT/DELETE, alias test) are intentionally
  * not admin-gated. These tests lock that split so the backend
@@ -64,8 +64,8 @@ describe('mesh is not tier-gated', () => {
         expect(res.status).toBe(200);
     });
 
-    // Every route except the SSE activity stream, which never ends a response.
-    // Handlers may still 4xx/5xx for other reasons in the test environment;
+    // Every route except the SSE activity stream, which never ends a response;
+    // the stream has its own test below. Handlers may still 4xx/5xx for other reasons in the test environment;
     // only a tier rejection is asserted absent.
     const everyRoute: { method: 'get' | 'post' | 'put' | 'delete'; path: () => string }[] = [
         { method: 'get', path: () => '/api/mesh/status' },
@@ -92,6 +92,35 @@ describe('mesh is not tier-gated', () => {
             expect(res.body.code).not.toBe('PAID_REQUIRED');
         });
     }
+
+    // Opens the stream, reads only the response head, then drops the socket so
+    // the handler's close listener unsubscribes.
+    async function openActivityStream(token: string): Promise<{ status: number; headers: Record<string, string>; code?: string }> {
+        const req = request(app).get('/api/mesh/activity/stream')
+            .set('Authorization', `Bearer ${token}`)
+            .buffer(false);
+        return new Promise((resolve, reject) => {
+            req.on('response', r => {
+                resolve({ status: r.status, headers: r.headers as Record<string, string>, code: r.body?.code });
+                r.destroy();
+            });
+            req.on('error', reject);
+            req.end();
+        });
+    }
+
+    it('opens the activity stream for a Community admin', async () => {
+        const res = await openActivityStream(userToken(TEST_USERNAME));
+        expect(res.code).not.toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain('text/event-stream');
+    });
+
+    it('opens the activity stream for a Community viewer', async () => {
+        const res = await openActivityStream(userToken('mesh-viewer'));
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain('text/event-stream');
+    });
 
     it('serves aliases identically on a paid instance', async () => {
         setTier('paid');

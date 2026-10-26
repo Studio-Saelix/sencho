@@ -8,8 +8,9 @@ vi.mock('@/hooks/useExperimental', () => ({
 }));
 
 // Community license: Routing must not depend on a paid tier.
+const useLicenseMock = vi.fn(() => ({ isPaid: false, isAdmiral: false, licenseStatus: 'ready' as 'ready' | 'loading' }));
 vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => ({ isPaid: false, isAdmiral: false, licenseStatus: 'ready' as const }),
+  useLicense: () => useLicenseMock(),
 }));
 const useAuthMock = vi.fn(() => ({ isAdmin: true as boolean, can: () => true as boolean }));
 vi.mock('@/context/AuthContext', () => ({
@@ -103,12 +104,55 @@ describe('FleetView tab discovery and deep-link fallback', () => {
   beforeEach(() => {
     useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
     useAuthMock.mockReturnValue({ isAdmin: true, can: () => true });
+    useLicenseMock.mockReturnValue({ isPaid: false, isAdmiral: false, licenseStatus: 'ready' });
   });
 
   it('shows Routing when experimental is on; Secrets always visible for Admin', () => {
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
+  });
+
+  it('renders the Routing panel on a Community license when experimental is on', () => {
+    const onTab = vi.fn();
+    render(
+      <FleetView
+        onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
+        fleetActiveTab="routing"
+        onFleetActiveTabChange={onTab}
+      />,
+    );
+    expect(screen.getByTestId('routing-tab')).toBeTruthy();
+    expect(onTab).not.toHaveBeenCalled();
+  });
+
+  it('keeps a Routing deep link and panel while the license is still loading', () => {
+    useLicenseMock.mockReturnValue({ isPaid: false, isAdmiral: false, licenseStatus: 'loading' });
+    const onTab = vi.fn();
+    render(
+      <FleetView
+        onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
+        fleetActiveTab="routing"
+        onFleetActiveTabChange={onTab}
+      />,
+    );
+    expect(screen.getByTestId('routing-tab')).toBeTruthy();
+    expect(onTab).not.toHaveBeenCalled();
+  });
+
+  it('renders no Routing panel when experimental is off', () => {
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+    render(
+      <FleetView
+        onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
+        fleetActiveTab="routing"
+        onFleetActiveTabChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('routing-tab')).toBeNull();
   });
 
   it('hides Routing when experimental off; Secrets stays visible for Admin', () => {
