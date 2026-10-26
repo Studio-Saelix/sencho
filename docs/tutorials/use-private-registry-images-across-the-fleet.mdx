@@ -29,10 +29,6 @@ It covers one GHCR credential and one image. It does not cover AWS ECR, browsing
 
 - Host port `8099` free on `edge-01` and `edge-02`, and `8100` free on all three nodes.
 
-<Warning>
-  Every step below deploys containers to real nodes. Use nodes you can afford to break, not production hosts.
-</Warning>
-
 <Steps>
   <Step title="Confirm the nodes cannot pull the image on their own">
     On `edge-01`, run:

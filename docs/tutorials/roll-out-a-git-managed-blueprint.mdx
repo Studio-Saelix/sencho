@@ -33,10 +33,6 @@ This tutorial does not cover sources that fetch or apply on their own, the place
 
   Host port `8088` must be free on every node.
 
-<Warning>
-  Every step below deploys to real nodes. Use nodes you can afford to break, not production hosts.
-</Warning>
-
 <Steps>
   <Step title="Create the source stack from your repository">
     Select **Create Stack** in the sidebar and open the **From Git** tab. Enter `storefront-git` as the **Stack Name**, your repository URL as the **Repository URL**, and `main` as the **Ref**. Leave `compose.yaml` as the compose file. Under **Authentication**, choose what your repository needs. For a private SSH repository, choose **Deploy key (SSH)**, select **Fetch host key fingerprint**, and paste the private key.
