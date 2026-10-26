@@ -100,7 +100,7 @@ export function LabelStacksSheet({ open, onOpenChange, nodes }: Props) {
               <div key={entry.node.id} className="rounded-md border border-card-border/40 p-2">
                 <div className="mb-1 flex items-center justify-between">
                   <span className={cn(KICKER, 'text-stat-value')}>
-                    {entry.node.name}{entry.node.type === 'local' ? ' · local' : ''}
+                    {entry.node.name}{entry.node.type === 'local' && !/local/i.test(entry.node.name) ? ' · local' : ''}
                   </span>
                   {entry.reachable && stacks.length > 0 ? (
                     <button

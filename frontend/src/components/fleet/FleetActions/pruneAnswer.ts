@@ -34,12 +34,14 @@ export function planAnswer(summary: PlanSummary, notice: string | null): StatusP
   if (summary.items === 0) {
     return { tone: 'neutral', title: 'Nothing to reclaim', line: `${plural(summary.reachable, 'node')} reviewed, no unused resources found.`, marker, detail };
   }
+  // Volumes and networks report no size, so a plan of only those has no byte total to lead with.
+  const sized = summary.bytes > 0 || summary.unsized < summary.items;
   return {
     tone: 'warning',
-    title: `${formatBytes(summary.bytes)} to reclaim`,
-    line: `${plural(summary.items, 'item')} on ${plural(summary.reachable, 'node')}`,
+    title: sized ? `${formatBytes(summary.bytes)} to reclaim` : `${plural(summary.items, 'item')} to reclaim`,
+    line: sized ? `${plural(summary.items, 'item')} on ${plural(summary.reachable, 'node')}` : `on ${plural(summary.reachable, 'node')}`,
     marker,
-    detail,
+    detail: sized ? detail : [notice, 'No size is reported for these items.'].filter(Boolean).join(' '),
   };
 }
 
@@ -64,7 +66,10 @@ export function outcomeSummary(results: FleetPruneNodeResult[]): OutcomeSummary 
   const removedAny = removed > 0;
   const marker = [failed > 0 && `${failed} failed`, skipped > 0 && `${skipped} skipped`].filter(Boolean).join(' · ') || undefined;
   const nodes = plural(results.length, 'node');
-  const line = outcomes.length > 0 ? `${plural(removed, 'item')} removed on ${nodes}` : `Across ${nodes}`;
+  // Volumes and networks report no size, so a prune of only those has no byte total to lead with.
+  const reclaimedLabel = reclaimed > 0 || removed === 0 ? formatBytes(reclaimed) : null;
+  const done = reclaimedLabel ? `${reclaimedLabel} reclaimed` : `${plural(removed, 'item')} removed`;
+  const line = reclaimedLabel && outcomes.length > 0 ? `${plural(removed, 'item')} removed on ${nodes}` : `Across ${nodes}`;
 
   if (stale && !removedAny) {
     return {
@@ -73,9 +78,10 @@ export function outcomeSummary(results: FleetPruneNodeResult[]): OutcomeSummary 
     };
   }
   if (stale || failedAny) {
-    const title = stale ? `Partly pruned, ${formatBytes(reclaimed)} reclaimed` : `${formatBytes(reclaimed)} reclaimed with failures`;
+    const title = stale ? `Partly pruned, ${done}` : `${done} with failures`;
     const detail = stale ? `The plan changed on “${stale.nodeName}” after it was built.` : undefined;
     return { answer: { tone: 'warning', title, line, marker, detail }, stale, removedAny, failedAny, reclaimed };
   }
-  return { answer: { tone: 'success', title: `Reclaimed ${formatBytes(reclaimed)}`, line, marker }, stale, removedAny, failedAny, reclaimed };
+  const title = reclaimedLabel ? `Reclaimed ${reclaimedLabel}` : `Removed ${plural(removed, 'item')}`;
+  return { answer: { tone: 'success', title, line, marker }, stale, removedAny, failedAny, reclaimed };
 }

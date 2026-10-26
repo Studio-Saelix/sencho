@@ -177,7 +177,7 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
 }
 
 function reportOutcome(results: FleetPruneNodeResult[]): void {
-  const { stale, removedAny, failedAny, reclaimed } = outcomeSummary(results);
+  const { answer, stale, removedAny, failedAny, reclaimed } = outcomeSummary(results);
   if (stale && removedAny) {
     toast.warning(`Fleet prune partially completed: ${formatBytes(reclaimed)} reclaimed before the plan changed on “${stale.nodeName}”. Review the new plan.`);
   } else if (stale) {
@@ -185,6 +185,6 @@ function reportOutcome(results: FleetPruneNodeResult[]): void {
   } else if (failedAny) {
     toast.warning(`Fleet prune completed with item failures. ${formatBytes(reclaimed)} reclaimed.`);
   } else {
-    toast.success(`Reclaimed ${formatBytes(reclaimed)} across ${results.length} node${results.length === 1 ? '' : 's'}.`);
+    toast.success(`${answer.title} across ${results.length} node${results.length === 1 ? '' : 's'}.`);
   }
 }

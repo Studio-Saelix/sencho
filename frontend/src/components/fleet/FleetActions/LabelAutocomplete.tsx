@@ -63,6 +63,7 @@ export function LabelAutocomplete({ value, onChange, suggestions, disabled, plac
           if (!open) setOpen(true);
         }}
         onFocus={() => { if (!disabled) setOpen(true); }}
+        onBlur={() => setOpen(false)}
         placeholder={placeholder}
         className="h-9 text-sm"
         disabled={disabled}

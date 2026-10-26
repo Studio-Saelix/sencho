@@ -52,7 +52,6 @@ export function FleetActionsTab({ nodes }: Props) {
           <FleetActionRow
             name="Label stacks"
             description="Add one label to stacks on many nodes"
-            hint={hints.labels}
             verb="Assign…"
             onOpen={open('label')}
           />

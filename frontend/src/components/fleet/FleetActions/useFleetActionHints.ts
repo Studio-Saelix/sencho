@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import { plural } from '@/lib/blueprintTargets';
 import { formatBytes } from '@/lib/utils';
 
 /** One live fact for an Actions row. `unavailable` rows render no hint at all. */
@@ -21,13 +20,12 @@ function isEstimate(value: unknown): value is EstimateResponse {
 }
 
 /**
- * The hints on the Actions list: what a Reclaim would free (images, Sencho-owned,
- * the sheet's default) and how many stack labels exist. Both endpoints are
- * admin-only, so a non-admin session never asks and the rows simply carry no hint.
+ * The hint on the Reclaim row: what a prune would free (images, Sencho-owned, the
+ * sheet's default). The estimate endpoint is admin-only, so a non-admin session
+ * never asks and the row carries no hint.
  */
 export function useFleetActionHints(isAdmin: boolean) {
   const [reclaim, setReclaim] = useState<ActionHint>(isAdmin ? { kind: 'loading' } : { kind: 'unavailable' });
-  const [labels, setLabels] = useState<ActionHint>(isAdmin ? { kind: 'loading' } : { kind: 'unavailable' });
   const [epoch, setEpoch] = useState(0);
 
   useEffect(() => {
@@ -57,29 +55,6 @@ export function useFleetActionHints(isAdmin: boolean) {
     return () => { cancelled = true; };
   }, [isAdmin, epoch]);
 
-  useEffect(() => {
-    if (!isAdmin) return;
-    let cancelled = false;
-    async function loadLabels() {
-      try {
-        const response = await apiFetch('/fleet/labels/suggestions');
-        const data = response.ok ? await response.json().catch(() => null) : null;
-        if (cancelled) return;
-        if (!Array.isArray(data?.suggestions)) {
-          setLabels({ kind: 'unavailable' });
-          return;
-        }
-        const count = data.suggestions.length;
-        setLabels({ kind: 'ready', text: count === 0 ? 'no labels yet' : plural(count, 'label') });
-      } catch (error) {
-        console.error('Failed to load stack labels', error);
-        if (!cancelled) setLabels({ kind: 'unavailable' });
-      }
-    }
-    loadLabels();
-    return () => { cancelled = true; };
-  }, [isAdmin]);
-
   const refreshReclaim = useCallback(() => setEpoch((value) => value + 1), []);
-  return { reclaim, labels, refreshReclaim };
+  return { reclaim, refreshReclaim };
 }
