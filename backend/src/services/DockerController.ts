@@ -330,12 +330,9 @@ export interface LabelInventoryRow {
 }
 
 /**
- * How the Docker endpoint guard treats a stop. One field rather than loose
- * flags, so intents cannot be combined into a silent full bypass.
- *
- * - `batch-checked`: skip the guard, for a caller that has just checked the
- *   whole batch with `assertNoDockerEndpointContainers` and must not pay for
- *   every check twice.
+ * How the Docker endpoint guard treats a stop. `batch-checked` skips the guard,
+ * for a caller that has just checked the whole batch with
+ * `assertNoDockerEndpointContainers` and must not pay for every check twice.
  */
 export interface StopContainerOptions {
   endpointGuard?: 'batch-checked';
@@ -347,7 +344,8 @@ export interface StopContainerOptions {
  * the Docker endpoint provider itself through. For Auto-Heal, which restarts an
  * unhealthy proxy on purpose: bouncing it is the fix. The owner of a namespace
  * the provider or Sencho runs in, a labeled container, and a mislabeled one are
- * still refused.
+ * still refused. One field rather than two flags, so the two intents cannot be
+ * combined into a silent full bypass.
  */
 export interface RestartContainerOptions {
   endpointGuard?: 'batch-checked' | 'allow-provider-restart';
