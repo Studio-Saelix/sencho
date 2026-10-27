@@ -1,7 +1,7 @@
 /**
- * Badge has a default size and a compact one for dense card rows. Lock the
- * size classes so dense surfaces stop re-typing the recipe, and so a caller
- * can still override the height (PinnedUpdateBadge relies on that).
+ * Badge has a default size and a compact one for dense rows and inline
+ * metadata pills. Lock the size classes so dense surfaces stop re-typing the
+ * recipe, and so a caller can still override the height.
  */
 import { it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
