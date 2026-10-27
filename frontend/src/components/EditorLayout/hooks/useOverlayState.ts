@@ -89,10 +89,11 @@ export function useOverlayState() {
   const [pendingLoadOptions, setPendingLoadOptions] = useState<LoadFileOptions | null>(null);
   const [pendingUnsavedNode, setPendingUnsavedNode] = useState<Node | null>(null);
   // A deferred "leave the dirty editor" navigation (back to the list, Home, a
-  // bottom-tab / hamburger destination) or the resume step of a node switch
-  // parked with its destination (see useNodeViewQueue). Wrapped in an object so the state
-  // setter is not mistaken for a functional update. Runs after the user
-  // confirms the unsaved-changes dialog. See useStackActions.attemptLeaveEditor.
+  // bottom-tab / hamburger destination, browser back or forward) or the resume
+  // step of a node switch parked with its destination (see useNodeViewQueue).
+  // Wrapped in an object so the state setter is not mistaken for a functional
+  // update. Runs after the user confirms the unsaved-changes dialog. See
+  // useStackActions.attemptLeaveEditor and attemptPopstateNavigation.
   const [pendingLeaveAction, setPendingLeaveAction] = useState<{
     run: () => void;
     onCancel?: () => void;

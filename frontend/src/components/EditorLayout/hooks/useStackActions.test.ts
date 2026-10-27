@@ -2013,6 +2013,19 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith({ run: perform });
   });
 
+  it.each([
+    ['a stashed navigation', { pendingLeaveAction: { run: vi.fn() } }],
+    ['a stack load', { pendingUnsavedLoad: 'other.yml' }],
+  ])('refuses the navigation and says so when %s already owns the dialog', (_owner, overlay) => {
+    const perform = vi.fn();
+    const { result, overlayState } = setup({ overlay });
+    result.current.attemptLeaveEditor(perform);
+    expect(perform).not.toHaveBeenCalled();
+    // The open prompt keeps its own navigation; nothing replaces it.
+    expect(overlayState.setPendingLeaveAction).not.toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/unsaved-changes prompt first/));
+  });
+
   it('runs the navigation immediately when the editor is clean', () => {
     const perform = vi.fn();
     const { result, overlayState } = setup({

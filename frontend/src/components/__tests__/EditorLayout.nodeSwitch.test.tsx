@@ -36,7 +36,11 @@ interface Captured {
     };
     stackActions: { discardAndLoadPending: () => void; cancelPendingUnsavedLoad: () => void };
   };
-  viewProps?: { activeView: string; onOpenNodeNetworking: (nodeId: number) => void };
+  viewProps?: {
+    activeView: string;
+    onOpenNodeNetworking: (nodeId: number) => void;
+    onOpenNodeSecurity: (nodeId: number, tab: string | null) => void;
+  };
   [key: string]: unknown;
 }
 
@@ -227,6 +231,8 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     makeDirty();
     await clickSettingsLink(1);
     await clickSettingsLink(3);
+    // The second click is the one not followed; the first stays parked.
+    expect(toast.info).toHaveBeenCalledTimes(1);
     expect(store.activeNode.id).toBe(2);
     expect(dialogOpen()).toBe(true);
     await confirmDiscard();
@@ -238,6 +244,7 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     makeDirty();
     await clickSettingsLink(1);
     await clickSettingsLink(1);
+    expect(toast.info).toHaveBeenCalledTimes(1);
     await confirmDiscard();
     expectPolicies(1);
   });
@@ -300,7 +307,7 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     vi.mocked(apiFetch).mockClear();
     await confirmDiscard();
     // Confirming loads that stack on the node the operator is on; the link goes nowhere.
-    expect(vi.mocked(apiFetch).mock.calls.some(([path]) => String(path).includes('app'))).toBe(true);
+    expect(vi.mocked(apiFetch).mock.calls.some(([path]) => String(path).startsWith('/stacks/app.yml'))).toBe(true);
     expect(store.activeNode.id).toBe(2);
     expect(view()).not.toMatch(/^security\|policies\|/);
   });
@@ -316,6 +323,54 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
     expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('app.yml');
     expect(store.activeNode.id).toBe(2);
+  });
+
+  // The refused link's view must not stay queued: a stale one would open Policies
+  // on some later, unrelated arrival at the node. One test per prompt owner.
+  it.each([
+    ['a stack load', async () => { await act(async () => { cap.shell.overlayState.setPendingUnsavedLoad('app.yml'); }); }],
+    ['a stashed navigation', async () => { await act(async () => { cap.shell.overlayState.setPendingLeaveAction({ run: vi.fn() }); }); }],
+    ['a parked node switch', async () => { await act(async () => { setActiveNode(N(3)); }); await flush(); }],
+  ])('leaves no destination queued when the link is refused behind %s', async (_owner, openPrompt) => {
+    await boot();
+    makeDirty();
+    await openPrompt();
+    await clickSettingsLink(1);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
+    await cancelDiscard();
+    expect(dialogOpen()).toBe(false);
+    makeClean();
+    await act(async () => { setActiveNode(N(1)); });
+    await flush();
+    expect(view()).toMatch(/^dashboard\|overview\|/);
+  });
+
+  // The Security-finding link shares the queue; desktop-only like the Networking one.
+  it.skipIf(isMobile)('does the same for the Security-finding link behind a stashed navigation', async () => {
+    await boot();
+    makeDirty();
+    const otherNavigation = vi.fn();
+    await act(async () => { cap.shell.overlayState.setPendingLeaveAction({ run: otherNavigation }); });
+    await act(async () => { cap.viewProps!.onOpenNodeSecurity(1, 'policies'); });
+    await flush();
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
+    await confirmDiscard();
+    expect(otherNavigation).toHaveBeenCalledTimes(1);
+    expect(store.activeNode.id).toBe(2);
+    expect(view()).not.toMatch(/^security\|/);
+  });
+
+  it('discards with a warning, as before, when the previous node was removed behind an open prompt', async () => {
+    await boot();
+    makeDirty();
+    await act(async () => { cap.shell.overlayState.setPendingUnsavedLoad('app.yml'); });
+    // Node 2 is deregistered and the node context falls back to node 1: nothing to revert to.
+    store.nodes = [N(1), N(3)];
+    await act(async () => { setActiveNode(N(1)); });
+    await flush();
+    expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/previous node is no longer available/));
+    expect(store.activeNode.id).toBe(1);
+    expect(cap.editor.content).toBe(cap.editor.originalContent);
   });
 
   it('does not announce a dropped link when a plain switch is refused behind a prompt', async () => {

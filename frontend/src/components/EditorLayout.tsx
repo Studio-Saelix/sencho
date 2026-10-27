@@ -1186,25 +1186,26 @@ export default function EditorLayout() {
     const previousId = lastSeenNodeIdRef.current;
     const isRealSwitch = previousId !== null && previousId !== activeNode.id;
 
-    // An unsaved-changes prompt is already open (a node switch, a stack load, or
-    // a leave-editor navigation). Ignore any further activeNode changes until the
-    // user resolves it and revert silently, so the prompt keeps the navigation it
-    // was opened for. A view queued for the ignored switch is dropped, and the
-    // operator is told, since the link that asked for it will not be followed.
-    if (isRealSwitch && (overlayState.pendingUnsavedLoad !== null || overlayState.pendingLeaveAction !== null)) {
-      const previousNode = nodes.find(n => n.id === previousId);
-      if (previousNode) {
-        if (dropQueuedView()) {
-          toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
-        }
-        revertingNodeSwitchRef.current = true;
-        setActiveNode(previousNode);
+    const previousNode = nodes.find(n => n.id === previousId);
+
+    // An unsaved-changes prompt is already open (a parked node switch, a stack
+    // load, or a stashed leave or back navigation). Ignore any further activeNode
+    // change until the user resolves it: revert, leaving the prompt with the
+    // navigation it was opened for. A view queued for the ignored switch is
+    // dropped, and if there was one the operator is told it was not followed.
+    // With no previous node to revert to, the switch lands and falls through to
+    // the discard path below.
+    if (isRealSwitch && previousNode
+      && (overlayState.pendingUnsavedLoad !== null || overlayState.pendingLeaveAction !== null)) {
+      if (dropQueuedView()) {
+        toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
       }
+      revertingNodeSwitchRef.current = true;
+      setActiveNode(previousNode);
       return;
     }
 
     if (isRealSwitch && stackActions.hasUnsavedChanges()) {
-      const previousNode = nodes.find(n => n.id === previousId);
       if (previousNode) {
         // Stash the attempted node + open the unsaved-changes dialog via the
         // existing pendingUnsavedLoad/Node fields. Revert activeNode back to

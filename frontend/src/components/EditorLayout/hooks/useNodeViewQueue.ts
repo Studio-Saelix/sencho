@@ -15,7 +15,8 @@ interface UseNodeViewQueueArgs {
 
 /**
  * The hand-off for "open this node's <view>" requests (a Fleet networking
- * signal, a Readiness security finding, the block dialog's settings link).
+ * signal, a Readiness security finding, the hub-only redirect, the block
+ * dialog's settings link).
  *
  * The node is switched first and the view opens once the node-settled effect
  * sees the switch land, so the view never mounts and fetches against the
@@ -24,7 +25,8 @@ interface UseNodeViewQueueArgs {
  * that wait: `parkForConfirmation` takes it out of the queue and hands back the
  * step that puts it back and finishes the switch. Cancelling the dialog never
  * runs that step, so a cancelled request leaves nothing behind to fire on some
- * later arrival at the node.
+ * later arrival at the node. A switch refused because another unsaved-changes
+ * prompt is already open never lands either: the shell calls `dropQueuedView`.
  */
 export function useNodeViewQueue({ nodes, activeNode, setActiveNode }: UseNodeViewQueueArgs) {
   const queuedRef = useRef<QueuedNodeView | null>(null);
