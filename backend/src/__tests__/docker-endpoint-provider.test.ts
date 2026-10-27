@@ -111,6 +111,14 @@ describe('resolveDockerEndpointProvider', () => {
     });
   });
 
+  it('stores an empty service label as null next to a project label', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer({
+      Labels: { 'com.docker.compose.project': 'sencho', 'com.docker.compose.service': '' },
+    })]);
+
+    expect(await resolveDockerEndpointProvider()).toMatchObject({ provider: { project: 'sencho', service: null } });
+  });
+
   it('stores an empty Compose label as null, so a refusal never names service ""', async () => {
     mockListContainers.mockResolvedValue([proxyContainer({
       Labels: {

@@ -180,7 +180,7 @@ async function resolveUncached(endpoint: string | undefined): Promise<DockerEndp
     provider: {
       containerId: match.Id,
       containerName: (match.Names?.[0] ?? '').replace(/^\//, '') || match.Id.slice(0, 12),
-      // An empty label is no label: Compose and the guard both treat it as missing.
+      // An empty label is stored as null, so a refusal never names an empty service.
       project: labels['com.docker.compose.project'] || null,
       service: labels['com.docker.compose.service'] || null,
       workingDir: labels['com.docker.compose.project.working_dir'] || null,

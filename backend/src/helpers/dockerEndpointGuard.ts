@@ -26,8 +26,8 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * (a stop, restart, take down, or delete is judged from the running containers
  * and does not need the render), when Compose's recreate decision cannot be
  * predicted, and when a deploy would remove a protected container as an orphan
- * (it is running, carries a project label, and has no service label). It otherwise lets the
- * operation through: when the stack holds no protected container, no owner of a
+ * (it is not stopped, carries a project label, and has no service label). It
+ * otherwise lets the operation through: when the stack holds no protected container, no owner of a
  * namespace one runs in, and nothing the operation would recreate that they
  * depend on; for a restart of Sencho itself (both evaluators); and for a remote
  * node (its own Sencho guards it).
@@ -97,7 +97,7 @@ type ListedContainer = {
   Id?: string;
   Names?: string[];
   Labels?: Record<string, string>;
-  /** Docker's container state (`running`, `exited`, ...); absent in older answers, which count as running. */
+  /** Docker's container state (`running`, `exited`, ...). Some mocks and proxies omit it; a missing state counts as running. */
   State?: string;
   ImageID?: string;
   NetworkSettings?: { Networks?: Record<string, { NetworkID?: string } | null> };
@@ -133,7 +133,11 @@ type ProviderView =
   | { state: 'unresolved'; reason: string }
   | { state: 'none' };
 
-/** A container that is not running holds no namespace and carries no connection, so removing it cannot cut one. */
+/**
+ * A container that has stopped holds no namespace and carries no connection, so
+ * removing it cannot cut one. Every other state (restarting, paused, removing,
+ * a missing or unknown one) counts as running.
+ */
 function isStopped(container: ListedContainer): boolean {
   return container.State === 'exited' || container.State === 'created' || container.State === 'dead';
 }
@@ -366,7 +370,7 @@ function reasonOf(role: ProtectedRole): DockerEndpointRefusal['reason'] {
   }
 }
 
-/** A running protected container with a project label and no Compose service label: a deploy that removes orphans removes it. */
+/** A protected container that has not stopped, with a project label and no Compose service label: a deploy that removes orphans removes it. */
 function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: string, via?: string): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
   return {
@@ -374,7 +378,7 @@ function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: stri
     service: name,
     message: `Container "${name}" ${subject}, but it has no Compose service label, so Compose treats it as an orphan of "${stackName}" and this deploy, which removes orphans, would remove it. `
       + 'Make it a service of the Compose file, or recreate it from the host without the project label, while Sencho is idle. '
-      + 'A leftover that is not running does not block a deploy, so removing it from the host also clears this.',
+      + 'If it is a leftover you no longer need, stop and remove it from the host first: a container that has stopped does not block a deploy.',
   };
 }
 
@@ -682,7 +686,8 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   }
   // A container carrying the label is protected wherever it runs: its namespace
   // owner may live in another project, and a proxy detection missed is
-  // protected by the label alone.
+  // protected by the label alone. (A deploy still removes a stopped orphan with
+  // the label, which is why the label means "protected while it is not stopped".)
   for (const c of labeledContainers(allContainers)) {
     if (typeof c.Id !== 'string' || roots.has(c.Id)) continue;
     roots.set(c.Id, { role: 'provider', target: { containerId: c.Id, containerName: nameOf(c) }, label: serviceOf(c) ?? (nameOf(c) || c.Id) });
@@ -717,7 +722,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     if (extra.length > 0) found.push({ containers: extra, role: root.role, via: root.label });
   }
 
-  const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] ?? null;
+  const selfProject = selfContainers[0]?.Labels?.['com.docker.compose.project'] || null;
   const providerInfo = provider.state === 'resolved' ? provider.provider : null;
   const providerReason = provider.state === 'unresolved' ? provider.reason : null;
   const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
@@ -729,8 +734,11 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     // removes it outright when it carries any project label (the stack is matched
     // by project label or by working directory, and the project name Compose runs
     // under can differ from the stack name in case or through a `name:` key).
-    // One with no project label at all is outside the project and left alone, and
-    // so is one that is not running: removing it cannot cut the connection.
+    // One with no project label at all is outside the project and left alone.
+    // One that has stopped is removed too, but the guard lets it through:
+    // removing it cannot cut the connection. (It could be started between this
+    // check and the removal, a window every check here has; the removal itself
+    // is not guarded again.)
     let judged = entry.containers;
     if (mutation.kind === 'up') {
       const orphan = entry.containers.find(c => !serviceOf(c) && !isStopped(c) && !!c.Labels?.['com.docker.compose.project']);

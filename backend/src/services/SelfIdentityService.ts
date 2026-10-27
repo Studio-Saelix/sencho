@@ -150,7 +150,7 @@ class SelfIdentityService {
 
     this.containerId = info.Id ?? null;
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
-    // An empty Compose label is no label, as it is for Compose and the endpoint guard.
+    // An empty label is stored as null, so a refusal never names an empty service.
     this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] || null;
     this.composeServiceName = info.Config?.Labels?.['com.docker.compose.service'] || null;
     this.composeWorkingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] || null;

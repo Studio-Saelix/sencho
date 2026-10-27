@@ -1793,14 +1793,37 @@ describe('a protected container with no Compose service label on a deploy', () =
     expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
   });
 
-  it.each(['running', 'restarting', 'paused'])('still refuses a %s orphan, and tells the operator that removing a leftover clears it', async (State) => {
+  it.each(['running', 'restarting', 'paused', 'removing', 'Exited', ''])('still refuses an orphan in state "%s", and tells the operator that removing a leftover clears it', async (State) => {
     mockListContainers.mockResolvedValue([senchoContainer, { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State }]);
 
     const refusal = await run({ kind: 'up' }, deployProbes());
 
     expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
-    expect(refusal?.message).toContain('not running');
-    expect(refusal?.message).toContain('removing it');
+    expect(refusal?.message).toContain('stop and remove it from the host');
+  });
+
+  it('refuses an orphan that reports no state at all', async () => {
+    mockListContainers.mockResolvedValue([senchoContainer, { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State: undefined }]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+  });
+
+  it('lists stopped containers too, since a stopped orphan is only let through when it is listed', async () => {
+    mockListContainers.mockResolvedValue([senchoContainer, { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State: 'exited' }]);
+
+    await run({ kind: 'up' }, deployProbes());
+
+    expect(mockListContainers).toHaveBeenCalledWith(expect.objectContaining({ all: true }));
+  });
+
+  it('keeps judging the later entries when the first has only a stopped orphan', async () => {
+    mockListContainers.mockResolvedValue([
+      senchoContainer,
+      { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), Id: 'd'.repeat(64), Names: ['/old-proxy'], State: 'exited' },
+      { ...stray({ [INFRASTRUCTURE_LABEL]: 'maybe' }), Id: 'c'.repeat(64), Names: ['/bad-label'], State: 'running' },
+    ]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'invalid_label', service: 'bad-label' });
   });
 
   it('lets a stopped orphan through for every role: provider, mislabeled, and an unlabeled namespace owner of the proxy', async () => {
@@ -1860,6 +1883,12 @@ describe('a protected container with no Compose service label on a deploy', () =
 
     expect(refusal).toMatchObject({ reason: 'provider', service: 'vpn' });
     expect(refusal?.message).toContain('"socket-proxy"');
+  });
+
+  it('still refuses an update with a stopped orphan, because an update refuses any protected container in the stack', async () => {
+    mockListContainers.mockResolvedValue([{ ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State: 'exited' }]);
+
+    expect(await run({ kind: 'update' }, deployProbes())).toMatchObject({ reason: 'provider' });
   });
 
   it('still refuses it on stop, update, and a service stop, which never judged it as a service', async () => {
