@@ -52,7 +52,7 @@ const PROXY_ID = 'b'.repeat(64);
 const VPN_ID = 'e'.repeat(64);
 const WEB_ID = 'c'.repeat(64);
 
-type Spec = { Name: string; labels?: Record<string, string>; hostConfig?: Record<string, string>; inspectStatus?: number };
+type Spec = { Name: string; labels?: Record<string, string>; hostConfig?: Record<string, string>; inspectStatus?: number; state?: string };
 const specs = new Map<string, Spec>();
 const ops: string[] = [];
 
@@ -91,13 +91,13 @@ beforeEach(() => {
       const actual = spec.labels?.[key];
       return actual !== undefined && (value === undefined || actual === value);
     }))
-    .map(([Id, spec]) => ({ Id, Names: [spec.Name], Labels: spec.labels ?? {} })));
+    .map(([Id, spec]) => ({ Id, Names: [spec.Name], Labels: spec.labels ?? {}, State: spec.state ?? 'running' })));
   engine.getContainer.mockImplementation((ref: string) => ({
     inspect: async () => {
       const found = resolveRef(ref);
       if (!found) throw httpError(404);
       if (found[1].inspectStatus) throw httpError(found[1].inspectStatus);
-      return { Id: found[0], Name: found[1].Name, Config: { Labels: found[1].labels ?? {} }, HostConfig: found[1].hostConfig ?? {}, NetworkSettings: { Networks: {} } };
+      return { Id: found[0], Name: found[1].Name, Config: { Labels: found[1].labels ?? {} }, State: { Status: found[1].state ?? 'running' }, HostConfig: found[1].hostConfig ?? {}, NetworkSettings: { Networks: {} } };
     },
     stop: async () => { ops.push(`stop ${ref}`); },
     restart: async () => { ops.push(`restart ${ref}`); },
@@ -156,6 +156,35 @@ describe.each([500, 502, 503, 409])('the owner of the proxy\'s network when the 
       expect(res.status).toBe(409);
       expect(res.body).toMatchObject({ code: 'docker_endpoint_protected' });
     }
+    expect(ops).toEqual([]);
+  });
+});
+
+describe('a protected container that has already stopped', () => {
+  // The Resources orphan prune removes exactly stopped containers, so this is the message its operator reads.
+  it('removeContainers refuses a stopped proxy and a stopped namespace owner, telling the operator to remove them from the host', async () => {
+    specs.get(PROXY_ID)!.state = 'exited';
+    specs.get(VPN_ID)!.state = 'exited';
+
+    const results = await controller().removeContainers([PROXY_ID, VPN_ID, WEB_ID]);
+
+    expect(results).toMatchObject([
+      { id: PROXY_ID, success: false, refused: true, error: expect.stringContaining('docker rm socket-proxy') },
+      { id: VPN_ID, success: false, refused: true, error: expect.stringContaining('docker rm vpn') },
+      { id: WEB_ID, success: true },
+    ]);
+    for (const result of results.slice(0, 2)) {
+      expect(result.error).toContain('is not running');
+      expect(result.error).not.toMatch(/recreate it from the host/i);
+    }
+    expect(ops).toEqual([`remove ${WEB_ID}`]);
+  });
+
+  it.each(['stopContainer', 'restartContainer'] as const)('%s still refuses a stopped proxy before touching the engine', async (method) => {
+    specs.get(PROXY_ID)!.state = 'exited';
+
+    await expect(controller()[method](PROXY_ID)).rejects.toMatchObject({ code: 'docker_endpoint_protected', message: expect.stringContaining('is not running') });
+
     expect(ops).toEqual([]);
   });
 });

@@ -1034,7 +1034,7 @@ describe('connection errors while listing the stack', () => {
 });
 
 describe('evaluateDockerEndpointContainer', () => {
-  type Spec = { Id: string; Name: string; labels?: Record<string, string>; networks?: string[]; hostConfig?: Record<string, string>; state?: 'running' | 'exited' };
+  type Spec = { Id: string; Name: string; labels?: Record<string, string>; networks?: string[]; hostConfig?: Record<string, string>; state?: 'running' | 'exited' | 'created' | 'dead' | 'paused' };
   const specs: Record<string, Spec> = {
     [PROXY_ID]: { Id: PROXY_ID, Name: '/socket-proxy', labels: { 'com.docker.compose.project': 'sencho', 'com.docker.compose.service': 'socket-proxy' }, networks: ['proxy-net'] },
     [SELF_ID]: { Id: SELF_ID, Name: '/sencho', labels: { 'com.docker.compose.project': 'sencho', 'com.docker.compose.service': 'sencho' }, networks: ['proxy-net'] },
@@ -1059,7 +1059,7 @@ describe('evaluateDockerEndpointContainer', () => {
         });
         return Object.values(specs)
           .filter(spec => (options.all === true || (spec.state ?? 'running') === 'running') && matchesLabel(spec))
-          .map(spec => ({ Id: spec.Id, Names: [spec.Name], Labels: spec.labels ?? {} }));
+          .map(spec => ({ Id: spec.Id, Names: [spec.Name], Labels: spec.labels ?? {}, State: spec.state ?? 'running' }));
       },
       getContainer: (ref: string) => ({
         inspect: async () => {
@@ -1071,6 +1071,7 @@ describe('evaluateDockerEndpointContainer', () => {
             Id: found.Id,
             Name: found.Name,
             Config: { Labels: found.labels ?? {} },
+            State: { Status: found.state ?? 'running' },
             HostConfig: found.hostConfig ?? {},
             NetworkSettings: { Networks: Object.fromEntries((found.networks ?? []).map(name => [name, { NetworkID: `id-${name}` }])) },
           };
@@ -1296,6 +1297,120 @@ describe('evaluateDockerEndpointContainer', () => {
     for (const id of [WEB_ID, PROXY_ID]) results.push(await evaluate(id, 'stop', down));
 
     expect(results.every(refusal => refusal !== null)).toBe(true);
+  });
+
+  describe('a protected container that has already stopped', () => {
+    const httpError = (statusCode: number) => Object.assign(new Error(`engine answered ${statusCode}`), { statusCode });
+    const denyInspectOf = (...refs: string[]) =>
+      dockerFor(undefined, { failFor: ref => (refs.includes(ref) ? httpError(403) : undefined) });
+    // The remedy for a running protected container, which does not fit one that is not running.
+    const RECREATE_ADVICE = /recreate it from the host/i;
+
+    afterEach(() => {
+      for (const id of [PROXY_ID, WEB_ID, VPN_ID]) {
+        delete specs[id].state;
+        delete specs[id].hostConfig;
+        delete specs[id].labels?.['io.sencho.infrastructure'];
+      }
+    });
+
+    it.each(['exited', 'created', 'dead'] as const)('says the resolved provider is not running (%s) and names the host-side removal, on a stop and a restart', async (state) => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      specs[PROXY_ID].state = state;
+
+      for (const action of ['stop', 'restart'] as const) {
+        const refusal = await evaluate(PROXY_ID, action);
+        expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+        expect(refusal?.message).toContain('is not running');
+        expect(refusal?.message).toContain('docker rm socket-proxy');
+        expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+      }
+    });
+
+    it('keeps the recreate advice for the same provider while it is running, paused, or in a state the guard does not know', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+      for (const state of [undefined, 'paused'] as const) {
+        specs[PROXY_ID].state = state;
+        const refusal = await evaluate(PROXY_ID, 'stop');
+        expect(refusal?.message).toMatch(RECREATE_ADVICE);
+        expect(refusal?.message).not.toContain('docker rm');
+      }
+    });
+
+    it('still lets Auto-Heal restart the resolved provider when it is stopped, which is how a stopped proxy comes back', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      specs[PROXY_ID].state = 'exited';
+
+      expect(await evaluateDockerEndpointContainer(PROXY_ID, 'restart', dockerFor(), { allowProvider: true })).toBeNull();
+      expect(await evaluateDockerEndpointContainer(PROXY_ID, 'stop', dockerFor(), { allowProvider: true })).toMatchObject({ reason: 'provider' });
+    });
+
+    it('says a stopped provider recreated under a new id, found by its name, is not running', async () => {
+      mockResolveProvider.mockResolvedValue({
+        state: 'resolved',
+        provider: { containerId: 'f'.repeat(64), containerName: 'socket-proxy', project: null, service: null, workingDir: null, socketBindSource: null },
+      });
+      specs[PROXY_ID].state = 'exited';
+
+      expect(await evaluate(PROXY_ID, 'stop')).toMatchObject({ reason: 'provider', message: expect.stringContaining('docker rm socket-proxy') });
+    });
+
+    it.each([['true', 'provider'], ['maybe', 'invalid_label']] as const)('says a stopped container labeled %s is not running, with an inspect that answers and one that is denied', async (value, reason) => {
+      mockResolveProvider.mockResolvedValue({ state: 'none', unmatched: true, reason: 'No container owns the address.' });
+      specs[WEB_ID].state = 'exited';
+      specs[WEB_ID].labels = { ...specs[WEB_ID].labels, 'io.sencho.infrastructure': value };
+
+      for (const docker of [dockerFor(), denyInspectOf(WEB_ID)]) {
+        const refusal = await evaluate(WEB_ID, 'stop', docker);
+        expect(refusal).toMatchObject({ reason, service: 'web' });
+        expect(refusal?.message).toContain('is not running');
+        expect(refusal?.message).toContain('docker rm web');
+        expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+      }
+    });
+
+    it('says a stopped provider whose inspect is denied is not running, when the list of labeled containers shows it', async () => {
+      specs[PROXY_ID].state = 'dead';
+      specs[PROXY_ID].labels = { ...specs[PROXY_ID].labels, 'io.sencho.infrastructure': 'true' };
+      // The cache names an old id and name, so neither the reference nor the name matches before the list is read; the Compose project and service do.
+      mockResolveProvider.mockResolvedValue({
+        state: 'resolved',
+        provider: { containerId: 'f'.repeat(64), containerName: 'old-proxy', project: 'sencho', service: 'socket-proxy', workingDir: null, socketBindSource: null },
+      });
+      const refusal = await evaluate(PROXY_ID, 'stop', denyInspectOf(PROXY_ID));
+
+      expect(refusal).toMatchObject({ reason: 'provider' });
+      expect(refusal?.message).toContain('is not running');
+      expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+    });
+
+    it.each(['NetworkMode', 'PidMode', 'IpcMode'])('says a stopped owner of the %s the proxy runs in is not running, naming the proxy', async (mode) => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      specs[PROXY_ID].hostConfig = { [mode]: `container:${WEB_ID}` };
+      specs[WEB_ID].state = 'exited';
+
+      const refusal = await evaluate(WEB_ID, 'stop');
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'web' });
+      expect(refusal?.message).toContain('"socket-proxy"');
+      expect(refusal?.message).toContain('docker rm web');
+      expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+    });
+
+    it('keeps the namespace-owner advice while the owner is running', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      specs[PROXY_ID].hostConfig = { NetworkMode: `container:${WEB_ID}` };
+
+      expect((await evaluate(WEB_ID, 'stop'))?.message).toMatch(RECREATE_ADVICE);
+    });
+
+    it('still lets a stopped ordinary container be stopped and removed', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      specs[VPN_ID].state = 'exited';
+
+      expect(await evaluate(VPN_ID, 'stop')).toBeNull();
+    });
   });
 
   describe('an inspect that fails with an HTTP status', () => {
@@ -1897,6 +2012,85 @@ describe('a protected container with no Compose service label on a deploy', () =
     expect(await run({ kind: 'stop' }, deployProbes())).toMatchObject({ reason: 'provider' });
     expect(await run({ kind: 'update' }, deployProbes())).toMatchObject({ reason: 'provider' });
     expect(await run({ kind: 'service', service: 'socket-proxy' }, deployProbes())).toMatchObject({ reason: 'provider' });
+  });
+});
+
+describe('a protected container that has already stopped, on a stack operation', () => {
+  const RECREATE_ADVICE = /recreate it from the host/i;
+  const stopped = (over: Parameters<typeof container>[2] = {}) => ({ ...container(PROXY_ID, 'socket-proxy', over), State: 'exited' });
+  const engineDriven: EndpointMutation[] = [{ kind: 'stop' }, { kind: 'restart' }, { kind: 'service', service: 'socket-proxy', engineOnly: true }];
+
+  beforeEach(() => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+  });
+
+  it.each(engineDriven)('says the stopped proxy is not running and names the host-side removal on %o', async (mutation) => {
+    mockListContainers.mockResolvedValue([stopped()]);
+
+    const refusal = await run(mutation);
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('is not running');
+    expect(refusal?.message).toContain('docker rm socket-proxy');
+    expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+  });
+
+  it('says so for a stopped orphan with no service label, which is named by its container name', async () => {
+    mockListContainers.mockResolvedValue([{
+      Id: PROXY_ID,
+      Names: ['/socket-proxy'],
+      Labels: { 'com.docker.compose.project': 'sencho', [INFRASTRUCTURE_LABEL]: 'true' },
+      NetworkSettings: { Networks: {} },
+      State: 'created',
+    }]);
+
+    const refusal = await run({ kind: 'stop' });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('docker rm socket-proxy');
+  });
+
+  it('says so for a stopped container labeled with a value other than "true"', async () => {
+    mockResolveProvider.mockResolvedValue({ state: 'none', reason: 'local socket' });
+    mockListContainers.mockResolvedValue([{ ...container(WEB_ID, 'web', { labels: { [INFRASTRUCTURE_LABEL]: 'maybe' } }), State: 'dead' }]);
+
+    const refusal = await run({ kind: 'stop' });
+
+    expect(refusal).toMatchObject({ reason: 'invalid_label', service: 'web' });
+    expect(refusal?.message).toContain('docker rm web');
+  });
+
+  it('says so for a stopped owner of a namespace the proxy runs in, naming the proxy', async () => {
+    runtimeModes.set(PROXY_ID, { name: 'socket-proxy', modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([
+      container(PROXY_ID, 'socket-proxy'),
+      { ...container(VPN_ID, 'vpn'), State: 'exited' },
+    ]);
+    // Only the owner is stopped: the proxy itself is running, so the owner is the entry that is refused.
+    const refusal = await run({ kind: 'service', service: 'vpn', engineOnly: true });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'vpn' });
+    expect(refusal?.message).toContain('"socket-proxy"');
+    expect(refusal?.message).toContain('docker rm vpn');
+    expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+  });
+
+  it('keeps the recreate advice while any replica of the service is running or its state is not known', async () => {
+    mockListContainers.mockResolvedValue([stopped(), { ...container('9'.repeat(64), 'socket-proxy'), State: 'running' }]);
+    expect((await run({ kind: 'stop' }))?.message).toMatch(RECREATE_ADVICE);
+
+    mockListContainers.mockResolvedValue([{ ...container(PROXY_ID, 'socket-proxy'), State: 'paused' }]);
+    expect((await run({ kind: 'stop' }))?.message).toMatch(RECREATE_ADVICE);
+
+    mockListContainers.mockResolvedValue([container(PROXY_ID, 'socket-proxy')]);
+    expect((await run({ kind: 'stop' }))?.message).toMatch(RECREATE_ADVICE);
+  });
+
+  it('keeps the recreate advice on an update and on a service redeploy, which recreate the service', async () => {
+    mockListContainers.mockResolvedValue([stopped()]);
+
+    expect((await run({ kind: 'update' }))?.message).toMatch(RECREATE_ADVICE);
+    expect((await run({ kind: 'service', service: 'socket-proxy' }))?.message).toMatch(RECREATE_ADVICE);
   });
 });
 
