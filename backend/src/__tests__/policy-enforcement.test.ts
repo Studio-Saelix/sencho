@@ -450,7 +450,9 @@ describe('blocked-deploy log line', () => {
 
   // The total matches the one stored row, so evaluation takes the full-detail
   // path (where getCveIntel runs) instead of the fail-closed aggregate fallback.
-  const criticalScan = () => mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 });
+  function criticalScan(): VulnerabilityScan {
+    return mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 });
+  }
 
   function blockLines(): string[] {
     return warnSpy.mock.calls
