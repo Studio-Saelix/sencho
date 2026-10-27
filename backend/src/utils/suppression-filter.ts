@@ -102,8 +102,9 @@ function effectiveStatus(suppression: CveSuppression): TriageStatus {
 /**
  * True when this row could dismiss some finding on `imageRef`: it is active, its
  * status dismisses, and its image pattern matches. The CVE and package are left
- * out, so a row that passes may still match nothing; a row that fails can never
- * match anything on this image. For callers that cannot see every finding (a
+ * out, so a row that passes may still dismiss nothing; a row that fails can never
+ * dismiss anything on this image (a non-dismissing row can still match a finding,
+ * but only to leave it actionable). For callers that cannot see every finding (a
  * truncated detail set) and so cannot run `applySuppressions`.
  */
 export function mayDismissOnImage(

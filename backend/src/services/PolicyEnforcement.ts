@@ -132,7 +132,8 @@ interface ImageRiskEvaluation {
      * Log-only: the reasons in `reasons` that were not established on verified
      * evidence, and why. KEV/fixable are assumed because the detail rows could
      * not be trusted. `severity` is listed only when suppressions are honored and
-     * one may apply to this image: it matched on the raw aggregate, and that
+     * some stored suppression may dismiss a finding on this image (assumed when the
+     * suppressions could not be read): it matched on the raw aggregate, and that
      * suppression, which might lift it, could not be applied without the rows.
      * Never reaches the API: the violation keeps the plain `reasons`.
      */
@@ -182,7 +183,9 @@ interface SuppressionPass {
  * anyway, because their absence cannot be proven without the details. When
  * suppressions are honored and may apply (`suppressionsMayApply`) they cannot be
  * applied without the rows either, so the post-suppression severity is unknown
- * and a raw severity match is recorded as unverified. The cause is carried in
+ * and a raw severity match is recorded as unverified. The caller decides
+ * `suppressionsMayApply`: per image from the stored suppressions on the truncated
+ * path, and plain `honorSuppressions` when the read itself failed. The cause is carried in
  * `unverified` so the block log can name it.
  */
 function aggregateFallback(
@@ -266,11 +269,11 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        // The suppressions were read, so the raw severity is the post-suppression
-        // severity, and a match on it stands verified, unless some stored row could
-        // dismiss a finding on this image (a row for another image, an expired
-        // one, or one that does not dismiss never can). The missing rows might be
-        // the findings such a row covers.
+        // A match on the raw severity stands verified unless suppressions are
+        // honored and some stored row could dismiss a finding on this image (a row
+        // for another image, an expired one, or one with a non-dismissing status
+        // never can). The missing detail rows might hold the findings that row
+        // covers; with no such row the raw severity equals the post-suppression one.
         return aggregateFallback(
             inputs, rawSeverity, scan,
             detailRowsTruncated(findings.length, scan.total_vulnerabilities),

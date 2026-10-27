@@ -685,6 +685,24 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
+    // Suppressions are off, so a stored dismissing row is not applied anywhere and
+    // cannot be what the match is waiting on.
+    it('keeps the severity match plain on truncated rows when suppressions are off, whatever is stored', async () => {
+      dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-0001' })]);
+      trivyStub.scanImagePreflight.mockResolvedValue(
+        mkScan({ id: 44, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 }),
+      );
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
+      const lines = blockLines();
+      expect(lines).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; severity threshold matched`,
+      ]);
+      expect(lines[0]).not.toContain('before suppressions could be applied');
+    });
+
     describe('with suppressions honored', () => {
       const BEFORE_SUPPRESSIONS = 'severity threshold matched before suppressions could be applied';
       const CRITICAL_TRUNCATED = (): VulnerabilityScan =>
@@ -723,7 +741,7 @@ describe('blocked-deploy log line', () => {
       });
 
       // Each row below is stored, so the list is non-empty, but none can dismiss
-      // a finding on nginx:1.14: the aggregate severity is already post-suppression.
+      // a finding on nginx:1.14: the raw aggregate severity equals the post-suppression one.
       it.each([
         ['scoped to another image', { image_pattern: 'redis:*' }],
         ['expired', { expires_at: 1 }],
@@ -824,6 +842,18 @@ describe('blocked-deploy log line', () => {
         ]);
       });
 
+      it('keeps the severity match plain beside the unverified KEV/fixable inputs when no suppression can dismiss', async () => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1, block_on_fixable: 1 }));
+        dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ status: 'needs_review' })]);
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; severity threshold matched`,
+        ]);
+      });
+
       it('lists the unapplied severity match under unverified, not matched, on the debug line', async () => {
         vi.stubEnv('DATA_DIR', '/unused');
         dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1', developer_mode: '1' });
@@ -833,6 +863,18 @@ describe('blocked-deploy log line', () => {
 
         const scanned = logSpy.mock.calls.map((args) => format(...args)).filter((line) => line.includes('scanned:'));
         expect(scanned).toEqual(['[Policy:debug] nginx:1.14 scanned: severity=CRITICAL kev=0 fixable=0 matched=[] unverified=[severity]']);
+      });
+
+      it('lists the severity match under matched on the debug line when no suppression can dismiss', async () => {
+        vi.stubEnv('DATA_DIR', '/unused');
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1', developer_mode: '1' });
+        dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ status: 'needs_review' })]);
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        const scanned = logSpy.mock.calls.map((args) => format(...args)).filter((line) => line.includes('scanned:'));
+        expect(scanned).toEqual(['[Policy:debug] nginx:1.14 scanned: severity=CRITICAL kev=0 fixable=0 matched=[severity] unverified=[]']);
       });
 
       it('does not mark severity unverified for a KEV-only policy even when the raw severity is critical', async () => {

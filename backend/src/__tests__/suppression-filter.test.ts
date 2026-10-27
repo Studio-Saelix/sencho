@@ -254,7 +254,7 @@ describe('mayDismissOnImage', () => {
     expect(mayDismissOnImage(makeSuppression(), IMAGE, NOW)).toBe(true);
   });
 
-  it('accepts every dismissing status and a CVE- or package-specific row', () => {
+  it('accepts every dismissing status, including a package-pinned row', () => {
     for (const status of ['not_affected', 'accepted', 'fixed', 'false_positive', 'ignored']) {
       expect(mayDismissOnImage(makeSuppression({ status, pkg_name: 'openssl' }), IMAGE, NOW)).toBe(true);
     }
@@ -274,11 +274,31 @@ describe('mayDismissOnImage', () => {
 
   it('rejects an expired row but accepts one expiring in the future', () => {
     expect(mayDismissOnImage(makeSuppression({ expires_at: NOW - 1 }), IMAGE, NOW)).toBe(false);
+    expect(mayDismissOnImage(makeSuppression({ expires_at: NOW }), IMAGE, NOW)).toBe(false);
     expect(mayDismissOnImage(makeSuppression({ expires_at: NOW + 1 }), IMAGE, NOW)).toBe(true);
   });
 
   it('rejects a row scoped to another image and accepts a matching glob', () => {
     expect(mayDismissOnImage(makeSuppression({ image_pattern: 'redis:*' }), IMAGE, NOW)).toBe(false);
     expect(mayDismissOnImage(makeSuppression({ image_pattern: 'nginx:*' }), IMAGE, NOW)).toBe(true);
+  });
+
+  it('accepts every row that applySuppressions dismisses a finding with', () => {
+    const finding = { vulnerability_id: 'CVE-2024-1234', pkg_name: 'openssl' };
+    const rows = [
+      makeSuppression(),
+      makeSuppression({ status: 'fixed' }),
+      makeSuppression({ status: 'bogus' }),
+      makeSuppression({ status: null as unknown as undefined }),
+      makeSuppression({ pkg_name: 'openssl', image_pattern: 'nginx:*' }),
+      makeSuppression({ expires_at: NOW + 1 }),
+      makeSuppression({ status: 'needs_review' }),
+      makeSuppression({ status: 'affected' }),
+      makeSuppression({ expires_at: NOW }),
+      makeSuppression({ image_pattern: 'redis:*' }),
+    ];
+    const dismissing = rows.filter((row) => applySuppressions([finding], IMAGE, [row], NOW)[0].suppressed);
+    expect(dismissing.length).toBeGreaterThan(0);
+    for (const row of dismissing) expect(mayDismissOnImage(row, IMAGE, NOW)).toBe(true);
   });
 });
