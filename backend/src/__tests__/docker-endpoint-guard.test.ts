@@ -1787,6 +1787,50 @@ describe('a protected container with no Compose service label on a deploy', () =
     expect(refusal?.message).toContain('orphan');
   });
 
+  it.each(['exited', 'created', 'dead'])('lets a %s orphan through, because removing a container that is not running cannot cut the connection', async (State) => {
+    mockListContainers.mockResolvedValue([senchoContainer, { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State }]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+  });
+
+  it.each(['running', 'restarting', 'paused'])('still refuses a %s orphan, and tells the operator that removing a leftover clears it', async (State) => {
+    mockListContainers.mockResolvedValue([senchoContainer, { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State }]);
+
+    const refusal = await run({ kind: 'up' }, deployProbes());
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('not running');
+    expect(refusal?.message).toContain('removing it');
+  });
+
+  it('lets a stopped orphan through for every role: provider, mislabeled, and an unlabeled namespace owner of the proxy', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+    runtimeModes.set(PROXY_ID, { modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([
+      container(PROXY_ID, 'socket-proxy', { imageId: 'same' }),
+      { Id: VPN_ID, Names: ['/vpn'], State: 'exited', Labels: { 'com.docker.compose.project': 'sencho' }, NetworkSettings: { Networks: {} } },
+      { ...stray({ [INFRASTRUCTURE_LABEL]: 'maybe' }), Id: 'c'.repeat(64), Names: ['/old-label'], State: 'exited' },
+    ]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+  });
+
+  it('refuses when a stopped orphan sits next to a running one', async () => {
+    mockListContainers.mockResolvedValue([
+      senchoContainer,
+      { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), Id: 'd'.repeat(64), Names: ['/old-proxy'], State: 'exited' },
+      { ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State: 'running' },
+    ]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+  });
+
+  it('still refuses a stop of a stopped orphan, which never judged it as a service', async () => {
+    mockListContainers.mockResolvedValue([{ ...stray({ [INFRASTRUCTURE_LABEL]: 'true' }), State: 'exited' }]);
+
+    expect(await run({ kind: 'stop' }, deployProbes())).toMatchObject({ reason: 'provider' });
+  });
+
   it('leaves a container with no project label at all alone, even when it is not a rendered service', async () => {
     mockListContainers.mockResolvedValue([senchoContainer, {
       Id: PROXY_ID,

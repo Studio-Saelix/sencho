@@ -205,6 +205,30 @@ describe('SelfIdentityService.initialize', () => {
     expect(svc.getComposeLocation()).toEqual({ service: 'app', workingDir: '/srv/compose/sencho' });
   });
 
+  it('reads an empty Compose label as missing', async () => {
+    process.env.HOSTNAME = 'sencho-1';
+    mockContainer.inspect.mockResolvedValue({
+      Id: FULL_CONTAINER_ID,
+      Name: '/sencho',
+      Image: 'sha256:' + FULL_IMAGE_ID_HEX,
+      Config: {
+        Labels: {
+          'com.docker.compose.project': '',
+          'com.docker.compose.service': '',
+          'com.docker.compose.project.working_dir': '',
+        },
+      },
+      NetworkSettings: { Networks: {} },
+      Mounts: [],
+    });
+
+    const svc = SelfIdentityService.getInstance();
+    await svc.initialize();
+
+    expect(svc.getComposeLocation()).toEqual({ service: null, workingDir: null });
+    expect(svc.getIdentity().composeProjectName).toBeNull();
+  });
+
   it('parses /proc/self/cgroup formats (cgroupv1 docker, cgroupv2 docker, podman libpod)', async () => {
     const tmp = await import('os');
     const fsp = await import('fs/promises');

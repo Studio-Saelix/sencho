@@ -150,9 +150,10 @@ class SelfIdentityService {
 
     this.containerId = info.Id ?? null;
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
-    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] ?? null;
-    this.composeServiceName = info.Config?.Labels?.['com.docker.compose.service'] ?? null;
-    this.composeWorkingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] ?? null;
+    // An empty Compose label is no label, as it is for Compose and the endpoint guard.
+    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] || null;
+    this.composeServiceName = info.Config?.Labels?.['com.docker.compose.service'] || null;
+    this.composeWorkingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] || null;
     this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
     this.imageRef = info.Config?.Image ?? null;
     // Bounded revision enrichment runs detached so it never blocks the callers

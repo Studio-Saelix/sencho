@@ -111,6 +111,21 @@ describe('resolveDockerEndpointProvider', () => {
     });
   });
 
+  it('stores an empty Compose label as null, so a refusal never names service ""', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer({
+      Labels: {
+        'com.docker.compose.project': '',
+        'com.docker.compose.service': '',
+        'com.docker.compose.project.working_dir': '',
+      },
+    })]);
+
+    expect(await resolveDockerEndpointProvider()).toMatchObject({
+      state: 'resolved',
+      provider: { containerName: 'sencho-proxy', project: null, service: null, workingDir: null },
+    });
+  });
+
   it('skips the lookup for an IP literal', async () => {
     process.env.DOCKER_HOST = 'tcp://172.20.0.3:2375';
 
