@@ -3,6 +3,8 @@
  *
  * Pure evaluateRollbackEligibility maps known signals to a verdict.
  * assessGenerationEligibility gathers best-effort evidence for a recovery row.
+ * The security posture signal is advisory and cannot honor a bypass: it serves
+ * read-only readiness. A restore decides posture in its own policy gate.
  */
 import type { StackUpdateRecoveryGenerationRow } from './DatabaseService';
 import DockerController from './DockerController';
@@ -148,6 +150,7 @@ async function checkSecurityPostureBlocked(
       actor: 'rollback-eligibility',
       auditMethod: 'GET',
       auditPath: '/api/stacks/rollback-eligibility',
+      recordAllowedEvidence: false,
     });
     return !gate.ok;
   } catch (error) {
@@ -163,13 +166,23 @@ async function checkSecurityPostureBlocked(
 /** Best-effort eligibility for a recovery generation row. */
 export async function assessGenerationEligibility(
   row: StackUpdateRecoveryGenerationRow,
+  opts: {
+    /**
+     * Leave the security posture to the caller's own policy gate. The posture
+     * check here evaluates with no bypass and no way to report why it blocked,
+     * so a caller that holds the operator's bypass and renders the block must
+     * not let it veto first. A deferred assessment never returns `eligible`
+     * (the posture signal stays unknown); callers test for `prohibited`.
+     */
+    deferSecurityPosture?: boolean;
+  } = {},
 ): Promise<RollbackEligibilityVerdict> {
   const held = parseHeldImageState(row.services_json);
   // Malformed recovery state cannot be assessed safely; refuse restore.
   if (!held.ok) return 'prohibited';
   const generationIntegrityOk = await checkGenerationIntegrity(row);
   const heldImagesPresent = await checkHeldImagesPresent(row, held);
-  const securityPostureBlocked = await checkSecurityPostureBlocked(row, held);
+  const securityPostureBlocked = opts.deferSecurityPosture ? null : await checkSecurityPostureBlocked(row, held);
   return evaluateRollbackEligibility({
     generationIntegrityOk,
     heldImagesPresent,

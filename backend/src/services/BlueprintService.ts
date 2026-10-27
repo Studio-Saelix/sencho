@@ -29,6 +29,7 @@ import { probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
+import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase } from '../utils/validation';
@@ -1508,9 +1509,14 @@ export class BlueprintService {
             actor: 'blueprint-reconciler',
             auditMethod: 'POST',
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
+            // The apply below runs the gate again against the stack as written to
+            // disk and audits that decision. This earlier one evaluates the
+            // blueprint's authored content for the same operation, so a row from
+            // each would count one apply twice.
+            recordAllowedEvidence: false,
         }, undefined, true);
         if (!gate.ok) {
-            throw new Error(describePolicyBlock(gate.policy, gate.violations));
+            throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
         }
 
         const outcome = await this.applyLocalUnderLock(
@@ -1553,7 +1559,7 @@ export class BlueprintService {
             /** GitOps binding to record on that recovery generation, when known. */
             recoveryBinding?: GitOpsRecoveryCapture;
         } = {},
-    ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
+    ): Promise<{ ran: true; policyEvidence?: AllowedPolicyEvidence } | { ran: false; existingAction: StackOpAction }> {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
             throw new Error('Invalid blueprint marker');
@@ -1562,6 +1568,7 @@ export class BlueprintService {
             throwIfGitManagedDeploy(DatabaseService.getInstance().getBlueprint(expected.blueprintId));
         }
         const fs = FileSystemService.getInstance(nodeId);
+        let policyEvidence: AllowedPolicyEvidence | undefined;
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',
             async () => {
@@ -1645,11 +1652,11 @@ export class BlueprintService {
                             throw new DigestPinsMismatchError();
                         }
                     }
-                    await assertPolicyGateAllows(
+                    ({ policyEvidence } = await assertPolicyGateAllows(
                         stackName,
                         nodeId,
                         buildSystemPolicyGateOptions('blueprint', { auditPath }),
-                    );
+                    ));
                     await ComposeService.getInstance(nodeId).deployStack(
                         stackName,
                         undefined,
@@ -1724,7 +1731,7 @@ export class BlueprintService {
             },
             getRegistryDeliveryLockContext(),
         );
-        return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };
+        return lock.ran ? { ran: true, ...(policyEvidence ? { policyEvidence } : {}) } : { ran: false, existingAction: lock.existing.action };
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {

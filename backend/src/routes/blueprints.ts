@@ -620,7 +620,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             });
             return;
         }
-        res.json({ deployed: true });
+        res.json({ deployed: true, ...(outcome.policyEvidence ? { policyEvidence: outcome.policyEvidence } : {}) });
     } catch (error) {
         if (error instanceof DigestPinsMismatchError) {
             res.status(400).json({ error: error.message });

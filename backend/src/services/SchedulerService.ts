@@ -43,6 +43,7 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
+import { describePolicyBlock } from '../helpers/policyGate';
 import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
 import { checkPermissionForSubject, type PermissionSubject } from '../middleware/permissions';
 import { AutoUpdateRemoteCoordinator, type RemoteAutoUpdateInput } from './AutoUpdateRemoteCoordinator';
@@ -215,8 +216,9 @@ export class SchedulerService {
      * block, dispatch the documented `scan_finding` warning naming the policy
      * and the offending images, then throw so the caller records the outcome:
      * the auto-update loop catches per stack and continues the rest of the run,
-     * while a single-stack auto-start surfaces as a task failure. The gate
-     * fails open when Trivy is missing.
+     * while a single-stack auto-start surfaces as a task failure. Whether a
+     * missing scanner blocks is the Scanner unavailable setting, which defaults
+     * to allow; a scan that ran and failed blocks by default instead.
      */
     private async enforceSchedulerPolicyGate(
         stackName: string,
@@ -231,17 +233,20 @@ export class SchedulerService {
             buildSystemPolicyGateOptions(actor, { auditPath }),
         );
         if (gate.ok) return;
-        const images = gate.violations.map((v) => v.imageRef).join(', ');
-        const reasons = summarizeBlockReasons(gate.violations);
-        this.safeDispatch(
-            'warning',
-            'scan_finding',
-            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}${images ? ` (${images})` : ''}`,
-            stackName,
+        // describePolicyBlock distinguishes a matched finding from missing
+        // evidence. Composing the sentence here instead reported a scanner
+        // outage as a policy match on the unattended path.
+        // Mapped to the shared vocabulary: a scheduled auto-start is a start of
+        // the stack, and an auto-update is an update, so the message names the
+        // operation the operator scheduled rather than an internal label.
+        const message = describePolicyBlock(
+            gate.policy,
+            gate.violations,
+            action === 'Auto-update' ? 'update' : 'deploy',
+            gate.evidence,
         );
-        throw new Error(
-            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}`,
-        );
+        this.safeDispatch('warning', 'scan_finding', `${action} blocked for "${stackName}": ${message}`, stackName);
+        throw new Error(message);
     }
 
     private async tick(): Promise<void> {

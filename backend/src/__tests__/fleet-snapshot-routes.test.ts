@@ -656,6 +656,72 @@ describe('Snapshot restore: remote dossier notes (proxy PUT)', () => {
         expect(calls.some(c => /\/dossier$/.test(c.url) && c.method === 'PUT')).toBe(true);
     });
 
+    describe('redeploy on a remote node', () => {
+        const policyEvidence = {
+            policy: { id: 3, name: 'prod-gate' },
+            bypassed: false,
+            evidence: { outcome: 'allow', summary: 'scanner unavailable', records: [], applications: [] },
+        };
+
+        // The remote node runs its own deploy gate; what it allowed the deploy on
+        // rides back on its deploy response.
+        function stubRemote(deployBody: Record<string, unknown>): void {
+            vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+            vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+                const body = /\/deploy$/.test(url) ? deployBody : {};
+                return {
+                    ok: true,
+                    status: 200,
+                    text: async () => JSON.stringify(body),
+                    json: async () => body,
+                } as unknown as Response;
+            }));
+        }
+
+        it('restore carries the decision the remote node allowed the deploy on', async () => {
+            const { id, remoteId } = remoteDocSnapshot('rdeploy', 'documented');
+            stubRemote({ message: 'Deployed', policyEvidence });
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: remoteId, stackName: 'rdeploy', redeploy: true });
+
+            expect(res.status).toBe(200);
+            expect(res.body.redeployed).toBe(true);
+            expect(res.body.policyEvidence).toEqual(policyEvidence);
+        });
+
+        it('restore adds nothing when the remote deploy was a clean pass', async () => {
+            const { id, remoteId } = remoteDocSnapshot('rdeploy-clean', 'documented');
+            stubRemote({ message: 'Deployed' });
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: remoteId, stackName: 'rdeploy-clean', redeploy: true });
+
+            expect(res.status).toBe(200);
+            expect(res.body.redeployed).toBe(true);
+            expect(res.body).not.toHaveProperty('policyEvidence');
+        });
+
+        it('restore-all carries the decision on the row it belongs to', async () => {
+            const { id } = remoteDocSnapshot('rdeploy-all', 'documented');
+            stubRemote({ message: 'Deployed', policyEvidence });
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore-all`)
+                .set('Cookie', adminCookie)
+                .send({ redeploy: true });
+
+            expect(res.status).toBe(200);
+            const row = (res.body.results as Array<{ stackName: string; policyEvidence?: unknown }>)
+                .find((r) => r.stackName === 'rdeploy-all');
+            expect(row?.policyEvidence).toEqual(policyEvidence);
+        });
+    });
+
     it('reports a non-fatal notesError when the remote dossier PUT fails but files restored', async () => {
         const { id, remoteId } = remoteDocSnapshot('rweb2', 'documented');
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
@@ -870,6 +936,7 @@ describe('Restore-all', () => {
         const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockImplementation(async (stackName: string) => {
             if (stackName === 'blocked-web') throw new Error('Policy "block-criticals" blocked deploy: 1 image(s) exceed high');
+            return {};
         });
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('restore-all-policy', 'admin', 1, 2, '[]', '[]');

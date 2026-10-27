@@ -15,7 +15,7 @@ import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController from '../services/DockerController';
-import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type ScanPolicy, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
 import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
 import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
@@ -36,7 +36,8 @@ import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyPreDeploy, type PolicyViolation } from '../services/PolicyEnforcement';
+import type { EvidenceGateDecision } from '../services/securityEvidence';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -78,7 +79,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -555,6 +556,8 @@ interface BulkResultItem {
   code?: string;
   /** Health gate run started for a successful update, when gating is enabled. */
   healthGateId?: string | null;
+  /** Set when an update proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 async function runStackBulkOp(
@@ -604,7 +607,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
+          error: describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence),
           code: 'policy_blocked',
         };
       }
@@ -629,7 +632,7 @@ async function runStackBulkOp(
       const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
       const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
       linkStackUpdateRecoveryGate(recoveryId, healthGateId);
-      return { stackName, ok: true, healthGateId };
+      return { stackName, ok: true, healthGateId, ...allowedPolicyEvidence(gate) };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
       if (outcome.kind === 'no-containers') {
@@ -1311,6 +1314,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     let deployed = false;
     let deployError: string | undefined;
+    let allowedEvidence: { policyEvidence?: AllowedPolicyEvidence } = {};
     if (deploy_now === true) {
       const gate = await enforcePolicyPreDeploy(
         stack_name,
@@ -1318,8 +1322,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = describePolicyBlock(gate.policy, gate.violations);
+        deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
       } else {
+        allowedEvidence = allowedPolicyEvidence(gate);
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(
             stack_name,
@@ -1350,6 +1355,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       warnings: result.warnings,
       deployed,
       deployError,
+      ...allowedEvidence,
     });
     if (deployed && skip_scan !== true) {
       triggerPostDeployScan(stack_name, req.nodeId).catch(err =>
@@ -2205,7 +2211,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null, { deployedGenerationId: deployResult.deployedGenerationId });
     linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
-    res.json({ message: 'Deployed successfully', healthGateId });
+    res.json({ message: 'Deployed successfully', healthGateId, ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -2591,6 +2597,7 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       ...(result.previousImageId ? { previousImageId: result.previousImageId } : {}),
       ...(result.newImageId ? { newImageId: result.newImageId } : {}),
       ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
+      ...policyEvidenceFor(res),
     });
     return true;
   }
@@ -2941,6 +2948,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     res.json({
       status: 'Update completed',
       healthGateId,
+      ...policyEvidenceFor(res),
       ...(recheckWarning ? { recheckWarning } : {}),
     });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
@@ -3072,9 +3080,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         const compCode = (compError as { code?: string }).code;
         const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
+          // A policy refusal carries the decision the block dialog renders; an
+          // integrity or held-image refusal does not, and stays a plain 409.
+          const block = compError as { violations?: PolicyViolation[]; policy?: ScanPolicy; evidence?: EvidenceGateDecision };
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...(block.violations ? policyBlockPayload(block.policy, block.violations, block.evidence) : {}),
             ...compFailureClass,
           });
           return;
@@ -3120,6 +3132,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         message: 'Stack rolled back from recovery generation.',
         recoveryId: currentGen.id,
         gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+        ...policyEvidenceFor(res),
       });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;
@@ -3164,7 +3177,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-    res.json({ message: 'Stack rolled back: compose and env files restored.' });
+    res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);

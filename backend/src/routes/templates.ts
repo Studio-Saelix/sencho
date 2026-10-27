@@ -13,7 +13,7 @@ import { MissingExternalNetworksError } from '../services/network/missingExterna
 import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
-import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { policyEvidenceFor, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
@@ -196,7 +196,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
       if (debug) console.debug(`[Templates:debug] Deploy timing: ${stackName} took ${Date.now() - deployStartedAt}ms`);
-      res.json({ success: true, message: 'Template deployed successfully' });
+      res.json({ success: true, message: 'Template deployed successfully', ...policyEvidenceFor(res) });
       if (!skip_scan) {
         triggerPostDeployScan(stackName, req.nodeId).catch(err =>
           console.error(`[Security] Post-deploy scan failed for ${stackName}:`, err),

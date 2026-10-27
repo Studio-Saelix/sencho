@@ -8,7 +8,14 @@ vi.mock('../middleware/auth', () => ({ authMiddleware: (req: express.Request, _r
   next();
 } }));
 vi.mock('../middleware/permissions', () => ({ requirePermission: mocks.permission }));
-vi.mock('../helpers/policyGate', () => ({ buildPolicyGateOptions: () => ({ bypass: false, actor: 'test' }) }));
+vi.mock('../helpers/policyGate', () => ({
+  buildPolicyGateOptions: (req: express.Request) => ({
+    bypass: false,
+    actor: 'test',
+    onAllowed: (allowed: unknown) => { if (req.res) req.res.locals.policyEvidence = allowed; },
+  }),
+  policyEvidenceFor: (res: express.Response) => (res.locals.policyEvidence ? { policyEvidence: res.locals.policyEvidence } : {}),
+}));
 vi.mock('../helpers/fleetUpdateCache', () => ({ invalidateFleetUpdateCache: mocks.invalidate }));
 vi.mock('../services/ImageUpdateFactsService', () => ({
   ImageUpdateFactsService: { getInstance: () => ({ readLocal: mocks.readLocal }) },
@@ -68,6 +75,19 @@ describe('checked automatic update route', () => {
     expect(mocks.apply).toHaveBeenCalledWith(expect.objectContaining({ verificationOwner: 'hub_authority' }));
     expect(response.body).toMatchObject({ applied: true, result: 'applied', healthGateId: 'health' });
     expect(response.body).not.toHaveProperty('recheckWarning');
+  });
+  it('reports the evidence the update was allowed on, and nothing on a clean pass', async () => {
+    const clean = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(clean.body).not.toHaveProperty('policyEvidence');
+
+    const allowed = { policy: { id: 3, name: 'prod-gate' }, bypassed: false, evidence: { outcome: 'allow', records: [], applications: [], summary: 'x' } };
+    mocks.apply.mockImplementation(async ({ policyOptions }) => {
+      policyOptions.onAllowed(allowed);
+      return { applied: true, result: 'applied', healthGateId: 'health' };
+    });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(response.status).toBe(200);
+    expect(response.body.policyEvidence).toMatchObject({ policy: { name: 'prod-gate' }, bypassed: false });
   });
   it('rejects facts that changed during policy without consuming the observation', async () => {
     mocks.readLocal.mockResolvedValueOnce(facts).mockResolvedValueOnce({ ...facts, images: [] });
