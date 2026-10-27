@@ -126,7 +126,6 @@ meshRouter.get('/local-services/:stackName', async (req: Request, res: Response)
  * "unknown" must not look like "declares nothing".
  */
 meshRouter.get('/local-declared-services/:stackName', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     const stackName = req.params.stackName as string;
     if (!isValidStackName(stackName)) { res.status(400).json({ error: 'Invalid stack name' }); return; }
     if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
