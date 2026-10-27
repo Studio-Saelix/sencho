@@ -582,6 +582,17 @@ describe('blocked-deploy log line', () => {
     expect(lines[0]).not.toMatch(/[\x00-\x1F\x7F]/);
   });
 
+  it('redacts a credential whose keyword or scheme is separated from its value by a control character', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('auth failed: Bearer\x01abc123def456 and password\x01=hunter2'));
+
+    await enforcePolicyForImageRefs('web', 1, ['reg.example.com/app:1'], { bypass: false, actor: 'u' });
+
+    const lines = blockLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toMatch(/abc123|hunter/);
+    expect(lines[0]).not.toMatch(/[\x00-\x1F\x7F]/);
+  });
+
   it('separates a reference carrying line breaks from the text after it', async () => {
     const result = await enforcePolicyForImageRefs('web', 1, ['app:1\nINJECTED\t:x'], { bypass: false, actor: 'u' }, undefined, true);
 

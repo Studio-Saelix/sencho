@@ -150,12 +150,14 @@ const detailRowsTruncated = (stored: number, total: number): string =>
  * error) made safe for a single log line. Runs of line breaks and tabs become one
  * space and the ends are trimmed, so multi-line scanner output keeps its fields
  * apart (deleting them would fuse the image tag with the timestamp that follows
- * it). Credentials are redacted next, while any other control character is still
- * in place, so one inside a credential cannot split it past the redaction;
- * `sanitizeForLog` then deletes those.
+ * it). Credentials are redacted with any other control character still in place,
+ * so one inside a credential cannot split it past the redaction. Those characters
+ * then become spaces and the text is redacted again, for a credential that only
+ * matches once a control character no longer separates its keyword from its value.
  */
 function logEntry(text: string): string {
-    return sanitizeForLog(redactSensitiveText(text.replace(/[\t\n\v\f\r]+/g, ' ').trim()));
+    const redacted = redactSensitiveText(text.replace(/[\t\n\v\f\r]+/g, ' ').trim());
+    return sanitizeForLog(redactSensitiveText(redacted.replace(/[\x00-\x1F\x7F]+/g, ' ')));
 }
 
 /**
