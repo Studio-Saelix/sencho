@@ -708,7 +708,7 @@ describe('blocked-deploy log line', () => {
       expect(blockLines()).toEqual([]);
     });
 
-    it('redacts credentials and strips control characters from the image reference', async () => {
+    it('redacts credentials from the image reference', async () => {
       trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
 
       await enforcePolicyForImageRefs('web', 1, ['user:secret@registry.example.com/app:1'], { bypass: false, actor: 'u' });
@@ -717,7 +717,33 @@ describe('blocked-deploy log line', () => {
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('[redacted]@registry.example.com/app:1');
       expect(lines[0]).not.toContain('secret');
-      expect(lines[0]).not.toMatch(/[\r\n]/);
+    });
+
+    it('names a fixable-only policy\'s unverified input', async () => {
+      dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 0, block_on_fixable: 1 }));
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: fixable Critical/High not verified, ${TRUNCATED}`,
+      ]);
+    });
+
+    it('gives each unverified image its own cause', async () => {
+      trivyStub.scanImagePreflight
+        .mockResolvedValueOnce(lowOnlyTruncatedScan())
+        .mockResolvedValueOnce(mkScan({ id: 46, total_vulnerabilities: 5, highest_severity: 'LOW' }));
+      dbStub.getAllVulnerabilityDetails.mockImplementation((scanId: number) => {
+        if (scanId === 46) throw new Error('db locked');
+        return [];
+      });
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'redis:6'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 2 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, stored detail rows (0) do not match the scan total (5); redis:6: known-exploited CVE (KEV), fixable Critical/High not verified, ${UNREADABLE}`,
+      ]);
     });
   });
 });

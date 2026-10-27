@@ -116,7 +116,7 @@ export function _resetTrivyMissingNotificationStateForTests(): void {
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
 
 interface ImageRiskEvaluation {
-    /** Policy inputs that matched for this image. */
+    /** Policy inputs that matched for this image, plus the assumed ones listed in `unverified`. */
     reasons: PolicyBlockReason[];
     /** Highest non-suppressed severity; UNKNOWN means no severity remains. */
     severity: VulnSeverity;
@@ -148,7 +148,7 @@ interface SuppressionPass {
 
 /**
  * Aggregate-only evaluation. Two roles: the cheap fast path for a severity-only
- * policy that does not need detail rows (`failClosed=false`), and the fallback
+ * policy that does not need detail rows (`failClosedCause=null`), and the fallback
  * when the detail rows cannot be trusted. Severity stays verifiable from the
  * stored aggregate counts, so it always gates. KEV/fixability cannot be read
  * from aggregates: when `failClosedCause` is set the active KEV/fixable inputs
