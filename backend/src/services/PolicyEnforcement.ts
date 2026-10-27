@@ -146,6 +146,16 @@ const detailRowsTruncated = (stored: number, total: number): string =>
     `stored detail rows (${stored}) do not match the scan total (${total})`;
 
 /**
+ * Free text on a block line (an image reference, a scanner or parser error)
+ * made safe for a single log line. Line breaks and tabs become a space so
+ * multi-line scanner output keeps its fields apart (deleting them would fuse the
+ * image tag with the timestamp that follows it), then credentials are redacted.
+ */
+function logEntry(text: string): string {
+    return sanitizeForLog(redactSensitiveText(text.replace(/[\x00-\x1F\x7F]+/g, ' ').trim()));
+}
+
+/**
  * What one image's unverified-evidence entry says. KEV/fixable read "not
  * verified, <cause>"; a severity match made while honored suppressions could not
  * be applied reads "matched before suppressions could be applied"; a severity
@@ -572,16 +582,14 @@ export async function enforcePolicyForImageRefs(
         console.warn(
             '[Policy] Blocked deploy for "%s": %d image(s) had evidence that could not be verified (policy "%s"): %s',
             sanitizeForLog(stackName), unverified.length, sanitizeForLog(policy.name),
-            unverified.map((v) => sanitizeForLog(redactSensitiveText(
-                `${v.imageRef}: ${describeUnverified(v, unverifiedByViolation.get(v)!)}`,
-            ))).join('; '),
+            unverified.map((v) => `${logEntry(v.imageRef)}: ${describeUnverified(v, unverifiedByViolation.get(v)!)}`).join('; '),
         );
     }
     if (unevaluated.length > 0) {
         console.warn(
             '[Policy] Blocked deploy for "%s": %d image(s) could not be evaluated (policy "%s"): %s',
             sanitizeForLog(stackName), unevaluated.length, sanitizeForLog(policy.name),
-            unevaluated.map((v) => sanitizeForLog(redactSensitiveText(`${v.imageRef}: ${v.error}`))).join('; '),
+            unevaluated.map((v) => `${logEntry(v.imageRef)}: ${logEntry(v.error ?? '')}`).join('; '),
         );
     }
     return { ok: false, bypassed: false, policy, violations };

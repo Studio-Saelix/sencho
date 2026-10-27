@@ -542,6 +542,41 @@ describe('blocked-deploy log line', () => {
     expect(lines[0]).not.toMatch(/[\r\n]/);
   });
 
+  // Trivy prints its failure as several tab-separated stderr lines, the first
+  // ending in the image tag. Deleting the breaks fused the tag with the
+  // timestamp ("no-such-tag2026-10-27T03:48:54ZFATAL").
+  const TRIVY_STDERR = 'trivy failed for nginx:no-such-tag:\n2026-10-27T03:48:54Z\tFATAL\tFatal error\trun error: image scan error: scan error: unable to initialize a scanner';
+
+  it('keeps the fields of a multi-line scanner error apart on the could-not-be-evaluated line', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error(TRIVY_STDERR));
+
+    await enforcePolicyForImageRefs('web', 1, ['nginx:no-such-tag'], { bypass: false, actor: 'u' });
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:no-such-tag: Pre-flight scan failed: trivy failed for nginx:no-such-tag: 2026-10-27T03:48:54Z FATAL Fatal error run error: image scan error: scan error: unable to initialize a scanner',
+    ]);
+  });
+
+  it('keeps the fields of a multi-line evaluation error apart', async () => {
+    trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
+    dbStub.getCveIntel.mockImplementation(() => { throw new Error('intel db read failed\r\n\tat readIntel\n\tat evaluate'); });
+
+    await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:1.14: Policy evaluation failed: intel db read failed at readIntel at evaluate',
+    ]);
+  });
+
+  it('separates a reference carrying line breaks from the text after it', async () => {
+    const result = await enforcePolicyForImageRefs('web', 1, ['app:1\nINJECTED\t:x'], { bypass: false, actor: 'u' }, undefined, true);
+
+    expect(result.ok).toBe(false);
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): app:1 INJECTED :x: Invalid image reference; the image could not be scanned',
+    ]);
+  });
+
   it('logs each cause with its own count when a block mixes a real finding and a failed scan', async () => {
     trivyStub.scanImagePreflight
       .mockResolvedValueOnce(criticalScan())
@@ -573,6 +608,16 @@ describe('blocked-deploy log line', () => {
       const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
 
       expect(result.ok).toBe(false);
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
+      ]);
+    });
+
+    it('does not leave a trailing line break in a reference on the unverified line', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14\n'], { bypass: false, actor: 'u' });
+
       expect(blockLines()).toEqual([
         `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
       ]);
