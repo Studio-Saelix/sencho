@@ -1628,6 +1628,16 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
       }) as typeof fsPromises.open);
     }
 
+    /** The permission bits of an open descriptor, so a later write to the path does not follow a check by path. */
+    async function permissionBitsOf(file: string): Promise<number> {
+      const handle = await fsPromises.open(file, 'r');
+      try {
+        return (await handle.stat()).mode & 0o777;
+      } finally {
+        await handle.close();
+      }
+    }
+
     /** Edit the captured entry of compose.yaml in place, as if it had been captured with another owner. */
     async function editCapturedEntry(
       stackName: string,
@@ -1682,7 +1692,7 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
       vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
 
       await RollbackGenerationStore.restoreGeneration(NODE, 'restore-twice', generationId, ['compose.yaml']);
-      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o600);
+      expect(await permissionBitsOf(file)).toBe(0o600);
 
       // The first restore left the live file in the process group. Judged
       // against that group, the second would hand the captured bits back.
