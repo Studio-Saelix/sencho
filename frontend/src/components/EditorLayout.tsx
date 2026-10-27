@@ -85,7 +85,8 @@ import { MobileFleet } from './mobile/MobileFleet';
 import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
-import { applyNavigateEvent, deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { useNavigateEventSurface } from './EditorLayout/hooks/useNavigateEventSurface';
 import { openPolicySettings } from './EditorLayout/openPolicySettings';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
@@ -296,14 +297,14 @@ export default function EditorLayout() {
   const onDeletedOpenStackRef = useRef<() => void>(() => {});
   // openViewOnNode is declared further down; assigned once it exists.
   const hubOnlyFromRemoteRef = useRef<(apply: () => void) => void>(() => {});
-  // Assigned once the mobile surface helpers exist: a navigate event from any
-  // dispatcher brings a phone to its content surface before the view changes.
-  const navigateEventRef = useRef<(apply: () => void) => void>((apply) => apply());
+  // A navigate event from any dispatcher brings a phone to its content surface
+  // before the view changes; connected once the mobile surface helpers exist.
+  const navigateEventSurface = useNavigateEventSurface();
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
     onHubOnlyFromRemote: (apply) => hubOnlyFromRemoteRef.current(apply),
-    onNavigateEvent: (apply) => navigateEventRef.current(apply),
+    onNavigateEvent: navigateEventSurface.onNavigateEvent,
     hasFleetCapability: hasCapability('fleet'),
     containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
@@ -667,13 +668,7 @@ export default function EditorLayout() {
     });
   };
 
-  useEffect(() => {
-    navigateEventRef.current = (apply) => applyNavigateEvent(
-      isMobile,
-      (then) => leaveToMobileSurface('content', then),
-      apply,
-    );
-  });
+  navigateEventSurface.connect(isMobile, (then) => leaveToMobileSurface('content', then));
 
   const goToMobileList = () => leaveToMobileSurface('list');
   const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));

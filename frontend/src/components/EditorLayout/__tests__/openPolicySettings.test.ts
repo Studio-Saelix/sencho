@@ -17,7 +17,7 @@ describe('openPolicySettings', () => {
     let queued: (() => void) | null = null;
     const openViewOnNode = vi.fn((_id: number, open: () => void) => { queued = open; });
     try {
-      openPolicySettings({ nodeId: 1, nodes, openViewOnNode, onNodeMissing: vi.fn() });
+      expect(openPolicySettings({ nodeId: 1, nodes, openViewOnNode, onNodeMissing: vi.fn() })).toBe(true);
       expect(openViewOnNode).toHaveBeenCalledWith(1, expect.any(Function));
       // Nothing opened yet: on the node that is active now, the tab would edit the wrong gate.
       expect(seen).not.toHaveBeenCalled();
@@ -33,7 +33,7 @@ describe('openPolicySettings', () => {
     const { seen, stop } = listen();
     const openViewOnNode = vi.fn();
     try {
-      openPolicySettings({ nodeId: null, nodes, openViewOnNode, onNodeMissing: vi.fn() });
+      expect(openPolicySettings({ nodeId: null, nodes, openViewOnNode, onNodeMissing: vi.fn() })).toBe(true);
       expect(openViewOnNode).not.toHaveBeenCalled();
       expect(seen).toHaveBeenCalledTimes(1);
     } finally {
@@ -46,7 +46,7 @@ describe('openPolicySettings', () => {
     const openViewOnNode = vi.fn();
     const onNodeMissing = vi.fn();
     try {
-      openPolicySettings({ nodeId: 99, nodes, openViewOnNode, onNodeMissing });
+      expect(openPolicySettings({ nodeId: 99, nodes, openViewOnNode, onNodeMissing })).toBe(false);
       expect(onNodeMissing).toHaveBeenCalledTimes(1);
       expect(openViewOnNode).not.toHaveBeenCalled();
       expect(seen).not.toHaveBeenCalled();

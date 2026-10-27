@@ -313,3 +313,30 @@ it.each([
   expect(toast.success).not.toHaveBeenCalled();
   consoleError.mockRestore();
 });
+
+it('does not vouch for a value read from another node when the panel is gone before the read-back lands', async () => {
+  const { unmount } = render(<EvidencePolicyPanel nodeName="pilot-12" />);
+  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
+
+  let answerReadBack: (r: Response) => void = () => undefined;
+  mockedFetch.mockImplementation((_url: string, opts?: { method?: string }) =>
+    opts?.method === 'PUT'
+      ? Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } } as unknown as Response)
+      : new Promise<Response>((resolve) => { answerReadBack = resolve; }),
+  );
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  fireEvent.click(radio('Scanner unavailable', 'Block'));
+  await waitFor(() => expect(mockedFetch.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
+
+  // The operator switches node: the panel remounts, and the old one goes away
+  // while its read-back is still in flight. The late answer is the new active
+  // node's policy, not the node that was saved.
+  unmount();
+  answerReadBack(jsonResponse(200, payload({ scannerUnavailable: 'block', isDefault: false })));
+
+  await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+  const message = vi.mocked(toast.error).mock.calls[0][0] as string;
+  expect(message).toMatch(/could not be read back/);
+  expect(message).not.toMatch(/value shown/);
+  consoleError.mockRestore();
+});

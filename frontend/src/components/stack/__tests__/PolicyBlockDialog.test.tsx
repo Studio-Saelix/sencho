@@ -29,7 +29,7 @@ describe('PolicyBlockDialog evidence', () => {
   };
 
   const renderDialog = (p: PolicyBlockPayload) =>
-    render(<PolicyBlockDialog open payload={p} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    render(<PolicyBlockDialog open payload={p} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
 
   it('says the block was not a proven vulnerability', () => {
     renderDialog(unavailablePayload);
@@ -94,9 +94,9 @@ describe('PolicyBlockDialog evidence', () => {
 
   it('asks the shell to open the settings, then closes the dialog', async () => {
     const onClose = vi.fn();
-    const onOpenSettings = vi.fn();
+    const onOpenSettings = vi.fn(() => true);
     render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={onOpenSettings} canBypass={false} canEditSettings bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
-    expect(screen.getByText(/belongs to this node only/i)).toBeInTheDocument();
+    expect(screen.getByText(/belongs to the node that ran this deploy/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -104,11 +104,20 @@ describe('PolicyBlockDialog evidence', () => {
     expect(onOpenSettings.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0]);
   });
 
+  it('keeps the explanation on screen when the settings could not be opened', async () => {
+    const onClose = vi.fn();
+    const onOpenSettings = vi.fn(() => false);
+    render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={onOpenSettings} canBypass={false} canEditSettings bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('does not navigate by itself: the shell decides which node and surface the settings open on', async () => {
     const navigate = vi.fn();
     window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
     try {
-      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
       await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
       expect(navigate).not.toHaveBeenCalled();
     } finally {
@@ -147,7 +156,7 @@ describe('PolicyBlockDialog evidence', () => {
       violations: [...unavailablePayload.violations, publicPayload.violations[0]],
     };
     const { unmount } = render(
-      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.queryByText(/blocked because the images above could not be evaluated/i)).not.toBeInTheDocument();
     // And the replacement still tells the operator the failed image needs
@@ -160,7 +169,7 @@ describe('PolicyBlockDialog evidence', () => {
     // On an evidence-only payload the sentence is the whole account of the block,
     // so it has to be there.
     render(
-      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
   });
@@ -190,7 +199,7 @@ describe('PolicyBlockDialog evidence', () => {
     expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
     // No rule was applied, so no setting governs this block and none is offered.
     expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/could not be obtained/i)).not.toBeInTheDocument();
   });
 
@@ -214,7 +223,7 @@ describe('PolicyBlockDialog evidence', () => {
     renderDialog(mixed);
     expect(screen.getByText(/evidence that could not be checked/i)).toBeInTheDocument();
     expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
   });
 
   it('does not offer the settings when the only applied rule allowed', () => {
@@ -234,7 +243,7 @@ describe('PolicyBlockDialog evidence', () => {
       },
     };
     renderDialog(allowedPlusFailure);
-    expect(screen.queryByText(/belongs to this node only/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
     expect(screen.getByText(/stopped because the images could not be evaluated/i)).toBeInTheDocument();
   });
 
@@ -371,7 +380,7 @@ describe('PolicyBlockDialog evidence', () => {
 describe('PolicyBlockDialog', () => {
   it('describes the active inputs (KEV + fixable, not the severity threshold)', () => {
     render(
-      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     const desc = screen.getAllByText(/known-exploited CVE \(KEV\)/i);
     expect(desc.length).toBeGreaterThan(0);
@@ -380,7 +389,7 @@ describe('PolicyBlockDialog', () => {
 
   it('renders a reason badge per matched input on the violation row', () => {
     render(
-      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText('KEV')).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
@@ -399,7 +408,7 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The matched row keeps its counts and reason badges.
     expect(screen.getByText(/1 KEV/)).toBeInTheDocument();
@@ -422,7 +431,7 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={failed} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={failed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The actual failure reason is shown, not an unexplained "0 critical 0 high".
     expect(screen.getByText(/Pre-flight scan failed: trivy crashed/i)).toBeInTheDocument();
@@ -438,7 +447,7 @@ describe('PolicyBlockDialog', () => {
       violations: [{ imageRef: 'redis:7', severity: 'HIGH', criticalCount: 0, highCount: 1, kevCount: 0, fixableCount: 0, reasons: [], scanId: 2 }],
     };
     render(
-      <PolicyBlockDialog open payload={legacy} stackName="web" action="deploy" onOpenSettings={vi.fn()} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={legacy} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getAllByText(/severity at or above HIGH/i).length).toBeGreaterThan(0);
   });
@@ -461,7 +470,7 @@ describe('PolicyBlockDialog names the operation it blocked', () => {
   };
 
   const renderFor = (action: 'deploy' | 'update' | 'rollback', bypassing = false) =>
-    render(<PolicyBlockDialog open payload={evidenceOnly} stackName="web" action={action} onOpenSettings={vi.fn()} canBypass canEditSettings={false} bypassing={bypassing} onClose={vi.fn()} onBypass={vi.fn()} />);
+    render(<PolicyBlockDialog open payload={evidenceOnly} stackName="web" action={action} onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={bypassing} onClose={vi.fn()} onBypass={vi.fn()} />);
 
   it.each([
     ['deploy', 'Deploy blocked by security policy', 'Deploy anyway', 'Deploying…', 'deploy again', 'This deploy was not stopped'],
@@ -482,7 +491,8 @@ describe('PolicyBlockDialog names the operation it blocked', () => {
   it('never calls a rollback a deploy in the title, the button, or the explanation', () => {
     renderFor('rollback');
     const modalText = document.body.textContent ?? '';
-    expect(modalText).not.toMatch(/Deploy blocked|Deploy anyway|This deploy was|deploy again/);
+    expect(modalText).not.toMatch(/Deploy blocked|Deploy anyway|[Dd]eploys?\b/);
+    expect(modalText).toMatch(/blocks rollbacks on/);
   });
 
   it('words the mixed-payload explanation for the operation too', () => {
@@ -493,7 +503,7 @@ describe('PolicyBlockDialog names the operation it blocked', () => {
         ...evidenceOnly.violations,
       ],
     };
-    render(<PolicyBlockDialog open payload={mixed} stackName="web" action="update" onOpenSettings={vi.fn()} canBypass canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    render(<PolicyBlockDialog open payload={mixed} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
     expect(screen.getByText(/This update was also affected by missing evidence/)).toBeInTheDocument();
     expect(screen.getByText(/Resolve the failure and update again/)).toBeInTheDocument();
   });

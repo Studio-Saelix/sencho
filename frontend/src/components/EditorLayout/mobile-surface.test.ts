@@ -1,6 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { applyNavigateEvent, deriveMobileSurface, type MobileSurfaceInput } from './mobile-surface';
-import { vi } from 'vitest';
 
 const base: MobileSurfaceInput = {
     activeView: 'dashboard',

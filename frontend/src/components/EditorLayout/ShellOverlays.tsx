@@ -46,7 +46,7 @@ interface ShellOverlaysProps {
   deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
   /** Open the Policies tab on the node a policy block was raised against (null: the active node). */
-  onOpenPolicySettings: (nodeId: number | null) => void;
+  onOpenPolicySettings: (nodeId: number | null) => boolean;
   /** Ref-backed readiness check, evaluated at confirmation time so a dialog
    *  opened while ready cannot dispatch after a node switch or failed refresh. */
   hydrationReady: () => boolean;

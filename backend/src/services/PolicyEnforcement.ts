@@ -355,6 +355,22 @@ interface ImageRiskEvaluation {
     unverified?: { reasons: PolicyBlockReason[]; cause: string };
 }
 
+/**
+ * The `partial` record's reason for an image whose finding rows could not be
+ * trusted. Says what the gate actually did for this policy: it treats the
+ * known-exploited and fixability inputs the policy enables as risky, and when it
+ * enables neither, only the suppressions it could not apply are affected.
+ */
+function partialFindingsReason(what: string, inputs: PolicyRiskInputs): string {
+    const enabled = [
+        inputs.blockOnKev ? 'known-exploited' : null,
+        inputs.blockOnFixable ? 'fixability' : null,
+    ].filter((x): x is string => x !== null);
+    return enabled.length > 0
+        ? `${what}, so ${enabled.join(' and ')} ${enabled.length > 1 ? 'were' : 'was'} treated as risky`
+        : `${what}, so suppressions could not be applied to every finding`;
+}
+
 /** Why `aggregateFallback` could not rely on the stored evidence: KEV/fixability, and suppressions when honored. */
 const EVIDENCE_READ_FAILED = 'stored scan evidence could not be read';
 const detailRowsTruncated = (stored: number, total: number): string =>
@@ -484,7 +500,7 @@ function evaluateImageRisk(
         console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
         return {
             ...aggregateFallback(inputs, rawSeverity, scan, EVIDENCE_READ_FAILED, honorSuppressions),
-            partialEvidenceReason: 'The scan findings could not be read, so known-exploited and fixability were treated as risky',
+            partialEvidenceReason: partialFindingsReason('The scan findings could not be read', inputs),
         };
     }
 
@@ -513,7 +529,7 @@ function evaluateImageRisk(
                 detailRowsTruncated(findings.length, scan.total_vulnerabilities),
                 honorSuppressions && suppressions.some((s) => mayDismissOnImage(s, imageRef)),
             ),
-            partialEvidenceReason: 'The stored findings do not cover every vulnerability in this scan, so known-exploited and fixability were treated as risky',
+            partialEvidenceReason: partialFindingsReason('The stored findings do not cover every vulnerability in this scan', inputs),
         };
     }
 
@@ -932,8 +948,8 @@ async function evaluateImageRefs(
                 // Deliberately a record and not an application. `outcome` reports
                 // what the availability POLICY decided, and the policy has no
                 // setting for partial evidence: the gate fails closed on the
-                // unproven inputs unconditionally, which is why this can block
-                // while the outcome reads `allow`. Recording it as an
+                // known-exploited and fixability inputs the policy enables, which
+                // is why this can block while the outcome reads `allow`. Recording it as an
                 // `allow` application would be worse, by implying a policy
                 // permitted something no policy governs. Consumers explain the
                 // block from the records, which carry the reason.
@@ -1181,7 +1197,7 @@ function withCandidateRuleApplied(
     const basisFor = (target: string): { source: SecurityEvidenceSource; state: SecurityEvidenceState } => {
         const basis =
             decision.applications.find((a) => a.target === target && a.state !== 'current') ??
-            decision.records.find((r) => r.target === target && r.state !== 'current');
+            decision.records.find((r) => r.target === target && r.state !== 'current' && r.state !== 'partial');
         return basis
             ? { source: basis.source, state: basis.state }
             : { source: 'vulnerability_scan', state: 'not_evaluated' };

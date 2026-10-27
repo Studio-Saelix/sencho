@@ -102,13 +102,15 @@ const OPERATION_COPY: Record<PolicyBlockableAction, {
   title: string;
   /** The operation as a noun, as in "This deploy was not stopped". */
   noun: string;
+  /** The plural, as in "Policy X blocks deploys on". */
+  plural: string;
   again: string;
   bypass: string;
   bypassing: string;
 }> = {
-  deploy: { title: 'Deploy', noun: 'deploy', again: 'deploy again', bypass: 'Deploy anyway', bypassing: 'Deploying…' },
-  update: { title: 'Update', noun: 'update', again: 'update again', bypass: 'Update anyway', bypassing: 'Updating…' },
-  rollback: { title: 'Rollback', noun: 'rollback', again: 'roll back again', bypass: 'Roll back anyway', bypassing: 'Rolling back…' },
+  deploy: { title: 'Deploy', noun: 'deploy', plural: 'deploys', again: 'deploy again', bypass: 'Deploy anyway', bypassing: 'Deploying…' },
+  update: { title: 'Update', noun: 'update', plural: 'updates', again: 'update again', bypass: 'Update anyway', bypassing: 'Updating…' },
+  rollback: { title: 'Rollback', noun: 'rollback', plural: 'rollbacks', again: 'roll back again', bypass: 'Roll back anyway', bypassing: 'Rolling back…' },
 };
 
 interface PolicyBlockDialogProps {
@@ -122,8 +124,11 @@ interface PolicyBlockDialogProps {
   canEditSettings: boolean;
   bypassing: boolean;
   onClose: () => void;
-  /** Open the Evidence availability settings on the node the block came from. */
-  onOpenSettings: () => void;
+  /**
+   * Open the Evidence availability settings on the node the block came from.
+   * Returns false when nothing could be started, so the explanation stays up.
+   */
+  onOpenSettings: () => boolean;
   onBypass: () => void;
 }
 
@@ -167,11 +172,13 @@ export function PolicyBlockDialog({
   const governedBySetting = (payload?.evidence?.applications ?? []).some((a) => a.outcome === 'block');
 
   // The block records the node the operation was sent to, which may no longer be
-  // the active node, so the shell opens the settings on that node. Opened before
-  // closing so the block explanation is never dismissed without somewhere to go.
+  // the active node, so the shell opens the settings on that node. The dialog
+  // closes once the shell has started that navigation; when it could not start
+  // (the node is gone) the explanation stays up beside the shell's error. A
+  // navigation the operator then declines, such as discarding unsaved edits, is
+  // theirs to decline.
   const openEvidenceSettings = () => {
-    onOpenSettings();
-    onClose();
+    if (onOpenSettings()) onClose();
   };
 
   return (
@@ -179,11 +186,11 @@ export function PolicyBlockDialog({
       <ModalDestructiveHeader
         kicker={`${stackName.toUpperCase()} · SCAN POLICY · BLOCKED`}
         title={`${copy.title} blocked by security policy`}
-        description={`Policy ${policyName} blocks deploys on ${inputsText}.`}
+        description={`Policy ${policyName} blocks ${copy.plural} on ${inputsText}.`}
       />
       <ModalBody>
         <p className="text-sm text-muted-foreground">
-          Policy <span className="font-medium text-foreground">{policyName}</span> blocks deploys
+          Policy <span className="font-medium text-foreground">{policyName}</span> blocks {copy.plural}
           on <span className="font-medium text-foreground">{inputsText}</span>.{' '}
           {hasGenuineViolation
             ? // Counted over the genuine matches only. On a mixed payload the
@@ -276,7 +283,7 @@ export function PolicyBlockDialog({
             </ul>
             {governedBySetting && (
               <p className="text-xs text-muted-foreground mt-2">
-                This setting belongs to this node only.{' '}
+                This setting belongs to the node that ran this {copy.noun}, not to the whole fleet.{' '}
                 {canEditSettings ? (
                   <button
                     type="button"

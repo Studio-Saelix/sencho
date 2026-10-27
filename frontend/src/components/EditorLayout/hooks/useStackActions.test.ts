@@ -1703,7 +1703,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.deployStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -1712,7 +1712,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.updateStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -1721,7 +1721,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'deploy', 'deploy');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -1753,7 +1753,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'update', 'update');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -1762,7 +1762,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.rollbackStack();
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback', nodeId: 1 }),
     );
   });
 });

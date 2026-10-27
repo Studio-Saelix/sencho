@@ -305,7 +305,7 @@ describe('candidate acceptance applies its own rule', () => {
         expect(added).toMatchObject({ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27' });
     });
 
-    it('falls back to a vulnerability scan that was not evaluated for a reference nothing recorded', async () => {
+    it('labels an invalid reference as a vulnerability scan that was not evaluated', async () => {
         // An invalid reference leaves a not_evaluated scan record and no application.
         const candidate = await evaluateCandidatePolicy('web', 1, ['not a valid ref!!'], { bypass: false, actor: 'system' });
         const added = candidate.evidence?.applications.find((a) => a.rule.startsWith('security_candidate_unproven'));
@@ -579,6 +579,43 @@ describe('evidence the gate records', () => {
             }));
         } finally {
             warn.mockRestore();
+        }
+    });
+
+    it('says which inputs a truncated read put at risk, and only the ones the policy enables', async () => {
+        const reasonFor = async (policy: Partial<ScanPolicy>, honor: boolean): Promise<string | undefined> => {
+            dbStub.getGlobalSettings.mockReturnValue(honor ? { deploy_block_honor_suppressions: '1' } : {});
+            dbStub.getMatchingPolicy.mockReturnValue(mkPolicy(policy));
+            primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'LOW' });
+            dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+            const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+            return gate.evidence?.records.find((r) => r.state === 'partial')?.reason;
+        };
+        expect(await reasonFor({ block_on_kev: 1, block_on_fixable: 1 }, false)).toContain('known-exploited and fixability were treated as risky');
+        expect(await reasonFor({ block_on_kev: 1 }, false)).toMatch(/known-exploited was treated as risky/);
+        expect(await reasonFor({ block_on_fixable: 1 }, false)).toMatch(/fixability was treated as risky/);
+        // Severity only, suppressions honored: nothing was assumed, so the record
+        // must not claim it was.
+        const severityOnly = await reasonFor({}, true);
+        expect(severityOnly).toContain('suppressions could not be applied to every finding');
+        expect(severityOnly).not.toContain('treated as risky');
+    });
+
+    it('records a partial finding set when the detail read itself fails', async () => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+        primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'LOW' });
+        dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('db locked'); });
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+            expect(gate.ok).toBe(false);
+            expect(gate.evidence?.records).toContainEqual(expect.objectContaining({
+                state: 'partial',
+                target: 'nginx:1.27',
+                reason: expect.stringContaining('could not be read'),
+            }));
+        } finally {
+            consoleError.mockRestore();
         }
     });
 

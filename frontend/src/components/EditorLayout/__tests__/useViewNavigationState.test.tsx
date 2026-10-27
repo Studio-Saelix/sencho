@@ -6,7 +6,8 @@ import * as NodeContext from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
 import { useState } from 'react';
 import { useViewNavigationState } from '../hooks/useViewNavigationState';
-import { applyNavigateEvent, deriveMobileSurface, type MobileView } from '../mobile-surface';
+import { deriveMobileSurface, type MobileView } from '../mobile-surface';
+import { useNavigateEventSurface } from '../hooks/useNavigateEventSurface';
 
 vi.mock('@/context/AuthContext');
 vi.mock('@/context/LicenseContext');
@@ -260,13 +261,9 @@ describe('useViewNavigationState', () => {
   // surface derivation, so the assertion is on where the phone ends up.
   function usePhoneShell(isMobile: boolean) {
     const [mobileView, setMobileView] = useState<MobileView>('list');
-    const nav = useViewNavigationState({
-      onNavigateEvent: (apply) => applyNavigateEvent(
-        isMobile,
-        (then) => { setMobileView('content'); then(); },
-        apply,
-      ),
-    });
+    const navigateEventSurface = useNavigateEventSurface();
+    const nav = useViewNavigationState({ onNavigateEvent: navigateEventSurface.onNavigateEvent });
+    navigateEventSurface.connect(isMobile, (then) => { setMobileView('content'); then(); });
     const surface = deriveMobileSurface({
       activeView: nav.activeView,
       selectedFile: null,
@@ -323,10 +320,9 @@ describe('useViewNavigationState', () => {
     const onHubOnlyFromRemote = vi.fn((apply: () => void) => { queued = apply; });
     const { result, rerender } = renderHook(() => {
       const [mobileView, setMobileView] = useState<MobileView>('list');
-      const nav = useViewNavigationState({
-        onHubOnlyFromRemote,
-        onNavigateEvent: (apply) => applyNavigateEvent(true, (then) => { setMobileView('content'); then(); }, apply),
-      });
+      const navigateEventSurface = useNavigateEventSurface();
+      const nav = useViewNavigationState({ onHubOnlyFromRemote, onNavigateEvent: navigateEventSurface.onNavigateEvent });
+      navigateEventSurface.connect(true, (then) => { setMobileView('content'); then(); });
       return { nav, mobileView };
     });
     act(() => {

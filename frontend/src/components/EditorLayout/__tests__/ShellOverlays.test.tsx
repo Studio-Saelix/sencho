@@ -83,7 +83,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
 function renderShell(
   overlay: OverlayState,
   stackActions: Partial<StackActionsHook>,
-  over: { hydrationReady?: () => boolean; onOpenPolicySettings?: (nodeId: number | null) => void } = {},
+  over: { hydrationReady?: () => boolean; onOpenPolicySettings?: (nodeId: number | null) => boolean } = {},
 ) {
   return render(
     <ShellOverlays
@@ -105,7 +105,7 @@ function renderShell(
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
-      onOpenPolicySettings={over.onOpenPolicySettings ?? (() => {})}
+      onOpenPolicySettings={over.onOpenPolicySettings ?? (() => true)}
       hydrationReady={over.hydrationReady ?? (() => false)}
     />,
   );
@@ -220,7 +220,7 @@ describe('ShellOverlays policy block dialog', () => {
   });
 
   it('opens the settings on the node the block was raised against, not the active node', () => {
-    const onOpenPolicySettings = vi.fn();
+    const onOpenPolicySettings = vi.fn(() => true);
     // Node 1 is the active node; the operation was sent to node 7.
     renderShell(makeOverlay({ policyBlock: block('deploy', 7) }), {}, { onOpenPolicySettings });
     (policyDialogProps.current!.onOpenSettings as () => void)();
@@ -228,8 +228,14 @@ describe('ShellOverlays policy block dialog', () => {
     expect(onOpenPolicySettings).toHaveBeenCalledWith(7);
   });
 
+  it('reports back whether the settings could be opened, so the dialog knows whether to close', () => {
+    const onOpenPolicySettings = vi.fn(() => false);
+    renderShell(makeOverlay({ policyBlock: block('deploy', 7) }), {}, { onOpenPolicySettings });
+    expect((policyDialogProps.current!.onOpenSettings as () => boolean)()).toBe(false);
+  });
+
   it('passes no node when the block recorded none', () => {
-    const onOpenPolicySettings = vi.fn();
+    const onOpenPolicySettings = vi.fn(() => true);
     renderShell(makeOverlay({ policyBlock: block('update', null) }), {}, { onOpenPolicySettings });
     (policyDialogProps.current!.onOpenSettings as () => void)();
     expect(onOpenPolicySettings).toHaveBeenCalledWith(null);

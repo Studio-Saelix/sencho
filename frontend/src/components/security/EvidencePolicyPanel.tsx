@@ -8,7 +8,7 @@
  * count. The active default is stated on every row rather than left implicit,
  * so "why was this allowed" is answerable from the screen.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -131,6 +131,14 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  // False once the panel has gone (it remounts on a node switch).
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   /**
    * `isCancelled` lets the mount effect ignore a response that arrives after the
@@ -198,14 +206,20 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
         }
         // The write answers with the resolved policy alone, not the whole read
         // envelope, so it is parsed on its own terms.
-        const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy).catch(() => null));
+        const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy).catch((parseErr) => {
+          console.error('The evidence policy save was accepted but its answer could not be parsed:', parseErr);
+          return null;
+        }));
         if (!policy) {
           // The node accepted the write but did not answer in a shape this build
           // can read, so what it now enforces is unknown. Read it back rather than
           // leave the old value on screen as if the save had not happened. When
           // that read fails too, no value is on screen to check, so the message
           // says the result is unknown instead of sending the operator to one.
-          const readBack = await load();
+          // Guarded like the mount read: when the operator has moved to another
+          // node meanwhile, the active node is no longer the one that was saved,
+          // so what it reports must not be taken for the saved value.
+          const readBack = await load(() => !aliveRef.current);
           throw new Error(readBack
             ? 'The node accepted the change but did not confirm it. Check the value shown.'
             : 'The node accepted the change but did not confirm it, and its policy could not be read back. What it enforces now is unknown.');
