@@ -258,7 +258,7 @@ Both files must be set. Setting only one refuses to start rather than falling ba
 
 The certificate must include a Subject Alternative Name that matches how agents dial: a DNS name for a hostname, or an `iPAddress` SAN for a raw IP. A certificate with only a Common Name fails Node's verification.
 
-Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle and the image health check can trust the issuer. Publicly trusted certificates do not need a CA file.
+Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle and the image health check can trust the issuer. Publicly trusted certificates do not need a CA file. For a worked setup that ends with an enrolled agent and checks the connection from the agent's side, see [Serve Sencho Over HTTPS and Enroll a Pilot Agent](/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent).
 
 Existing Pilot agents keep their persisted `pilot.jwt` across a scheme change. Edit the agent compose file so `SENCHO_PRIMARY_URL` uses `https://` (and add the CA bind-mount if enrollment now includes one), then recreate the agent container.
 
@@ -285,7 +285,7 @@ services:
 
 ## Reverse proxy setup
 
-Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer.
+Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer. For a worked Caddy setup that checks the audit log, the session cookie, and the sign-in limiter, see [Put Sencho Behind Caddy and Keep Real Client Addresses](/tutorials/run-sencho-behind-a-reverse-proxy).
 
 Until the direct peer is listed, Sencho ignores the forwarding headers: requests appear to come from the proxy, the sign-in cookie is not marked `Secure`, SSO callbacks are built on the scheme Sencho sees, and the source limits on sign-in, SSO, and other unauthenticated requests are shared across every client behind the proxy, so repeated sign-in attempts from one person can lock sign-in for everyone behind it. Signed-in requests keep their per-user or per-token rate-limit bucket. Sencho logs its trusted-proxy policy at startup and warns once per unlisted peer when an HTTP request carries forwarding headers, naming the value to set.
 

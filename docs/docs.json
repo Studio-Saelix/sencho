@@ -235,6 +235,7 @@
             "group": "Fleet & nodes",
             "pages": [
               "tutorials/enroll-a-remote-node",
+              "tutorials/use-private-registry-images-across-the-fleet",
               "tutorials/set-up-fleet-secrets",
               "tutorials/set-up-fleet-federation",
               "tutorials/configure-recovery-vault-backups"
@@ -245,8 +246,12 @@
             "pages": [
               "tutorials/create-and-approve-a-blueprint",
               "tutorials/connect-a-git-source",
+              "tutorials/deploy-on-push-from-github-or-gitlab",
+              "tutorials/roll-out-a-git-managed-blueprint",
+              "tutorials/work-the-gitops-portfolio",
               "tutorials/schedule-an-operation",
               "tutorials/configure-auto-update-policies",
+              "tutorials/restore-a-stack-from-its-rollback-point",
               "tutorials/configure-auto-heal-policies",
               "tutorials/set-up-deploy-enforcement"
             ]
@@ -254,9 +259,12 @@
           {
             "group": "Secure & integrate",
             "pages": [
+              "tutorials/run-sencho-behind-a-reverse-proxy",
+              "tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent",
               "tutorials/set-up-sso",
               "tutorials/grant-scoped-stack-access",
               "tutorials/configure-environment-guardrails",
+              "tutorials/keep-secrets-in-git-with-sops",
               "tutorials/set-up-a-webhook",
               "tutorials/resolve-stack-drift"
             ]
