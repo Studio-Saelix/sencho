@@ -460,7 +460,7 @@ describe('blocked-deploy log line', () => {
       .filter((line) => line.startsWith('[Policy] Blocked deploy'));
   }
 
-  it('names the matched policy inputs when a scanned image has a real finding', async () => {
+  it('keeps the policy-inputs wording when a scanned image has a real finding', async () => {
     trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
 
     const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
@@ -556,6 +556,147 @@ describe('blocked-deploy log line', () => {
       '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
       '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): alpine:3.19: Pre-flight scan failed: trivy crashed',
     ]);
+  });
+
+  describe('fail-closed on missing evidence', () => {
+    const TRUNCATED = 'stored detail rows do not match the scan total';
+    const UNREADABLE = 'detail rows could not be read';
+
+    // Five findings counted, one stored row: the cache-hit preflight shape.
+    function lowOnlyTruncatedScan(): VulnerabilityScan {
+      return mkScan({ id: 43, total_vulnerabilities: 5, highest_severity: 'LOW' });
+    }
+
+    it('names truncated detail rows, not matched KEV/fixable findings, for a LOW-only image', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.ok).toBe(false);
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
+      ]);
+    });
+
+    it('names an unreadable detail set as the cause', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+      dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('db locked'); });
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.ok).toBe(false);
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${UNREADABLE}`,
+      ]);
+    });
+
+    it('names the cause when the suppression read is what failed', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+      dbStub.getCveSuppressions.mockImplementation(() => { throw new Error('db locked'); });
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${UNREADABLE}`,
+      ]);
+    });
+
+    it('names only the unverified inputs the policy enables', async () => {
+      dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1, block_on_fixable: 0 }));
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV) not verified, ${TRUNCATED}`,
+      ]);
+    });
+
+    it('also names the severity match when the same image genuinely crosses the threshold', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(
+        mkScan({ id: 44, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 }),
+      );
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; severity threshold matched`,
+      ]);
+    });
+
+    it('keeps the matched wording for a severity-only policy whose truncated rows assume nothing', async () => {
+      dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+      dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+      trivyStub.scanImagePreflight.mockResolvedValue(
+        mkScan({ id: 45, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 }),
+      );
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.violations[0].reasons).toEqual(['severity']);
+      expect(blockLines()).toEqual([
+        '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")',
+      ]);
+    });
+
+    it('logs every cause on its own line when one block mixes all three', async () => {
+      trivyStub.scanImagePreflight
+        .mockResolvedValueOnce(criticalScan())
+        .mockResolvedValueOnce(lowOnlyTruncatedScan())
+        .mockRejectedValueOnce(new Error('trivy crashed'));
+      dbStub.getAllVulnerabilityDetails.mockImplementation((scanId: number) => (scanId === 42
+        ? [{ id: 1, scan_id: 42, vulnerability_id: 'CVE-2024-1', pkg_name: 'p', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null }]
+        : []));
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'redis:6', 'alpine:3.19'], { bypass: false, actor: 'u' });
+
+      expect(result.violations).toHaveLength(3);
+      expect(blockLines()).toEqual([
+        '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): redis:6: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
+        '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): alpine:3.19: Pre-flight scan failed: trivy crashed',
+      ]);
+    });
+
+    it('leaves the violation and the deploy decision exactly as before', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.ok).toBe(false);
+      expect(result.violations).toEqual([{
+        imageRef: 'nginx:1.14',
+        severity: 'LOW',
+        criticalCount: 0,
+        highCount: 0,
+        kevCount: 0,
+        fixableCount: 0,
+        reasons: ['kev', 'fixable'],
+        scanId: 43,
+      }]);
+    });
+
+    it('logs no blocked-deploy line when an admin bypasses the block', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: true, actor: 'admin' });
+
+      expect(result.bypassed).toBe(true);
+      expect(blockLines()).toEqual([]);
+    });
+
+    it('redacts credentials and strips control characters from the image reference', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      await enforcePolicyForImageRefs('web', 1, ['user:secret@registry.example.com/app:1'], { bypass: false, actor: 'u' });
+
+      const lines = blockLines();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('[redacted]@registry.example.com/app:1');
+      expect(lines[0]).not.toContain('secret');
+      expect(lines[0]).not.toMatch(/[\r\n]/);
+    });
   });
 });
 
