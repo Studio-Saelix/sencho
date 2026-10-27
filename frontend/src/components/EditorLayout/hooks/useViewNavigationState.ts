@@ -43,12 +43,17 @@ interface UseViewNavigationStateOptions {
    * of setting a view the remote node hides.
    */
   onHubOnlyFromRemote?: (apply: () => void) => void;
+  /**
+   * Wraps the state change a navigate event asks for. The shell uses it to bring
+   * a phone to its content surface first; without it the change runs directly.
+   */
+  onNavigateEvent?: (apply: () => void) => void;
   hasFleetCapability?: boolean;
   containerLabelsEnabled?: boolean;
 }
 
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
-  const { onNavigateToDashboard, onHubOnlyFromRemote, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
+  const { onNavigateToDashboard, onHubOnlyFromRemote, onNavigateEvent, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
   const { isAdmin, can, permissionsStatus, permissions, user } = useAuth();
   const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
@@ -56,9 +61,11 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   // Read by the navigate-event listener, which registers once.
   const isRemoteRef = useRef(isRemote);
   const onHubOnlyFromRemoteRef = useRef(onHubOnlyFromRemote);
+  const onNavigateEventRef = useRef(onNavigateEvent);
   useEffect(() => {
     isRemoteRef.current = isRemote;
     onHubOnlyFromRemoteRef.current = onHubOnlyFromRemote;
+    onNavigateEventRef.current = onNavigateEvent;
   });
   const { experimental, experimentalReady } = useExperimental();
 
@@ -137,12 +144,15 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
         setActiveView(detail.view as ActiveView);
         setFilterNodeId(detail.nodeId ?? null);
       };
+      // Also the hub-switch path: the change lands on the hub, and on a phone
+      // that still has to show the content surface.
+      const run = () => (onNavigateEventRef.current ? onNavigateEventRef.current(apply) : apply());
       const switchToHub = onHubOnlyFromRemoteRef.current;
       if (isRemoteRef.current && HUB_ONLY_VIEWS.has(detail.view as ActiveView) && switchToHub) {
-        switchToHub(apply);
+        switchToHub(run);
         return;
       }
-      apply();
+      run();
     };
     window.addEventListener(SENCHO_NAVIGATE_EVENT, handler);
     return () => window.removeEventListener(SENCHO_NAVIGATE_EVENT, handler);

@@ -3,12 +3,16 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 beforeEach(() => {
   onConfirmMock.mockReset();
+  policyDialogProps.current = null;
 });
 
 // The dialog under test: capture its onConfirm so the tests exercise
 // ShellOverlays' gating wiring (the corrected surface) without dragging in
 // the real modal or its context providers.
-const { onConfirmMock } = vi.hoisted(() => ({ onConfirmMock: vi.fn() }));
+const { onConfirmMock, policyDialogProps } = vi.hoisted(() => ({
+  onConfirmMock: vi.fn(),
+  policyDialogProps: { current: null as null | Record<string, unknown> },
+}));
 vi.mock('@/components/ComposeDiffPreviewDialog', () => ({
   ComposeDiffPreviewDialog: (props: { onConfirm: () => void | Promise<void> }) => {
     onConfirmMock.mockImplementation(() => props.onConfirm());
@@ -27,7 +31,12 @@ vi.mock('@/components/BashExecModal', () => ({ default: () => null }));
 vi.mock('@/components/stack/UpdateReadinessDialog', () => ({ UpdateReadinessDialog: () => null }));
 vi.mock('@/components/stack/PreDeployScanDialog', () => ({ PreDeployScanDialog: () => null }));
 vi.mock('@/components/stack/MissingExternalNetworksDialog', () => ({ MissingExternalNetworksDialog: () => null }));
-vi.mock('@/components/stack/PolicyBlockDialog', () => ({ PolicyBlockDialog: () => null }));
+vi.mock('@/components/stack/PolicyBlockDialog', () => ({
+  PolicyBlockDialog: (props: Record<string, unknown>) => {
+    policyDialogProps.current = props;
+    return null;
+  },
+}));
 vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({ SelfStackProtectedDialog: () => null }));
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
 vi.mock('../FleetView/ReconnectingOverlay', () => ({ ReconnectingOverlay: () => null }));
@@ -74,7 +83,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
 function renderShell(
   overlay: OverlayState,
   stackActions: Partial<StackActionsHook>,
-  over: { hydrationReady?: () => boolean } = {},
+  over: { hydrationReady?: () => boolean; onOpenPolicySettings?: (nodeId: number | null) => void } = {},
 ) {
   return render(
     <ShellOverlays
@@ -96,6 +105,7 @@ function renderShell(
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
+      onOpenPolicySettings={over.onOpenPolicySettings ?? (() => {})}
       hydrationReady={over.hydrationReady ?? (() => false)}
     />,
   );
@@ -192,5 +202,36 @@ describe('ShellOverlays diff-preview confirmation', () => {
     // afterSave travels with the call: this path saved first too, so a pull that
     // skips has to report itself rather than hide behind the save's own toast.
     expect(pullStackImages).toHaveBeenCalledWith(undefined, { afterSave: true });
+  });
+});
+
+describe('ShellOverlays policy block dialog', () => {
+  const block = (action: 'deploy' | 'update' | 'rollback', nodeId: number | null) => ({
+    stackName: 'web',
+    stackFile: 'web.yml',
+    action,
+    payload: { error: 'blocked', policy: null, violations: [] },
+    nodeId,
+  });
+
+  it('tells the dialog which operation was blocked', () => {
+    renderShell(makeOverlay({ policyBlock: block('rollback', 1) }), {});
+    expect(policyDialogProps.current).toMatchObject({ open: true, action: 'rollback' });
+  });
+
+  it('opens the settings on the node the block was raised against, not the active node', () => {
+    const onOpenPolicySettings = vi.fn();
+    // Node 1 is the active node; the operation was sent to node 7.
+    renderShell(makeOverlay({ policyBlock: block('deploy', 7) }), {}, { onOpenPolicySettings });
+    (policyDialogProps.current!.onOpenSettings as () => void)();
+    expect(onOpenPolicySettings).toHaveBeenCalledTimes(1);
+    expect(onOpenPolicySettings).toHaveBeenCalledWith(7);
+  });
+
+  it('passes no node when the block recorded none', () => {
+    const onOpenPolicySettings = vi.fn();
+    renderShell(makeOverlay({ policyBlock: block('update', null) }), {}, { onOpenPolicySettings });
+    (policyDialogProps.current!.onOpenSettings as () => void)();
+    expect(onOpenPolicySettings).toHaveBeenCalledWith(null);
   });
 });

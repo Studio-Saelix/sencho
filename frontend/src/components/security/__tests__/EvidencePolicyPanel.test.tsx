@@ -278,9 +278,38 @@ it('reads the policy back when a save is accepted but the answer cannot be read'
   );
   fireEvent.click(radio('Scanner unavailable', 'Block'));
 
-  await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/did not confirm it/)));
+  await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/did not confirm it.*Check the value shown/)));
   expect(toast.success).not.toHaveBeenCalled();
   // The screen shows what the node reports now, not the value from before the save.
   expect(mockedFetch.mock.calls.filter(([, opts]) => !opts?.method).length).toBeGreaterThan(readsBefore);
   await waitFor(() => expect(radio('Scanner unavailable', 'Block')).toHaveAttribute('aria-checked', 'true'));
+});
+
+it.each([
+  ['the read-back fails', () => jsonResponse(500, { error: 'boom' })],
+  ['the read-back answers with a payload this build cannot read', () => jsonResponse(200, { unexpected: true })],
+])('does not point at a value on screen when an unconfirmed save is followed by a read-back where %s', async (_name, readBack) => {
+  render(<EvidencePolicyPanel />);
+  await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  mockedFetch.mockImplementation((_url: string, opts?: { method?: string }) =>
+    Promise.resolve(
+      opts?.method === 'PUT'
+        ? ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } } as unknown as Response)
+        : readBack(),
+    ),
+  );
+  fireEvent.click(radio('Scanner unavailable', 'Block'));
+
+  // No rows remain, so the message must say the result is unknown rather than
+  // send the operator to check a value.
+  await waitFor(() => expect(screen.getByText(/could not be read, so what this node currently enforces is unknown/)).toBeInTheDocument());
+  await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+  const message = vi.mocked(toast.error).mock.calls[0][0] as string;
+  expect(message).toMatch(/did not confirm it/);
+  expect(message).toMatch(/could not be read back/);
+  expect(message).not.toMatch(/value shown/);
+  expect(toast.success).not.toHaveBeenCalled();
+  consoleError.mockRestore();
 });

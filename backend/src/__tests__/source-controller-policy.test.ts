@@ -27,6 +27,7 @@ import { stackManagedRoot } from '../services/gitops/directApplication';
 import { candidateContentFingerprint } from '../services/gitops/fingerprint';
 import { GitSourceService } from '../services/GitSourceService';
 import { SourceController } from '../services/gitops/SourceController';
+import { decideEvidenceGate } from '../services/securityEvidence';
 import { attentionReasons } from '../services/gitops/attention';
 import { projectApplication } from '../services/gitops/derive';
 import { DatabaseService } from '../services/DatabaseService';
@@ -586,24 +587,22 @@ describe('SourceController automatic acceptance', () => {
         evaluateCandidatePolicy.mockResolvedValue({
             status: 'allowed',
             policy: policyRow(),
-            evidence: {
-                outcome: 'allow',
-                records: [{
+            evidence: decideEvidenceGate(
+                [{
                     source: 'vulnerability_scan',
                     state: 'failed',
                     target: 'nginx:1.27',
                     collectedAt: null,
                     reason: 'Pre-flight scan failed: timeout',
                 }],
-                applications: [{
+                [{
                     source: 'vulnerability_scan',
                     state: 'failed',
                     outcome: 'allow',
                     rule: 'security_candidate_unproven=allow',
                     target: 'nginx:1.27',
                 }],
-                summary: 'Failed evidence for vulnerability_scan: allow (security_candidate_unproven=allow)',
-            },
+            ),
         });
         spyOnReconcile().mockResolvedValue(okResult);
         spyOnDispatch();
@@ -680,16 +679,15 @@ describe('SourceController automatic acceptance', () => {
         evaluateCandidatePolicy.mockResolvedValue({
             status: 'allowed',
             policy: undefined,
-            evidence: {
-                outcome: 'allow',
-                records: [{
+            evidence: decideEvidenceGate(
+                [{
                     source: 'vulnerability_scan',
                     state: 'failed',
                     target: 'nginx:1.27',
                     collectedAt: null,
                     reason: 'Pre-flight scan failed: timeout',
                 }],
-                applications: [
+                [
                     {
                         source: 'vulnerability_scan',
                         state: 'failed',
@@ -709,8 +707,7 @@ describe('SourceController automatic acceptance', () => {
                         target: 'nginx:1.27',
                     },
                 ],
-                summary: 'Failed evidence for vulnerability_scan: allow (security_scan_failure=allow)',
-            },
+            ),
         });
         spyOnReconcile().mockResolvedValue(okResult);
         spyOnDispatch();
@@ -804,12 +801,7 @@ describe('SourceController automatic acceptance', () => {
         evaluateCandidatePolicy.mockResolvedValue({
             status: 'allowed',
             policy: undefined,
-            evidence: {
-                outcome: 'allow',
-                records: [],
-                applications: [b, a],
-                summary: 'Failed evidence for vulnerability_scan: allow (security_scan_failure=allow)',
-            },
+            evidence: decideEvidenceGate([], [b, a]),
         });
         spyOnReconcile().mockResolvedValue(okResult);
         spyOnDispatch();

@@ -137,21 +137,23 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
    * panel has gone: the panel is keyed by node id, so every node switch remounts
    * it, and a late reply from the previous node's request must not land in the
    * new node's panel. The retry button passes nothing, because it only runs
-   * while mounted.
+   * while mounted. Resolves true only when a policy was read and is now shown.
    */
-  const load = useCallback(async (isCancelled?: () => boolean) => {
+  const load = useCallback(async (isCancelled?: () => boolean): Promise<boolean> => {
     try {
       const res = await apiFetch('/security/evidence-policy');
       if (!res.ok) throw new Error(`Failed to load (${res.status})`);
       const data = parseEvidencePolicyResponse(await res.json());
-      if (isCancelled?.()) return;
+      if (isCancelled?.()) return false;
       if (!data) throw new Error('unreadable policy payload');
       setState(data);
       setLoadFailed(false);
+      return true;
     } catch (err) {
-      if (isCancelled?.()) return;
+      if (isCancelled?.()) return false;
       console.error('Failed to load the evidence policy:', err);
       setLoadFailed(true);
+      return false;
     }
   }, []);
 
@@ -200,9 +202,13 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
         if (!policy) {
           // The node accepted the write but did not answer in a shape this build
           // can read, so what it now enforces is unknown. Read it back rather than
-          // leave the old value on screen as if the save had not happened.
-          await load();
-          throw new Error('The node accepted the change but did not confirm it. Check the value shown.');
+          // leave the old value on screen as if the save had not happened. When
+          // that read fails too, no value is on screen to check, so the message
+          // says the result is unknown instead of sending the operator to one.
+          const readBack = await load();
+          throw new Error(readBack
+            ? 'The node accepted the change but did not confirm it. Check the value shown.'
+            : 'The node accepted the change but did not confirm it, and its policy could not be read back. What it enforces now is unknown.');
         }
         setState((prev) => (prev ? { ...prev, policy } : prev));
         toast.success(nodeName ? `Evidence policy updated on ${nodeName}` : 'Evidence policy updated');

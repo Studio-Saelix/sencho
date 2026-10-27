@@ -287,6 +287,31 @@ describe('candidate acceptance applies its own rule', () => {
         );
     });
 
+    it('names the missing scanner, not a scan, as the source the candidate rule acted on', async () => {
+        trivyStub.isTrivyAvailable.mockReturnValue(false);
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        const added = candidate.evidence?.applications.find((a) => a.rule.startsWith('security_candidate_unproven'));
+        expect(added).toMatchObject({ source: 'scanner_availability', state: 'unavailable' });
+        expect(candidate.evidence?.summary).toContain(
+            'Scanner availability: unavailable, blocked by the Candidate not evaluated setting',
+        );
+        expect(candidate.evidence?.summary).not.toContain('Vulnerability scan');
+    });
+
+    it('keeps the vulnerability scan as the source when the scan is what failed', async () => {
+        trivyStub.scanImagePreflight.mockRejectedValue(new Error('scan process crashed'));
+        const candidate = await evaluateCandidatePolicy('web', 1, ['nginx:1.27'], { bypass: false, actor: 'system' });
+        const added = candidate.evidence?.applications.find((a) => a.rule.startsWith('security_candidate_unproven'));
+        expect(added).toMatchObject({ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27' });
+    });
+
+    it('falls back to a vulnerability scan that was not evaluated for a reference nothing recorded', async () => {
+        // An invalid reference leaves a not_evaluated scan record and no application.
+        const candidate = await evaluateCandidatePolicy('web', 1, ['not a valid ref!!'], { bypass: false, actor: 'system' });
+        const added = candidate.evidence?.applications.find((a) => a.rule.startsWith('security_candidate_unproven'));
+        expect(added).toMatchObject({ source: 'vulnerability_scan', state: 'not_evaluated' });
+    });
+
     it('holds a candidate whose policy evaluation threw, whatever the deploy settings say', async () => {
         // The release blocker this guards. The scan itself succeeded, so its
         // evidence record reads `current`; only the evaluation failed. Deriving

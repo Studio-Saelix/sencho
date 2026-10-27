@@ -85,7 +85,8 @@ import { MobileFleet } from './mobile/MobileFleet';
 import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
-import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { applyNavigateEvent, deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { openPolicySettings } from './EditorLayout/openPolicySettings';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
 import { HubOnlyGate } from './HubOnlyGate';
@@ -295,10 +296,14 @@ export default function EditorLayout() {
   const onDeletedOpenStackRef = useRef<() => void>(() => {});
   // openViewOnNode is declared further down; assigned once it exists.
   const hubOnlyFromRemoteRef = useRef<(apply: () => void) => void>(() => {});
+  // Assigned once the mobile surface helpers exist: a navigate event from any
+  // dispatcher brings a phone to its content surface before the view changes.
+  const navigateEventRef = useRef<(apply: () => void) => void>((apply) => apply());
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
     onHubOnlyFromRemote: (apply) => hubOnlyFromRemoteRef.current(apply),
+    onNavigateEvent: (apply) => navigateEventRef.current(apply),
     hasFleetCapability: hasCapability('fleet'),
     containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
@@ -662,6 +667,14 @@ export default function EditorLayout() {
     });
   };
 
+  useEffect(() => {
+    navigateEventRef.current = (apply) => applyNavigateEvent(
+      isMobile,
+      (then) => leaveToMobileSurface('content', then),
+      apply,
+    );
+  });
+
   const goToMobileList = () => leaveToMobileSurface('list');
   const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));
   const openSettingsMobileAware = (section?: SectionId) =>
@@ -770,6 +783,12 @@ export default function EditorLayout() {
   const handleOpenNodeNetworking = (nodeId: number) => {
     openViewOnNode(nodeId, () => setActiveView('networking'));
   };
+  const handleOpenPolicySettings = (nodeId: number | null) => openPolicySettings({
+    nodeId,
+    nodes,
+    openViewOnNode,
+    onNodeMissing: () => toast.error('That node is no longer registered.'),
+  });
   const handleOpenNodeSecurity = (nodeId: number, tab: SecurityTab | null) => {
     openViewOnNode(nodeId, () => {
       setSecurityTab(tab ?? 'overview');
@@ -1569,6 +1588,7 @@ export default function EditorLayout() {
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           deleteVolumePreservation={deleteVolumePreservation}
           onOpenFleetNodeUpdates={() => openFleetUpdates('nodes')}
+          onOpenPolicySettings={handleOpenPolicySettings}
           hydrationReady={hydrationReady}
         />
       );

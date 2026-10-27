@@ -8,7 +8,6 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { SeverityChip } from '@/components/VulnerabilityScanSheet';
 import type { VulnSeverity } from '@/types/security';
-import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/lib/events';
 import { buildEvidenceLines } from './policyBlockEvidence';
 
 /** Risk inputs a deploy gate can block on; mirrors the backend reason set. */
@@ -98,15 +97,33 @@ function describePolicyInputs(policy: PolicyBlockPayload['policy']): string {
 /** The only stack operations the backend scan-policy gate can reject. */
 export type PolicyBlockableAction = 'deploy' | 'update' | 'rollback';
 
+/** What the operator is told about the operation the bypass would run. */
+const OPERATION_COPY: Record<PolicyBlockableAction, {
+  title: string;
+  /** The operation as a noun, as in "This deploy was not stopped". */
+  noun: string;
+  again: string;
+  bypass: string;
+  bypassing: string;
+}> = {
+  deploy: { title: 'Deploy', noun: 'deploy', again: 'deploy again', bypass: 'Deploy anyway', bypassing: 'Deploying…' },
+  update: { title: 'Update', noun: 'update', again: 'update again', bypass: 'Update anyway', bypassing: 'Updating…' },
+  rollback: { title: 'Rollback', noun: 'rollback', again: 'roll back again', bypass: 'Roll back anyway', bypassing: 'Rolling back…' },
+};
+
 interface PolicyBlockDialogProps {
   open: boolean;
   payload: PolicyBlockPayload | null;
   stackName: string;
+  /** The operation that was blocked, which is also the one the bypass runs. */
+  action: PolicyBlockableAction;
   canBypass: boolean;
   /** Whether the viewer may change the Evidence availability settings the block points at. */
   canEditSettings: boolean;
   bypassing: boolean;
   onClose: () => void;
+  /** Open the Evidence availability settings on the node the block came from. */
+  onOpenSettings: () => void;
   onBypass: () => void;
 }
 
@@ -121,12 +138,15 @@ export function PolicyBlockDialog({
   open,
   payload,
   stackName,
+  action,
   canBypass,
   canEditSettings,
   bypassing,
   onClose,
+  onOpenSettings,
   onBypass,
 }: PolicyBlockDialogProps) {
+  const copy = OPERATION_COPY[action];
   const policyName = payload?.policy?.name ?? 'policy';
   const inputsText = describePolicyInputs(payload?.policy ?? null);
   const violations = payload?.violations ?? [];
@@ -146,14 +166,11 @@ export function PolicyBlockDialog({
   // send the operator to a control that changes nothing for this block.
   const governedBySetting = (payload?.evidence?.applications ?? []).some((a) => a.outcome === 'block');
 
-  // Navigation does not switch nodes, and this dialog only ever opens for the
-  // active node, so the Policies tab it lands on edits the node that ran the deploy.
-  // Dispatched before closing so the block explanation is never dismissed without
-  // somewhere to go.
+  // The block records the node the operation was sent to, which may no longer be
+  // the active node, so the shell opens the settings on that node. Opened before
+  // closing so the block explanation is never dismissed without somewhere to go.
   const openEvidenceSettings = () => {
-    window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-      detail: { view: 'security', tab: 'policies' },
-    }));
+    onOpenSettings();
     onClose();
   };
 
@@ -161,7 +178,7 @@ export function PolicyBlockDialog({
     <Modal open={open} onOpenChange={(next) => { if (!next) onClose(); }} size="xl">
       <ModalDestructiveHeader
         kicker={`${stackName.toUpperCase()} · SCAN POLICY · BLOCKED`}
-        title="Deploy blocked by security policy"
+        title={`${copy.title} blocked by security policy`}
         description={`Policy ${policyName} blocks deploys on ${inputsText}.`}
       />
       <ModalBody>
@@ -173,7 +190,7 @@ export function PolicyBlockDialog({
               // remaining rows are evidence placeholders, which did not trigger
               // anything on the merits.
               `The following ${genuineCount === 1 ? 'image' : `${genuineCount} images`} triggered the block.`
-            : 'No image was found to match those conditions. The deploy was stopped because the images could not be checked against them.'}
+            : `No image was found to match those conditions. The ${copy.noun} was stopped because the images could not be checked against them.`}
         </p>
         <div className="border border-glass-border bg-card/60 shadow-card-bevel divide-y divide-glass-border">
           {violations.length === 0 ? (
@@ -229,11 +246,11 @@ export function PolicyBlockDialog({
                 // completed and whose policy evaluation failed, and calling that a
                 // scan failure would point at the wrong thing. The recovery hint
                 // still applies either way.
-                'Some images could not be evaluated. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and deploy again, or bypass if you accept the risk.'
+                `Some images could not be evaluated. They are listed above without a finding count, so the counts above do not cover them. Resolve the failure and ${copy.again}, or bypass if you accept the risk.`
               : // "Evaluated" rather than "scanned" for the same reason as the mixed
               // branch: a row here can be a scan that completed and a policy
               // evaluation that threw, and each row above states its own cause.
-              'The deploy was blocked because the images above could not be evaluated. Resolve the issue above and deploy again, or bypass if you accept the risk.'}
+              `The ${copy.noun} was blocked because the images above could not be evaluated. Resolve the issue above and ${copy.again}, or bypass if you accept the risk.`}
           </p>
         )}
         {evidenceLines.length > 0 && (
@@ -244,11 +261,11 @@ export function PolicyBlockDialog({
             <p className="text-xs text-muted-foreground mt-1">
               {hasGenuineViolation
                 ? governedBySetting
-                  ? 'This deploy was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.'
-                  : 'This deploy was also affected by evidence that could not be checked. Alongside the findings above, see the details below.'
+                  ? `This ${copy.noun} was also affected by missing evidence. Alongside the findings above, the evidence below could not be obtained, and your settings say what to do in that case.`
+                  : `This ${copy.noun} was also affected by evidence that could not be checked. Alongside the findings above, see the details below.`
                 : governedBySetting
-                  ? 'This deploy was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.'
-                  : 'This deploy was not stopped by a proven vulnerability. It was stopped because the images could not be evaluated.'}
+                  ? `This ${copy.noun} was not stopped by a proven vulnerability. It was stopped because the evidence the policy needs could not be obtained, and your settings say what to do in that case.`
+                  : `This ${copy.noun} was not stopped by a proven vulnerability. It was stopped because the images could not be evaluated.`}
             </p>
             <ul className="mt-2 space-y-1">
               {evidenceLines.map((line) => (
@@ -293,7 +310,7 @@ export function PolicyBlockDialog({
                 onBypass();
               }}
             >
-              {bypassing ? 'Deploying…' : 'Deploy anyway'}
+              {bypassing ? copy.bypassing : copy.bypass}
             </Button>
           ) : (
             <Button variant="outline" size="sm" disabled>

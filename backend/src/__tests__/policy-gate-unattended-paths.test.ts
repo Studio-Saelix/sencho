@@ -55,21 +55,18 @@ vi.mock('../services/FleetSyncService', () => ({ FleetSyncService: { getSelfIden
 import { describePolicyBlock } from '../helpers/policyGate';
 import { SchedulerService } from '../services/SchedulerService';
 import { applyAutomaticStackUpdate } from '../services/automaticStackUpdate';
+import { decideEvidenceGate } from '../services/securityEvidence';
 
-const evidenceDecision = {
-  outcome: 'block' as const,
-  records: [{ source: 'vulnerability_scan' as const, state: 'failed' as const, target: 'nginx:1.27', collectedAt: null }],
-  applications: [
-    {
-      source: 'vulnerability_scan' as const,
-      state: 'failed' as const,
-      outcome: 'block' as const,
-      rule: 'security_scan_failure=block',
-      target: 'nginx:1.27',
-    },
-  ],
-  summary: 'Failed evidence for vulnerability_scan: block (security_scan_failure=block)',
-};
+const evidenceDecision = decideEvidenceGate(
+  [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: null }],
+  [{
+    source: 'vulnerability_scan',
+    state: 'failed',
+    outcome: 'block',
+    rule: 'security_scan_failure=block',
+    target: 'nginx:1.27',
+  }],
+);
 
 beforeEach(() => {
   mockDescribePolicyBlock.mockReset();

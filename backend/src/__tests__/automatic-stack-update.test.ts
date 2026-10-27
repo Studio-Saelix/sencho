@@ -67,6 +67,14 @@ describe('automatic stack apply pipeline', () => {
     expect(mocks.link).toHaveBeenCalledWith('recovery', 'health');
   });
 
+  it('hands the caller\'s decision callback to the gate, so an allowed update can report what it rested on', async () => {
+    const onAllowed = vi.fn();
+    await applyAutomaticStackUpdate({
+      ...input, policyOptions: { ...input.policyOptions, onAllowed }, verificationOwner: 'hub_authority',
+    });
+    expect(mocks.policy).toHaveBeenCalledWith('web', 1, expect.objectContaining({ onAllowed, bypass: false }));
+  });
+
   it('retains local verification and keeps successful mutation on recheck failure', async () => {
     mocks.recheck.mockRejectedValue(new Error('registry unavailable'));
     const result = await applyAutomaticStackUpdate({ ...input, verificationOwner: 'target_local' });

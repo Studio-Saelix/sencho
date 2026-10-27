@@ -335,6 +335,45 @@ async function cleanupStackDir(name: string) {
 
 const SKIP_PLAN_FINGERPRINT = { requirePlanFingerprint: false as const };
 
+/**
+ * Put the real deploy gate in the state where it allows on evidence that is not a
+ * clean pass: a policy matches the stack, the scanner is missing, and the setting
+ * for that case is `warn`. Returns what to call to undo it, and what to ask for
+ * the audit rows the gate wrote for the stack.
+ */
+async function arrangeAllowedOnUnavailableScanner(stackName: string) {
+    const { default: TrivyService } = await import('../services/TrivyService');
+    const { NotificationService } = await import('../services/NotificationService');
+    const db = DatabaseService.getInstance();
+    const previous = db.getGlobalSettings().security_scanner_unavailable;
+    const policy = db.createScanPolicy({
+        name: `evidence-${stackName}`,
+        node_id: null,
+        node_identity: '',
+        stack_pattern: stackName,
+        max_severity: 'HIGH',
+        block_on_deploy: 1,
+        enabled: 1,
+        block_on_severity: 1,
+        block_on_kev: 0,
+        block_on_fixable: 0,
+        replicated_from_control: 0,
+    });
+    db.updateGlobalSetting('security_scanner_unavailable', 'warn');
+    const trivySpy = vi.spyOn(TrivyService.getInstance(), 'isTrivyAvailable').mockReturnValue(false);
+    const alertSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
+    return {
+        evidenceRows: () => db.getAuditLogs({ search: 'policy.evidence_allowed', limit: 500 }).entries
+            .filter((row) => row.summary.includes(`stack="${stackName}"`)),
+        restore: () => {
+            trivySpy.mockRestore();
+            alertSpy.mockRestore();
+            db.deleteScanPolicy(policy.id);
+            db.updateGlobalSetting('security_scanner_unavailable', previous ?? 'allow');
+        },
+    };
+}
+
 describe('GitSourceService.shortOperationId', () => {
     function shortOperationId(operationId: string): string {
         return (GitSourceService as unknown as { shortOperationId: (id: string) => string }).shortOperationId(operationId);
@@ -8701,6 +8740,52 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('hands the decision the real gate allowed on an unavailable scanner to the caller of a deploy resume', async () => {
+            const sha = 't9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9b9';
+            const { svc, applicationId, nodeId, generationId, promoteSpy, deploySpy } =
+                await appliedWithFailedDeploy('retry-deploy-resume-evidence', sha);
+            deploySpy.mockImplementation(async (_stack, _ws, _atomic, ctx) => {
+                const tx = GitOpsTransitions.getInstance();
+                const env = {
+                    operationId: ctx!.gitopsDeployOperationId!,
+                    actor: 'system:compose',
+                    trigger: 'deploy',
+                    at: Date.now(),
+                };
+                tx.deployStarted(applicationId, nodeId, generationId, env);
+                tx.deployBound(applicationId, nodeId, generationId, env);
+                return {
+                    recoveryId: null,
+                    deployedGenerationId: generationId,
+                    gitopsOperationId: ctx!.gitopsDeployOperationId!,
+                };
+            });
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-resume-evidence');
+            const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+            // Armed after the failed deploy above, so the only gate pass counted is the resume's.
+            const gate = await arrangeAllowedOnUnavailableScanner('retry-deploy-resume-evidence');
+            const onAllowed = vi.fn();
+
+            try {
+                const result = await svc.retry('retry-deploy-resume-evidence', { actor: 'tester', onAllowed });
+
+                expect(result.outcome).toBe('no_source_change');
+                expect(onAllowed).toHaveBeenCalledTimes(1);
+                expect(onAllowed.mock.calls[0][0]).toMatchObject({
+                    bypassed: false,
+                    evidence: { outcome: 'warn' },
+                });
+                expect(gate.evidenceRows()).toHaveLength(1);
+            } finally {
+                gate.restore();
+                beginSpy.mockRestore();
+                validateSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
         it('refuses the deploy resume when the evidence moved before the lock, settling the refusal', async () => {
             const sha = 't10a10a10a10a10a10a10a10a10a10a10a10a10';
             const { svc, applicationId, promoteSpy, deploySpy } =
@@ -9416,6 +9501,37 @@ describe('GitSourceService.apply', () => {
             expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source', { deployedGenerationId: null });
             expect(mockRecoveryLinkGateOrRetain).toHaveBeenCalledWith('rec-test-1', 'gate-git');
         } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+            beginSpy.mockRestore();
+        }
+    });
+
+    it('hands the decision the real gate allowed on an unavailable scanner to the caller of an apply', async () => {
+        const sha = 'eeee777eeee777eeee777eeee777eeee777eeee7';
+        const svc = await seedPending('apply-evidence-allowed', 'services:\n  x:\n    image: alpine\n', sha);
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-evidence');
+        const gate = await arrangeAllowedOnUnavailableScanner('apply-evidence-allowed');
+        const onAllowed = vi.fn();
+
+        try {
+            const result = await svc.apply('apply-evidence-allowed', sha, { deploy: true, onAllowed, ...skipFingerprint });
+            expect(result.deployed).toBe(true);
+            expect(onAllowed).toHaveBeenCalledTimes(1);
+            expect(onAllowed.mock.calls[0][0]).toMatchObject({
+                bypassed: false,
+                evidence: { outcome: 'warn' },
+            });
+            expect(gate.evidenceRows()).toHaveLength(1);
+        } finally {
+            gate.restore();
             validateSpy.mockRestore();
             saveSpy.mockRestore();
             deploySpy.mockRestore();

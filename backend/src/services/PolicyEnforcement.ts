@@ -41,6 +41,7 @@ import {
     type EvidenceGateDecision,
     type EvidenceRuleApplication,
     type SecurityEvidenceRecord,
+    type SecurityEvidenceSource,
     type SecurityEvidenceState,
 } from './securityEvidence';
 import {
@@ -1173,16 +1174,20 @@ function withCandidateRuleApplied(
     // One application per unproven target, even when the evaluator already
     // recorded an application for it. Those name the deploy-gate rule that fired
     // (a scan failure, say); this one names the candidate rule that decided what
-    // to do about it, and the two are different facts. The state is reused from
-    // whatever already described this target, so the entry does not restate it
-    // differently.
-    const stateFor = (target: string): SecurityEvidenceState =>
-        decision.applications.find((a) => a.target === target && a.state !== 'current')?.state ??
-        decision.records.find((r) => r.target === target && r.state !== 'current')?.state ??
-        'not_evaluated';
+    // to do about it, and the two are different facts. The source and state are
+    // reused from whatever already described this target, so the entry does not
+    // restate it differently: a missing scanner stays a scanner gap and does not
+    // become a scan that never ran.
+    const basisFor = (target: string): { source: SecurityEvidenceSource; state: SecurityEvidenceState } => {
+        const basis =
+            decision.applications.find((a) => a.target === target && a.state !== 'current') ??
+            decision.records.find((r) => r.target === target && r.state !== 'current');
+        return basis
+            ? { source: basis.source, state: basis.state }
+            : { source: 'vulnerability_scan', state: 'not_evaluated' };
+    };
     const added: EvidenceRuleApplication[] = targets.map((target) => ({
-        source: 'vulnerability_scan' as const,
-        state: stateFor(target),
+        ...basisFor(target),
         outcome,
         rule: ruleClause('security_candidate_unproven', outcome),
         target,
