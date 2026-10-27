@@ -1,0 +1,181 @@
+---
+title: Deploy a Compose Change the Moment You Push It to GitHub or GitLab
+sidebarTitle: Trigger a pull from GitHub or GitLab
+description: Create a provider hook on a Git source, register it on GitHub or GitLab, confirm the first delivery, and choose whether a push stages a review or deploys by itself.
+---
+
+Say `marketing-site` is an nginx stack that already tracks a repository, and a teammate pushes a new image tag to it. Today nothing happens until someone opens the stack and selects **Pull now**. This tutorial removes that step: you create a provider hook in Sencho, register its URL and secret on GitHub or GitLab, and from then on the push itself tells Sencho to fetch. You start with **Review only**, so the first push stages a pending update you approve, and then switch to **Auto-deploy**, so the second push lands on the running container without a click.
+
+It covers one provider hook on a direct Git source, one confirmed delivery, and the choice between **Review only** and **Auto-deploy**. It does not cover linking a stack to a repository (see [Deploy Compose Changes by Pulling From Git Instead of Editing by Hand](/tutorials/connect-a-git-source)), private repositories, Gitea, Forgejo, or Bitbucket Cloud hooks, or triggering a sync from a CI pipeline (see [Deploy a Stack Automatically From Your CI Pipeline](/tutorials/set-up-a-webhook)). [Git webhooks](/features/git-webhooks) has the full delivery rules and signing reference.
+
+## Prerequisites
+
+- The `admin` or `node-admin` role. Creating a hook needs the `stack:edit` permission, and choosing **Auto-deploy** also needs `stack:deploy`.
+- A running stack linked to a repository on GitHub or GitLab, with a compose file at the repository root. This tutorial uses `marketing-site`, linked to `https://github.com/your-org/marketing-site.git` on `main`, with this compose file:
+
+  ```yaml
+  services:
+    web:
+      image: nginx:1.27-alpine
+      restart: always
+      ports:
+        - "8098:80"
+  ```
+
+  If the stack is not linked yet, follow [Deploy Compose Changes by Pulling From Git Instead of Editing by Hand](/tutorials/connect-a-git-source) first and leave **Apply behavior** on **Review only**.
+- Admin access to the repository on GitHub, or the Maintainer or Owner role on the GitLab project, so you can add a webhook.
+- A Sencho address the Git host can reach over the internet. Sencho builds the hook URL from the address in your browser's address bar, so open Sencho at that public address before you copy the URL. Use an HTTPS address outside a test setup: the secret signs each delivery, but it does not encrypt the payload.
+- Available on every tier, including Community; no Admiral requirement.
+
+<Warning>
+A hook that accepts a delivery can write files to a stack and, under **Auto-deploy**, run `docker compose up -d`. Keep the secret out of chat, tickets, and committed files, and rotate it from the hook's **Rotate** button if it leaks.
+</Warning>
+
+<Steps>
+  <Step title="Open the Automation tab">
+    Open the `marketing-site` stack, then open its **Git Source** sheet from the **Source** row on the **Anatomy** tab, or from **Edit compose** then **Git Source**. Select the **Automation** tab.
+
+    The **Apply behavior** choice at the top decides what a push does once Sencho has fetched the commit. Leave it on **Review only**: the fetch validates the incoming commit and flags a pending update, and nothing is written until you approve it. The **Provider hooks** section below it is empty.
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/automation-tab-empty.png" alt="Automation tab of the Git Source sheet for marketing-site with Apply behavior set to Review only, a Reconciliation row showing Active with a Suspend button, and a Provider hooks section with an Add provider hook button and the message No provider hooks." />
+    </Frame>
+  </Step>
+  <Step title="Add a provider hook">
+    Select **Add provider hook**, choose **GitHub** (or **GitLab**) as the **Provider**, and leave **Event scope** on **Configured ref**. That scope reacts to pushes on the branch named in the source's **Ref**, here `main`, and ignores everything else. **Ref + PRs** also reacts to pull request events, which you only want when previews of pull requests are useful. Select **Create**.
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/add-provider-hook-form.png" alt="Add provider hook form below the Provider hooks heading, with a Provider select showing GitHub, an Event scope control with Configured ref selected and Ref plus PRs beside it, and Cancel and Create buttons." />
+    </Frame>
+
+    Each stack can have one hook per provider, so a stack that also lives on GitLab gets a second hook with its own URL and secret.
+  </Step>
+  <Step title="Copy the secret and the URL">
+    A **Copy your webhook secret now** notice shows the secret once. Select the copy button and paste it somewhere temporary, because Sencho never displays it again. If you lose it, **Rotate** issues a new one and keeps the old one valid for 24 hours so you can update the host without a gap.
+
+    Below the notice, the hook row shows its **Webhook URL**, which ends in `/api/gitops/hooks/<node id>/<endpoint id>`. Copy it as well.
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/webhook-secret-and-url.png" alt="Automation tab after creating the hook, with a Copy your webhook secret now notice showing the secret and a Dismiss button, and a GitHub hook row below it showing Enabled, an On toggle, a Rotate button, Configured ref selected, the Webhook URL, and a note about setting the content type to JSON." />
+    </Frame>
+  </Step>
+  <Step title="Register the hook on your Git host">
+    Add the URL and secret to the repository. GitHub signs each delivery with the secret and GitLab sends it as a token header, and Sencho rejects any delivery whose signature or token does not match.
+
+    <Tabs>
+      <Tab title="GitHub">
+        In the repository, select **Settings**, then **Webhooks**, then **Add webhook**. Set these fields:
+
+        - **Payload URL**: the Sencho webhook URL.
+        - **Content type**: `application/json`. The default, `application/x-www-form-urlencoded`, wraps the payload in a form field, so the signature does not verify and the delivery fails.
+        - **Secret**: the secret you copied.
+        - **Which events would you like to trigger this webhook?**: **Just the push event**.
+        - **Active**: ticked.
+
+        Select **Add webhook**. GitHub sends a `ping` event right away.
+      </Tab>
+      <Tab title="GitLab">
+        In the project, select **Settings**, then **Webhooks**, then **Add new webhook**. Set these fields:
+
+        - **URL**: the Sencho webhook URL.
+        - **Secret token**: the secret you copied. GitLab recommends a signing token for new webhooks, but a Sencho GitLab hook verifies the secret token sent in `X-Gitlab-Token`, so use that field.
+        - **Trigger**: **Push events**.
+        - **Enable SSL verification**: leave it ticked when Sencho is served over HTTPS with a certificate GitLab trusts.
+
+        Select **Add webhook**. GitLab does not send an event on its own. Open the **Test** list for the new webhook and select **Push events**.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Confirm the first delivery arrived">
+    Back in Sencho, reopen the sheet (or reload the page) and select **Recent deliveries** on the hook row.
+
+    On GitHub the `ping` shows as **Ignored by policy** with the outcome `ping`. That is the expected result. It proves the URL, the secret, and the content type work, and Sencho does not fetch for a ping. On the GitHub side, the webhook's **Recent Deliveries** tab shows the same delivery with a `202` response.
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/ping-delivery-ignored.png" alt="Hook row with Recent deliveries expanded, listing one delivery in the state Ignored by policy with the outcome ping and the event ping, with the time it arrived." />
+    </Frame>
+
+    <Note>
+    GitLab's **Test** button is not a harmless ping. It sends a real push event for the project's latest commit, so Sencho fetches and records a delivery as **Queued**. Wait at least 10 seconds before you push for real: Sencho debounces deliveries for one source on a 10-second window, and a push that arrives inside it is recorded as **Duplicate** and does not fetch. If that happens, push another commit or select **Pull now**.
+    </Note>
+  </Step>
+  <Step title="Push a change and review the pending update">
+    Edit the compose file in the repository and push it to `main`. Here, change `nginx:1.27-alpine` to `nginx:1.28-alpine`.
+
+    A few seconds later the hook row lists a **Queued** push delivery with the ref `refs/heads/main`, and the Git Source sheet's **Overview** tab reads **Review required** with the new commit and a **Review update** button. **Review only** fetched and validated the commit but wrote nothing.
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/pending-update-review-required.png" alt="Overview tab with an amber Review required notice reading A fetched commit is waiting for review before it can apply, the commit short SHA, and a Review update button, above a stage row of Source review required, Artifact qualified, and Runtime artifact unverified." />
+    </Frame>
+
+    Select **Review update**. The **Git · Change plan** dialog lists `compose.yaml` as **Modify**. Tick **Deploy after apply** and select **Apply**. A toast reads `Changes applied and deployed.`
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/change-plan-modify.png" alt="Git Change plan dialog for marketing-site listing a Modify row for compose.yaml, with Deploy after apply ticked and Dismiss and Apply buttons." />
+    </Frame>
+
+    With **Review only**, every push waits for a person, and you decide per commit whether it deploys.
+  </Step>
+  <Step title="Let a push deploy by itself">
+    Reopen the **Automation** tab and select **Auto-deploy**, which writes the files and runs `docker compose up -d` for every accepted push. An **Update** button appears in the sheet toolbar, because the choice is not saved until you select it. Select **Update**; a toast reads `Git source saved.`
+
+    <Frame>
+      <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/auto-deploy-selected.png" alt="Automation tab with Auto-deploy selected under Apply behavior and a highlighted Update button at the left of the toolbar, above the GitHub hook row." />
+    </Frame>
+
+    Push one more commit, this time changing the tag to `nginx:1.29-alpine`. Nothing needs approving: the container is recreated within about 15 seconds.
+
+    <Note>
+    Both automatic modes hold one kind of change for review. If an incoming commit removes or renames a service that stores data in a named volume or bind mount, or Sencho cannot prove it does not, the change is held for review and the stack shows **stateful change blocked**. Choose **Auto-write files** instead of **Auto-deploy** when another process handles the rollout and you only want the files updated.
+    </Note>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from three places, because a delivery that Sencho accepted does not prove the container changed.
+
+**The hook's Recent deliveries.** Both pushes appear as **Queued** with the outcome `success`, the event `push`, and the ref `refs/heads/main`, above the `ping`. **Queued** means Sencho accepted the delivery and handed it to the Git source. What happened next depends on the apply behavior, which is why the next two checks matter.
+
+<Frame>
+  <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/auto-deploy-deliveries.png" alt="Automation tab with Auto-deploy selected, the sheet header showing the newer commit as accepted, and the GitHub hook's Recent deliveries listing two Queued push deliveries above the Ignored by policy ping." />
+</Frame>
+
+**The Git Source sheet.** Its header shows the short SHA of the latest commit and the state `accepted`. Reopen the **Overview** tab to see **Accepted** and the stage row **Source accepted**, **Artifact qualified**, and **Runtime synced and healthy**. For a few seconds after a deploy the runtime can read **Artifact unverified** while Sencho identifies the running image; reopen the sheet and it settles.
+
+<Frame>
+  <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/source-accepted.png" alt="Git Source sheet Overview tab with the header showing the short commit SHA and accepted, an Accepted notice reading The fetched commit has been accepted as the current generation, and a stage row of Source accepted, Artifact qualified, and Runtime synced and healthy." />
+</Frame>
+
+**The stack itself.** Reopen `marketing-site`. The container has a fresh uptime and its logs start with `nginx/1.29`, and **Edit compose** shows `nginx:1.29-alpine`. You did not select **Pull now**, **Apply**, or **Deploy**.
+
+<Frame>
+  <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/stack-redeployed.png" alt="marketing-site stack page showing the running container marketing-site-web-1 up about two minutes, logs reporting nginx/1.29, and the Anatomy tab listing the Git source as the repository on main." />
+</Frame>
+
+If you registered the hook on GitLab, the same checks apply. A real push there also shows **Queued**, and if you pressed **Test** just before pushing, the row for the push reads **Duplicate** as described above.
+
+<Frame>
+  <img src="/images/tutorials/deploy-on-push-from-github-or-gitlab/gitlab-deliveries.png" alt="Automation tab for a stack with a GitLab hook, showing Recent deliveries with a Queued push delivery, a Duplicate push delivery marked skipped, and an earlier Queued push delivery." />
+</Frame>
+
+## If something goes wrong
+
+**GitHub shows `Invalid HTTP Response: 404` on every delivery, and Sencho's Recent deliveries stays empty.** Sencho answers `404 Not found` to an unknown endpoint, a disabled hook, and a signature that does not verify, and it answers all three the same way so a caller cannot probe for valid ids. Rejected deliveries are not recorded in the hook's list. The usual cause on GitHub is **Content type** left on `application/x-www-form-urlencoded`. Open the webhook on GitHub, set **Content type** to `application/json`, check that **Secret** matches the secret you copied (or **Rotate** in Sencho and paste the new one), and select **Redeliver** on a failed delivery. On GitLab, check the **Secret token** and the **Recent events** list for the webhook. In both cases confirm that the URL carries the node id of the node that owns the stack and that the hook is still switched on in Sencho.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Git webhooks" icon="link" href="/features/git-webhooks">
+    Every delivery outcome, the signing headers for each host, rate limits, and the CI webhook alternative.
+  </Card>
+  <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
+    What each apply behavior does, polling, suspend and resume, and the troubleshooting table.
+  </Card>
+  <Card title="Deploy Compose Changes by Pulling From Git Instead of Editing by Hand" icon="code-pull-request" href="/tutorials/connect-a-git-source">
+    Link a stack to a repository and run one manual pull and apply.
+  </Card>
+  <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
+    Trigger a Git source sync from CI when your pipeline already calls Sencho.
+  </Card>
+</CardGroup>
