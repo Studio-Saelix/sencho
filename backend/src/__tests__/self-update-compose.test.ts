@@ -250,7 +250,7 @@ describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
       targetPath: '/opt/sencho/docker-compose.yml',
     });
     // The copy runs before the recreate so a failed write never half-applies.
-    expect(cmd.indexOf('cp ')).toBeLessThan(cmd.indexOf('up -d --force-recreate'));
+    expect(cmd.indexOf('cp ')).toBeLessThan(cmd.indexOf('up -d --no-deps --force-recreate'));
     expect(cmd).toContain(
       `cp ${shQuote('/app/data/.sencho-compose-patch')} ${shQuote('/opt/sencho/docker-compose.yml')}`,
     );
@@ -263,7 +263,7 @@ describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
     });
     // A failed copy writes the error file and exits 1 before any recreate.
     expect(cmd).toContain('exit 1');
-    expect(cmd.indexOf('exit 1')).toBeLessThan(cmd.indexOf('up -d --force-recreate'));
+    expect(cmd.indexOf('exit 1')).toBeLessThan(cmd.indexOf('up -d --no-deps --force-recreate'));
     expect(cmd).toContain('Failed to write the updated compose file');
   });
 

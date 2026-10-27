@@ -450,7 +450,7 @@ class SelfUpdateService {
 
   /** Bounded code for the last failure, for the public meta endpoint; null when there is none. */
   getLastErrorCode(): string | null {
-    if (!this.lastUpdateError) return null;
+    if (!this.getLastError()) return null;
     return this.lastUpdateErrorCode ?? 'update_failed';
   }
 
