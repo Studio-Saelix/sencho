@@ -270,6 +270,29 @@ describe('GET /api/fleet/update-status unreachable nodes', () => {
     expect(rows.find(n => n.nodeId === proxyNodeId)!.online).toBe(true);
   });
 
+  it('keeps a skipped version skipped on the local row when only its own poll fails', async () => {
+    vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('99.0.0');
+    mockMeta(ONLINE());
+    const db = DatabaseService.getInstance();
+    db.setNodeUpdateSkip(localNodeId, '99.0.0', TEST_USERNAME);
+    try {
+      const baseline = (await getRows()).find(n => n.nodeId === localNodeId)!;
+      expect(baseline.skipActive).toBe(true);
+      expect(baseline.updateAvailable).toBe(false);
+
+      vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const local = (await getRows()).find(n => n.nodeId === localNodeId)!;
+      expect(local.online).toBe(true);
+      expect(local.skipActive).toBe(true);
+      expect(local.skippedVersion).toBe('99.0.0');
+      expect(local.updateAvailable).toBe(false);
+    } finally {
+      db.deleteNodeUpdateSkip(localNodeId);
+    }
+  });
+
   it('keeps an in-flight update visible while the node is unreachable', async () => {
     mockTarget();
     mockCompareTargetFetch();

@@ -1449,9 +1449,12 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
       // A remote whose poll failed is unreadable, so it reads as offline with
       // no version. The local row is the process serving this request, so it
-      // stays online with the gateway version and the plain gateway-versus-target
-      // result. Tracker, skip and pin state are not recomputed here and read empty.
+      // stays online with the gateway version and its gateway-versus-target
+      // result, with an active skip honored. Tracker and pin state are not
+      // recomputed here and read empty.
       const isLocal = nodes[i].type === 'local';
+      const skipRow = isLocal ? db.getNodeUpdateSkip(nodes[i].id) : null;
+      const skipActive = skipRow !== null && compareValid && skipRow.skippedVersion === compareVersion;
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
@@ -1459,11 +1462,11 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         version: isLocal ? gatewayVersion : null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
         online: isLocal,
-        updateAvailable: isLocal && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
+        updateAvailable: isLocal && !skipActive && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
         updateStatus: null,
         error: null,
-        skipActive: false,
-        skippedVersion: null,
+        skipActive,
+        skippedVersion: skipActive ? skipRow.skippedVersion : null,
         ...EMPTY_PIN_STATUS,
         isDevImage: false,
         devBuildUpdateAvailable: false,
