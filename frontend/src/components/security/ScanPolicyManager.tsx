@@ -440,7 +440,9 @@ export function ScanPolicyManager() {
         </div>
       )}
 
-      <EvidencePolicyPanel key={activeNode?.id ?? 'none'} nodeName={activeNode?.name} />
+      {/* Held back until a node is active: the panel pins its requests to the node it
+          is given, and with none there is no node to pin them to. */}
+      {activeNode && <EvidencePolicyPanel key={activeNode.id} nodeId={activeNode.id} nodeName={activeNode.name} />}
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader

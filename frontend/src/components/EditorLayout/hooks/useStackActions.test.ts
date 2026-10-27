@@ -2041,6 +2041,25 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('lets a node switch carry its own resume step: the stashed action runs and discard does not switch on its own', () => {
+    // The shell parks a queued destination on the leave action when a node
+    // switch waits on this dialog; the action finishes the switch itself.
+    const run = vi.fn();
+    const setActiveNode = vi.fn();
+    const targetNode = { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result } = setup({
+      overlay: {
+        pendingLeaveAction: { run },
+        pendingUnsavedLoad: '__node-switch-pending__',
+        pendingUnsavedNode: targetNode as never,
+      },
+      setActiveNode,
+    });
+    result.current.discardAndLoadPending();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(setActiveNode).not.toHaveBeenCalled();
+  });
+
   it('clears a stashed leave action on cancel', () => {
     const { result, overlayState } = setup({ overlay: { pendingLeaveAction: { run: vi.fn() } } });
     result.current.cancelPendingUnsavedLoad();

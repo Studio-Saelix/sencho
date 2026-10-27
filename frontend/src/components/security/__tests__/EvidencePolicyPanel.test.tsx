@@ -59,7 +59,7 @@ beforeEach(() => {
 });
 
 it('states the active setting and the shipped default on every row', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
   // Every row's help text names the default, so it is never hidden.
   expect(screen.getAllByText(/Default: allow\./).length).toBeGreaterThan(0);
@@ -68,18 +68,18 @@ it('states the active setting and the shipped default on every row', async () =>
 
 it('marks a value that differs from the default', async () => {
   mockedFetch.mockResolvedValue(jsonResponse(200, payload({ scannerUnavailable: 'block', isDefault: false })));
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/Changed from the default \(allow\)/)).toBeInTheDocument());
 });
 
 it('does not claim a default change when the value matches', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
   expect(screen.queryByText(/Changed from the default/)).not.toBeInTheDocument();
 });
 
 it('sends only the changed field', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
   // The write answers with the resolved policy alone, no read envelope.
@@ -101,7 +101,7 @@ it('pushes every row control to the right edge, including one that wraps below i
   // edge, so one row's control sat apart from its siblings'. jsdom has no
   // layout, so this asserts the class that keeps each control right-aligned in
   // the wrapped case; on one line it is a no-op.
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Candidate not evaluated' })).toBeInTheDocument());
   for (const name of ['Scanner unavailable', 'Scan failed', 'Candidate not evaluated']) {
     expect(screen.getByRole('radiogroup', { name })).toHaveClass('ml-auto');
@@ -115,7 +115,7 @@ it('shows a layout-matched placeholder while loading rather than a blank pane', 
   mockedFetch.mockImplementation(
     () => new Promise<Response>((resolve) => { release = resolve; }),
   );
-  const { container } = render(<EvidencePolicyPanel />);
+  const { container } = render(<EvidencePolicyPanel nodeId={1} />);
 
   // Loading: a placeholder is present and no controls are.
   await waitFor(() => expect(container.querySelectorAll('[class*="animate-pulse"]').length).toBeGreaterThan(0));
@@ -134,7 +134,7 @@ it('shows a layout-matched placeholder while loading rather than a blank pane', 
 
 it('surfaces a read failure without claiming which values are in force', async () => {
   mockedFetch.mockResolvedValue(jsonResponse(500, {}));
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
   // A failed read says nothing about the stored values, so the copy must not
   // claim the gate fell back to anything. Only the server's own settings read
@@ -149,7 +149,7 @@ it('gives the load-failure card the same material as the loaded panel', async ()
   // error card did not, so a read failure swapped the panel's shape at the moment
   // the operator was least able to read it.
   mockedFetch.mockResolvedValue(jsonResponse(500, {}));
-  const { container } = render(<EvidencePolicyPanel />);
+  const { container } = render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
   expect(container.querySelector('[class*="shadow-card-bevel"]')).not.toBeNull();
   expect(container.querySelector('[class*="border-t-card-border-top"]')).not.toBeNull();
@@ -158,7 +158,7 @@ it('gives the load-failure card the same material as the loaded panel', async ()
 it('locks the retry control while its request is in flight', async () => {
   // Repeated clicks used to fire repeated requests with no feedback at all.
   mockedFetch.mockResolvedValue(jsonResponse(500, {}));
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
 
   let release: ((value: Response) => void) | undefined;
@@ -184,7 +184,7 @@ it('accepts the write response, which carries the policy without the read envelo
   // Regression: the write answers `{ policy }` with no `defaults`. Parsing it
   // with the stricter read parser rejected every save, and the unit tests missed
   // it because they fed the read shape to the write path.
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
   mockedFetch.mockResolvedValue(
@@ -201,7 +201,7 @@ it('accepts the write response, which carries the policy without the read envelo
 });
 
 it('rejects a write response whose policy is malformed', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
   mockedFetch.mockResolvedValue(jsonResponse(200, { policy: { scannerUnavailable: 'maybe' } }));
@@ -215,7 +215,7 @@ it('treats an unexpected payload as unreadable rather than rendering nonsense', 
   // A node behind the proxy can answer with a shape this build does not know;
   // the panel must not take the Policies tab down with it.
   mockedFetch.mockResolvedValue(jsonResponse(200, { policy: { scannerUnavailable: 'nonsense' } }));
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/could not be read/)).toBeInTheDocument());
 });
 
@@ -224,7 +224,7 @@ it('disables the controls for a non-admin', async () => {
     isAdmin: false,
     can: () => true,
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText(/read-only for your role/)).toBeInTheDocument());
   expect(radio('Scanner unavailable', 'Block')).toBeDisabled();
   expect(radio('Candidate not evaluated', 'Allow')).toBeDisabled();
@@ -235,13 +235,13 @@ it('keeps showing the active values to a non-admin', async () => {
     isAdmin: false,
     can: () => true,
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   // Read-only must not mean opaque: the defaults still have to be visible.
   await waitFor(() => expect(screen.getAllByText(/Default: allow\./).length).toBeGreaterThan(0));
 });
 
 it('reports a rejected write without claiming success', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
   mockedFetch.mockResolvedValue(jsonResponse(400, { error: 'scanFailure must be one of: allow, warn, block' }));
@@ -252,7 +252,7 @@ it('reports a rejected write without claiming success', async () => {
 });
 
 it('names the node the settings belong to, in the card and in the save confirmation', async () => {
-  render(<EvidencePolicyPanel nodeName="pilot-12" />);
+  render(<EvidencePolicyPanel nodeId={12} nodeName="pilot-12" />);
   await waitFor(() => expect(screen.getByText(/These settings belong to pilot-12, not to the whole fleet/)).toBeInTheDocument());
 
   mockedFetch.mockResolvedValue(
@@ -265,7 +265,7 @@ it('names the node the settings belong to, in the card and in the save confirmat
 });
 
 it('reads the policy back when a save is accepted but the answer cannot be read', async () => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
   const readsBefore = mockedFetch.mock.calls.filter(([, opts]) => !opts?.method).length;
 
@@ -289,7 +289,7 @@ it.each([
   ['the read-back fails', () => jsonResponse(500, { error: 'boom' })],
   ['the read-back answers with a payload this build cannot read', () => jsonResponse(200, { unexpected: true })],
 ])('does not point at a value on screen when an unconfirmed save is followed by a read-back where %s', async (_name, readBack) => {
-  render(<EvidencePolicyPanel />);
+  render(<EvidencePolicyPanel nodeId={1} />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
   const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
@@ -315,7 +315,7 @@ it.each([
 });
 
 it('does not vouch for a value read from another node when the panel is gone before the read-back lands', async () => {
-  const { unmount } = render(<EvidencePolicyPanel nodeName="pilot-12" />);
+  const { unmount } = render(<EvidencePolicyPanel nodeId={12} nodeName="pilot-12" />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
   let answerReadBack: (r: Response) => void = () => undefined;

@@ -8786,6 +8786,67 @@ describe('GitSourceService.apply', () => {
             }
         });
 
+        it('hands the decision the real gate allowed on an unavailable scanner to the caller of a promotion retry', async () => {
+            const sha = 't9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9';
+            const stackName = 'retry-promote-evidence';
+            const svc = await seedPending(stackName, 'services:\n  x:\n    image: alpine\n', sha);
+            const generationId = acceptPendingCandidate(stackName);
+            const applicationId = liveApp(stackName)!.id;
+            const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+            DatabaseService.getInstance().getDb()
+                .prepare('UPDATE stack_git_sources SET auto_deploy_on_apply = 1 WHERE stack_name = ?')
+                .run(stackName);
+            const { GitProjectManifestService } = await import('../services/GitProjectManifestService');
+            const { ComposeService } = await import('../services/ComposeService');
+            const { HealthGateService } = await import('../services/HealthGateService');
+            const promoteSpy = vi.spyOn(GitProjectManifestService.prototype, 'promoteGeneration')
+                .mockImplementation(async () => {});
+            const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack')
+                .mockImplementation(async (_stack, _ws, _atomic, ctx) => {
+                    const tx = GitOpsTransitions.getInstance();
+                    const env = {
+                        operationId: ctx!.gitopsDeployOperationId!,
+                        actor: 'system:compose',
+                        trigger: 'deploy',
+                        at: Date.now(),
+                    };
+                    tx.deployStarted(applicationId, nodeId, generationId, env);
+                    tx.deployBound(applicationId, nodeId, generationId, env);
+                    return {
+                        recoveryId: null,
+                        deployedGenerationId: generationId,
+                        gitopsOperationId: ctx!.gitopsDeployOperationId!,
+                    };
+                });
+            const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-promote-evidence');
+            const reconcileSpy = vi.spyOn(svc, 'reconcile');
+            const gate = await arrangeAllowedOnUnavailableScanner(stackName);
+            const onAllowed = vi.fn();
+
+            try {
+                const result = await svc.retry(stackName, { actor: 'tester', onAllowed });
+
+                // The promote arm ran (nothing was fetched or re-accepted) and
+                // its deploy passed the real gate on missing evidence.
+                expect(reconcileSpy).not.toHaveBeenCalled();
+                expect(promoteSpy).toHaveBeenCalledTimes(1);
+                expect(deploySpy).toHaveBeenCalledTimes(1);
+                expect(result.outcome).toBe('no_source_change');
+                expect(onAllowed).toHaveBeenCalledTimes(1);
+                expect(onAllowed.mock.calls[0][0]).toMatchObject({
+                    bypassed: false,
+                    evidence: { outcome: 'warn' },
+                });
+                expect(gate.evidenceRows()).toHaveLength(1);
+            } finally {
+                gate.restore();
+                reconcileSpy.mockRestore();
+                beginSpy.mockRestore();
+                promoteSpy.mockRestore();
+                deploySpy.mockRestore();
+            }
+        });
+
         it('refuses the deploy resume when the evidence moved before the lock, settling the refusal', async () => {
             const sha = 't10a10a10a10a10a10a10a10a10a10a10a10a10';
             const { svc, applicationId, promoteSpy, deploySpy } =

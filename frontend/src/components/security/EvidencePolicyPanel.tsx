@@ -125,7 +125,15 @@ function PolicyRow({
   );
 }
 
-export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
+/**
+ * `nodeId` is the node this panel displays, and every request it makes (the
+ * mount read, the retry, each save, the read-back after an unconfirmed save) is
+ * pinned to it. The default targeting reads the active node from shared browser
+ * storage, which another tab can change while this one stays mounted on the old
+ * node: a write would then land on the node the other tab chose while the toast
+ * named the one on screen.
+ */
+export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; nodeName?: string }) {
   const { isAdmin } = useAuth();
   const [state, setState] = useState<EvidencePolicyResponse | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -149,7 +157,7 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
    */
   const load = useCallback(async (isCancelled?: () => boolean): Promise<boolean> => {
     try {
-      const res = await apiFetch('/security/evidence-policy');
+      const res = await apiFetch('/security/evidence-policy', { nodeId });
       if (!res.ok) throw new Error(`Failed to load (${res.status})`);
       const data = parseEvidencePolicyResponse(await res.json());
       if (isCancelled?.()) return false;
@@ -163,7 +171,7 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
       setLoadFailed(true);
       return false;
     }
-  }, []);
+  }, [nodeId]);
 
   useEffect(() => {
     const guard = { cancelled: false };
@@ -198,6 +206,7 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
       try {
         const res = await apiFetch('/security/evidence-policy', {
           method: 'PUT',
+          nodeId,
           body: JSON.stringify(patch),
         });
         if (!res.ok) {
@@ -232,7 +241,7 @@ export function EvidencePolicyPanel({ nodeName }: { nodeName?: string }) {
         setBusy(false);
       }
     },
-    [load, nodeName],
+    [load, nodeId, nodeName],
   );
 
   if (loadFailed) {

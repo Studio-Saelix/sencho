@@ -136,17 +136,17 @@ it('shows the evidence policy on a remote node and reads it from that node, not 
   // Scan policies stay local-only: the remote banner shows and they are not fetched.
   expect(screen.getByText('Managed on the local instance')).toBeInTheDocument();
   expect(mockedFetch.mock.calls.some(([url]) => url === '/security/policies')).toBe(false);
-  // The evidence read must reach the active node, so it must not be pinned local.
+  // The evidence read is pinned to the node on screen, never to the hub
+  // (`localOnly` or a null node) and never left to follow shared storage.
   const call = mockedFetch.mock.calls.find(([url]) => url === '/security/evidence-policy');
   expect(call).toBeTruthy();
-  // Neither option may pin the read to the hub: `localOnly` or an explicit null node.
   expect(call![1] ?? {}).not.toHaveProperty('localOnly');
-  expect(call![1] ?? {}).not.toHaveProperty('nodeId');
+  expect(call![1]).toMatchObject({ nodeId: 12 });
   expect(within(screen.getByRole('radiogroup', { name: 'Scanner unavailable' })).getByRole('radio', { name: 'Block' }))
     .toHaveAttribute('aria-checked', 'true');
 });
 
-it('saves the evidence policy to the active remote node without pinning the write local', async () => {
+it('saves the evidence policy to the displayed remote node, not the hub and not whatever storage names', async () => {
   setup();
   useNode({ type: 'remote', id: 12, name: 'pilot-12' });
   mockedFetch.mockImplementation((url: string, opts?: { method?: string }) =>
@@ -165,9 +165,18 @@ it('saves the evidence policy to the active remote node without pinning the writ
     const put = mockedFetch.mock.calls.find(([url, opts]) => url === '/security/evidence-policy' && opts?.method === 'PUT');
     expect(put).toBeTruthy();
     expect(put![1]).not.toHaveProperty('localOnly');
-    expect(put![1]).not.toHaveProperty('nodeId');
+    expect(put![1]).toMatchObject({ nodeId: 12 });
     expect(JSON.parse(put![1].body)).toEqual({ scannerUnavailable: 'block' });
   });
+});
+
+it('renders no evidence panel, and sends no request for it, until a node is active', async () => {
+  setup();
+  vi.mocked(NodeContext.useNodes).mockReturnValue({ activeNode: null } as unknown as ReturnType<typeof NodeContext.useNodes>);
+  render(<ScanPolicyManager />);
+  await waitFor(() => expect(screen.getByText('Add policy')).toBeInTheDocument());
+  expect(screen.queryByText('Evidence availability')).not.toBeInTheDocument();
+  expect(mockedFetch.mock.calls.some(([url]) => url === '/security/evidence-policy')).toBe(false);
 });
 
 it('does not carry one node\'s evidence policy over to the next node selected', async () => {
