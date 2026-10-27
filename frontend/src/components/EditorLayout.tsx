@@ -1186,15 +1186,17 @@ export default function EditorLayout() {
     const previousId = lastSeenNodeIdRef.current;
     const isRealSwitch = previousId !== null && previousId !== activeNode.id;
 
-    // A node-switch prompt is already open. Ignore any further activeNode
-    // changes until the user resolves the current dialog; revert silently so
-    // the dialog's pendingUnsavedNode stays anchored to the first attempt.
-    if (isRealSwitch && overlayState.pendingUnsavedLoad === NODE_SWITCH_PENDING_TOKEN) {
+    // An unsaved-changes prompt is already open (a node switch, a stack load, or
+    // a leave-editor navigation). Ignore any further activeNode changes until the
+    // user resolves it and revert silently, so the prompt keeps the navigation it
+    // was opened for. A view queued for the ignored switch is dropped, and the
+    // operator is told, since the link that asked for it will not be followed.
+    if (isRealSwitch && (overlayState.pendingUnsavedLoad !== null || overlayState.pendingLeaveAction !== null)) {
       const previousNode = nodes.find(n => n.id === previousId);
       if (previousNode) {
-        // A reverted switch never lands, so a view queued for it must not
-        // fire on some later, unrelated arrival at that node.
-        dropQueuedView();
+        if (dropQueuedView()) {
+          toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
+        }
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
       }
@@ -1213,15 +1215,8 @@ export default function EditorLayout() {
         overlayState.setPendingLoadOptions(null);
         // A view queued for this switch waits with the confirmation: accepting
         // it re-queues the view and finishes the switch, cancelling drops it.
-        // Another stashed navigation already owns the dialog, so it wins.
         const resumeSwitch = parkForConfirmation(activeNode);
-        if (resumeSwitch) {
-          if (overlayState.pendingLeaveAction) {
-            toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
-          } else {
-            overlayState.setPendingLeaveAction({ run: resumeSwitch });
-          }
-        }
+        if (resumeSwitch) overlayState.setPendingLeaveAction({ run: resumeSwitch });
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
         return;

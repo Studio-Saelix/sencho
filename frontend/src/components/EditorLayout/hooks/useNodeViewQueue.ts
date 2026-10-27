@@ -48,16 +48,14 @@ export function useNodeViewQueue({ nodes, activeNode, setActiveNode }: UseNodeVi
     return queued;
   };
 
-  /** Forget the queued view: its switch was reverted and will not land. */
-  const dropQueuedView = () => {
-    queuedRef.current = null;
-  };
+  /** Forget the queued view: its switch was reverted and will not land. Returns whether there was one. */
+  const dropQueuedView = (): boolean => takeQueuedView() !== null;
 
   /**
    * The switch to `target` is waiting on a confirmation. Returns the step to run
-   * on confirmation (re-queue the view, then switch), or null when the queued
-   * view is not for `target`; that view is dropped, since its switch is not the
-   * one being confirmed.
+   * on confirmation (re-queue the view, then switch), or null when nothing is
+   * queued (a plain switch) or the queued view is not for `target`; that view is
+   * dropped, since its switch is not the one being confirmed.
    */
   const parkForConfirmation = (target: Node): (() => void) | null => {
     const queued = takeQueuedView();

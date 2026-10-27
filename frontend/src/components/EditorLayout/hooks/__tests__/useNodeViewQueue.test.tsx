@@ -105,12 +105,24 @@ describe('the settings link across a dirty-editor node switch', () => {
 
     // A second request while the dialog is up: the shell reverts that switch and drops its view.
     act(() => hook.result.current.openViewOnNode(3, () => navigations.push({ view: 'networking' } as SenchoNavigateDetail)));
-    act(() => hook.result.current.dropQueuedView());
+    let dropped = false;
+    act(() => { dropped = hook.result.current.dropQueuedView(); });
+    // The shell tells the operator about a dropped link only when there was one to drop.
+    expect(dropped).toBe(true);
+    act(() => { dropped = hook.result.current.dropQueuedView(); });
+    expect(dropped).toBe(false);
     expect(setActiveNode).toHaveBeenLastCalledWith(NODES[2]);
 
     act(() => confirm!());
     expect(settle(1)).toBe('open-node-view');
     expect(navigations).toEqual([{ view: 'security', tab: 'policies' }]);
+  });
+
+  it('parks nothing for a plain switch with no queued view', () => {
+    const { hook } = setup();
+    let confirm: (() => void) | null = () => {};
+    act(() => { confirm = hook.result.current.parkForConfirmation(NODES[0]); });
+    expect(confirm).toBeNull();
   });
 
   it('opens at once on the active node and for a clean editor takes the ordinary path', () => {

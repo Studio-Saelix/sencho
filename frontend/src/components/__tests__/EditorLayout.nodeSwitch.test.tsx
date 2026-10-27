@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useSyncExternalStore } from 'react';
 import { render, act, cleanup } from '@testing-library/react';
 import { toast } from '@/components/ui/toast-store';
+import { apiFetch } from '@/lib/api';
 
 // Types are erased, so they can sit outside the hoisted block the mock factories read.
 type TestNode = { id: number; name: string; type: string; is_default: boolean };
@@ -31,9 +32,11 @@ interface Captured {
       pendingUnsavedLoad: string | null;
       pendingLeaveAction: unknown;
       setPendingLeaveAction: (action: { run: () => void } | null) => void;
+      setPendingUnsavedLoad: (load: string | null) => void;
     };
     stackActions: { discardAndLoadPending: () => void; cancelPendingUnsavedLoad: () => void };
   };
+  viewProps?: { activeView: string; onOpenNodeNetworking: (nodeId: number) => void };
   [key: string]: unknown;
 }
 
@@ -145,7 +148,7 @@ vi.mock('@/components/mobile/MobileSchedules', () => ({ MobileSchedules: stub() 
 vi.mock('@/components/mobile/MobileSettings', () => ({ MobileSettings: stub() }));
 vi.mock('@/components/MobileTabBar', () => ({ MobileTabBar: (p: { mobileView: string }) => { cap.tab = p; return null; } }));
 vi.mock('@/components/EditorLayout/ViewRouter', () => ({
-  ViewRouter: (p: { activeView: string }) => { cap.viewProps = p; return <div data-testid="view">{p.activeView}</div>; },
+  ViewRouter: (p: NonNullable<Captured['viewProps']>) => { cap.viewProps = p; return <div data-testid="view">{p.activeView}</div>; },
 }));
 vi.mock('@/components/EditorLayout/ShellOverlays', () => ({
   ShellOverlays: (p: Captured['shell']) => { cap.shell = p; return null; },
@@ -169,6 +172,7 @@ const cancelDiscard = async () => { await act(async () => { cap.shell.stackActio
 
 afterEach(() => { cleanup(); });
 beforeEach(() => {
+  vi.clearAllMocks();
   for (const k of Object.keys(cap)) delete cap[k];
   window.history.replaceState({}, '', '/');
   sessionStorage.clear();
@@ -250,5 +254,78 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     expect(otherNavigation).toHaveBeenCalledTimes(1);
     expect(store.activeNode.id).toBe(2);
     expect(view()).toMatch(/^dashboard\|/);
+  });
+
+  // The three owners of an open unsaved-changes prompt are a parked node switch,
+  // a stack load and a leave-editor navigation. A link clicked behind any of them
+  // is not followed, says so, and leaves that prompt's own navigation alone.
+  const NOT_FOLLOWED = /unsaved-changes prompt first.*not followed/;
+
+  it('says so and keeps the parked switch when a node-switch prompt is already open', async () => {
+    await boot();
+    makeDirty();
+    // The operator starts a switch to node 3 from the switcher; the dirty guard holds it.
+    await act(async () => { setActiveNode(N(3)); });
+    await flush();
+    expect(store.activeNode.id).toBe(2);
+    expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('__node-switch-pending__');
+
+    await clickSettingsLink(1);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
+    expect(store.activeNode.id).toBe(2);
+    expect(dialogOpen()).toBe(true);
+
+    await confirmDiscard();
+    // Confirming finishes the switch the prompt was opened for, and no Policies view fires later.
+    expect(store.activeNode.id).toBe(3);
+    expect(view()).toMatch(/^dashboard\|overview\|/);
+    await act(async () => { setActiveNode(N(1)); });
+    await flush();
+    expect(view()).toMatch(/^dashboard\|overview\|/);
+  });
+
+  it('says so and keeps the stashed stack load when a stack-load prompt is already open', async () => {
+    await boot();
+    makeDirty();
+    await act(async () => { cap.shell.overlayState.setPendingUnsavedLoad('app.yml'); });
+    expect(dialogOpen()).toBe(true);
+
+    await clickSettingsLink(1);
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
+    // The link did not take over the prompt: it still holds the stack load, not a node switch.
+    expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('app.yml');
+    expect(cap.shell.overlayState.pendingLeaveAction).toBeNull();
+    expect(store.activeNode.id).toBe(2);
+
+    vi.mocked(apiFetch).mockClear();
+    await confirmDiscard();
+    // Confirming loads that stack on the node the operator is on; the link goes nowhere.
+    expect(vi.mocked(apiFetch).mock.calls.some(([path]) => String(path).includes('app'))).toBe(true);
+    expect(store.activeNode.id).toBe(2);
+    expect(view()).not.toMatch(/^security\|policies\|/);
+  });
+
+  // The phone shell mounts the view router only on its content surface, so this caller is desktop-only.
+  it.skipIf(isMobile)('does the same for the other node-view links, here Networking, behind a stack-load prompt', async () => {
+    await boot();
+    makeDirty();
+    await act(async () => { cap.shell.overlayState.setPendingUnsavedLoad('app.yml'); });
+
+    await act(async () => { cap.viewProps!.onOpenNodeNetworking(1); });
+    await flush();
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(NOT_FOLLOWED));
+    expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('app.yml');
+    expect(store.activeNode.id).toBe(2);
+  });
+
+  it('does not announce a dropped link when a plain switch is refused behind a prompt', async () => {
+    await boot();
+    makeDirty();
+    await act(async () => { cap.shell.overlayState.setPendingUnsavedLoad('app.yml'); });
+    await act(async () => { setActiveNode(N(3)); });
+    await flush();
+    expect(toast.info).not.toHaveBeenCalled();
+    expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('app.yml');
+    expect(store.activeNode.id).toBe(2);
   });
 });
