@@ -57,9 +57,9 @@ const EMPTY_FORM: PolicyFormState = {
  * control-governed: fetched localOnly and shown only on the local node,
  * mirroring how the rest of the fleet-governance UI behaves. The evidence
  * availability panel is the exception: it configures the node that deploys, so
- * it is shown on a remote node too (its read and write are proxied to the
- * active node) and is keyed by node id so a switch never shows the previous
- * node's values.
+ * it is shown on a remote node too (its read and write are pinned to the
+ * node on screen, not to whatever shared storage names) and is keyed by node id
+ * so a switch never shows the previous node's values.
  */
 export function ScanPolicyManager() {
   const { isAdmin, can } = useAuth();

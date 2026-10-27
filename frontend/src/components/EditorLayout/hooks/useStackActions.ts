@@ -2705,8 +2705,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     overlayState.setPendingLoadOptions(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
-    // A stashed "leave editor" navigation takes precedence; it already knows
-    // how to tear down editor state (resetEditorState) and move the surface.
+    // A stashed navigation takes precedence and finishes the move itself: a
+    // "leave editor" one tears down editor state (resetEditorState) and moves
+    // the surface, a parked node switch re-queues its destination and switches.
     if (leave) {
       leave.run();
       return;

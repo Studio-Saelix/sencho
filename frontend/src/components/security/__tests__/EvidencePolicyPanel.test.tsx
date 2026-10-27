@@ -314,7 +314,7 @@ it.each([
   consoleError.mockRestore();
 });
 
-it('does not vouch for a value read from another node when the panel is gone before the read-back lands', async () => {
+it('names the node and points at its settings when the panel is gone before the read-back lands', async () => {
   const { unmount } = render(<EvidencePolicyPanel nodeId={12} nodeName="pilot-12" />);
   await waitFor(() => expect(screen.getByText('Evidence availability')).toBeInTheDocument());
 
@@ -328,15 +328,18 @@ it('does not vouch for a value read from another node when the panel is gone bef
   fireEvent.click(radio('Scanner unavailable', 'Block'));
   await waitFor(() => expect(mockedFetch.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
 
-  // The operator switches node: the panel remounts, and the old one goes away
-  // while its read-back is still in flight. The late answer is the new active
-  // node's policy, not the node that was saved.
+  // The operator switches node: the panel unmounts while its read-back is still
+  // in flight. The read-back still goes to the node that was saved, but there is
+  // no panel left to show it in, so the message must not send the operator to a
+  // value on screen.
   unmount();
   answerReadBack(jsonResponse(200, payload({ scannerUnavailable: 'block', isDefault: false })));
 
   await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
   const message = vi.mocked(toast.error).mock.calls[0][0] as string;
-  expect(message).toMatch(/could not be read back/);
-  expect(message).not.toMatch(/value shown/);
+  expect(message).toMatch(/accepted the change on pilot-12 but did not confirm it/);
+  expect(message).toMatch(/Open its Evidence availability settings/);
+  expect(message).not.toMatch(/value shown|unknown/);
+  expect(mockedFetch.mock.calls.filter(([, o]) => !o?.method).every(([, o]) => o?.nodeId === 12)).toBe(true);
   consoleError.mockRestore();
 });

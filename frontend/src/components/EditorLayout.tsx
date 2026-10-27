@@ -1215,8 +1215,12 @@ export default function EditorLayout() {
         // it re-queues the view and finishes the switch, cancelling drops it.
         // Another stashed navigation already owns the dialog, so it wins.
         const resumeSwitch = parkForConfirmation(activeNode);
-        if (resumeSwitch && !overlayState.pendingLeaveAction) {
-          overlayState.setPendingLeaveAction({ run: resumeSwitch });
+        if (resumeSwitch) {
+          if (overlayState.pendingLeaveAction) {
+            toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
+          } else {
+            overlayState.setPendingLeaveAction({ run: resumeSwitch });
+          }
         }
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);

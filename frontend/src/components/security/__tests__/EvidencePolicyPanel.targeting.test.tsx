@@ -5,7 +5,7 @@
  * request targeting reads the active node from shared browser storage, which a
  * second tab can change while this tab stays mounted on the first node. These
  * tests move that storage after the panel has rendered and assert on the
- * headers that actually reach the network, so a request that follows the
+ * headers that reach `fetch`, so a request that follows the
  * storage instead of the panel fails here. `apiFetch` is deliberately not
  * mocked: a mock of it would accept whatever targeting the panel asked for.
  */

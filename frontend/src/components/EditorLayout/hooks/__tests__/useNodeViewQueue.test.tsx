@@ -7,7 +7,7 @@
  * on the blocked node's Policies tab, cancelling leaves nothing behind that
  * could fire on a later visit. The tests drive the same sequence the shell's
  * node-switch effect runs (queue, park on the dirty guard, confirm or cancel,
- * settle) with the real queue, the real settle resolver and the real link.
+ * settle) with the real queue, the real settle resolver and the real link function.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
@@ -89,7 +89,7 @@ describe('the settings link across a dirty-editor node switch', () => {
     const { hook, clickSettingsLink } = setup();
 
     clickSettingsLink();
-    // The dirty guard is confirming a switch to node 3, not the node the view was queued for.
+    // The dirty guard is holding a switch to node 3, not the node the view was queued for.
     let confirm: (() => void) | null = null;
     act(() => { confirm = hook.result.current.parkForConfirmation(NODES[2]); });
     expect(confirm).toBeNull();

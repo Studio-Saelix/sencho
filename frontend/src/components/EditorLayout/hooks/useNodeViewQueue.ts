@@ -56,7 +56,8 @@ export function useNodeViewQueue({ nodes, activeNode, setActiveNode }: UseNodeVi
   /**
    * The switch to `target` is waiting on a confirmation. Returns the step to run
    * on confirmation (re-queue the view, then switch), or null when the queued
-   * view is not for `target` and so has nothing to carry across the wait.
+   * view is not for `target`; that view is dropped, since its switch is not the
+   * one being confirmed.
    */
   const parkForConfirmation = (target: Node): (() => void) | null => {
     const queued = takeQueuedView();

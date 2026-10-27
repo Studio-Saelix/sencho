@@ -149,11 +149,12 @@ export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; node
   }, []);
 
   /**
-   * `isCancelled` lets the mount effect ignore a response that arrives after the
-   * panel has gone: the panel is keyed by node id, so every node switch remounts
-   * it, and a late reply from the previous node's request must not land in the
-   * new node's panel. The retry button passes nothing, because it only runs
-   * while mounted. Resolves true only when a policy was read and is now shown.
+   * `isCancelled` lets a caller skip updating a panel that has gone: the panel
+   * is keyed by node id, so every node switch unmounts it, and a late reply must
+   * not set state on the instance that is leaving. The request itself is pinned
+   * to this panel's node either way. The retry button passes nothing, because a
+   * click that is still in flight when the panel goes only sets state on the
+   * unmounted instance. Resolves true only when a policy was read and is now shown.
    */
   const load = useCallback(async (isCancelled?: () => boolean): Promise<boolean> => {
     try {
@@ -225,10 +226,15 @@ export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; node
           // leave the old value on screen as if the save had not happened. When
           // that read fails too, no value is on screen to check, so the message
           // says the result is unknown instead of sending the operator to one.
-          // Guarded like the mount read: when the operator has moved to another
-          // node meanwhile, the active node is no longer the one that was saved,
-          // so what it reports must not be taken for the saved value.
+          // The read-back goes to the node that was saved, like every other
+          // request here. When the panel has gone meanwhile (the operator moved
+          // to another node) the answer has nowhere to be shown, so the message
+          // names the node and sends the operator to its settings instead.
           const readBack = await load(() => !aliveRef.current);
+          const where = nodeName ? ` on ${nodeName}` : '';
+          if (!aliveRef.current) {
+            throw new Error(`The node accepted the change${where} but did not confirm it. Open its Evidence availability settings to check the value.`);
+          }
           throw new Error(readBack
             ? 'The node accepted the change but did not confirm it. Check the value shown.'
             : 'The node accepted the change but did not confirm it, and its policy could not be read back. What it enforces now is unknown.');
