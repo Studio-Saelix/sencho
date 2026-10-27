@@ -330,7 +330,7 @@ describe('NodeUpdatesSheet', () => {
     };
 
     // The Summary tile is the count above its label; scope to the summary grid
-    // because the row badge and the tile share the "Up to date" text.
+    // because a row badge can share the "Up to date" text with the tile.
     function summaryCount(label: string): string {
       const grid = document.querySelector('.grid-cols-4') as HTMLElement;
       const tile = within(grid).getByText(label).parentElement as HTMLElement;
@@ -355,11 +355,12 @@ describe('NodeUpdatesSheet', () => {
     it.each([
       ['updating', 'Updating'],
       ['failed', 'Failed'],
-    ] as const)('keeps the %s badge, not Offline, while an update restarts the node', (updateStatus, badge) => {
+    ] as const)('keeps the %s badge and its summary count, not Offline, on an unreachable node', (updateStatus, badge) => {
       render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [{ ...DARK, updateStatus }] })} />);
       const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
       expect(within(row).getByText(badge)).toBeInTheDocument();
       expect(within(row).queryByText('Offline')).not.toBeInTheDocument();
+      expect(summaryCount(badge)).toBe('1');
     });
   });
 

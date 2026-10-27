@@ -6,6 +6,8 @@
  *     known process start time must NOT be reported as completed).
  *   - The failure-class terminal transitions emit an operator-visible WARN.
  *   - POST /api/fleet/nodes/:id/update concurrency guard (409).
+ *   - Unreachable nodes: a proxy node with no target or a failed poll reports
+ *     online=false and no update available, and an in-flight update stays visible.
  *   - Authorization: both DELETE clear routes require admin.
  *   - The forced-recheck throttle on DELETE /update-status?recheck=true.
  */
@@ -217,7 +219,7 @@ describe('GET /api/fleet/update-status unreachable nodes', () => {
 
   it('reports a proxy node with no reachable target as offline with no update claimed', async () => {
     mockCompareTargetFetch();
-    // fetchMetaForNode stays real: no proxy target resolves to OFFLINE_META.
+    // fetchMetaForNode stays real: with no proxy target it returns OFFLINE_META.
     vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
 
     const rows = await getRows();
@@ -231,21 +233,22 @@ describe('GET /api/fleet/update-status unreachable nodes', () => {
   it('keeps a failed poll as an offline row with no update claimed, and still returns the other nodes', async () => {
     mockCompareTargetFetch();
     vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockRejectedValue(new Error('probe blew up'));
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const rows = await getRows();
     const row = rows.find(n => n.nodeId === proxyNodeId)!;
     expect(row.online).toBe(false);
     expect(row.updateAvailable).toBe(false);
     expect(row.updateStatus).toBeNull();
-    expect(rows.find(n => n.nodeId === localNodeId)).toBeDefined();
+    expect(rows.find(n => n.nodeId === localNodeId)!.online).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed'), expect.any(Error));
   });
 
   it('keeps an in-flight update visible while the node is unreachable', async () => {
     mockTarget();
     mockCompareTargetFetch();
     // The node restarts mid-update, so its meta is unreachable: the tracker
-    // keeps reporting the update, and no update is claimed for the dark node.
+    // keeps reporting the update, and no update is claimed for the unreachable node.
     mockMeta({ ...ONLINE(), version: null, startedAt: null, capabilities: [], online: false });
     setTracker({ startedAt: Date.now() - RECENT_MS });
 
