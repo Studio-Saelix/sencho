@@ -437,6 +437,11 @@ function nameOf(container: ListedContainer): string {
   return container.Names?.[0]?.replace(/^\//, '') ?? '';
 }
 
+/** The service a refusal reports for a stack container: its Compose service, else its name or id. */
+function reportedServiceOf(container: ListedContainer): string {
+  return serviceOf(container) || nameOf(container) || container.Id || 'unknown';
+}
+
 /**
  * The provider's container is matched by id, by name, and by Compose project and
  * service, because a recreate gives the provider a new id while the cached
@@ -776,7 +781,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
       if (orphan) return orphanRemovalRefusal(entry.role, nameOf(orphan) || orphan.Id || 'unknown', stackName, entry.via);
       judged = entry.containers.filter(c => !!serviceOf(c));
     }
-    const services = [...new Set(judged.map(c => serviceOf(c) || nameOf(c) || c.Id || 'unknown'))];
+    const services = [...new Set(judged.map(reportedServiceOf))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
@@ -787,7 +792,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
       }
       // A stop, restart, take down, or delete of a service whose containers have all stopped: recreating it is not the advice that fits.
       // (An unidentified provider keeps its own refusal: the cause is that detection failed, not the container.)
-      const ofService = judged.filter(c => (serviceOf(c) || nameOf(c) || c.Id || 'unknown') === service);
+      const ofService = judged.filter(c => reportedServiceOf(c) === service);
       if (isEngineDriven(mutation) && entry.role !== 'unknown_provider' && ofService.length > 0 && ofService.every(isStopped)) {
         return stoppedContainerRefusal(entry.role, nameOf(ofService[0]) || ofService[0].Id || service, service, entry.via);
       }
@@ -990,12 +995,13 @@ export async function evaluateDockerEndpointContainer(
     const bare = containerId.replace(/^\//, '');
     const asLabeled = labeled.find(c => (!!c.Id && matchesContainerId(c.Id, containerId)) || nameOf(c) === bare);
     if (asLabeled) {
+      const listedService = serviceOf(asLabeled) ?? service;
       const listedStoppedAs = stoppedAs(asLabeled.State, nameOf(asLabeled));
       if (provider.state === 'resolved' && isProviderContainer(asLabeled, provider.provider)) {
-        return providerVerdict(serviceOf(asLabeled) ?? service, provider.provider, selfProject, listedStoppedAs);
+        return providerVerdict(listedService, provider.provider, selfProject, listedStoppedAs);
       }
       const role = asLabeled.Labels?.[INFRASTRUCTURE_LABEL] === 'true' ? 'provider' : 'mislabeled';
-      return listedStoppedAs ? stoppedContainerRefusal(role, listedStoppedAs, serviceOf(asLabeled) ?? service) : refusalFor(role, serviceOf(asLabeled) ?? service, null, selfProject);
+      return listedStoppedAs ? stoppedContainerRefusal(role, listedStoppedAs, listedService) : refusalFor(role, listedService, null, selfProject);
     }
   }
 
