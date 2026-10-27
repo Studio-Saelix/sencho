@@ -116,7 +116,7 @@ export function _resetTrivyMissingNotificationStateForTests(): void {
 type PreflightScan = Pick<VulnerabilityScan, 'id' | 'highest_severity' | 'critical_count' | 'high_count' | 'total_vulnerabilities'>;
 
 interface ImageRiskEvaluation {
-    /** Policy inputs that matched for this image, including any KEV/fixable inputs assumed (see `unverified`). */
+    /** Policy inputs that matched for this image. Those also listed in `unverified` were assumed or matched only provisionally. */
     reasons: PolicyBlockReason[];
     /** Highest non-suppressed severity; UNKNOWN means no severity remains. */
     severity: VulnSeverity;
@@ -180,23 +180,23 @@ interface SuppressionPass {
  * the stored aggregate counts still give it. KEV/fixability cannot be read from
  * aggregates: when `failClosedCause` is set the active KEV/fixable inputs block
  * anyway, because their absence cannot be proven without the details. When
- * suppressions are honored they cannot be applied without the rows either, so
- * the post-suppression severity is unknown and a raw severity match is recorded
- * as unverified. The cause is carried in `unverified` so the block log can name
- * it.
+ * suppressions are honored and may apply (`suppressionsMayApply`) they cannot be
+ * applied without the rows either, so the post-suppression severity is unknown
+ * and a raw severity match is recorded as unverified. The cause is carried in
+ * `unverified` so the block log can name it.
  */
 function aggregateFallback(
     inputs: PolicyRiskInputs,
     rawSeverity: VulnSeverity,
     scan: PreflightScan,
     failClosedCause: string | null,
-    honorSuppressions: boolean,
+    suppressionsMayApply: boolean,
 ): ImageRiskEvaluation {
     const reasons: PolicyBlockReason[] = [];
     const unverified: PolicyBlockReason[] = [];
     if (inputs.blockOnSeverity && isSeverityAtLeast(rawSeverity, inputs.maxSeverity)) {
         reasons.push('severity');
-        if (failClosedCause && honorSuppressions) unverified.push('severity');
+        if (failClosedCause && suppressionsMayApply) unverified.push('severity');
     }
     if (failClosedCause && inputs.blockOnKev) unverified.push('kev');
     if (failClosedCause && inputs.blockOnFixable) unverified.push('fixable');
@@ -266,7 +266,13 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        return aggregateFallback(inputs, rawSeverity, scan, detailRowsTruncated(findings.length, scan.total_vulnerabilities), honorSuppressions);
+        // The suppressions were read, so with none defined the raw severity is the
+        // post-suppression severity and a match on it stands verified.
+        return aggregateFallback(
+            inputs, rawSeverity, scan,
+            detailRowsTruncated(findings.length, scan.total_vulnerabilities),
+            honorSuppressions && suppressions.length > 0,
+        );
     }
 
     // KEV membership is the same for the full set and the non-suppressed subset,
@@ -544,8 +550,9 @@ export async function enforcePolicyForImageRefs(
     // Three causes, each logged as what it is. `error`: the image could not be
     // scanned or evaluated. `unverified`: KEV/fixable reasons were assumed, or a
     // severity match could not be checked against honored suppressions, because
-    // the detail rows could not be trusted (any other severity match on the same
-    // image is named too). Everything else matched a policy input.
+    // the detail rows could not be trusted (a severity match on the same image is
+    // named too, as unverified when it could not be checked against honored
+    // suppressions). Everything else matched a policy input.
     const unevaluated = violations.filter((v) => v.error);
     const unverified = violations.filter((v) => !v.error && unverifiedByViolation.has(v));
     const matched = violations.filter((v) => !v.error && !unverifiedByViolation.has(v));
