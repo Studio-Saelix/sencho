@@ -23,11 +23,14 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * inspect fails (Docker being unreachable included: a failed read proves
  * nothing about the mutation that follows it), when the Compose model of a
  * stack that is deployed, updated, or changed per service cannot be rendered
- * (a stop or restart driven through the Engine API does not need the render),
- * and when Compose's recreate decision cannot be predicted. It otherwise lets
- * the operation through: when the stack holds no protected container, no owner
- * of a namespace one runs in, and nothing the operation would recreate that
- * they depend on; and for a remote node (its own Sencho guards it).
+ * (a stop, restart, take down, or delete is judged from the running containers
+ * and does not need the render), when Compose's recreate decision cannot be
+ * predicted, and when a deploy would remove a protected container as an orphan
+ * (it carries a project label and no service label). It otherwise lets the
+ * operation through: when the stack holds no protected container, no owner of a
+ * namespace one runs in, and nothing the operation would recreate that they
+ * depend on; for a restart of Sencho itself (both evaluators); and for a remote
+ * node (its own Sencho guards it).
  *
  * The provider is recognised by its id, by its container name, and by its
  * Compose project and service, so a proxy recreated since it was resolved is
@@ -41,7 +44,9 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * Sencho's own namespaces and from the containers carrying the infrastructure
  * label, and refused when any of them cannot be read. Only the container
  * evaluator lets a restart of Sencho through a failed inspect; the stack
- * evaluator reads Sencho's namespaces first and refuses when that read fails.
+ * evaluator reads the namespaces of Sencho, the provider, and the labeled
+ * containers before it decides, and refuses when any of those reads fails
+ * (other than a missing container).
  *
  * Two evaluators share these rules: `evaluateDockerEndpointGuard` for the
  * mutating Compose entry points (`ComposeService`) and
@@ -78,11 +83,12 @@ export type EndpointMutation =
    * A service-scoped operation: refused when it targets a protected service, and
    * when the stack's Compose model cannot be rendered. `restart` marks a restart
    * of that service; `engineOnly` marks a stop or restart driven through the
-   * Engine API, which does not need the render (like a stack-level stop).
+   * Engine API, which is judged from the running containers and does not need
+   * the render (like a stack-level stop, restart, take down, or delete).
    */
   | { kind: 'service'; service: string; restart?: boolean; engineOnly?: boolean };
 
-/** A stop or restart that never asks Compose, so it is decided from the running containers and must work while the file is broken. */
+/** A stop, restart, take down, or delete: the guard decides it from the running containers and does not read the Compose file. */
 function isEngineDriven(mutation: EndpointMutation): boolean {
   return mutation.kind === 'stop' || mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.engineOnly === true);
 }
@@ -352,14 +358,14 @@ function reasonOf(role: ProtectedRole): DockerEndpointRefusal['reason'] {
   }
 }
 
-/** A protected container with this project's label and no Compose service label: a deploy that removes orphans removes it. */
+/** A protected container with a project label and no Compose service label: a deploy that removes orphans removes it. */
 function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: string, via?: string): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
   return {
     reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
     service: name,
-    message: `Container "${name}" ${subject}, but it has no Compose service label, so Compose treats it as an orphan of "${stackName}" and a deploy would remove it and cut that connection. `
-      + 'Recreate it from the host (docker compose up -d) while Sencho is idle.',
+    message: `Container "${name}" ${subject}, but it has no Compose service label, so Compose treats it as an orphan of "${stackName}" and this deploy, which removes orphans, would remove it. `
+      + 'Make it a service of the Compose file, or recreate it from the host without the project label, while Sencho is idle.',
   };
 }
 
@@ -390,10 +396,11 @@ function nameOf(container: ListedContainer): string {
 /**
  * The provider's container is matched by id, by name, and by Compose project and
  * service, because a recreate gives the provider a new id while the cached
- * answer still names the old one. A recreate keeps the name even when the
- * container carries no Compose labels (resolved without a project or service,
- * or recreated by hand), so the name match holds whatever the labels say. A
- * listed container supplies `Names`, an inspected one `Name`.
+ * answer still names the old one. A Compose recreate keeps the name even when
+ * the container carries no Compose labels (the provider was resolved without a
+ * project or service, or was recreated by hand under the same name), so the
+ * name match holds whatever the labels say. A listed container supplies
+ * `Names`, an inspected one `Name`.
  */
 function isProviderContainer(
   container: { Id?: string; Name?: string; Names?: string[]; Labels?: Record<string, string> },
@@ -707,17 +714,20 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
   for (const entry of found) {
     // A protected container without a Compose service label (a stale or hand-made
-    // container carrying the stack label) is still protected, under its name. It
-    // is not one of the stack's services, so what Compose decides for a service
-    // of the same name says nothing about it; `up --remove-orphans` removes it
-    // outright when it carries this project's label.
-    const unlabeled = entry.containers.filter(c => serviceOf(c) === null);
+    // container carrying the stack label) is still protected, under its name. On a
+    // deploy it is not one of the stack's services, so what Compose decides for a
+    // service of the same name says nothing about it; `up --remove-orphans`
+    // removes it outright when it carries any project label (the stack is matched
+    // by project label or by working directory, and the project name Compose runs
+    // under can differ from the stack name in case or through a `name:` key).
+    // One with no project label at all is outside the project and left alone.
+    const unlabeled = entry.containers.filter(c => !serviceOf(c));
     if (mutation.kind === 'up') {
-      const orphan = unlabeled.find(c => c.Labels?.['com.docker.compose.project'] === stackName);
+      const orphan = unlabeled.find(c => !!c.Labels?.['com.docker.compose.project']);
       if (orphan) return orphanRemovalRefusal(entry.role, orphan.Names?.[0]?.replace(/^\//, '') || orphan.Id || 'unknown', stackName, entry.via);
     }
-    const keyed = mutation.kind === 'up' ? entry.containers.filter(c => serviceOf(c) !== null) : entry.containers;
-    const services = [...new Set(keyed.map(c => serviceOf(c) ?? c.Names?.[0]?.replace(/^\//, '') ?? c.Id ?? 'unknown'))];
+    const keyed = mutation.kind === 'up' ? entry.containers.filter(c => !!serviceOf(c)) : entry.containers;
+    const services = [...new Set(keyed.map(c => serviceOf(c) || c.Names?.[0]?.replace(/^\//, '') || c.Id || 'unknown'))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
@@ -764,7 +774,7 @@ function renderFailureRefusal(stackName: string, detail: string): DockerEndpoint
     reason: 'unresolved',
     service: null,
     message: `Sencho could not render the Compose configuration of "${stackName}" (${detail}), so it cannot tell whether this operation would stop or recreate the container that carries its Docker connection. `
-      + 'Fix the configuration (rendering it must also take under 20 seconds and produce under 5 MiB of output), then retry.',
+      + 'Fix the configuration (rendering it must also take under 20 seconds and produce no more than 5 MiB of output), then retry.',
   };
 }
 

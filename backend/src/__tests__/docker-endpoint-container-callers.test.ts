@@ -237,9 +237,11 @@ describe.each([
   });
 
   it('refuses to remove it, alone or in a batch with an ordinary container', async () => {
+    expect(await controller().removeContainers([NEW_PROXY_ID])).toMatchObject([{ id: NEW_PROXY_ID, success: false, refused: true }]);
     const results = await controller().removeContainers([NEW_PROXY_ID, WEB_ID]);
 
     expect(results[0]).toMatchObject({ id: NEW_PROXY_ID, success: false, refused: true });
+    expect(results[1]).toMatchObject({ id: WEB_ID, success: true });
     expect(ops).not.toContain(`remove ${NEW_PROXY_ID}`);
     await expect(controller().assertNoDockerEndpointContainers([WEB_ID, NEW_PROXY_ID], 'stop')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
   });
