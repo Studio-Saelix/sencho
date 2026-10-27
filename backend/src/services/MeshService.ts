@@ -2857,7 +2857,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             let whole: boolean;
             try {
                 whole = fsSvc.declarationSetEpoch(folder) !== null;
-            } catch {
+            } catch (err) {
+                // Only a folder that cannot be a stack folder is exempt. Any
+                // other failure leaves the question open, which keeps claims.
+                const code = (err as NodeJS.ErrnoException).code;
+                if (code !== 'INVALID_STACK_NAME' && code !== 'INVALID_PATH') throw err;
                 whole = true;
             }
             if (!whole) {

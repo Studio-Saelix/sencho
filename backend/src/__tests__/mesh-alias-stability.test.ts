@@ -61,6 +61,7 @@ beforeEach(() => {
     svc.reservedPorts = new Map();
     svc.aliasByPort = new Map();
     svc.aliasCache = new Map();
+    (svc as unknown as { unpersistedSnapshots: Map<number, string> }).unpersistedSnapshots = new Map();
 });
 
 function mockInspect(impl: Inspect): void {
@@ -2026,8 +2027,8 @@ describe('a layer shared through an in-root link follows the owner\'s publicatio
         const localNode = await sharedStack();
         const publication = await beginOwnerPublication();
         try {
-            // The owner's first layer has landed, and db has moved out of the
-            // shared one: the sharer would read web alone.
+            // db has moved out of the shared layer: the sharer would read web
+            // and other, with db missing.
             await writeComposeFile(owner, ['other'], 'compose.override.yml');
             const svc = MeshService.getInstance();
             expect(await svc.getLocalDeclaredServiceNames(sharer)).toBeNull();
@@ -2082,6 +2083,39 @@ describe('a layer shared through an in-root link follows the owner\'s publicatio
         } finally {
             publication.abandon();
         }
+    });
+
+    /** Make the bracket lookup of the owner's folder fail with `code`, as a lookup for a folder no writer can name would. */
+    async function failOwnerLookupWith(code: string): Promise<void> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const real = FileSystemService.prototype.declarationSetEpoch;
+        vi.spyOn(FileSystemService.prototype, 'declarationSetEpoch').mockImplementation(function (
+            this: InstanceType<typeof FileSystemService>,
+            name: string,
+        ) {
+            if (name === owner) throw Object.assign(new Error('lookup failed'), { code });
+            return real.call(this, name);
+        });
+    }
+
+    it('reads a layer shared from a folder that cannot hold a bracket', async () => {
+        await sharedStack();
+        await failOwnerLookupWith('INVALID_STACK_NAME');
+        expect((await MeshService.getInstance().getLocalDeclaredServiceNames(sharer))?.sort()).toEqual(['db', 'web']);
+    });
+
+    it('does not read past an unexpected failure to look up the owner\'s bracket', async () => {
+        const localNode = await sharedStack();
+        await failOwnerLookupWith('EIO');
+        const svc = MeshService.getInstance();
+        await expect(svc.getLocalDeclaredServiceNames(sharer)).rejects.toThrow('lookup failed');
+
+        // The refresh treats the failed read like any failed observation and
+        // keeps the saved claim.
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* the failed inspection is logged */ });
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(true);
     });
 
     it('names the folder that holds a layer\'s real file, or none for a file in the root itself', async () => {
@@ -2220,24 +2254,55 @@ describe('a snapshot that could not be stored is still replayed', () => {
         expect(warned - before).toBe(1);
     });
 
-    it('does not replay a memory copy for a membership that was opted out and in again', async () => {
+    it('drops the memory copy of a membership that was opted out', async () => {
         const db = DatabaseService.getInstance();
         seedPg();
         failNextSnapshotWrites(1);
         mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
         const svc = MeshService.getInstance();
         await svc.refreshAliasCache();
+        const memory = (svc as unknown as { unpersistedSnapshots: Map<number, string> }).unpersistedSnapshots;
+        expect(memory.size).toBe(1);
 
         db.deleteMeshStack(remoteNodeId, 'pg');
-        mockInspect(unobservable[0][1]);
         await svc.refreshAliasCache();
+
+        expect(memory.size).toBe(0);
+        // Opted back in, the stack starts from what it saved, not from the old memory copy.
         db.insertMeshStack(remoteNodeId, 'pg', 'tester');
         seedLastKnown(remoteNodeId, 'pg', [{ service: 'db', ports: [5432] }]);
+        mockInspect(unobservable[0][1]);
+        await svc.refreshAliasCache();
+        const reserved = (svc as unknown as Internals).reservedPorts;
+        expect(reserved.has(5432)).toBe(true);
+        expect(reserved.has(6379)).toBe(false);
+    });
+
+    it('stops replaying the memory copy once a later tick computes what the database already holds', async () => {
+        seedPg();
+        failNextSnapshotWrites(1);
+        mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        expect(savedServices()).toEqual([{ service: 'db', ports: [5432] }]);
+
+        // cache is removed from the stack's compose file, so the next
+        // snapshot is the one the database holds and nothing is written.
+        vi.spyOn(
+            svc as unknown as { inspectDeclaredServices: (n: number, s: string) => Promise<Set<string> | null> },
+            'inspectDeclaredServices',
+        ).mockResolvedValue(new Set(['db']));
+        mockInspect(async () => [{ service: 'db', ports: [5432], running: true }]);
+        await svc.refreshAliasCache();
+        expect(savedServices()).toEqual([{ service: 'db', ports: [5432] }]);
+
+        mockInspect(unobservable[0][1]);
         await svc.refreshAliasCache();
 
         const reserved = (svc as unknown as Internals).reservedPorts;
         expect(reserved.has(5432)).toBe(true);
         expect(reserved.has(6379)).toBe(false);
+        expect((await svc.listAliases()).map((a) => a.host)).not.toContain('cache.pg.edge.sencho');
     });
 });
 

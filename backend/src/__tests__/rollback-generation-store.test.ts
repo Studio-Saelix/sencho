@@ -1720,7 +1720,7 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
       expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o640);
     });
 
-    posixOnly('falls back to the live file\'s group for a generation captured before owners were kept', async () => {
+    posixOnly('restores a generation captured before owners were kept over the file it replaces', async () => {
       const { generationId, file } = await captured('restore-legacy');
       await editCapturedEntry('restore-legacy', generationId, (entry) => { delete entry.uid; delete entry.gid; });
 
