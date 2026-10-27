@@ -1606,6 +1606,188 @@ describe('the owner of a namespace a labeled container runs in, in another proje
   });
 });
 
+describe('a provider recreated under the same name, whatever labels the new container carries', () => {
+  const NEW_PROXY_ID = 'd'.repeat(64);
+  const providerCached = (project: string | null, service: string | null) => ({
+    state: 'resolved' as const,
+    provider: { containerId: PROXY_ID, containerName: 'socket-proxy', project, service, workingDir: null, socketBindSource: null },
+  });
+  const recreated = (labels: Record<string, string>) => ({
+    Id: NEW_PROXY_ID,
+    Names: ['/socket-proxy'],
+    Labels: labels,
+    NetworkSettings: { Networks: { 'proxy-net': { NetworkID: 'id-proxy-net' } } },
+  });
+  const sencho = { project: 'sencho', service: 'sencho' };
+
+  describe('stack evaluator (list path)', () => {
+    it.each<[string, string | null, string | null, Record<string, string>]>([
+      ['no cached project or service, new container unlabeled', null, null, { 'com.docker.compose.project': 'sencho' }],
+      ['cached project only (no service), new container with the project label', 'sencho', null, { 'com.docker.compose.project': 'sencho' }],
+      ['cached project and service, new container without a service label', 'sencho', 'socket-proxy', { 'com.docker.compose.project': 'sencho' }],
+    ])('refuses a stop, restart, and update when %s', async (_name, project, service, labels) => {
+      mockResolveProvider.mockResolvedValue(providerCached(project, service));
+      mockListContainers.mockResolvedValue([recreated(labels)]);
+
+      for (const mutation of [{ kind: 'stop' }, { kind: 'restart' }, { kind: 'update' }] as EndpointMutation[]) {
+        expect(await run(mutation)).toMatchObject({ reason: 'provider' });
+      }
+    });
+
+    it('does not take a container with another name and id for the provider', async () => {
+      mockResolveProvider.mockResolvedValue(providerCached(null, null));
+      mockListContainers.mockResolvedValue([webContainer]);
+
+      expect(await run({ kind: 'stop' })).toBeNull();
+      expect(await run({ kind: 'restart' })).toBeNull();
+    });
+  });
+
+  describe('container evaluator (inspect succeeds)', () => {
+    type Spec = { Id: string; Name: string; labels: Record<string, string> };
+    const NEW: Spec = { Id: NEW_PROXY_ID, Name: '/socket-proxy', labels: {} };
+    const dockerWith = (...specs: Spec[]) => ({
+      listContainers: async () => [],
+      getContainer: (ref: string) => ({
+        inspect: async () => {
+          const found = specs.find(spec => spec.Id === ref || spec.Id.startsWith(ref) || spec.Name === `/${ref.replace(/^\//, '')}`);
+          if (!found) throw Object.assign(new Error('no such container'), { statusCode: 404 });
+          return { Id: found.Id, Name: found.Name, Config: { Labels: found.labels }, HostConfig: {}, NetworkSettings: { Networks: {} } };
+        },
+      }),
+    });
+    const WEB: Spec = { Id: WEB_ID, Name: '/web', labels: {} };
+
+    it.each<[string, string | null, string | null]>([
+      ['no cached project or service', null, null],
+      ['a cached project and service, new container unlabeled', 'sencho', 'socket-proxy'],
+    ])('refuses a stop and restart by id, short id, name, and /name with %s', async (_name, project, service) => {
+      mockResolveProvider.mockResolvedValue(providerCached(project, service));
+      const docker = dockerWith(NEW, WEB);
+
+      for (const ref of [NEW_PROXY_ID, NEW_PROXY_ID.slice(0, 12), 'socket-proxy', '/socket-proxy']) {
+        for (const action of ['stop', 'restart'] as const) {
+          expect(await evaluateDockerEndpointContainer(ref, action, docker), `${action} ${ref}`).toMatchObject({ reason: 'provider' });
+        }
+      }
+    });
+
+    it('lets Auto-Heal restart that provider and still refuses its stop', async () => {
+      mockResolveProvider.mockResolvedValue(providerCached(null, null));
+      const docker = dockerWith(NEW, WEB);
+
+      expect(await evaluateDockerEndpointContainer(NEW_PROXY_ID, 'restart', docker, { allowProvider: true })).toBeNull();
+      expect(await evaluateDockerEndpointContainer(NEW_PROXY_ID, 'stop', docker, { allowProvider: true })).toMatchObject({ reason: 'provider' });
+    });
+
+    it('does not match a different name, or a different id with the cached name unset', async () => {
+      mockResolveProvider.mockResolvedValue(providerCached(null, null));
+      const docker = dockerWith(NEW, WEB);
+
+      expect(await evaluateDockerEndpointContainer(WEB_ID, 'stop', docker)).toBeNull();
+      mockResolveProvider.mockResolvedValue({
+        state: 'resolved',
+        provider: { containerId: PROXY_ID, containerName: '', project: null, service: null, workingDir: null, socketBindSource: null },
+      });
+      expect(await evaluateDockerEndpointContainer(NEW_PROXY_ID, 'stop', docker)).toBeNull();
+    });
+
+    it('keeps sencho out of it', async () => {
+      mockResolveProvider.mockResolvedValue(providerCached(null, null));
+
+      expect(await evaluateDockerEndpointContainer(SELF_ID, 'stop', dockerWith(NEW, { Id: SELF_ID, Name: '/sencho', labels: sencho }))).toMatchObject({ reason: 'sencho' });
+    });
+  });
+});
+
+describe('a protected container with no Compose service label on a deploy', () => {
+  // `up -d --remove-orphans` removes a container that carries the project label
+  // and no service label, whatever a service of the same name decides.
+  const stray = (labels: Record<string, string>) => ({
+    Id: PROXY_ID,
+    Names: ['/socket-proxy'],
+    Labels: { 'com.docker.compose.project': 'sencho', ...labels },
+    NetworkSettings: { Networks: {} },
+  });
+  const renderedProxy = 'services:\n  socket-proxy:\n    image: tecnativa/docker-socket-proxy\n';
+  const deployProbes = () => probes({ renderConfig: vi.fn().mockResolvedValue(renderedProxy), configHash: vi.fn().mockResolvedValue('hash-current'), localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }) });
+  const officialProxy = container('1'.repeat(64), 'socket-proxy', { imageId: 'same', labels: { 'io.sencho.infrastructure': 'true' } });
+
+  it.each<[string, string, string]>([
+    ['labeled true', 'true', 'provider'],
+    ['labeled with another value', 'maybe', 'invalid_label'],
+  ])('refuses it when it is %s and no service of that name is running', async (_name, value, reason) => {
+    mockListContainers.mockResolvedValue([senchoContainer, stray({ [INFRASTRUCTURE_LABEL]: value })]);
+
+    const refusal = await run({ kind: 'up' }, deployProbes());
+
+    expect(refusal).toMatchObject({ reason, service: 'socket-proxy' });
+    expect(refusal?.message).toContain('orphan');
+  });
+
+  it('refuses it when an unchanged service of the same name is running too', async () => {
+    mockListContainers.mockResolvedValue([senchoContainer, officialProxy, stray({ [INFRASTRUCTURE_LABEL]: 'true' })]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+  });
+
+  it('refuses it when it is the detected provider with no labels besides the project', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy', null));
+    mockListContainers.mockResolvedValue([senchoContainer, stray({})]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider' });
+  });
+
+  it('still lets an unchanged, service-labeled proxy through', async () => {
+    mockListContainers.mockResolvedValue([senchoContainer, officialProxy]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+  });
+
+  it('leaves a container the deploy does not own alone (matched by working directory only)', async () => {
+    mockListContainers.mockResolvedValue([senchoContainer, stray({
+      'com.docker.compose.project': 'other',
+      'com.docker.compose.project.working_dir': '/srv/compose/sencho',
+      [INFRASTRUCTURE_LABEL]: 'true',
+    })]);
+
+    expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+  });
+
+  it('still refuses it on stop, update, and a service stop, which never judged it as a service', async () => {
+    mockListContainers.mockResolvedValue([stray({ [INFRASTRUCTURE_LABEL]: 'true' })]);
+
+    expect(await run({ kind: 'stop' }, deployProbes())).toMatchObject({ reason: 'provider' });
+    expect(await run({ kind: 'update' }, deployProbes())).toMatchObject({ reason: 'provider' });
+    expect(await run({ kind: 'service', service: 'socket-proxy' }, deployProbes())).toMatchObject({ reason: 'provider' });
+  });
+});
+
+describe('Sencho named with a leading slash on a denied inspect', () => {
+  const denied = (ref: string) => (ref === '/sencho' ? Object.assign(new Error('403'), { statusCode: 403 }) : undefined);
+  const docker = () => ({
+    listContainers: async () => [],
+    getContainer: (ref: string) => ({
+      inspect: async () => {
+        const failure = denied(ref);
+        if (failure) throw failure;
+        return { Id: SELF_ID, Name: '/sencho', Config: { Labels: {} }, HostConfig: {}, NetworkSettings: { Networks: {} } };
+      },
+    }),
+  });
+
+  beforeEach(() => {
+    vi.spyOn(SelfIdentityService.getInstance(), 'isOwnContainer').mockImplementation(id => id === SELF_ID || id === 'sencho');
+  });
+
+  it('refuses a stop however the reference is spelled, and allows a restart', async () => {
+    for (const ref of ['/sencho', 'sencho', SELF_ID]) {
+      expect(await evaluateDockerEndpointContainer(ref, 'stop', docker()), ref).toMatchObject({ reason: 'sencho' });
+    }
+    expect(await evaluateDockerEndpointContainer('/sencho', 'restart', docker())).toBeNull();
+  });
+});
+
 describe('dockerEndpointRefusalOf', () => {
   const remote = (over: Record<string, unknown> = {}) => Object.assign(new Error('Failed to redeploy stack on remote node (409): {...}'), {
     code: 'docker_endpoint_protected',

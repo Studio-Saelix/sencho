@@ -22,21 +22,26 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * (for the stacks that could hold the provider), when a container list or
  * inspect fails (Docker being unreachable included: a failed read proves
  * nothing about the mutation that follows it), when the Compose model of a
- * stack that is deployed, updated, or changed per service cannot be rendered,
+ * stack that is deployed, updated, or changed per service cannot be rendered
+ * (a stop or restart driven through the Engine API does not need the render),
  * and when Compose's recreate decision cannot be predicted. It otherwise lets
  * the operation through: when the stack holds no protected container, no owner
  * of a namespace one runs in, and nothing the operation would recreate that
- * they depend on; for a remote node (its own Sencho guards it); and for a
- * restart of Sencho itself, which stays allowed even when inspecting it fails
- * (a stop does not).
+ * they depend on; and for a remote node (its own Sencho guards it).
+ *
+ * The provider is recognised by its id, by its container name, and by its
+ * Compose project and service, so a proxy recreated since it was resolved is
+ * still refused, whatever labels the new container carries.
  *
  * A failed container inspect refuses, except for a missing container (HTTP 404,
- * the operation then fails by itself), a restart of Sencho, a restart that
- * Auto-Heal asked to let the resolved provider through, and an inspect the
- * endpoint denies (HTTP 401 or 403) of a container that is not known to be
- * protected: that container is then judged from the provider's and Sencho's own
- * namespaces and from the containers carrying the infrastructure label, and
- * refused when any of them cannot be read.
+ * the operation then fails by itself), a restart of Sencho, a restart of the
+ * resolved provider that Auto-Heal asked to let through (any inspect error), and
+ * an inspect the endpoint denies (HTTP 401 or 403) of a container that is not
+ * known to be protected: that container is then judged from the provider's and
+ * Sencho's own namespaces and from the containers carrying the infrastructure
+ * label, and refused when any of them cannot be read. Only the container
+ * evaluator lets a restart of Sencho through a failed inspect; the stack
+ * evaluator reads Sencho's namespaces first and refuses when that read fails.
  *
  * Two evaluators share these rules: `evaluateDockerEndpointGuard` for the
  * mutating Compose entry points (`ComposeService`) and
@@ -333,6 +338,31 @@ function unknownRecreateRefusal(role: ProtectedRole, service: string, via?: stri
   };
 }
 
+/** The reason a role is refused under, shared by every refusal that names it. */
+function reasonOf(role: ProtectedRole): DockerEndpointRefusal['reason'] {
+  switch (role) {
+    case 'sencho': return 'sencho';
+    case 'provider': return 'provider';
+    case 'mislabeled': return 'invalid_label';
+    case 'unknown_provider': return 'unresolved';
+    default: {
+      const unreachable: never = role;
+      throw new Error(`Unhandled protected role: ${String(unreachable)}`);
+    }
+  }
+}
+
+/** A protected container with this project's label and no Compose service label: a deploy that removes orphans removes it. */
+function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: string, via?: string): DockerEndpointRefusal {
+  const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
+  return {
+    reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
+    service: name,
+    message: `Container "${name}" ${subject}, but it has no Compose service label, so Compose treats it as an orphan of "${stackName}" and a deploy would remove it and cut that connection. `
+      + 'Recreate it from the host (docker compose up -d) while Sencho is idle.',
+  };
+}
+
 /**
  * Every container on the node (running or stopped), and the ones that belong to
  * the stack, matched by project name or working directory.
@@ -358,15 +388,20 @@ function nameOf(container: ListedContainer): string {
 }
 
 /**
- * The provider's container is matched by id and by Compose project and service,
- * because a recreate gives the provider a new id while the cached answer still
- * names the old one.
+ * The provider's container is matched by id, by name, and by Compose project and
+ * service, because a recreate gives the provider a new id while the cached
+ * answer still names the old one. A recreate keeps the name even when the
+ * container carries no Compose labels (resolved without a project or service,
+ * or recreated by hand), so the name match holds whatever the labels say. A
+ * listed container supplies `Names`, an inspected one `Name`.
  */
 function isProviderContainer(
-  container: { Id?: string; Labels?: Record<string, string> },
+  container: { Id?: string; Name?: string; Names?: string[]; Labels?: Record<string, string> },
   provider: DockerEndpointContainer,
 ): boolean {
   if (container.Id && container.Id === provider.containerId) return true;
+  const providerName = bareName(provider.containerName);
+  if (providerName && [container.Name, ...(container.Names ?? [])].some(name => bareName(name) === providerName)) return true;
   if (provider.project === null || provider.service === null) return false;
   return container.Labels?.['com.docker.compose.project'] === provider.project
     && container.Labels?.['com.docker.compose.service'] === provider.service;
@@ -672,8 +707,17 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const restartsSelf = mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.restart === true);
   for (const entry of found) {
     // A protected container without a Compose service label (a stale or hand-made
-    // container carrying the stack label) is still protected, under its name.
-    const services = [...new Set(entry.containers.map(c => serviceOf(c) ?? c.Names?.[0]?.replace(/^\//, '') ?? c.Id ?? 'unknown'))];
+    // container carrying the stack label) is still protected, under its name. It
+    // is not one of the stack's services, so what Compose decides for a service
+    // of the same name says nothing about it; `up --remove-orphans` removes it
+    // outright when it carries this project's label.
+    const unlabeled = entry.containers.filter(c => serviceOf(c) === null);
+    if (mutation.kind === 'up') {
+      const orphan = unlabeled.find(c => c.Labels?.['com.docker.compose.project'] === stackName);
+      if (orphan) return orphanRemovalRefusal(entry.role, orphan.Names?.[0]?.replace(/^\//, '') || orphan.Id || 'unknown', stackName, entry.via);
+    }
+    const keyed = mutation.kind === 'up' ? entry.containers.filter(c => serviceOf(c) !== null) : entry.containers;
+    const services = [...new Set(keyed.map(c => serviceOf(c) ?? c.Names?.[0]?.replace(/^\//, '') ?? c.Id ?? 'unknown'))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
@@ -720,7 +764,7 @@ function renderFailureRefusal(stackName: string, detail: string): DockerEndpoint
     reason: 'unresolved',
     service: null,
     message: `Sencho could not render the Compose configuration of "${stackName}" (${detail}), so it cannot tell whether this operation would stop or recreate the container that carries its Docker connection. `
-      + 'Fix the configuration (rendering it must also take under 20 seconds), then retry.',
+      + 'Fix the configuration (rendering it must also take under 20 seconds and produce under 5 MiB of output), then retry.',
   };
 }
 
@@ -757,21 +801,23 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
 
 /**
  * Container-level guard for stop, restart, and removal (removal is evaluated as
- * a stop). It mirrors the stack level: the provider (by id, by Compose service,
- * or by label) is refused on stop and removal, and on restart unless
- * `allowProvider` is set; a container that may be the provider when it
- * cannot be told apart is refused; the Sencho container is refused on stop and
- * removal only (a restart brings it back, which is the one intended way to
- * bounce Sencho). The owner of a network, pid, or ipc namespace that the
- * provider, Sencho, or any container carrying the infrastructure label runs in
- * is refused as well, whatever the action.
+ * a stop). It mirrors the stack level: the provider (by id, by name, or by
+ * Compose project and service) is refused on stop and removal, and on restart
+ * unless `allowProvider` is set; a container carrying the infrastructure label
+ * that is not the provider is refused on every action, `allowProvider` or not; a
+ * container that may be the provider when it cannot be told apart is refused;
+ * the Sencho container is refused on stop and removal only (a restart brings it
+ * back, which is the one intended way to bounce Sencho). The owner of a network,
+ * pid, or ipc namespace that the provider, Sencho, or any container carrying the
+ * infrastructure label runs in is refused as well, whatever the action.
  *
  * A container that cannot be inspected is refused, except one that does not
  * exist (HTTP 404, the operation then fails by itself), a restart of Sencho, a
- * restart of the resolved provider under `allowProvider`, and one whose inspect
- * the endpoint denies (HTTP 401 or 403) and that is not the provider: that one
- * is let through only when the provider, Sencho, and the labeled containers can
- * be read and none of them is it or runs in its namespace.
+ * restart of the resolved provider under `allowProvider` (whatever the error),
+ * and one whose inspect the endpoint denies (HTTP 401 or 403) and that is not
+ * the provider: that one is let through only when the provider, Sencho, and the
+ * labeled containers can be read and none of them is it or runs in its
+ * namespace.
  */
 export async function evaluateDockerEndpointContainer(
   containerId: string,
@@ -798,7 +844,7 @@ export async function evaluateDockerEndpointContainer(
     if (provider.state === 'resolved' && namesProviderContainer(containerId, provider.provider)) {
       return providerVerdict(provider.provider.service ?? provider.provider.containerName, provider.provider, self.getIdentity().composeProjectName);
     }
-    if (self.isOwnContainer(containerId)) {
+    if (self.isOwnContainer(bareName(containerId))) {
       return action === 'stop' ? refusalFor('sencho', self.getComposeLocation().service ?? 'sencho', null, null) : null;
     }
     // A failed inspect is no proof the container is ordinary: a transport failure
@@ -817,7 +863,7 @@ export async function evaluateDockerEndpointContainer(
   const selfProject = self.getIdentity().composeProjectName;
 
   if (info) {
-    if (provider.state === 'resolved' && isProviderContainer({ Id: fullId, Labels: labels }, provider.provider)) {
+    if (provider.state === 'resolved' && isProviderContainer({ Id: fullId, Name: info.Name, Labels: labels }, provider.provider)) {
       return providerVerdict(service, provider.provider, selfProject);
     }
     const labelValue = labels[INFRASTRUCTURE_LABEL];
@@ -825,7 +871,7 @@ export async function evaluateDockerEndpointContainer(
     if (labelValue !== undefined) return refusalFor('mislabeled', service, null, selfProject);
   }
 
-  let isSelf = self.isOwnContainer(fullId) || self.isOwnContainer(containerId);
+  let isSelf = self.isOwnContainer(fullId) || self.isOwnContainer(bareName(containerId));
   if (!isSelf && selfState === 'unresolved') {
     const candidates = await getRuntimeContainerIdCandidates();
     if (candidates.length === 0) {

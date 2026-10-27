@@ -63,7 +63,8 @@ function httpError(statusCode: number) {
 function stubSelf() {
   const self = SelfIdentityService.getInstance();
   vi.spyOn(self, 'ensureResolved').mockResolvedValue('resolved');
-  vi.spyOn(self, 'isOwnContainer').mockImplementation(id => id === SELF_ID);
+  // The real check matches the full or short id and the container name (without a slash).
+  vi.spyOn(self, 'isOwnContainer').mockImplementation(id => id === SELF_ID || id === 'sencho');
   vi.spyOn(self, 'getIdentity').mockReturnValue({
     containerId: SELF_ID, containerName: 'sencho', composeProjectName: 'sencho', imageId: null, networkNames: [], volumeNames: [],
   });
@@ -197,5 +198,100 @@ describe('Auto-Heal (endpointGuard: allow-provider-restart)', () => {
     await controller().restartContainer(WEB_ID, { endpointGuard: 'allow-provider-restart' });
 
     expect(ops).toEqual([`restart ${WEB_ID}`]);
+  });
+});
+
+const NEW_PROXY_ID = 'd'.repeat(64);
+
+function appWithContainersRoute() {
+  const app = express();
+  app.use((req, _res, next) => {
+    req.nodeId = 1;
+    req.user = { username: 'admin', role: 'admin', userId: 1 } as typeof req.user;
+    next();
+  });
+  app.use('/api/containers', containersRouter);
+  return app;
+}
+
+describe.each([
+  ['resolved without a Compose project or service', { project: null, service: null }],
+  ['resolved with a project and service, recreated without Compose labels', { project: 'sencho', service: 'socket-proxy' }],
+])('a proxy %s, recreated under the same name since it was resolved', (_label, cached) => {
+  beforeEach(() => {
+    mockResolveProvider.mockResolvedValue({
+      state: 'resolved',
+      provider: { containerId: PROXY_ID, containerName: 'socket-proxy', ...cached, workingDir: null, socketBindSource: null },
+    });
+    // The old id is gone; the new container has the same name, a new id, and no labels at all.
+    specs.delete(PROXY_ID);
+    specs.set(NEW_PROXY_ID, { Name: '/socket-proxy' });
+    specs.get(VPN_ID)!.inspectStatus = undefined;
+  });
+
+  it.each([NEW_PROXY_ID, NEW_PROXY_ID.slice(0, 12), 'socket-proxy', '/socket-proxy'])('refuses to stop or restart it by %s', async (ref) => {
+    await expect(controller().stopContainer(ref)).rejects.toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+    await expect(controller().restartContainer(ref)).rejects.toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+
+    expect(ops).toEqual([]);
+  });
+
+  it('refuses to remove it, alone or in a batch with an ordinary container', async () => {
+    const results = await controller().removeContainers([NEW_PROXY_ID, WEB_ID]);
+
+    expect(results[0]).toMatchObject({ id: NEW_PROXY_ID, success: false, refused: true });
+    expect(ops).not.toContain(`remove ${NEW_PROXY_ID}`);
+    await expect(controller().assertNoDockerEndpointContainers([WEB_ID, NEW_PROXY_ID], 'stop')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+  });
+
+  it('the container route answers 409 for a stop and a restart', async () => {
+    const app = appWithContainersRoute();
+
+    for (const action of ['stop', 'restart']) {
+      const res = await request(app).post(`/api/containers/${NEW_PROXY_ID}/${action}`);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+    }
+    expect(ops).toEqual([]);
+  });
+
+  it('Auto-Heal restarts that provider only, and still restarts an ordinary sibling', async () => {
+    await controller().restartContainer(NEW_PROXY_ID, { endpointGuard: 'allow-provider-restart' });
+    await expect(controller().stopContainer(NEW_PROXY_ID)).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await controller().restartContainer(WEB_ID, { endpointGuard: 'allow-provider-restart' });
+
+    expect(ops).toEqual([`restart ${NEW_PROXY_ID}`, `restart ${WEB_ID}`]);
+  });
+
+  it('does not match a container with another name and another id', async () => {
+    await controller().stopContainer(WEB_ID);
+
+    expect(ops).toEqual([`stop ${WEB_ID}`]);
+  });
+});
+
+describe('Sencho named with a leading slash while that reference is denied but the id is readable', () => {
+  beforeEach(() => {
+    specs.get(VPN_ID)!.inspectStatus = undefined;
+    specs.get(PROXY_ID)!.hostConfig = undefined;
+    const readable = engine.getContainer.getMockImplementation()!;
+    engine.getContainer.mockImplementation((ref: string) => (ref === '/sencho'
+      ? { inspect: async () => { throw httpError(403); }, stop: async () => { ops.push('stop /sencho'); }, restart: async () => { ops.push('restart /sencho'); } }
+      : readable(ref)));
+  });
+
+  it('refuses a stop through the controller and the route (%2Fsencho), and the engine never receives it', async () => {
+    await expect(controller().stopContainer('/sencho')).rejects.toMatchObject({ code: 'docker_endpoint_protected', reason: 'sencho' });
+
+    const res = await request(appWithContainersRoute()).post('/api/containers/%2Fsencho/stop');
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'sencho' });
+    expect(ops).toEqual([]);
+  });
+
+  it('keeps a restart allowed, which is the intended way to bounce Sencho', async () => {
+    await controller().restartContainer('/sencho');
+
+    expect(ops).toEqual(['restart /sencho']);
   });
 });
