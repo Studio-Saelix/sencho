@@ -6,6 +6,7 @@
  * that the rewire changed no outcome for an operator who configures nothing.
  * This file covers what the settings can then do.
  */
+import util from 'node:util';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ScanPolicy, VulnerabilityScan } from '../services/DatabaseService';
 
@@ -522,6 +523,38 @@ describe('evidence the gate records', () => {
         dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
         const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
         expect(gate.evidence?.records).toContainEqual(expect.objectContaining({ state: 'partial' }));
+    });
+
+    it('explains a truncated-row block in the log and in the evidence, with suppressions honored', async () => {
+        // One block, two accounts of it: the operator log names the unverified
+        // cause (including the severity match that a stored suppression might
+        // lift), and the evidence carries the same fact as a partial record.
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1 }));
+        primeCleanScan({ total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 });
+        dbStub.getAllVulnerabilityDetails.mockReturnValue([{ vulnerability_id: 'CVE-2024-0001' }]);
+        dbStub.getCveSuppressions.mockReturnValue([{
+            id: 1, cve_id: 'CVE-2024-0001', pkg_name: null, image_pattern: null, reason: 'accepted',
+            created_by: 'admin', created_at: Date.now() - 1000, expires_at: null,
+            replicated_from_control: 0, status: 'accepted',
+        }]);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const gate = await enforcePolicyForImageRefs('web', 1, ['nginx:1.27'], { bypass: false, actor: 'admin' });
+
+            expect(gate.ok).toBe(false);
+            const lines = warn.mock.calls.map((c) => util.format(...c)).filter((l) => l.includes('Blocked deploy'));
+            expect(lines).toEqual([
+                '[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.27: known-exploited CVE (KEV) not verified, stored detail rows (1) do not match the scan total (5); severity threshold matched before suppressions could be applied',
+            ]);
+            expect(gate.evidence?.records).toContainEqual(expect.objectContaining({
+                state: 'partial',
+                target: 'nginx:1.27',
+                reason: expect.stringContaining('do not cover every vulnerability'),
+            }));
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it('falls back to the documented defaults when the settings read throws', async () => {

@@ -237,14 +237,10 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         // the peer falls back to its local DB default (always 1) and treats
         // cross-node aliases as same-node.
         const wsUrl = httpUrlToWs(target.apiUrl) + `/api/mesh/proxy-tunnel?nodeId=${nodeId}`;
-        // Forward central's tier so the receiver enforces the paid gate
-        // against the *central's* license (matching the HTTP mesh routes,
-        // which all gate on `requirePaid` against `req.proxyTier`). Without
-        // this the receiver falls back to its own local license, which would
-        // both reject paid centrals talking to Community remotes and let
-        // Community centrals dial locally-paid remotes. The header is trusted
-        // on the receiver only when the WS carries a node_proxy / pilot_tunnel
-        // credential (see middleware/auth.ts).
+        // Mesh is not tier-gated and current receivers ignore this header.
+        // Peers on an older release still reject the tunnel unless the
+        // central's forwarded tier is paid, so keep sending it while fleets
+        // can run mixed versions (it only helps a paid central there).
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         let ws: WebSocket;
         try {

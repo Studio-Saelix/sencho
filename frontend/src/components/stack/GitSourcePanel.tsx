@@ -37,6 +37,9 @@ import type {
   GitOpsSourceStatus,
 } from '@/types/gitops';
 
+// Matches the other GitOps views: one operation commits several transitions in a row.
+const INVALIDATE_DEBOUNCE_MS = 250;
+
 export interface GitSource {
   id: number;
   stack_name: string;
@@ -221,8 +224,13 @@ export function GitSourcePanel({
   const faults = revision ? absentFault(revision) : [];
   const pending = derivePendingCommit(sourceFacet, faults.length, source?.pending_commit_sha ?? null);
 
+  // Whether the sheet shows a linked source, so a background read never turns
+  // the form a new source is being typed into into someone else's link.
+  const hasSource = useRef(false);
+
   const resetToUnlinked = useCallback(() => {
     setSource(null);
+    hasSource.current = false;
     setRepoUrl('');
     setBranch('main');
     setComposePaths(['compose.yaml']);
@@ -258,7 +266,12 @@ export function GitSourcePanel({
   // Only the latest request may touch state, so a slow answer for the stack the
   // sheet just left cannot overwrite the one it is now showing.
   const loadSeq = useRef(0);
+  const backgroundSeq = useRef(0);
+  const backgroundApplied = useRef(0);
   const loadedForOpen = useRef(false);
+  // An announcement that arrived while the opening read was still in flight: that
+  // read may predate it, so one more read follows once the sheet has loaded.
+  const refreshQueued = useRef(false);
 
   /**
    * Read the source and its status.
@@ -270,10 +283,23 @@ export function GitSourcePanel({
    * what is on screen on failure instead of turning a linked stack into an empty
    * form, and `refresh` leaves unsaved edits alone, so a pull or a suspend does
    * not throw away a change the operator is still making.
+   *
+   * `background` is `refresh` for a change nobody on this sheet asked for (a
+   * health verdict arriving while it sits open): it applies a linked source and
+   * says nothing otherwise, so a failed poll or a source that vanished mid-edit
+   * neither raises a toast nor wipes the form.
    */
-  const load = useCallback(async (mode: 'open' | 'save' | 'refresh' = 'open') => {
-    const seq = ++loadSeq.current;
-    const current = () => seq === loadSeq.current;
+  const load = useCallback(async (mode: 'open' | 'save' | 'refresh' | 'background' = 'open') => {
+    // A background read never supersedes one the operator is waiting on (an
+    // open or a save); it is the one that gives way.
+    const background = mode === 'background';
+    const seq = background ? loadSeq.current : ++loadSeq.current;
+    const bgSeq = background ? ++backgroundSeq.current : 0;
+    // A background read that applied while this one was in flight started after
+    // it did, so it is the newer answer and this one must not undo it.
+    const bgApplied0 = backgroundApplied.current;
+    const current = () => seq === loadSeq.current
+      && (background ? bgSeq === backgroundSeq.current : backgroundApplied.current === bgApplied0);
     const fresh = mode === 'open';
     if (fresh) {
       setLoading(true);
@@ -281,6 +307,10 @@ export function GitSourcePanel({
       loadedForOpen.current = false;
     }
     const fail = (message: string) => {
+      if (background) {
+        console.warn('[GitSourcePanel] background refresh failed; the sheet may be stale:', stackName, message);
+        return;
+      }
       if (!fresh) {
         toast.error('Could not refresh the sheet. Reopen it to see the current state.');
         return;
@@ -296,17 +326,29 @@ export function GitSourcePanel({
       if (res.ok) {
         const data: GitSourceRead | GitSourceUnlinked = await res.json();
         if (!current()) return;
+        if (background) {
+          // Only a linked source on a sheet already showing one: anything else
+          // would mix the answer with a form or error the operator is looking at.
+          if ('linked' in data || !hasSource.current) return;
+          backgroundApplied.current += 1;
+          setRevision(data.gitopsRevision);
+          setSource(data);
+          return;
+        }
         setRevision(data.gitopsRevision);
         // An existing stack with no Git source attached answers 200 { linked: false }.
         if ('linked' in data) {
           resetToUnlinked();
         } else {
           setSource(data);
-          if (mode !== 'refresh') fillForm(data);
+          hasSource.current = true;
+          if (mode === 'open' || mode === 'save') fillForm(data);
         }
       } else if (res.status === 404) {
-        resetToUnlinked();
-        setRevision(null);
+        if (!background) {
+          resetToUnlinked();
+          setRevision(null);
+        }
       } else if (res.status === 403) {
         fail('You do not have permission to view this stack\'s Git source.');
       } else {
@@ -325,6 +367,16 @@ export function GitSourcePanel({
     }
   }, [stackName, nodeId, resetToUnlinked, fillForm]);
 
+  // The opening read, plus the one more read an announcement that landed during
+  // it earns. A superseded read leaves the flag to the read that replaced it.
+  const loadOpen = useCallback(async () => {
+    refreshQueued.current = false;
+    await load('open');
+    if (!refreshQueued.current || !loadedForOpen.current) return;
+    refreshQueued.current = false;
+    void load('background');
+  }, [load]);
+
   useEffect(() => {
     if (open) {
       setTab('overview');
@@ -332,9 +384,59 @@ export function GitSourcePanel({
       // Drop whatever the sheet held for another stack or an earlier visit before reading afresh.
       resetToUnlinked();
       setRevision(null);
-      void load('open');
+      void loadOpen();
     }
-  }, [open, load, resetToUnlinked]);
+  }, [open, loadOpen, resetToUnlinked]);
+
+  // The health verdict lands after the deploy that started it, usually with the
+  // sheet still open, and the server offers Retry only once it has failed. The
+  // GitOps announcement is the trigger, as for every other GitOps view.
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refreshSoon = () => {
+      if (timer) clearTimeout(timer);
+      // The opening read may predate this announcement, so it earns one more
+      // read when it lands instead of racing it.
+      if (!loadedForOpen.current) {
+        refreshQueued.current = true;
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void load('background');
+      }, INVALIDATE_DEBOUNCE_MS);
+    };
+    const onInvalidate = (e: Event) => {
+      const detail = (e as CustomEvent<{ scope?: string; nodeId?: unknown; stackName?: unknown }>).detail;
+      if (detail?.scope !== 'gitops') return;
+      // Events that name another node or stack are not about this sheet. One that
+      // names neither (a controller action raised from another surface) might be.
+      if (typeof detail.nodeId === 'number' && panelNodeId !== null && detail.nodeId !== panelNodeId) return;
+      if (typeof detail.stackName === 'string' && detail.stackName !== stackName) return;
+      refreshSoon();
+    };
+    // Announcements sent while the socket was down are gone, so a reconnect is
+    // itself a reason to look again.
+    const onConnection = (e: Event) => {
+      if ((e as CustomEvent<{ connected?: boolean }>).detail?.connected) refreshSoon();
+    };
+    // A remote node has its own socket, so its reconnect is announced per node
+    // and only the sheet that reads that node has missed anything.
+    const onNodeSocketOpen = (e: Event) => {
+      const detail = (e as CustomEvent<{ nodeId?: unknown }>).detail;
+      if (panelNodeId !== null && detail?.nodeId === panelNodeId) refreshSoon();
+    };
+    window.addEventListener('sencho:state-invalidate', onInvalidate);
+    window.addEventListener('sencho:notifications-connection', onConnection);
+    window.addEventListener('sencho:node-notifications-open', onNodeSocketOpen);
+    return () => {
+      window.removeEventListener('sencho:state-invalidate', onInvalidate);
+      window.removeEventListener('sencho:notifications-connection', onConnection);
+      window.removeEventListener('sencho:node-notifications-open', onNodeSocketOpen);
+      if (timer) clearTimeout(timer);
+    };
+  }, [open, panelNodeId, stackName, load]);
 
   const buildSaveBody = useCallback(() => {
     const autoApply = applyMode === 'auto-write' || applyMode === 'auto-deploy';
@@ -675,9 +777,9 @@ export function GitSourcePanel({
     ),
   );
   const showPendingReview = Boolean(pending && !showControllerCard && !claimedByBlueprint);
-  // The one verb the status offers: retry when the controller is holding the source back and allows it, else review the waiting commit.
+  // The one verb the status offers: retry when the projection offers it (the controller is holding the source back, or the applied generation failed its health gate), else review the waiting commit. A waiting commit outranks a health-gate retry, which would redeploy the generation it supersedes.
   let statusAction: ReactNode;
-  if (showControllerCard && offerRetry) {
+  if (offerRetry && !showPendingReview) {
     statusAction = (
       <BusyButton
         size="sm"
@@ -1059,7 +1161,7 @@ export function GitSourcePanel({
         className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3"
       >
         <p className="font-mono text-[11px] text-destructive">{loadError}</p>
-        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { void load('open'); }}>
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { void loadOpen(); }}>
           <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.5} />
           Retry
         </Button>

@@ -94,6 +94,29 @@ function isActive(suppression: CveSuppression, now: number): boolean {
     return suppression.expires_at === null || suppression.expires_at > now;
 }
 
+/** The triage status a row takes effect with; a missing or unrecognized one is `accepted`. */
+function effectiveStatus(suppression: CveSuppression): TriageStatus {
+    return isTriageStatus(suppression.status) ? suppression.status : 'accepted';
+}
+
+/**
+ * True when this row could dismiss some finding on `imageRef`: it is active, its
+ * status dismisses, and its image pattern matches. The CVE and package are left
+ * out, so a row that passes may still dismiss nothing; a row that fails can never
+ * dismiss anything on this image (a non-dismissing row can still match a finding,
+ * but only to leave it actionable). For callers that cannot see every finding (a
+ * truncated detail set) and so cannot run `applySuppressions`.
+ */
+export function mayDismissOnImage(
+    suppression: CveSuppression,
+    imageRef: string,
+    now: number = Date.now(),
+): boolean {
+    return isActive(suppression, now)
+        && DISMISSING_STATUSES.has(effectiveStatus(suppression))
+        && matchesImagePattern(suppression.image_pattern, imageRef);
+}
+
 function specificityScore(s: CveSuppression): number {
     return (s.pkg_name ? 2 : 0) + (s.image_pattern ? 1 : 0);
 }
@@ -174,7 +197,7 @@ export function applySuppressions<T extends SuppressibleFinding>(
         const bucket = buckets.get(f.vulnerability_id);
         const match = bucket ? pickFromBucket(bucket, f, imageRef, now) : null;
         if (!match) return { ...f, suppressed: false };
-        const status = (isTriageStatus(match.status) ? match.status : 'accepted');
+        const status = effectiveStatus(match);
         return {
             ...f,
             suppressed: DISMISSING_STATUSES.has(status),
