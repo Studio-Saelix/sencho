@@ -231,8 +231,8 @@ export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; node
           // to another node) the answer has nowhere to be shown, so the message
           // names the node and sends the operator to its settings instead.
           const readBack = await load(() => !aliveRef.current);
-          const where = nodeName ? ` on ${nodeName}` : '';
           if (!aliveRef.current) {
+            const where = nodeName ? ` on ${nodeName}` : '';
             throw new Error(`The node accepted the change${where} but did not confirm it. Open its Evidence availability settings to check the value.`);
           }
           throw new Error(readBack
