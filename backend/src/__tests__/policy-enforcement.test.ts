@@ -542,10 +542,12 @@ describe('blocked-deploy log line', () => {
     expect(lines[0]).not.toMatch(/[\r\n]/);
   });
 
-  // Trivy prints its failure as several tab-separated stderr lines, the first
-  // ending in the image tag. Deleting the breaks fused the tag with the
-  // timestamp ("no-such-tag2026-10-27T03:48:54ZFATAL").
-  const TRIVY_STDERR = 'trivy failed for nginx:no-such-tag:\n2026-10-27T03:48:54Z\tFATAL\tFatal error\trun error: image scan error: scan error: unable to initialize a scanner';
+  // The scan error is Node's execFile message: the command line ending in the
+  // image tag, then Trivy's stderr, whose lines are tab-separated. Deleting the
+  // breaks fused the tag with the timestamp and the level fields
+  // ("no-such-tag2026-10-27T03:48:54ZFATALFatal error"). Real stderr ends in a
+  // newline, which must not leave a trailing space.
+  const TRIVY_STDERR = 'Command failed: trivy image --scanners vuln nginx:no-such-tag\n2026-10-27T03:48:54Z\tFATAL\tFatal error\trun error: image scan error: scan error: unable to initialize a scanner\n';
 
   it('keeps the fields of a multi-line scanner error apart on the could-not-be-evaluated line', async () => {
     trivyStub.scanImagePreflight.mockRejectedValue(new Error(TRIVY_STDERR));
@@ -553,7 +555,7 @@ describe('blocked-deploy log line', () => {
     await enforcePolicyForImageRefs('web', 1, ['nginx:no-such-tag'], { bypass: false, actor: 'u' });
 
     expect(blockLines()).toEqual([
-      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:no-such-tag: Pre-flight scan failed: trivy failed for nginx:no-such-tag: 2026-10-27T03:48:54Z FATAL Fatal error run error: image scan error: scan error: unable to initialize a scanner',
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:no-such-tag: Pre-flight scan failed: Command failed: trivy image --scanners vuln nginx:no-such-tag 2026-10-27T03:48:54Z FATAL Fatal error run error: image scan error: scan error: unable to initialize a scanner',
     ]);
   });
 
@@ -566,6 +568,18 @@ describe('blocked-deploy log line', () => {
     expect(blockLines()).toEqual([
       '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:1.14: Policy evaluation failed: intel db read failed at readIntel at evaluate',
     ]);
+  });
+
+  it('still redacts a credential that has a control character inside it', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('pull failed: https://user:ab\x01cd@reg.example.com/v2/ password=hu\x00nter2'));
+
+    await enforcePolicyForImageRefs('web', 1, ['reg.example.com/app:1'], { bypass: false, actor: 'u' });
+
+    const lines = blockLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('https://[redacted]@reg.example.com/v2/');
+    expect(lines[0]).not.toMatch(/user:ab|cd@|nter2|hunter/);
+    expect(lines[0]).not.toMatch(/[\x00-\x1F\x7F]/);
   });
 
   it('separates a reference carrying line breaks from the text after it', async () => {
@@ -613,6 +627,8 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
+    // A reference that reaches this line can only carry whitespace at its ends
+    // (validateImageRef trims), so this pins the trim rather than the separator.
     it('does not leave a trailing line break in a reference on the unverified line', async () => {
       trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
 

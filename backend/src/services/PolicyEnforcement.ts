@@ -146,13 +146,16 @@ const detailRowsTruncated = (stored: number, total: number): string =>
     `stored detail rows (${stored}) do not match the scan total (${total})`;
 
 /**
- * Free text on a block line (an image reference, a scanner or parser error)
- * made safe for a single log line. Line breaks and tabs become a space so
- * multi-line scanner output keeps its fields apart (deleting them would fuse the
- * image tag with the timestamp that follows it), then credentials are redacted.
+ * Free text on a block line (an image reference, a scan or policy-evaluation
+ * error) made safe for a single log line. Runs of line breaks and tabs become one
+ * space and the ends are trimmed, so multi-line scanner output keeps its fields
+ * apart (deleting them would fuse the image tag with the timestamp that follows
+ * it). Credentials are redacted next, while any other control character is still
+ * in place, so one inside a credential cannot split it past the redaction;
+ * `sanitizeForLog` then deletes those.
  */
 function logEntry(text: string): string {
-    return sanitizeForLog(redactSensitiveText(text.replace(/[\x00-\x1F\x7F]+/g, ' ').trim()));
+    return sanitizeForLog(redactSensitiveText(text.replace(/[\t\n\v\f\r]+/g, ' ').trim()));
 }
 
 /**
