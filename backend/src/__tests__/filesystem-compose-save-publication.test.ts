@@ -261,6 +261,83 @@ describe('compose save publication', () => {
             });
         });
 
+        describe('when the process cannot change the file\'s user', () => {
+            // A non-root process may give a file to a group it belongs to but
+            // not to another user. The handle refuses a change of user and
+            // honours a change of group to the process's own, or refuses both.
+            function refuseUserChange(refuseGroupToo: boolean): Array<[number, number]> {
+                const ownUid = process.getuid?.() ?? 0;
+                const ownGid = process.getgid?.() ?? 0;
+                const attempts: Array<[number, number]> = [];
+                const realOpen = fsp.open.bind(fsp);
+                vi.spyOn(fsp, 'open').mockImplementation((async (...args: Parameters<typeof fsp.open>) => {
+                    const fh = await realOpen(...args);
+                    if (!String(args[0]).includes('sencho-tmp')) return fh;
+                    const realChown = fh.chown.bind(fh);
+                    fh.chown = (async (uid: number, gid: number) => {
+                        attempts.push([uid, gid]);
+                        const refused = uid !== ownUid || (refuseGroupToo && gid !== ownGid);
+                        if (refused) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+                        return realChown(uid, gid);
+                    }) as typeof fh.chown;
+                    return fh;
+                }) as typeof fsp.open);
+                return attempts;
+            }
+
+            it('keeps the file in the owner\'s group and keeps the group bits', async () => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, 0o660);
+                const ownUid = process.getuid?.() ?? 0;
+                const ownGid = process.getgid?.() ?? 0;
+                const attempts = refuseUserChange(false);
+                const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* a dropped group would be logged */ });
+
+                // The file belongs to another user, in a group the process is in.
+                await FileSystemService.getInstance().writeStackFile(
+                    STACK, 'compose.yaml', composeContent(['web', 'db']),
+                    { mode: 0o660, owner: { uid: ownUid + 1, gid: ownGid } },
+                );
+
+                expect(attempts).toEqual([[ownUid + 1, ownGid], [ownUid, ownGid]]);
+                expect(fsSync.statSync(target).gid).toBe(ownGid);
+                expect(modeAndContent(target)).toEqual({ mode: 0o660, content: composeContent(['web', 'db']) });
+                expect(warn).not.toHaveBeenCalled();
+                expect(stagingFiles()).toEqual([]);
+            });
+
+            it('still drops the group bits when the group cannot be kept either', async () => {
+                const target = path.join(stackDir, 'compose.yaml');
+                fsSync.chmodSync(target, 0o660);
+                const ownUid = process.getuid?.() ?? 0;
+                const ownGid = process.getgid?.() ?? 0;
+                const attempts = refuseUserChange(true);
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().writeStackFile(
+                    STACK, 'compose.yaml', composeContent(['web', 'db']),
+                    { mode: 0o660, owner: { uid: ownUid + 1, gid: ownGid + 1 } },
+                );
+
+                expect(attempts).toEqual([[ownUid + 1, ownGid + 1], [ownUid, ownGid + 1]]);
+                expect(modeAndContent(target).mode).toBe(0o600);
+            });
+
+            it('does not retry when the file already belongs to the process', async () => {
+                const ownUid = process.getuid?.() ?? 0;
+                const ownGid = process.getgid?.() ?? 0;
+                const attempts = refuseUserChange(true);
+                vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+                await FileSystemService.getInstance().writeStackFile(
+                    STACK, 'compose.yaml', composeContent(['web']),
+                    { owner: { uid: ownUid, gid: ownGid + 1 } },
+                );
+
+                expect(attempts).toEqual([[ownUid, ownGid + 1]]);
+            });
+        });
+
         it('keeps a restricted target restricted when an upload replaces it', async () => {
             const target = path.join(stackDir, 'compose.yaml');
             fsSync.chmodSync(target, 0o600);

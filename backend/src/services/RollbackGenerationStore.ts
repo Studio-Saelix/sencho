@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'crypto';
 import { constants as fsConstants, promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
-import { FileSystemService, type DeclarationSetPublication } from './FileSystemService';
+import { FileSystemService, isModeApplicationError, type DeclarationSetPublication } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
@@ -56,6 +56,13 @@ interface PreRestoreIndexEntry {
   state: 'present' | 'absent' | 'link';
   blobId?: string;
   mode?: number | null;
+  /**
+   * Owner and group of the preimage. A revert hands the file back to them, so
+   * the group bits it publishes are judged against the preimage's group and
+   * not against whatever the restore left on the live file.
+   */
+  uid?: number;
+  gid?: number;
   encrypted?: boolean;
   /**
    * Raw readlink value, for state 'link' (a managed path only unlinked, so the
@@ -139,7 +146,7 @@ async function writePrivate(target: string, data: string | Buffer): Promise<void
 async function readSnapshotBytes(
   fh: import('fs/promises').FileHandle,
   rel: string,
-): Promise<{ bytes: Buffer; mode: number }> {
+): Promise<{ bytes: Buffer; mode: number; uid: number; gid: number }> {
   const st = await fh.stat();
   if (!st.isFile()) {
     throw Object.assign(
@@ -147,7 +154,7 @@ async function readSnapshotBytes(
       { code: 'DIRECTORY_COLLISION' },
     );
   }
-  return { bytes: await fh.readFile(), mode: st.mode & 0o777 };
+  return { bytes: await fh.readFile(), mode: st.mode & 0o777, uid: st.uid, gid: st.gid };
 }
 
 function assertSafeGenerationId(generationId: string): void {
@@ -836,14 +843,22 @@ export class RollbackGenerationStore {
     }
     try {
       for (const item of restores) {
-        await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
         const sensitive = item.sensitivity === 'high' || item.sensitivity === 'medium';
         // Sensitive content is always owner-only; other files restore captured mode.
         const targetMode = sensitive ? 0o600 : (item.mode ?? null);
-        if (targetMode === null || process.platform === 'win32') continue;
+        if (targetMode === null || process.platform === 'win32') {
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
+          continue;
+        }
+        // The mode goes through the writer with the bytes. Its group rule
+        // judges the bits against the file being replaced, so a restore that
+        // cannot hand the file back to its group does not publish group
+        // access the file never had there; a mode applied by path afterwards
+        // would put the captured bits back whatever the group.
         try {
-          await fsSvc.chmodStackPath(stackName, item.relativePath, targetMode, scope);
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content, { mode: targetMode });
         } catch (e) {
+          if (!isModeApplicationError(e)) throw e;
           if (sensitive) {
             throw Object.assign(
               new Error(
@@ -856,6 +871,9 @@ export class RollbackGenerationStore {
             '[RollbackGenerationStore] Could not restore mode on entry:',
             (e as Error).message,
           );
+          // Nothing was published. The bytes still come back, with the mode
+          // the file already had.
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
         }
       }
 
@@ -1169,7 +1187,7 @@ export class RollbackGenerationStore {
         // the descriptor the check reads is the one the bytes come from.
         const fh = await fsPromises.open(realSrc, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
         try {
-          const { bytes, mode } = await readSnapshotBytes(fh, rel);
+          const { bytes, mode, uid, gid } = await readSnapshotBytes(fh, rel);
           const blobId = randomUUID();
           const blobPath = path.resolve(blobsRoot, blobId);
           if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
@@ -1189,6 +1207,8 @@ export class RollbackGenerationStore {
             state: 'present',
             blobId,
             mode,
+            uid,
+            gid,
             encrypted,
             linkTarget,
           });
@@ -1342,10 +1362,20 @@ export class RollbackGenerationStore {
       // permissions in one atomic promotion. A permission failure therefore
       // leaves the preimage untouched and this revert throwing, which keeps the
       // snapshot and restore-intent.json for a retry instead of reporting a
-      // compensation that only put the bytes back. (A process that cannot put
-      // the file back in its group publishes it without the group bits.)
+      // compensation that only put the bytes back. The preimage's owner and
+      // group go with the mode: the live file already belongs to this process
+      // after a restore that could not hand it over, so its group would pass
+      // for the preimage's and put group bits back for a group that never held
+      // the file. Judged against the preimage, a process that cannot put the
+      // file back in its group publishes it without the group bits.
       const mode = this.preRestoreWriteMode(rel, entry.mode);
-      await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
+      const owner = mode === undefined ? undefined : this.preRestoreWriteOwner(rel, entry);
+      await fsSvc.writeStackFile(
+        stackName,
+        rel,
+        buf,
+        mode === undefined ? undefined : { mode, ...(owner ? { owner } : {}) },
+      );
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
     return true;
@@ -1369,6 +1399,29 @@ export class RollbackGenerationStore {
       );
     }
     return process.platform === 'win32' ? undefined : recorded;
+  }
+
+  /**
+   * The owner and group to hand a reverted file back to, or undefined when the
+   * snapshot recorded none (an index written before they were kept, or a
+   * platform without them). A half-recorded or malformed pair is refused
+   * rather than guessed at, so a corrupt index cannot move a file to a group
+   * it never had.
+   */
+  private static preRestoreWriteOwner(
+    rel: string,
+    recorded: Pick<PreRestoreIndexEntry, 'uid' | 'gid'>,
+  ): { uid: number; gid: number } | undefined {
+    const { uid, gid } = recorded;
+    if (uid === undefined && gid === undefined) return undefined;
+    const valid = (id: unknown): id is number => Number.isInteger(id) && (id as number) >= 0 && (id as number) <= 0xffffffff;
+    if (!valid(uid) || !valid(gid)) {
+      throw Object.assign(
+        new Error(`Pre-restore entry for "${rel}" has an invalid owner`),
+        { code: 'PRE_RESTORE_INDEX_INVALID' },
+      );
+    }
+    return process.platform === 'win32' ? undefined : { uid, gid };
   }
 
   /** Resolve a pre-restore blob id under blobsRoot; rejects traversal. */

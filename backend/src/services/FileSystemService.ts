@@ -163,8 +163,8 @@ function openDeclarationSet(key: string): DeclarationSetPublication {
 /**
  * Keep the original owner on a staging file when the process is allowed to set
  * it (the common root-in-a-container case). A non-root process cannot hand a
- * file to another user; the replacement stays owned by the process, which is
- * the only outcome available to it. The change goes through the open
+ * file to another user; the replacement stays owned by the process, keeping
+ * the owner's group when the process belongs to it. The change goes through the open
  * descriptor: a path-based chown would follow a link swapped in for the
  * staging name by a container that shares the directory.
  */
@@ -173,12 +173,43 @@ async function chownStaged(
   owner: { uid: number; gid: number } | undefined,
 ): Promise<void> {
   if (!owner) return;
+  if (await tryChown(handle, owner.uid, owner.gid)) return;
+  // A process that cannot give the file to another user can still keep it in
+  // the owner's group when it is a member of that group: a group-shared file
+  // stays shared after a save instead of falling to the process's own group.
+  const ownUid = process.getuid?.();
+  if (ownUid !== undefined && ownUid !== owner.uid) await tryChown(handle, ownUid, owner.gid);
+}
+
+/** One ownership change through the descriptor; false when the system refuses it. */
+async function tryChown(
+  handle: { chown(uid: number, gid: number): Promise<void> },
+  uid: number,
+  gid: number,
+): Promise<boolean> {
   try {
-    await handle.chown(owner.uid, owner.gid);
+    await handle.chown(uid, gid);
+    return true;
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+    return false;
   }
+}
+
+/**
+ * A failure to apply an explicit permission mode to a staged file. The write
+ * did not publish, so a caller that treats the mode as best effort can tell
+ * this from every other write failure and publish the bytes with the mode the
+ * file already had.
+ */
+function modeApplicationError(err: unknown): Error {
+  const error = err instanceof Error ? err : new Error(String(err));
+  return Object.assign(error, { modeApplication: true as const });
+}
+
+export function isModeApplicationError(err: unknown): boolean {
+  return err instanceof Error && (err as { modeApplication?: unknown }).modeApplication === true;
 }
 
 /** Mode and owner of a regular file at `filePath`, or undefined for anything else. */
@@ -2524,6 +2555,11 @@ export class FileSystemService {
    * committed but the mode wrong. Staging the mode keeps the promotion
    * all-or-nothing: the target either keeps its previous content and mode, or
    * gets the new content with the requested mode.
+   *
+   * `owner` names the owner and group the published file should have. Without
+   * it the replaced file's own are carried over. A caller that rewrites a file
+   * another write has since changed passes the owner it recorded, so the group
+   * bits are judged against that group.
    */
   private async writeStackFileAtomic(
     safePath: string,
@@ -2606,13 +2642,18 @@ export class FileSystemService {
             // carried over from the replaced file may be refused by a
             // filesystem that cannot set modes, which leaves the staging file
             // owner-only, the narrower outcome.
-            if (opts.mode !== undefined || (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP')) throw err;
+            if (opts.mode !== undefined) throw modeApplicationError(err);
+            if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
             console.warn(
               `[FileSystemService] Could not restore mode ${finalMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
             );
           }
         } else if (opts.mode !== undefined) {
-          await fh.chmod(opts.mode);
+          try {
+            await fh.chmod(opts.mode);
+          } catch (err: unknown) {
+            throw modeApplicationError(err);
+          }
         }
         await fh.sync();
         staged = await fh.stat();
@@ -2659,7 +2700,7 @@ export class FileSystemService {
     stackName: string,
     relPath: string,
     content: string | Buffer,
-    opts?: { exclusive?: boolean; mode?: number },
+    opts?: { exclusive?: boolean; mode?: number; owner?: { uid: number; gid: number } },
   ): Promise<void> {
     const safePath = await this.resolveSafeStackPath(stackName, relPath);
     await this.writeStackFileAtomic(safePath, content, opts);

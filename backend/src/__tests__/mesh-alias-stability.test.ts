@@ -13,7 +13,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { parseLastKnownServices } from '../services/MeshService';
+import { MeshError, parseLastKnownServices } from '../services/MeshService';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
@@ -284,6 +284,64 @@ describe('mesh alias stability', () => {
         await svc.refreshAliasCache();
 
         expect((svc as unknown as Internals).reservedPorts.get(8080)?.host).toBe('web.first.edge.sencho');
+    });
+
+    it('keeps the same owner of a contested port before, during, and after the owning node is offline', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(remoteNodeId, 'first', 'tester');
+        db.insertMeshStack(localNode.id, 'second', 'tester');
+        let edgeOnline = true;
+        mockInspect(async (nodeId, _stack, reach) => {
+            if (nodeId === remoteNodeId && !edgeOnline) {
+                if (reach) reach.reachable = false;
+                return [];
+            }
+            return [{ service: 'web', ports: [8080], running: true }];
+        });
+        const svc = MeshService.getInstance();
+        const internals = svc as unknown as Internals;
+        const owners = () => ({
+            reserved: internals.reservedPorts.get(8080)?.stackName,
+            routed: internals.aliasByPort.get(8080)?.stackName,
+        });
+
+        await svc.refreshAliasCache();
+        expect(owners()).toEqual({ reserved: 'first', routed: 'first' });
+
+        edgeOnline = false;
+        await svc.refreshAliasCache();
+        expect(owners()).toEqual({ reserved: 'first', routed: 'first' });
+
+        edgeOnline = true;
+        await svc.refreshAliasCache();
+        expect(owners()).toEqual({ reserved: 'first', routed: 'first' });
+    });
+
+    it('writes the offline node hostnames into another stack override', async () => {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(remoteNodeId, 'pg', 'tester');
+        seedLastKnown(remoteNodeId, 'pg', [{ service: 'db', ports: [5432] }]);
+        db.insertMeshStack(localNode.id, 'consumer', 'tester');
+        await writeComposeFile('consumer', ['app']);
+        mockInspect(async (nodeId, _stack, reach) => {
+            if (nodeId === remoteNodeId) {
+                if (reach) reach.reachable = false;
+                return [];
+            }
+            return [{ service: 'app', ports: [3000], running: true }];
+        });
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        const file = await svc.ensureStackOverride(localNode.id, 'consumer');
+
+        if (!file) throw new Error('no override was written');
+        const text = await fs.readFile(file, 'utf8');
+        expect(text).toContain('db.pg.edge.sencho');
     });
 });
 
@@ -1239,7 +1297,313 @@ describe('overlapping refreshes', () => {
         expect((await svc.listAliases()).map((a) => a.host))
             .toContain(`db.throws.edge.sencho`);
     });
+
+    it('does not hand a superseded caller back before the newest refresh has published', async () => {
+        const db = DatabaseService.getInstance();
+        db.insertMeshStack(remoteNodeId, 'api', 'tester');
+        const gate = gatedInspect();
+        const svc = MeshService.getInstance();
+
+        // A mutation's refresh, then the timer's: the timer's supersedes it.
+        let mutationSettled = false;
+        const mutation = svc.refreshAliasCache().then(() => { mutationSettled = true; });
+        const timer = svc.refreshAliasCache();
+        await gate.waitForCalls(2);
+
+        // The older answer arrives first. Nothing is published yet, so the
+        // mutation's caller must keep waiting instead of reading the stale cache.
+        gate.answer(0, [{ service: 'web', ports: [8080], running: true }]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(mutationSettled).toBe(false);
+        expect(await svc.listAliases()).toEqual([]);
+
+        gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+        await mutation;
+        expect((await svc.listAliases()).map((a) => a.host)).toContain('web.api.edge.sencho');
+        await timer;
+    });
+
+    describe('a mutation that a timer refresh supersedes', () => {
+        type Mutating = {
+            syncForwarderListeners: () => Promise<void>;
+            regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void>;
+            cascadeRecomposeAcrossFleet: (n: number | undefined, s: string | undefined, actor: string) => void;
+            triggerRedeploy: (n: number, s: string, actor: string) => void;
+            proxyFetch: (nodeId: number, method: string, url: string, body?: unknown) => Promise<{ ok: boolean; status: number }>;
+        };
+
+        function stubFleetWork(): { pushed: string[][]; regenerated: string[][] } {
+            const svc = MeshService.getInstance();
+            const internals = svc as unknown as Mutating;
+            const pushed: string[][] = [];
+            const regenerated: string[][] = [];
+            vi.spyOn(internals, 'syncForwarderListeners').mockResolvedValue(undefined);
+            // The override of every other stack is built from the cache at the
+            // moment it is written, so the cache is what each write consumes.
+            vi.spyOn(internals, 'regenerateOverridesAcrossFleet').mockImplementation(async () => {
+                regenerated.push((await svc.listAliases()).map((a) => a.host).sort());
+            });
+            vi.spyOn(internals, 'cascadeRecomposeAcrossFleet').mockImplementation(() => undefined);
+            vi.spyOn(internals, 'triggerRedeploy').mockImplementation(() => undefined);
+            vi.spyOn(internals, 'proxyFetch').mockImplementation(async (_nodeId, method, _url, body) => {
+                if (method === 'PUT') {
+                    pushed.push(((body as { aliases: Array<{ host: string }> }).aliases).map((a) => a.host).sort());
+                }
+                return { ok: true, status: 200 };
+            });
+            return { pushed, regenerated };
+        }
+
+        it('opt-in writes overrides that include its own aliases', async () => {
+            const gate = gatedInspect({ immediate: 1 });
+            const { pushed, regenerated } = stubFleetWork();
+            const svc = MeshService.getInstance();
+
+            const optIn = svc.optInStack(remoteNodeId, 'api', 'tester');
+            await gate.waitForCalls(2);
+            // The timer fires while the opt-in's own refresh is still inspecting.
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(3);
+
+            gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(pushed).toEqual([]);
+            gate.answer(2, [{ service: 'web', ports: [8080], running: true }]);
+            await optIn;
+            await timer;
+
+            expect(pushed).toEqual([['web.api.edge.sencho']]);
+            expect(regenerated).toEqual([['web.api.edge.sencho']]);
+        });
+
+        it('an opt-in rolled back after a rejected push leaves no alias behind', async () => {
+            const db = DatabaseService.getInstance();
+            db.insertMeshStack(remoteNodeId, 'kept', 'tester');
+            const gate = gatedInspect({ immediate: 1 });
+            const { regenerated } = stubFleetWork();
+            const svc = MeshService.getInstance();
+            vi.spyOn(svc, 'pushOverrideToNode').mockRejectedValue(new MeshError('push_failed', 'node rejected the override'));
+
+            const optIn = svc.optInStack(remoteNodeId, 'api', 'tester');
+            // What the caller sees the moment its rollback returns.
+            let aliasesAtReturn: string[] = [];
+            const settled = optIn.catch((err: unknown) => {
+                aliasesAtReturn = Array.from((svc as unknown as Internals).aliasCache.keys());
+                return err;
+            });
+            // The opt-in's own refresh inspects both stacks and publishes.
+            await gate.waitForCalls(3);
+            gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+            gate.answer(2, [{ service: 'web', ports: [9000], running: true }]);
+            // The rollback refresh inspects what is left; the timer's refresh supersedes it.
+            await gate.waitForCalls(4);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(5);
+            gate.answer(3, [{ service: 'web', ports: [9000], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            gate.answer(4, [{ service: 'web', ports: [9000], running: true }]);
+
+            expect(await settled).toBeInstanceOf(MeshError);
+            await timer;
+            expect(aliasesAtReturn).toEqual(['web.kept.edge.sencho']);
+            expect(regenerated).toEqual([]);
+        });
+
+        it('an opt-in whose first observation cannot be stored returns with the refreshed aliases', async () => {
+            const db = DatabaseService.getInstance();
+            db.insertMeshStack(remoteNodeId, 'kept', 'tester');
+            const svc = MeshService.getInstance();
+            const internals = svc as unknown as Internals;
+            mockInspect(async () => [{ service: 'web', ports: [7000], running: true }]);
+            await svc.refreshAliasCache();
+
+            const gate = gatedInspect({ immediate: 1 });
+            stubFleetWork();
+            vi.spyOn(db, 'setMeshStackLastKnownServices').mockImplementation(() => {
+                throw new Error('database unavailable');
+            });
+            vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+            const optIn = svc.optInStack(remoteNodeId, 'api', 'tester');
+            let portsAtReturn: number[] = [];
+            const settled = optIn.catch((err: unknown) => {
+                portsAtReturn = Array.from(internals.aliasByPort.keys());
+                return err;
+            });
+            // The rollback's refresh inspects what is left; the timer's supersedes it.
+            await gate.waitForCalls(2);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(3);
+            gate.answer(1, [{ service: 'web', ports: [9000], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            gate.answer(2, [{ service: 'web', ports: [9000], running: true }]);
+
+            expect(String(await settled)).toContain('database unavailable');
+            await timer;
+            expect(portsAtReturn).toEqual([9000]);
+        });
+
+        it('opt-out regenerates the remaining overrides without the removed aliases', async () => {
+            const db = DatabaseService.getInstance();
+            db.insertMeshStack(remoteNodeId, 'gone', 'tester');
+            db.insertMeshStack(remoteNodeId, 'kept', 'tester');
+            const svc = MeshService.getInstance();
+            mockInspect(async (_n, stack) => [{ service: stack === 'gone' ? 'db' : 'web', ports: [stack === 'gone' ? 5432 : 8080], running: true }]);
+            await svc.refreshAliasCache();
+            expect((await svc.listAliases()).map((a) => a.host)).toContain('db.gone.edge.sencho');
+
+            const gate = gatedInspect();
+            const { regenerated } = stubFleetWork();
+            vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+            const optOut = svc.optOutStack(remoteNodeId, 'gone', 'tester');
+            await gate.waitForCalls(1);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(2);
+
+            gate.answer(0, [{ service: 'web', ports: [8080], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(regenerated).toEqual([]);
+            gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+            await optOut;
+            await timer;
+
+            expect(regenerated).toEqual([['web.kept.edge.sencho']]);
+        });
+
+        it('node disable regenerates the remaining overrides without the dropped aliases', async () => {
+            const db = DatabaseService.getInstance();
+            const localNode = db.getDefaultNode();
+            if (!localNode) throw new Error('missing default node');
+            db.insertMeshStack(remoteNodeId, 'gone', 'tester');
+            db.insertMeshStack(localNode.id, 'kept', 'tester');
+            const svc = MeshService.getInstance();
+            mockInspect(async (_n, stack) => [{ service: stack === 'gone' ? 'db' : 'web', ports: [stack === 'gone' ? 5432 : 8080], running: true }]);
+            await svc.refreshAliasCache();
+
+            const gate = gatedInspect();
+            const { regenerated } = stubFleetWork();
+            vi.spyOn(svc, 'removeOverrideFromNode').mockResolvedValue(undefined);
+
+            const disable = svc.disableForNode(remoteNodeId, 'tester');
+            await gate.waitForCalls(1);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(2);
+
+            gate.answer(0, [{ service: 'web', ports: [8080], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(regenerated).toEqual([]);
+            gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+            await disable;
+            await timer;
+
+            expect(regenerated).toEqual([[`web.kept.${localNode.name}.sencho`]]);
+        });
+
+        it('a pilot override apply syncs listeners from the refreshed aliases', async () => {
+            const db = DatabaseService.getInstance();
+            db.insertMeshStack(remoteNodeId, 'kept', 'tester');
+            const svc = MeshService.getInstance();
+            const internals = svc as unknown as Mutating & { senchoIp: string | null; pilotAliasOverlay: Map<string, Alias[]> };
+            internals.senchoIp = '172.30.0.2';
+            vi.spyOn(svc, 'getDeclaredStackServices').mockResolvedValue({ app: { declaresNetworks: false } });
+
+            const gate = gatedInspect();
+            const synced: string[][] = [];
+            vi.spyOn(internals, 'syncForwarderListeners').mockImplementation(async () => {
+                synced.push((await svc.listAliases()).map((a) => a.host).sort());
+            });
+            const web = [{ service: 'web', ports: [8080], running: true }];
+
+            // Applying the override records the stack as meshed, so each
+            // refresh inspects it as well as the stack already opted in.
+            const apply = svc.applyLocalOverride('overlay-app', [], [{
+                host: 'api.overlay-app.hub.sencho', nodeId: 99, nodeName: 'hub', stackName: 'overlay-app', serviceName: 'api', port: 9090,
+            }]);
+            await gate.waitForCalls(2);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(4);
+
+            gate.answer(0, web);
+            gate.answer(1, [{ service: 'app', ports: [3000], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(synced).toEqual([]);
+            gate.answer(2, web);
+            gate.answer(3, [{ service: 'app', ports: [3000], running: true }]);
+            await apply;
+            await timer;
+
+            // The overlay and the sender address belong to the singleton, so they are put back.
+            internals.pilotAliasOverlay.delete('overlay-app');
+            internals.senchoIp = null;
+
+            expect(synced).toHaveLength(1);
+            expect(synced[0]).toEqual(expect.arrayContaining(['api.overlay-app.hub.sencho', 'web.kept.edge.sencho']));
+        });
+
+        it('a pilot override removal syncs listeners from the refreshed aliases', async () => {
+            const db = DatabaseService.getInstance();
+            db.insertMeshStack(remoteNodeId, 'kept', 'tester');
+            const svc = MeshService.getInstance();
+            const internals = svc as unknown as Mutating & { pilotAliasOverlay: Map<string, Alias[]> };
+            internals.pilotAliasOverlay.set('overlay-stack', [{
+                host: 'api.overlay-stack.hub.sencho', nodeId: 99, nodeName: 'hub', stackName: 'overlay-stack', serviceName: 'api', port: 9090,
+            }]);
+            mockInspect(async () => [{ service: 'web', ports: [8080], running: true }]);
+            await svc.refreshAliasCache();
+            expect((await svc.listAliases()).map((a) => a.host)).toContain('api.overlay-stack.hub.sencho');
+
+            const gate = gatedInspect();
+            const synced: string[][] = [];
+            vi.spyOn(internals, 'syncForwarderListeners').mockImplementation(async () => {
+                synced.push((await svc.listAliases()).map((a) => a.host).sort());
+            });
+
+            const removal = svc.removeLocalOverride('overlay-stack');
+            await gate.waitForCalls(1);
+            const timer = svc.refreshAliasCache();
+            await gate.waitForCalls(2);
+
+            gate.answer(0, [{ service: 'web', ports: [8080], running: true }]);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(synced).toEqual([]);
+            gate.answer(1, [{ service: 'web', ports: [8080], running: true }]);
+            await removal;
+            await timer;
+
+            expect(synced).toEqual([['web.kept.edge.sencho']]);
+        });
+    });
 });
+
+/**
+ * An inspection stub whose answers the test releases one at a time, so two
+ * refreshes can be made to finish in either order. The first `immediate`
+ * calls answer at once with one running `web` service on port 8080 (opt-in's
+ * own look at the stack before it inserts the membership).
+ */
+function gatedInspect(opts: { immediate?: number } = {}): {
+    waitForCalls: (count: number) => Promise<void>;
+    answer: (index: number, services: Observed[]) => void;
+} {
+    const resolvers: Array<(services: Observed[]) => void> = [];
+    let calls = 0;
+    const immediate = opts.immediate ?? 0;
+    mockInspect(async () => {
+        const index = calls;
+        calls += 1;
+        if (index < immediate) return [{ service: 'web', ports: [8080], running: true }];
+        return new Promise<Observed[]>((resolve) => { resolvers[index] = resolve; });
+    });
+    return {
+        waitForCalls: (count) => vi.waitFor(() => { expect(calls).toBeGreaterThanOrEqual(count); }),
+        answer: (index, services) => {
+            const resolve = resolvers[index];
+            if (!resolve) throw new Error(`inspection ${index} was never started`);
+            resolve(services);
+        },
+    };
+}
 
 /**
  * A failed opt-out used to delete the record and reinsert it from scratch,
