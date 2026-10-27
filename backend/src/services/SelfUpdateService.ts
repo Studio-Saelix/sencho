@@ -4,7 +4,16 @@ import * as fs from 'fs';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { disableCapability } from './CapabilityRegistry';
+import { resolveDockerEndpointProvider, type DockerEndpointContainer } from './DockerEndpointProvider';
 import { isDebugEnabled } from '../utils/debug';
+import { getErrorMessage } from '../utils/errors';
+import {
+  HELPER_DATA_DIR,
+  HELPER_SOCKET_PATH,
+  type ProviderReplaceMode,
+  type ProviderReplacePlan,
+  type StageResult,
+} from '../helpers/endpointProviderReplace';
 import {
   buildTargetImageRef,
   isRepinBlocked,
@@ -131,7 +140,9 @@ export function buildSelfUpdateComposeCmd(
   successMarkerFile?: string,
   successMarkerContent = '{"ok":true}',
 ): string {
-  const recreate = ['docker compose', ...fFlags.map(shQuote), 'up -d --force-recreate', shQuote(serviceName), `2>${stderrTmp}`].join(' ');
+  // --no-deps: only Sencho is recreated, never a dependency Compose would
+  // otherwise restart with it (such as the proxy carrying the Docker API).
+  const recreate = ['docker compose', ...fFlags.map(shQuote), 'up -d --no-deps --force-recreate', shQuote(serviceName), `2>${stderrTmp}`].join(' ');
   const copyStep = composeCopy
     ? [`cp ${shQuote(composeCopy.stagedPath)} ${shQuote(composeCopy.targetPath)} 2>${stderrTmp} || { { echo "exit=1"; echo "Failed to write the updated compose file"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; exit 1; }`]
     : [];
@@ -159,7 +170,75 @@ interface ComposeContext {
   imageName: string;
   dataDirHost: string | null;
   hostBindMounts: HostMount[];
+  /** Compose project label of Sencho's own container. */
+  project: string | null;
+  /** Image ID of the running container, so a helper runs exactly this build. */
+  runningImageId: string | null;
 }
+
+/**
+ * Whether Fleet Update and Reapply can also recreate the container that
+ * carries this node's Docker API. `none` means Sencho does not reach Docker
+ * through a container; `unavailable` names the provider when known and why it
+ * cannot be replaced from here.
+ */
+export type EndpointProviderOption =
+  | { state: 'none' }
+  | { state: 'available'; service: string; containerName: string }
+  | { state: 'unavailable'; service: string | null; reason: string };
+
+/** A replacement Sencho can run: the option plus what the helper needs. */
+interface ReplaceableProvider {
+  provider: DockerEndpointContainer & { service: string; socketBindSource: string };
+}
+
+/**
+ * Build the `docker run` argv for the Docker endpoint replacement helper. It
+ * mounts the host socket the provider itself mounts (never a guessed path), so
+ * the helper keeps its own connection while the provider is recreated, and runs
+ * the image of the running Sencho by ID so the helper script is the one this
+ * process shipped with. `replace` runs detached: an attached client would
+ * stream through the provider being replaced and die with it.
+ */
+export function buildEndpointProviderHelperArgs(input: {
+  mode: 'stage' | 'replace';
+  operationId: string;
+  socketSource: string;
+  workingDir: string;
+  dataDirHost: string;
+  hostBindMounts: ReadonlyArray<HostMount>;
+  imageId: string;
+  composeWritable: boolean;
+}): string[] {
+  const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable } = input;
+  const mountArgs: string[] = [
+    '-v', `${socketSource}:${HELPER_SOCKET_PATH}`,
+    '-v', `${workingDir}:${workingDir}:${composeWritable ? 'rw' : 'ro'}`,
+    '-v', `${dataDirHost}:${HELPER_DATA_DIR}:rw`,
+  ];
+  const alreadyMounted = new Set([socketSource, workingDir, dataDirHost]);
+  for (const { source } of hostBindMounts) {
+    if (alreadyMounted.has(source) || source.startsWith(workingDir + '/')) continue;
+    alreadyMounted.add(source);
+    mountArgs.push('-v', `${source}:${source}:ro`);
+  }
+  return [
+    'run', ...(mode === 'replace' ? ['-d'] : []), '--rm',
+    '--user', 'root',
+    '--label', 'io.sencho.helper=endpoint-provider',
+    '-e', `DOCKER_HOST=unix://${HELPER_SOCKET_PATH}`,
+    '--entrypoint', 'node',
+    ...mountArgs,
+    '-w', workingDir,
+    imageId,
+    '/app/dist/endpointProviderHelper.js', mode, operationId,
+  ];
+}
+
+/** Seconds the helper waits for the new provider to run (and be healthy, when it has a healthcheck). */
+export const PROVIDER_READY_SECONDS = 60;
+/** Seconds the helper waits for the new Sencho to confirm Docker access through the new provider. */
+export const PROVIDER_ACK_SECONDS = 180;
 
 /**
  * Build the `docker run` argv for the self-update helper container. Pure and
@@ -226,11 +305,42 @@ export function buildComposeConfigValidateArgs(
   );
 }
 
+/** What the operation layer passes to run a Docker endpoint replacement. */
+export interface EndpointProviderRequest {
+  operationId: string;
+  /** The service the operator confirmed; a different provider at run time is refused. */
+  service: string;
+  /** Sencho-side directory holding the handoff files; the helper sees it under /app/data. */
+  handoffDir: string;
+  planFile: string;
+}
+
+const STAGE_UNREADABLE = 'The staging helper returned no readable result.';
+
+export function parseStageResult(stdout: string): StageResult {
+  try {
+    const parsed = JSON.parse(stdout.trim()) as Partial<StageResult> & { message?: unknown; providerImage?: unknown; previousImageId?: unknown; previousImageRef?: unknown };
+    if (parsed.ok === true && typeof parsed.providerImage === 'string' && typeof parsed.previousImageId === 'string') {
+      return {
+        ok: true,
+        providerImage: parsed.providerImage,
+        previousImageId: parsed.previousImageId,
+        previousImageRef: typeof parsed.previousImageRef === 'string' ? parsed.previousImageRef : null,
+      };
+    }
+    if (parsed.ok === false && typeof parsed.message === 'string') return { ok: false, message: parsed.message };
+  } catch {
+    // Fall through: not the helper's JSON.
+  }
+  return { ok: false, message: STAGE_UNREADABLE };
+}
+
 class SelfUpdateService {
   private static instance: SelfUpdateService;
   private canSelfUpdate = false;
   private composeContext: ComposeContext | null = null;
   private lastUpdateError: string | null = null;
+  private lastUpdateErrorCode: string | null = null;
   /** Stashed when the helper exits before any onceHelperExit listener is registered. */
   private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
@@ -303,7 +413,11 @@ class SelfUpdateService {
         console.log('[SelfUpdate] /app/data mount not found - update error recovery and compose repin will be unavailable');
       }
 
-      this.composeContext = { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts };
+      this.composeContext = {
+        workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts,
+        project: labels['com.docker.compose.project'] || null,
+        runningImageId: typeof info.Image === 'string' && info.Image ? info.Image : null,
+      };
       this.canSelfUpdate = true;
       console.log(`[SelfUpdate] Ready - service="${serviceName}" image="${imageName}" in ${workingDir}`);
 
@@ -334,6 +448,18 @@ class SelfUpdateService {
     return this.lastUpdateError;
   }
 
+  /** Bounded code for the last failure, for the public meta endpoint; null when there is none. */
+  getLastErrorCode(): string | null {
+    if (!this.lastUpdateError) return null;
+    return this.lastUpdateErrorCode ?? 'update_failed';
+  }
+
+  /** Records a failure reported after the helper ran (the endpoint replacement outcome). */
+  recordUpdateFailure(message: string, code: string): void {
+    this.lastUpdateError = message;
+    this.lastUpdateErrorCode = code;
+  }
+
   /** Register a one-shot listener for the helper container's execFile callback. */
   onceHelperExit(listener: (error: string | null) => void): void {
     if (this.pendingHelperExitError !== undefined) {
@@ -354,6 +480,7 @@ class SelfUpdateService {
   /** Clears the stored update error (call after reading it). */
   clearLastError(): void {
     this.lastUpdateError = null;
+    this.lastUpdateErrorCode = null;
   }
 
   /**
@@ -375,6 +502,10 @@ class SelfUpdateService {
 
   getComposeServiceName(): string | null {
     return this.composeContext?.serviceName ?? null;
+  }
+
+  getComposeProject(): string | null {
+    return this.composeContext?.project ?? null;
   }
 
   /**
@@ -462,13 +593,15 @@ class SelfUpdateService {
     dockerConfigPath?: string;
     successMarkerFile?: string;
     successMarkerContent?: string;
+    /** Also recreate the Docker endpoint provider, through the replacement helper. */
+    endpointProvider?: EndpointProviderRequest;
   }): Promise<void> {
     if (!this.composeContext) return;
     const env = {
       ...this.buildEnv(),
       ...(options?.dockerConfigPath ? { DOCKER_CONFIG: options.dockerConfigPath } : {}),
     };
-    this.lastUpdateError = null;
+    this.clearLastError();
     this.pendingHelperExitError = undefined;
 
     try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
@@ -545,6 +678,10 @@ class SelfUpdateService {
       }
     }
 
+    if (options?.endpointProvider) {
+      await this.runEndpointProviderReplacement(env, options.endpointProvider, 'update', composeCopy ?? null);
+      return;
+    }
     this.spawnHelper(env, composeCopy, options?.successMarkerFile, options?.successMarkerContent);
   }
 
@@ -557,10 +694,12 @@ class SelfUpdateService {
   async triggerComposeReapply(options?: {
     successMarkerFile?: string;
     successMarkerContent?: string;
+    /** Also recreate the Docker endpoint provider, through the replacement helper. */
+    endpointProvider?: EndpointProviderRequest;
   }): Promise<void> {
     if (!this.composeContext) return;
     const env = this.buildEnv();
-    this.lastUpdateError = null;
+    this.clearLastError();
     this.pendingHelperExitError = undefined;
 
     try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
@@ -583,9 +722,144 @@ class SelfUpdateService {
       return;
     }
 
-    // No pull and no compose rewrite: the authored image ref is authoritative.
+    // No Sencho pull and no compose rewrite: the authored image ref is authoritative.
     // Skip dangling-image prune (nothing was pulled).
+    if (options?.endpointProvider) {
+      await this.runEndpointProviderReplacement(env, options.endpointProvider, 'reapply', null);
+      return;
+    }
     this.spawnHelper(env, undefined, options?.successMarkerFile, options?.successMarkerContent, false);
+  }
+
+  /** Whether Update and Reapply can also recreate the container carrying this node's Docker API. */
+  async getEndpointProviderOption(): Promise<EndpointProviderOption> {
+    const result = await this.resolveReplaceableProvider();
+    if ('state' in result) return result;
+    return { state: 'available', service: result.provider.service, containerName: result.provider.containerName };
+  }
+
+  /**
+   * The endpoint provider, when it can be replaced from here. It must be a
+   * service of Sencho's own Compose project (an unrelated proxy is not
+   * Sencho's to recreate), mount the host Docker socket the helper will use,
+   * and the data directory must be mounted for the helper's handoff files.
+   */
+  private async resolveReplaceableProvider(): Promise<ReplaceableProvider | Exclude<EndpointProviderOption, { state: 'available' }>> {
+    let resolved;
+    try {
+      resolved = await resolveDockerEndpointProvider();
+    } catch (error) {
+      return { state: 'unavailable', service: null, reason: `Sencho could not identify the container carrying its Docker connection (${getErrorMessage(error, 'lookup failed')}).` };
+    }
+    if (resolved.state === 'none') return { state: 'none' };
+    if (resolved.state === 'unresolved') return { state: 'unavailable', service: null, reason: resolved.reason };
+    const provider = resolved.provider;
+    const name = provider.service ?? provider.containerName;
+    const unavailable = (reason: string) => ({ state: 'unavailable' as const, service: provider.service, reason });
+    const ctx = this.composeContext;
+    if (!this.canSelfUpdate || !ctx) return unavailable('Self-update is unavailable on this instance.');
+    if (!provider.service || !provider.project || provider.project !== ctx.project || provider.workingDir !== ctx.workingDir) {
+      return unavailable(`"${name}" carries Sencho's Docker connection but is not a service of Sencho's own Compose project, so Update and Reapply cannot recreate it. Recreate it from its own project on the host.`);
+    }
+    if (provider.service === ctx.serviceName) return unavailable('The Docker endpoint resolves to Sencho itself.');
+    if (!provider.socketBindSource || !provider.socketBindSource.startsWith('/')) {
+      return unavailable(`"${name}" does not bind-mount the host Docker socket, so the replacement helper has no direct Docker connection to use while it is recreated.`);
+    }
+    if (!ctx.dataDirHost) return unavailable('The Sencho data directory is not mounted, so the replacement helper cannot report its outcome.');
+    if (!ctx.runningImageId) return unavailable('Sencho could not determine the image it is running.');
+    return { provider: { ...provider, service: provider.service, socketBindSource: provider.socketBindSource } };
+  }
+
+  /**
+   * Stage, then hand over to the detached replacement helper. Every refusal
+   * lands in lastUpdateError before anything stops. After a successful spawn
+   * the helper's outcome file is the only verdict (ImageOperationService
+   * watches it); this process will be recreated part way through.
+   */
+  private async runEndpointProviderReplacement(
+    env: NodeJS.ProcessEnv,
+    request: EndpointProviderRequest,
+    mode: ProviderReplaceMode,
+    composeCopy: ComposeCopy | null,
+  ): Promise<void> {
+    const ctx = this.composeContext;
+    const replaceable = await this.resolveReplaceableProvider();
+    if (!ctx || 'state' in replaceable) {
+      this.lastUpdateError = 'state' in replaceable && replaceable.state === 'unavailable'
+        ? replaceable.reason
+        : 'Sencho no longer reaches Docker through a container, so there is no Docker endpoint to recreate.';
+      console.error('[SelfUpdate] Docker endpoint replacement refused:', this.lastUpdateError);
+      return;
+    }
+    const { provider } = replaceable;
+    if (provider.service !== request.service) {
+      this.lastUpdateError = `The Docker endpoint changed from "${request.service}" to "${provider.service}" since the operation started. Run it again.`;
+      console.error('[SelfUpdate] Docker endpoint replacement refused:', this.lastUpdateError);
+      return;
+    }
+    const plan: ProviderReplacePlan = {
+      schemaVersion: 1,
+      operationId: request.operationId,
+      mode,
+      project: ctx.project!,
+      workingDir: ctx.workingDir,
+      configFiles: ctx.configFiles.split(',').map(file => file.trim()).filter(Boolean),
+      providerService: provider.service,
+      senchoService: ctx.serviceName,
+      providerContainerId: provider.containerId,
+      composeCopy,
+      pruneOnUpdate: mode === 'update' && DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1',
+      providerReadySeconds: PROVIDER_READY_SECONDS,
+      ackSeconds: PROVIDER_ACK_SECONDS,
+    };
+    const helperInput = {
+      operationId: request.operationId,
+      socketSource: provider.socketBindSource,
+      workingDir: ctx.workingDir,
+      dataDirHost: ctx.dataDirHost!,
+      hostBindMounts: ctx.hostBindMounts,
+      imageId: ctx.runningImageId!,
+      composeWritable: composeCopy !== null,
+    };
+
+    try {
+      fs.mkdirSync(request.handoffDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(request.planFile, JSON.stringify(plan), { mode: 0o600 });
+    } catch (error) {
+      this.lastUpdateError = `Could not write the replacement plan to the data directory (${getErrorMessage(error, 'write failed')}).`;
+      console.error('[SelfUpdate] Docker endpoint replacement refused:', this.lastUpdateError);
+      return;
+    }
+
+    console.log(`[SelfUpdate] Staging replacement of the Docker endpoint "${provider.service}"...`);
+    let staged: StageResult;
+    try {
+      const { stdout } = await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'stage', composeWritable: false }), {
+        env, timeout: 10 * 60_000, maxBuffer: 10 * 1024 * 1024,
+      });
+      staged = parseStageResult(stdout);
+    } catch (error) {
+      const stdout = (error as { stdout?: Buffer | string })?.stdout?.toString() ?? '';
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      const parsed = parseStageResult(stdout);
+      staged = parsed.ok
+        ? { ok: false, message: stderr || getErrorMessage(error, 'The staging helper failed.') }
+        : (parsed.message === STAGE_UNREADABLE && stderr ? { ok: false, message: stderr } : parsed);
+    }
+    if (!staged.ok) {
+      this.lastUpdateError = `Nothing was stopped. ${staged.message}`;
+      console.error('[SelfUpdate] Docker endpoint staging failed:', this.lastUpdateError);
+      return;
+    }
+    console.log(`[SelfUpdate] Staged ${staged.providerImage} for "${provider.service}" (previous image ${staged.previousImageId}); spawning the replacement helper (last breath)`);
+
+    try {
+      await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'replace' }), { env, timeout: 60_000 });
+    } catch (error) {
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      this.lastUpdateError = `Nothing was stopped. The replacement helper could not start: ${stderr || getErrorMessage(error, 'docker run failed')}`;
+      console.error('[SelfUpdate] Docker endpoint replacement helper failed to start:', this.lastUpdateError);
+    }
   }
 
   /**

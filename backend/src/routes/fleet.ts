@@ -15,7 +15,7 @@ import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMem
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
-import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
+import SelfUpdateService, { type EndpointProviderOption, type PinInfo } from '../services/SelfUpdateService';
 import { MonitorService } from '../services/MonitorService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
@@ -25,6 +25,14 @@ import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
+import {
+  ENDPOINT_PROVIDER_CAPABILITY,
+  ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
+  HARDENED_ENDPOINT_PROVIDER_REASON,
+  describeRemoteUpdateError,
+  parseReplaceEndpointProvider,
+  respondClaimRefused,
+} from '../helpers/endpointProviderRequest';
 import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
@@ -1231,6 +1239,9 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteUpdateBlocked = false;
         let remoteImageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         let remoteCapabilities: string[] = [];
+        // A Docker endpoint replacement is verified by the node itself before it
+        // reports success; until it does, a restart is not a completion.
+        let endpointProviderPending = node.type === 'local' && ImageOperationService.getInstance().isEndpointProviderPending();
         if (node.type === 'local') {
           version = gatewayVersion;
         } else {
@@ -1243,6 +1254,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteUpdateBlocked = meta.updateBlocked;
           remoteImageChannel = meta.imageChannel;
           remoteCapabilities = meta.capabilities ?? [];
+          endpointProviderPending = meta.endpointProviderPending === true;
         }
 
         const isReapply = tracker?.operationKind === 'reapply_configuration';
@@ -1261,7 +1273,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
             console.debug('[Fleet:debug] Polling update status for node', node.id, node.name, '- elapsed:', Math.round(elapsed / 1000) + 's', 'version:', version, 'wasOffline:', tracker.wasOffline, 'remoteOnline:', remoteOnline);
           }
 
-          if (elapsed > UPDATE_TIMEOUT_MS) {
+          if (elapsed > UPDATE_TIMEOUT_MS && !endpointProviderPending) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
             resolveTerminal(node, tracker, 'timeout', isReapply
               ? 'Node did not come back online within 5 minutes after reapply.'
@@ -1269,12 +1281,16 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           } else if (node.type === 'remote') {
             if (remoteUpdateError) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
-              resolveTerminal(node, tracker, 'failed', remoteUpdateError);
+              resolveTerminal(node, tracker, 'failed', describeRemoteUpdateError(remoteUpdateError));
             } else if (!remoteOnline) {
               if (!tracker.wasOffline) {
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
                 updateTracker.set(node.id, { ...tracker, wasOffline: true });
               }
+            } else if (endpointProviderPending) {
+              // The node is back but still verifying its new Docker endpoint; its
+              // own verdict (updateError or the flag clearing) decides.
+              if (debug) console.debug('[Fleet:debug] Node', node.id, 'is verifying its Docker endpoint replacement');
             } else if (!isReapply && isValidVersion(version) && version !== tracker.previousVersion) {
               // Signal 1: a valid, different version. Skipped for reapply because
               // the authored image/version is not expected to change.
@@ -1328,7 +1344,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'update failed:', localError);
               resolveTerminal(node, tracker, 'failed', localError);
               selfUpdate.clearLastError();
-            } else if (elapsed > EARLY_FAIL_MS) {
+            } else if (elapsed > EARLY_FAIL_MS && !endpointProviderPending) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's');
               resolveTerminal(node, tracker, 'failed', earlyFailMsg);
             }
@@ -1529,12 +1545,25 @@ function postSystemEndpoint(
   }, target.trustedLoopback);
 }
 
-function postSystemUpdate(target: ProxyTarget, targetVersion?: string) {
-  return postSystemEndpoint(target, '/api/system/update', targetVersion ? { targetVersion } : {});
+function postSystemUpdate(target: ProxyTarget, targetVersion?: string, replaceEndpointProvider = false) {
+  return postSystemEndpoint(target, '/api/system/update', {
+    ...(targetVersion ? { targetVersion } : {}),
+    ...(replaceEndpointProvider ? { replaceEndpointProvider: true } : {}),
+  });
 }
 
-function postSystemReapplyCompose(target: ProxyTarget) {
-  return postSystemEndpoint(target, '/api/system/reapply-compose');
+function postSystemReapplyCompose(target: ProxyTarget, replaceEndpointProvider = false) {
+  return postSystemEndpoint(target, '/api/system/reapply-compose', replaceEndpointProvider ? { replaceEndpointProvider: true } : {});
+}
+
+/** Refuses a remote Docker endpoint replacement when the node does not advertise it. */
+function refuseUnsupportedEndpointProvider(res: Response, capabilities: string[], replaceEndpointProvider: boolean): boolean {
+  if (!replaceEndpointProvider || capabilities.includes(ENDPOINT_PROVIDER_CAPABILITY)) return false;
+  res.status(409).json({
+    error: 'This node runs a Sencho version that cannot recreate its Docker endpoint. Update it first, then try again.',
+    code: ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
+  });
+  return true;
 }
 
 /** Clear a terminal tracker row, or time out a stale in-flight one. Returns a
@@ -1618,6 +1647,73 @@ fleetRouter.delete('/nodes/:nodeId/skip-version', authMiddleware, async (req: Re
     }
   });
 
+/**
+ * Whether Update and Reapply on this node can also recreate the container
+ * carrying its Docker API, so the confirm dialog can offer it. Local nodes
+ * answer directly; remote nodes are asked through their own system endpoint.
+ */
+fleetRouter.get('/nodes/:nodeId/endpoint-provider', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
+    if (nodeId === null) return;
+    const node = DatabaseService.getInstance().getNode(nodeId);
+    if (!node) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+    if (node.type === 'local') {
+      res.json(await SelfUpdateService.getInstance().getEndpointProviderOption());
+      return;
+    }
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) {
+      res.status(503).json({ error: formatNoTargetError(node) });
+      return;
+    }
+    const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
+    if (!meta.online) {
+      res.status(503).json({ error: 'Remote node is unreachable. Verify the node is running and the API URL is correct.' });
+      return;
+    }
+    if (!meta.capabilities.includes(ENDPOINT_PROVIDER_CAPABILITY)) {
+      res.json({ state: 'unsupported' });
+      return;
+    }
+    const headers: Record<string, string> = {};
+    if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
+    const response = await safeRemoteFetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/endpoint-provider`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    }, target.trustedLoopback);
+    if (!response.ok) {
+      res.status(502).json({ error: 'The node could not report its Docker endpoint.' });
+      return;
+    }
+    res.json(parseEndpointProviderOption(await response.json().catch(() => null)));
+  } catch (error) {
+    console.error('[Fleet] Docker endpoint option error:', error);
+    res.status(500).json({ error: 'Could not determine the Docker endpoint of this node.' });
+  }
+});
+
+/** Accepts only the documented option shapes from a remote node; anything else reads as unavailable. */
+function parseEndpointProviderOption(payload: unknown): EndpointProviderOption {
+  const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const service = typeof value.service === 'string' && value.service ? value.service : null;
+  if (value.state === 'none') return { state: 'none' };
+  if (value.state === 'available' && service && typeof value.containerName === 'string') {
+    return { state: 'available', service, containerName: value.containerName };
+  }
+  return {
+    state: 'unavailable',
+    service,
+    reason: value.state === 'unavailable' && typeof value.reason === 'string' && value.reason
+      ? value.reason
+      : 'The node returned an unreadable Docker endpoint answer.',
+  };
+}
+
 fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
@@ -1632,6 +1728,8 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
 
     const requestedTarget = parseRequestedTargetVersion(req, res);
     if (requestedTarget === null) return; // invalid supplied value; 400 already sent
+    const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
+    if (replaceEndpointProvider === null) return;
 
     const conflict = beginTrackerOperation(nodeId, 'Update already in progress for this node.');
     if (conflict) {
@@ -1653,6 +1751,10 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       const resolvedTarget = await resolveUpdateTarget(requestedTarget);
       const pin = await selfUpdate.getPinInfo({ fresh: true });
       if (pin && classifyImageChannel(pin.composeImageRef) === 'hardened') {
+        if (replaceEndpointProvider) {
+          res.status(409).json({ error: HARDENED_ENDPOINT_PROVIDER_REASON, code: ENDPOINT_PROVIDER_UNAVAILABLE_CODE });
+          return;
+        }
         if (!requireUserSession(req, res)) return;
         const preflight = await ImageOperationService.getInstance().preflightSwitch();
         if (!preflight.ok) {
@@ -1673,11 +1775,8 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
         return;
       }
       if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(resolvedTarget))) return;
-      const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion: resolvedTarget });
-      if (!claim.ok) {
-        res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
-        return;
-      }
+      const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion: resolvedTarget, replaceEndpointProvider });
+      if (respondClaimRefused(res, claim)) return;
       updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
       res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
       // Schedule unconditionally: client abort can fire only `close` without `finish`,
@@ -1708,6 +1807,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       res.status(503).json({ error: 'Remote node does not support self-update. It may need to be updated manually first.' });
       return;
     }
+    if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
     // Hardened peers are digest-pinned (updateBlocked) but must still reach
     // /api/system/update so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
     if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
@@ -1716,7 +1816,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     }
 
     const resolvedTarget = await resolveUpdateTarget(requestedTarget);
-    const response = await postSystemUpdate(target, resolvedTarget);
+    const response = await postSystemUpdate(target, resolvedTarget, replaceEndpointProvider);
 
     if (!response.ok) {
       const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
@@ -1750,6 +1850,9 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       return;
     }
 
+    const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
+    if (replaceEndpointProvider === null) return;
+
     const conflict = beginTrackerOperation(nodeId, 'An update or reapply is already in progress for this node.');
     if (conflict) {
       res.status(409).json({ error: conflict });
@@ -1764,11 +1867,8 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         res.status(503).json({ error: 'Compose reapply unavailable on the local node.' });
         return;
       }
-      const claim = await ImageOperationService.getInstance().claimComposeReapply();
-      if (!claim.ok) {
-        res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
-        return;
-      }
+      const claim = await ImageOperationService.getInstance().claimComposeReapply({ replaceEndpointProvider });
+      if (respondClaimRefused(res, claim)) return;
       updateTracker.set(
         nodeId,
         updateTracker.create('updating', getSenchoVersion(), null, undefined, undefined, 'reapply_configuration'),
@@ -1824,6 +1924,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         res.status(503).json({ error });
         return;
       }
+      if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
       // Digest pins and updateBlocked are intentional non-gates: reapply never
       // repins the image, so blocked update rows remain eligible.
 
@@ -1841,7 +1942,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         ),
       );
 
-      const response = await postSystemReapplyCompose(target);
+      const response = await postSystemReapplyCompose(target, replaceEndpointProvider);
 
       if (!response.ok) {
         const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));

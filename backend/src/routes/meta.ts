@@ -5,6 +5,7 @@ import { classifyBuildChannel, isRepinBlocked } from '../helpers/selfUpdateCompo
 import { MeshService } from '../services/MeshService';
 import SelfUpdateService from '../services/SelfUpdateService';
 import SelfIdentityService from '../services/SelfIdentityService';
+import { ImageOperationService } from '../services/ImageOperationService';
 
 // Captured at boot. Exposed via /api/health and /api/meta so the Fleet update
 // overlay can distinguish a brand-new process from the old one still mid-pull.
@@ -39,7 +40,8 @@ metaRouter.get('/health', (_req: Request, res: Response): void => {
 // private registry/repository name.
 metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
   const selfUpdate = SelfUpdateService.getInstance();
-  const updateError = selfUpdate.getLastError();
+  // A bounded code (update_failed or an endpoint_provider_* outcome), never the error text.
+  const updateError = selfUpdate.getLastErrorCode();
   const pin = await selfUpdate.getPinInfo({ cacheOnly: true });
   const updateBlocked = pin ? isRepinBlocked(pin.pinKind) : false;
   const runningRef = SelfIdentityService.getInstance().getBuildInfo().imageRef;
@@ -57,6 +59,9 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
     // ever exposed on this public endpoint.
     ...(runningRef ? { buildChannel: classifyBuildChannel(runningRef) } : {}),
     updateBlocked,
-    ...(updateError ? { updateError: 'update_failed' } : {}),
+    ...(updateError ? { updateError } : {}),
+    // A boolean only: tells the hub a Docker endpoint replacement is still being
+    // verified, so a restart alone is not read as a completed update.
+    ...(ImageOperationService.getInstance().isEndpointProviderPending() ? { endpointProviderPending: true } : {}),
   });
 });

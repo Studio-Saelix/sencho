@@ -1,7 +1,13 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
-import SelfUpdateService from './SelfUpdateService';
+import SelfUpdateService, { PROVIDER_ACK_SECONDS, PROVIDER_READY_SECONDS } from './SelfUpdateService';
+import DockerController from './DockerController';
+import { DatabaseService } from './DatabaseService';
+import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
+import { getSenchoVersion } from './CapabilityRegistry';
+import { helperFiles, parseOutcome, type ProviderAck, type ProviderOutcome } from '../helpers/endpointProviderReplace';
+import { getErrorMessage } from '../utils/errors';
 import { HardenedEntitlementService } from './HardenedEntitlementService';
 import { RegistryService } from './RegistryService';
 import type { ImagePinKind } from '../helpers/selfUpdateCompose';
@@ -10,7 +16,23 @@ import { getAuthToken, httpRequest } from './registry-api';
 
 export type ImageOperationKind = 'switch' | 'update' | 'community_update' | 'compose_reapply';
 export type ImageOperationState = 'pending_pull' | 'pulling' | 'patching' | 'recreating' | 'succeeded' | 'failed';
-type FailureCode = 'self_update_unavailable' | 'entitlement_denied' | 'preflight_mismatch' | 'compose_unavailable' | 'registry_access_unavailable' | 'update_failed' | 'interrupted_by_restart';
+type FailureCode = 'self_update_unavailable' | 'entitlement_denied' | 'preflight_mismatch' | 'compose_unavailable' | 'registry_access_unavailable' | 'update_failed' | 'interrupted_by_restart'
+  | EndpointProviderFailureCode;
+
+/** Outcomes of a Docker endpoint replacement that failed after it started. */
+export type EndpointProviderFailureCode = 'endpoint_provider_restored' | 'endpoint_provider_recovery_required';
+
+/** The container carrying the Docker API that this operation also recreates. */
+export interface OperationEndpointProvider {
+  project: string;
+  service: string;
+  containerName: string;
+}
+
+export type ClaimResult =
+  | { ok: true }
+  | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
+  | { ok: false; failureCode: 'endpoint_provider_unavailable'; reason: string };
 
 export interface ImageOperation {
   schemaVersion: 1;
@@ -25,8 +47,13 @@ export interface ImageOperation {
   resolvedAt?: string;
   acknowledgedAt?: string;
   failureCode?: FailureCode;
-  rollback: { attempted: false };
+  /** Operator-facing reason for a failure, when one is known. */
+  failureDetail?: string;
+  /** Whether a failed Docker endpoint replacement put the previous container back. */
+  rollback: { attempted: false } | { attempted: true; restored: boolean; error: string | null };
   preflightFingerprint?: string;
+  /** Set when the operation also recreates the container carrying this node's Docker API. */
+  endpointProvider?: OperationEndpointProvider;
 }
 
 export type HardenedPreflight =
@@ -36,10 +63,27 @@ export type HardenedPreflight =
 const OPERATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const NON_TERMINAL_STATES: ReadonlyArray<ImageOperationState> = ['pending_pull', 'pulling', 'patching', 'recreating'];
+
 export class ImageOperationService {
   private static instance: ImageOperationService;
   private claimed = false;
   private stateWriteQueue: Promise<void> = Promise.resolve();
+  /** True while this process runs or reconciles a Docker endpoint replacement. */
+  private endpointProviderPending = false;
+  /**
+   * Bounds for a Docker endpoint replacement, in milliseconds. `verify` is how
+   * long a new process retries Docker through the new provider before it
+   * answers the helper; `outcome` is how long it then waits for the helper's
+   * verdict; `watch` is how long the process that spawned the helper waits.
+   * Overridden in tests.
+   */
+  public endpointProviderTimings = {
+    pollMs: 2_000,
+    verifyMs: 90_000,
+    outcomeMs: 180_000,
+    watchMs: (PROVIDER_READY_SECONDS * 2 + PROVIDER_ACK_SECONDS + 120) * 1000,
+  };
 
   public static getInstance(): ImageOperationService {
     if (!ImageOperationService.instance) ImageOperationService.instance = new ImageOperationService();
@@ -143,10 +187,8 @@ export class ImageOperationService {
     }
   }
 
-  public async claimCommunityUpdate(options?: { targetVersion?: string }): Promise<
-    { ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
-  > {
-    return this.claimComposeOperation('community_update', options?.targetVersion ?? null);
+  public async claimCommunityUpdate(options?: { targetVersion?: string; replaceEndpointProvider?: boolean }): Promise<ClaimResult> {
+    return this.claimComposeOperation('community_update', options?.targetVersion ?? null, options?.replaceEndpointProvider === true);
   }
 
   public async executeClaimedCommunityUpdate(options?: { targetVersion?: string }): Promise<{ ok: boolean; failureCode?: string }> {
@@ -157,22 +199,25 @@ export class ImageOperationService {
       operation.state = 'pulling';
       await this.persist(operation);
       // Register before triggerUpdate so a fast helper exit cannot drain listeners first.
-      this.watchHelperExit(operation);
+      if (operation.endpointProvider) this.endpointProviderPending = true;
+      else this.watchHelperExit(operation);
       await selfUpdate.triggerUpdate({
         ...options,
         successMarkerFile: this.successMarkerFile(operation),
         successMarkerContent: JSON.stringify({ ok: true, operationId: operation.operationId }),
+        ...(operation.endpointProvider ? { endpointProvider: this.endpointProviderRequest(operation, operation.endpointProvider) } : {}),
       });
       if (selfUpdate.getLastError()) {
-        await this.fail(operation, 'update_failed');
+        await this.failFromLastError(operation);
         return { ok: false, failureCode: 'update_failed' };
       }
       operation.state = 'recreating';
       await this.persist(operation);
       if (selfUpdate.getLastError()) {
-        await this.fail(operation, 'update_failed');
+        await this.failFromLastError(operation);
         return { ok: false, failureCode: 'update_failed' };
       }
+      if (operation.endpointProvider) this.watchEndpointProviderOutcome(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Community update failed:', error);
@@ -187,10 +232,8 @@ export class ImageOperationService {
     return this.executeClaimedCommunityUpdate(options);
   }
 
-  public async claimComposeReapply(): Promise<
-    { ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
-  > {
-    return this.claimComposeOperation('compose_reapply', null);
+  public async claimComposeReapply(options?: { replaceEndpointProvider?: boolean }): Promise<ClaimResult> {
+    return this.claimComposeOperation('compose_reapply', null, options?.replaceEndpointProvider === true);
   }
 
   public async executeClaimedComposeReapply(): Promise<{ ok: boolean; failureCode?: string }> {
@@ -201,15 +244,18 @@ export class ImageOperationService {
       // No pull/patch for reapply: jump straight to recreating.
       operation.state = 'recreating';
       await this.persist(operation);
-      this.watchHelperExit(operation);
+      if (operation.endpointProvider) this.endpointProviderPending = true;
+      else this.watchHelperExit(operation);
       await selfUpdate.triggerComposeReapply({
         successMarkerFile: this.successMarkerFile(operation),
         successMarkerContent: JSON.stringify({ ok: true, operationId: operation.operationId }),
+        ...(operation.endpointProvider ? { endpointProvider: this.endpointProviderRequest(operation, operation.endpointProvider) } : {}),
       });
       if (selfUpdate.getLastError()) {
-        await this.fail(operation, 'update_failed');
+        await this.failFromLastError(operation);
         return { ok: false, failureCode: 'update_failed' };
       }
+      if (operation.endpointProvider) this.watchEndpointProviderOutcome(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Compose reapply failed:', error);
@@ -248,9 +294,18 @@ export class ImageOperationService {
     return true;
   }
 
+  /** True while a Docker endpoint replacement is running or being verified on this node. */
+  public isEndpointProviderPending(): boolean {
+    return this.endpointProviderPending;
+  }
+
   public async reconcileOnStartup(): Promise<void> {
     const operation = await this.getCurrentOperation();
-    if (!operation || !['pending_pull', 'pulling', 'patching', 'recreating'].includes(operation.state)) return;
+    if (!operation || !NON_TERMINAL_STATES.includes(operation.state)) return;
+    if (operation.endpointProvider) {
+      await this.reconcileEndpointProvider(operation, operation.endpointProvider);
+      return;
+    }
     const markerPath = this.successMarkerFile(operation);
     for (let elapsed = 0; elapsed < 30_000; elapsed += 1_000) {
       const markerOk = await this.isSuccessMarkerForOperation(markerPath, operation.operationId);
@@ -279,6 +334,160 @@ export class ImageOperationService {
     await this.fail(operation, 'interrupted_by_restart');
   }
 
+  /** Fails the operation with the helper's error; a Docker endpoint replacement keeps the text as its detail. */
+  private async failFromLastError(operation: ImageOperation): Promise<void> {
+    const detail = operation.endpointProvider ? SelfUpdateService.getInstance().getLastError() ?? undefined : undefined;
+    await this.fail(operation, 'update_failed', detail);
+  }
+
+  private endpointProviderRequest(operation: ImageOperation, provider: OperationEndpointProvider) {
+    return {
+      operationId: operation.operationId,
+      service: provider.service,
+      handoffDir: path.dirname(helperFiles.plan(this.dataDir(), operation.operationId)),
+      planFile: helperFiles.plan(this.dataDir(), operation.operationId),
+    };
+  }
+
+  /**
+   * In the process that spawned the helper: the helper recreates the provider
+   * first, so a failure there (and its rollback) is reported while this
+   * process still runs. Success arrives only after this process is replaced,
+   * so the watch ends with the process; a helper that never reports within
+   * the bound is a failure the operator must look at.
+   */
+  private watchEndpointProviderOutcome(operation: ImageOperation): void {
+    void (async () => {
+      const outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.watchMs);
+      await this.finalizeEndpointProvider(operation, outcome);
+    })().catch(error => {
+      console.error('[ImageOperation] Docker endpoint outcome watch failed:', error);
+    });
+  }
+
+  /**
+   * In the new process after Sencho was recreated: check Docker through the
+   * new provider, answer the helper (its ack), then wait for the helper's
+   * verdict. Only a positive verdict marks the operation succeeded.
+   */
+  private async reconcileEndpointProvider(operation: ImageOperation, provider: OperationEndpointProvider): Promise<void> {
+    this.endpointProviderPending = true;
+    this.setLocalTracker(operation, 'updating');
+    let outcome = await this.readProviderOutcome(operation);
+    if (!outcome) {
+      const ack = await this.verifyDockerThroughProvider(operation, provider);
+      try {
+        await this.atomicWrite(helperFiles.ack(this.dataDir(), operation.operationId), JSON.stringify(ack));
+      } catch (error) {
+        console.error('[ImageOperation] Could not answer the Docker endpoint helper:', error);
+      }
+      outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.outcomeMs);
+    }
+    await this.finalizeEndpointProvider(operation, outcome);
+  }
+
+  /** Retries Docker through the new provider until it answers and the provider container is running and healthy. */
+  private async verifyDockerThroughProvider(operation: ImageOperation, provider: OperationEndpointProvider): Promise<ProviderAck> {
+    const deadline = Date.now() + this.endpointProviderTimings.verifyMs;
+    let detail: string;
+    for (;;) {
+      try {
+        const docker = DockerController.getInstance().getDocker();
+        await docker.ping();
+        const containers = await docker.listContainers({
+          all: true,
+          filters: { label: [`com.docker.compose.project=${provider.project}`, `com.docker.compose.service=${provider.service}`] },
+        });
+        const running = containers.find(container => container.State === 'running');
+        if (!running) {
+          detail = `"${provider.service}" is not running`;
+        } else {
+          const health = (await docker.getContainer(running.Id).inspect()).State?.Health?.Status;
+          if (!health || health === 'healthy') return { operationId: operation.operationId, ok: true, detail: null };
+          detail = `"${provider.service}" healthcheck is ${health}`;
+        }
+      } catch (error) {
+        detail = `Docker did not answer through "${provider.service}": ${getErrorMessage(error, 'request failed')}`;
+      }
+      if (Date.now() >= deadline) return { operationId: operation.operationId, ok: false, detail };
+      await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
+    }
+  }
+
+  private async readProviderOutcome(operation: ImageOperation): Promise<ProviderOutcome | null> {
+    try {
+      const raw: unknown = JSON.parse(await fs.readFile(helperFiles.outcome(this.dataDir(), operation.operationId), 'utf8'));
+      return parseOutcome(raw, operation.operationId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error('[ImageOperation] Failed to read the Docker endpoint outcome:', error);
+      }
+      return null;
+    }
+  }
+
+  private async waitForProviderOutcome(operation: ImageOperation, timeoutMs: number): Promise<ProviderOutcome | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const outcome = await this.readProviderOutcome(operation);
+      if (outcome || Date.now() >= deadline) return outcome;
+      await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
+    }
+  }
+
+  /** Persists the helper's verdict (or its absence) and mirrors it on the Fleet tracker and the update error. */
+  private async finalizeEndpointProvider(operation: ImageOperation, outcome: ProviderOutcome | null): Promise<void> {
+    const current = await this.getCurrentOperation();
+    if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {
+      this.endpointProviderPending = false;
+      return;
+    }
+    const service = operation.endpointProvider?.service ?? 'the Docker endpoint';
+    if (outcome?.ok) {
+      current.state = 'succeeded';
+      current.resolvedAt = new Date().toISOString();
+      this.endpointProviderPending = false;
+      await this.persist(current);
+      await this.cleanupOperationArtifacts(current);
+      await fs.rm(path.dirname(helperFiles.plan(this.dataDir(), current.operationId)), { recursive: true, force: true })
+        .catch(error => console.error('[ImageOperation] Failed to clean the Docker endpoint handoff files:', error));
+      this.setLocalTracker(current, 'completed');
+      console.log(`[ImageOperation] Docker endpoint "${service}" replaced and verified`);
+      return;
+    }
+    const restored = outcome?.rollback.restored === true;
+    const failureCode: EndpointProviderFailureCode = restored ? 'endpoint_provider_restored' : 'endpoint_provider_recovery_required';
+    const cause = outcome?.error ?? 'The replacement helper did not report an outcome in time.';
+    const detail = restored
+      ? `Replacing the Docker endpoint "${service}" failed: ${cause} The previous "${service}" container was restored and Sencho reaches Docker again. Fix the Compose configuration of "${service}", then run Reapply again.`
+      : `Replacing the Docker endpoint "${service}" failed: ${cause} The previous container could not be restored${outcome?.rollback.error ? ` (${outcome.rollback.error})` : ''}. Sencho may not reach Docker on this node until "${service}" runs again: on the host, run "docker compose up -d ${service}" in Sencho's Compose project directory, then check Fleet. The helper log is in the Sencho data directory under ${path.dirname(helperFiles.plan('', current.operationId)).replace(/^\//, '')}.`;
+    current.rollback = outcome ? { attempted: true, restored, error: outcome.rollback.error } : { attempted: false };
+    SelfUpdateService.getInstance().recordUpdateFailure(detail, failureCode);
+    console.error('[ImageOperation] Docker endpoint replacement failed:', detail);
+    await this.fail(current, failureCode, detail);
+    this.setLocalTracker(current, 'failed', detail);
+  }
+
+  /** Mirrors a Docker endpoint replacement on the local node's Fleet tracker, which a restart otherwise empties. */
+  private setLocalTracker(operation: ImageOperation, status: 'updating' | 'completed' | 'failed', error?: string): void {
+    try {
+      const local = DatabaseService.getInstance().getNodes().find(node => node.type === 'local');
+      if (!local) return;
+      const trackers = FleetUpdateTrackerService.getInstance();
+      const kind = operation.kind === 'compose_reapply' ? 'reapply_configuration' : 'update';
+      const live = trackers.get(local.id);
+      if (status === 'updating') {
+        trackers.set(local.id, trackers.create('updating', getSenchoVersion(), null, undefined, undefined, kind));
+      } else if (live?.status === 'updating') {
+        trackers.set(local.id, trackers.resolve(live, status, error));
+      } else {
+        trackers.set(local.id, trackers.create(status, getSenchoVersion(), null, error, undefined, kind));
+      }
+    } catch (trackerError) {
+      console.error('[ImageOperation] Could not update the local Fleet tracker:', trackerError);
+    }
+  }
+
   private watchHelperExit(operation: ImageOperation): void {
     SelfUpdateService.getInstance().onceHelperExit((error) => {
       // Surviving the helper callback means recreate did not take over; treat
@@ -299,8 +508,24 @@ export class ImageOperationService {
   private async claimComposeOperation(
     kind: 'community_update' | 'compose_reapply',
     targetImageRef: string | null,
-  ): Promise<{ ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }> {
+    replaceEndpointProvider: boolean,
+  ): Promise<ClaimResult> {
     const selfUpdate = SelfUpdateService.getInstance();
+    let endpointProvider: OperationEndpointProvider | undefined;
+    if (replaceEndpointProvider) {
+      const option = await selfUpdate.getEndpointProviderOption();
+      const project = selfUpdate.getComposeProject();
+      if (option.state !== 'available' || !project) {
+        return {
+          ok: false,
+          failureCode: 'endpoint_provider_unavailable',
+          reason: option.state === 'unavailable'
+            ? option.reason
+            : 'Sencho does not reach Docker through a container on this node, so there is no Docker endpoint to recreate.',
+        };
+      }
+      endpointProvider = { project, service: option.service, containerName: option.containerName };
+    }
     const resolved = await selfUpdate.getResolvedComposeImageForUpdate();
     const operation = this.newOperation(
       kind,
@@ -309,6 +534,7 @@ export class ImageOperationService {
       resolved?.filePath ?? null,
       selfUpdate.getComposeServiceName(),
     );
+    if (endpointProvider) operation.endpointProvider = endpointProvider;
     if (!await this.tryClaim(operation)) {
       return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
     }
@@ -365,10 +591,12 @@ export class ImageOperationService {
     return run;
   }
 
-  private async fail(operation: ImageOperation, failureCode: FailureCode): Promise<void> {
+  private async fail(operation: ImageOperation, failureCode: FailureCode, detail?: string): Promise<void> {
     operation.state = 'failed';
     operation.failureCode = failureCode;
+    if (detail) operation.failureDetail = detail;
     operation.resolvedAt = new Date().toISOString();
+    if (operation.endpointProvider) this.endpointProviderPending = false;
     await this.persist(operation);
     await this.cleanupOperationArtifacts(operation);
   }
