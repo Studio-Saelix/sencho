@@ -8,7 +8,8 @@
  * talks to rather than spinning up the real services, since the contracts
  * between them are stable and already exercised by their own tests.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { format } from 'node:util';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import type { ScanPolicy, VulnerabilityScan } from '../services/DatabaseService';
 
 interface TrivyStub {
@@ -423,6 +424,92 @@ describe('enforcePolicyPreDeploy', () => {
     expect(result.violations[0].error).toMatch(/invalid image reference/i);
     expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
+  });
+});
+
+describe('blocked-deploy log line', () => {
+  let warnSpy: MockInstance<typeof console.warn>;
+
+  beforeEach(() => {
+    trivyStub.isTrivyAvailable.mockReset().mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockReset();
+    dbStub.getMatchingPolicy.mockReset().mockReturnValue(mkPolicy({ block_on_kev: 1, block_on_fixable: 1 }));
+    dbStub.getGlobalSettings.mockReset().mockReturnValue({});
+    dbStub.getAllVulnerabilityDetails.mockReset().mockReturnValue([
+      { id: 1, scan_id: 42, vulnerability_id: 'CVE-2024-1', pkg_name: 'p', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    dbStub.getCveSuppressions.mockReset().mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A KEV/fixable policy reads per-finding rows, so a scan that should match
+  // needs one stored Critical finding behind its counts.
+  const criticalScan = () => mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 });
+
+  function blockLines(): string[] {
+    return warnSpy.mock.calls
+      .map((args) => format(...args))
+      .filter((line) => line.startsWith('[Policy] Blocked deploy'));
+  }
+
+  it('names the matched policy inputs when a scanned image has a real finding', async () => {
+    trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
+    ]);
+  });
+
+  it('names the scan failure, not findings, when the image scan failed', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('trivy crashed'));
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['alpine:3.17'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): alpine:3.17: Pre-flight scan failed: trivy crashed',
+    ]);
+  });
+
+  it('names an invalid image reference as the cause', async () => {
+    await enforcePolicyForImageRefs('web', 1, ['${IMAGE}'], { bypass: false, actor: 'u' }, undefined, true);
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): ${IMAGE}: Invalid image reference; the image could not be scanned',
+    ]);
+  });
+
+  it('names a policy evaluation failure as the cause', async () => {
+    trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
+    dbStub.getCveIntel.mockImplementation(() => { throw new Error('intel db read failed'); });
+
+    await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:1.14: Policy evaluation failed: intel db read failed',
+    ]);
+  });
+
+  it('logs each cause with its own count when a block mixes a real finding and a failed scan', async () => {
+    trivyStub.scanImagePreflight
+      .mockResolvedValueOnce(criticalScan())
+      .mockRejectedValueOnce(new Error('trivy crashed'));
+
+    await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'alpine:3.19'], { bypass: false, actor: 'u' });
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
+      '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): alpine:3.19: Pre-flight scan failed: trivy crashed',
+    ]);
   });
 });
 

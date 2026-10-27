@@ -13,7 +13,7 @@ import { DatabaseService } from './DatabaseService';
 import type { ScanPolicy, VulnSeverity, VulnerabilityScan, VulnerabilityDetail } from './DatabaseService';
 import { FleetSyncService } from './FleetSyncService';
 import { NotificationService } from './NotificationService';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import TrivyService from './TrivyService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { applySuppressions } from '../utils/suppression-filter';
@@ -480,10 +480,23 @@ export async function enforcePolicyForImageRefs(
         return { ok: true, bypassed: true, policy, violations };
     }
 
-    console.warn(
-        '[Policy] Blocked deploy for "%s": %d image(s) matched %s (policy "%s")',
-        sanitizeForLog(stackName), violations.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
-    );
+    // A violation with `error` set is evidence that could not be obtained, not a
+    // finding, so it is logged with its own cause instead of the policy inputs.
+    const matched = violations.filter((v) => !v.error);
+    const unevaluated = violations.filter((v) => v.error);
+    if (matched.length > 0) {
+        console.warn(
+            '[Policy] Blocked deploy for "%s": %d image(s) matched %s (policy "%s")',
+            sanitizeForLog(stackName), matched.length, describePolicyInputs(policyInputs(policy)), sanitizeForLog(policy.name),
+        );
+    }
+    if (unevaluated.length > 0) {
+        console.warn(
+            '[Policy] Blocked deploy for "%s": %d image(s) could not be evaluated (policy "%s"): %s',
+            sanitizeForLog(stackName), unevaluated.length, sanitizeForLog(policy.name),
+            unevaluated.map((v) => sanitizeForLog(redactSensitiveText(`${v.imageRef}: ${v.error}`))).join('; '),
+        );
+    }
     return { ok: false, bypassed: false, policy, violations };
 }
 
