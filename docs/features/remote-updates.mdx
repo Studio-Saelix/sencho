@@ -67,6 +67,23 @@ Confirming a local reapply opens a dialog that states the node will recreate fro
 
 Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. Clicking **Deploy**, **Update**, **Stop**, **Take down**, **Delete**, or **Rollback** on Sencho's own stack opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
 
+Update and Reapply recreate only the Sencho service (`docker compose up -d --no-deps --force-recreate`). Other services in Sencho's Compose project, including the ones it lists in `depends_on`, keep running as they are.
+
+## Recreating the Docker endpoint
+
+When Sencho reaches Docker through a socket proxy that is a service of Sencho's own Compose project (`DOCKER_HOST` points at it), that proxy carries Sencho's Docker connection, and ordinary stack operations refuse to stop or recreate it (see [Self-Hosting: Updating the proxy](/operations/self-hosting#updating-the-proxy)). Update and Reapply are the way to apply a change to it: the confirmation dialog for that node shows **Also recreate the Docker endpoint** with the proxy's service name. The box starts unchecked; check it to recreate the proxy in the same operation.
+
+With the box checked, Sencho:
+
+1. Checks, before anything stops, that it can reach Docker directly through the host socket the proxy itself mounts, that this socket belongs to the engine running the proxy, that the Compose project renders, and that the proxy's declared image is available. Reapply pulls the image only when it is missing; Update pulls it. A failure here stops the operation with nothing changed.
+2. Records the running proxy (its image by ID and its configuration) so it can be put back.
+3. Starts a helper container that talks to Docker through that host socket, not through the proxy. The helper recreates the proxy (`up -d --no-deps --force-recreate --wait`), then Sencho.
+4. Waits for the restarted Sencho to confirm that it reaches Docker through the new proxy, and that the proxy is running and healthy when it declares a healthcheck. Only that confirmation marks the operation as completed; the restart alone does not.
+
+If recreating the proxy fails, the new proxy is unhealthy, or Sencho does not confirm Docker access within a few minutes, the helper removes the new proxy container and recreates the previous one from what it recorded. The node then reports **Failed** with what went wrong and that the previous proxy was restored; fix the proxy's Compose configuration and run Reapply again. The restored container keeps its previous configuration, so Compose treats it as out of date and the next Reapply with the option recreates it again. If the previous proxy cannot be restored either, the failure says so and names the command to run on the host (`docker compose up -d <proxy service>` in Sencho's Compose project directory). The helper's log is kept in Sencho's data directory under `endpoint-provider/`.
+
+The option is not offered, and the dialog says why, when the proxy belongs to a different Compose project, does not bind-mount the host Docker socket, or Sencho's data directory is not mounted. A hardened image update cannot also recreate the proxy; update first, then use Reapply with the option. Remote nodes offer the option once they run a Sencho version that supports it; for a remote node with a proxy, **Update** opens the same confirmation instead of starting at once.
+
 ## Updating the local (gateway) node
 
 Updating the gateway is special because the dashboard is hosted by the very container that is about to restart. Clicking **Update** on the local row, or **Update to vX.Y.Z** on the Local card, opens a confirmation dialog (kicker **LOCAL · UPDATE**, title **Update local node**, with **Cancel** and **Update & restart** buttons) before anything happens on disk. The body text depends on how the compose file pins the image: for a semver pin it names the exact rewrite (for example, "This install pins `saelix/sencho:0.94.1`. Updating rewrites it to `saelix/sencho:0.95.0`..."); for a floating tag it reads more generally ("Pulls Sencho v0.95.0 and restarts the server..."). Both variants end with the same note that the dashboard briefly disconnects and reconnects automatically.
@@ -80,7 +97,7 @@ A node pinned to the `sencho-dev:dev` integration image gets a third variant ins
 After **Update & restart** is confirmed on a Community-channel install:
 
 1. The browser captures the gateway's current boot timestamp from `/api/health`.
-2. The server classifies the compose image pin. For semver pins it pulls the target release, stages a rewritten compose file, and spawns a short-lived helper container that copies the file onto the host and runs `docker compose up -d --force-recreate`.
+2. The server classifies the compose image pin. For semver pins it pulls the target release, stages a rewritten compose file, and spawns a short-lived helper container that copies the file onto the host and runs `docker compose up -d --no-deps --force-recreate` for the Sencho service.
 3. A full-screen **Updating Sencho...** overlay takes over the browser tab. The overlay polls `/api/health` every 3 seconds and keeps the page from reloading until a *new* boot timestamp comes back, even if the API briefly responds during the pull.
 4. Once a fresh boot timestamp is reported, the overlay reloads the page on the new version.
 
@@ -93,7 +110,7 @@ If the new container does not come up within 5 minutes, the overlay surfaces a *
 </Note>
 
 <Note>
-  Self-update helpers always mount the host `/var/run/docker.sock` into the helper container, independent of `DOCKER_HOST`. On a TCP-only socket proxy, update and reapply helpers do not reach the proxy, so use a deployment where the helpers still receive a working host socket path. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#self-update-behind-a-proxy).
+  Self-update helpers mount the host `/var/run/docker.sock` into the helper container, independent of `DOCKER_HOST`. On a TCP-only socket proxy, update and reapply helpers do not reach the proxy, so use a deployment where the helpers still receive a working host socket path. With [Recreating the Docker endpoint](#recreating-the-docker-endpoint) checked, the helper mounts the host socket the proxy itself mounts instead. The generated Pilot Agent compose also mounts the raw socket path, so a TCP-only proxy on an agent node requires editing the generated compose. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#self-update-behind-a-proxy).
 </Note>
 
 
@@ -110,7 +127,7 @@ A node running the Admiral **Hardened Build** image is a deliberate exception: i
 For both local and remote nodes, an update goes through the same three steps:
 
 1. **Pull** the target Sencho image from the registry (the compose-declared reference for floating tags, or the repinned semver tag for version pins).
-2. **Recreate** the container with the new image via `docker compose up -d --force-recreate`.
+2. **Recreate** the container with the new image via `docker compose up -d --no-deps --force-recreate`.
 3. **Restart** the Sencho process. The node is briefly offline during the swap.
 
 The gateway tracks each in-flight update in memory and watches the target node for one of four completion signals, in this order of precedence:
