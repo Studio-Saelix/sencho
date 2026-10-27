@@ -243,10 +243,11 @@ function evaluateImageRisk(
         suppressions = db.getCveSuppressions();
     } catch (err) {
         // Detail read failed: severity still gates from the aggregate (without
-        // applying suppressions), but KEV/fixability are unknowable. Fail closed on them, consistent with the
-        // truncated-details path below: a policy that explicitly opted into a
-        // KEV/fixable gate must not silently degrade to "allow" on a transient
-        // read error. The admin bypass path stays available.
+        // applying suppressions), but KEV/fixability are unknowable. Fail closed
+        // on them, consistent with the truncated-details path below: a policy
+        // that explicitly opted into a KEV/fixable gate must not silently degrade
+        // to "allow" on a transient read error. The admin bypass path stays
+        // available.
         console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
         return aggregateFallback(inputs, rawSeverity, scan, EVIDENCE_READ_FAILED, honorSuppressions);
     }
