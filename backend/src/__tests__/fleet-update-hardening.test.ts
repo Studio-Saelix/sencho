@@ -208,6 +208,54 @@ describe('GET /api/fleet/update-status terminal resolution', () => {
   });
 });
 
+describe('GET /api/fleet/update-status unreachable nodes', () => {
+  async function getRows(): Promise<Array<Record<string, unknown>>> {
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    return res.body.nodes;
+  }
+
+  it('reports a proxy node with no reachable target as offline with no update claimed', async () => {
+    mockCompareTargetFetch();
+    // fetchMetaForNode stays real: no proxy target resolves to OFFLINE_META.
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+
+    const rows = await getRows();
+    const row = rows.find(n => n.nodeId === proxyNodeId)!;
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
+    expect(row.version).toBeNull();
+    expect(rows.find(n => n.nodeId === localNodeId)!.online).toBe(true);
+  });
+
+  it('keeps a failed poll as an offline row with no update claimed, and still returns the other nodes', async () => {
+    mockCompareTargetFetch();
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockRejectedValue(new Error('probe blew up'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const rows = await getRows();
+    const row = rows.find(n => n.nodeId === proxyNodeId)!;
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
+    expect(row.updateStatus).toBeNull();
+    expect(rows.find(n => n.nodeId === localNodeId)).toBeDefined();
+  });
+
+  it('keeps an in-flight update visible while the node is unreachable', async () => {
+    mockTarget();
+    mockCompareTargetFetch();
+    // The node restarts mid-update, so its meta is unreachable: the tracker
+    // keeps reporting the update, and no update is claimed for the dark node.
+    mockMeta({ ...ONLINE(), version: null, startedAt: null, capabilities: [], online: false });
+    setTracker({ startedAt: Date.now() - RECENT_MS });
+
+    const row = (await getRows()).find(n => n.nodeId === proxyNodeId)!;
+    expect(row.updateStatus).toBe('updating');
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
+  });
+});
+
 describe('POST /api/fleet/nodes/:id/update concurrency', () => {
   it('returns 409 when an update is already in progress for the node', async () => {
     setTracker({ startedAt: Date.now() - RECENT_MS });

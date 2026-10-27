@@ -216,7 +216,7 @@ export function NodeUpdatesSheet({
     const stableAvailable = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus).length;
     const devAvailable = updateStatuses.filter(s => s.devBuildUpdateAvailable && !s.updateStatus).length;
     const totalAvailable = stableAvailable + devAvailable;
-    const upToDate = updateStatuses.filter(s => s.online !== false && !s.updateAvailable && !s.devBuildUpdateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
+    const upToDate = updateStatuses.filter(s => s.online && !s.updateAvailable && !s.devBuildUpdateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
     const updating = updateStatuses.filter(s => s.updateStatus === 'updating').length;
     const failed = updateStatuses.filter(s => s.updateStatus === 'failed' || s.updateStatus === 'timeout').length;
     const updatableRemoteCount = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus && s.type === 'remote').length;
@@ -432,12 +432,12 @@ export function NodeUpdatesSheet({
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
-                                        {!s.updateStatus && s.online === false && (
+                                        {!s.updateStatus && !s.online && (
                                             <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap">
                                                 <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
                                             </Badge>
                                         )}
-                                        {!s.updateStatus && s.online !== false && !s.updateAvailable && !s.devBuildUpdateAvailable && !s.skipActive && (
+                                        {!s.updateStatus && s.online && !s.updateAvailable && !s.devBuildUpdateAvailable && !s.skipActive && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const useAuthMock = vi.fn();
@@ -143,6 +143,7 @@ describe('NodeCard', () => {
 
   const updateAvailableStatus = {
     nodeId: 2, name: 'Edge', type: 'remote' as const, version: '1.0.0', latestVersion: '1.1.0',
+    online: true,
     updateAvailable: true, updateStatus: null,
   };
 
@@ -152,15 +153,17 @@ describe('NodeCard', () => {
     expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
   });
 
-  it('shows no Update available or Pinned pill on an unreachable node', () => {
-    render(<NodeCard {...baseProps(offlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+  it('shows no Update available pill on an unreachable node', () => {
+    render(<NodeCard {...baseProps(offlineNode())} updateStatus={{ ...updateAvailableStatus, online: false }} onUpdate={vi.fn()} />);
     expect(screen.getByText('Offline')).toBeInTheDocument();
     expect(screen.queryByText('Update available')).not.toBeInTheDocument();
-    cleanup();
+  });
+
+  it('shows no Pinned pill on an unreachable node', () => {
     render(
       <NodeCard
         {...baseProps(offlineNode())}
-        updateStatus={{ ...updateAvailableStatus, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
         onUpdate={vi.fn()}
       />,
     );

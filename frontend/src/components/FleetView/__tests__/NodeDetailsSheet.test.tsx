@@ -62,6 +62,7 @@ function registryNode(overrides: Partial<Node> = {}): Node {
 
 const UPDATE_STATUS: NodeUpdateStatus = {
   nodeId: 2, name: 'Edge', type: 'remote', version: '1.2.0', latestVersion: '1.2.0',
+  online: true,
   updateAvailable: false, updateStatus: null, imageChannel: 'community', imagePinKind: 'semver',
 };
 

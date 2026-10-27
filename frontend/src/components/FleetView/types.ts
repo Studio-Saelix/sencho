@@ -55,9 +55,9 @@ export interface NodeUpdateStatus {
     type: 'local' | 'remote';
     version: string | null;
     latestVersion: string | null;
-    /** False when the control instance could not reach the node; its version and
-     *  update availability are then unknown. Only `false` is meaningful. */
-    online?: boolean;
+    /** False when the control instance could not reach or poll the node; its
+     *  version and update availability are then unknown. */
+    online: boolean;
     updateAvailable: boolean;
     updateStatus: 'updating' | 'completed' | 'timeout' | 'failed' | null;
     error?: string | null;

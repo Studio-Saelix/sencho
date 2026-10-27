@@ -1342,8 +1342,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let updateAvailable = false;
         if (!isValidVersion(version)) {
           // Assume a reachable remote is outdated when it reports no parseable
-          // version. An unreachable one has no reading at all, so claiming an
-          // update for it would be a guess about a node nobody can see.
+          // version. An unreachable one has no reading at all, so flagging an
+          // update for it would be a guess.
           updateAvailable = node.type === 'remote' && remoteOnline;
         } else if (compareValid) {
           updateAvailable = semver.lt(version, compareVersion!);
