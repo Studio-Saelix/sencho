@@ -69,7 +69,7 @@ function mockDocker(options: { ping?: () => Promise<unknown>; running?: boolean;
     listContainers: vi.fn(async () => (options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }])),
     getContainer: () => ({ inspect: async () => ({ State: { Health: options.health ? { Status: options.health } : undefined } }) }),
   };
-  vi.spyOn(DockerController, 'getInstance').mockReturnValue({ getDocker: () => docker } as unknown as InstanceType<typeof DockerController>);
+  vi.spyOn(DockerController, 'getInstance').mockReturnValue({ getDocker: () => docker } as unknown as ReturnType<typeof DockerController.getInstance>);
   return docker;
 }
 

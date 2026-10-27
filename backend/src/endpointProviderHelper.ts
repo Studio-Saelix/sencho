@@ -23,7 +23,10 @@ const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f
 
 function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDeps {
   const docker = new Docker({ socketPath: HELPER_SOCKET_PATH });
-  const fFlags = plan.configFiles.flatMap(file => ['-f', file]);
+  // The project name is passed explicitly: a project deployed under a name
+  // other than its directory would otherwise be rendered as a new project and
+  // get a second proxy instead of the replacement.
+  const projectFlags = ['-p', plan.project, ...plan.configFiles.flatMap(file => ['-f', file])];
   return {
     docker: {
       ping: async () => { await docker.ping(); },
@@ -51,7 +54,7 @@ function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDep
       pruneDanglingImages: async () => { await docker.pruneImages({ filters: { dangling: ['true'] } }); },
     },
     compose: (args) => new Promise(resolve => {
-      execFile('docker', ['compose', ...fFlags, ...args], {
+      execFile('docker', ['compose', ...projectFlags, ...args], {
         cwd: plan.workingDir,
         env: { ...process.env, DOCKER_HOST: `unix://${HELPER_SOCKET_PATH}` },
         timeout: 10 * 60_000,

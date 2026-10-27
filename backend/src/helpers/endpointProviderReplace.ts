@@ -101,7 +101,7 @@ export interface HelperDocker {
 
 export interface HelperDeps {
   docker: HelperDocker;
-  /** Runs `docker compose -f <files...> <args>` in the project working directory. */
+  /** Runs `docker compose -p <project> -f <files...> <args>` in the project working directory. */
   compose(args: string[]): Promise<{ ok: boolean; output: string }>;
   readJson(path: string): Promise<unknown | null>;
   writeJson(path: string, value: unknown): Promise<void>;
