@@ -132,7 +132,8 @@ type ProviderView =
   | { state: 'none' };
 
 function serviceOf(container: ListedContainer): string | null {
-  return container.Labels?.['com.docker.compose.service'] ?? null;
+  // An empty label is no label: Compose treats a container with one as an orphan.
+  return container.Labels?.['com.docker.compose.service'] || null;
 }
 
 type RenderedService = {

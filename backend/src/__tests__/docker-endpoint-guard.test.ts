@@ -1764,6 +1764,20 @@ describe('a protected container with no Compose service label on a deploy', () =
     expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
   });
 
+  it('names the protected container with an empty service label by its name when it refuses its namespace owner', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+    runtimeModes.set(PROXY_ID, { modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([
+      container(PROXY_ID, 'socket-proxy', { labels: { 'com.docker.compose.service': '' } }),
+      container(VPN_ID, 'vpn'),
+    ]);
+
+    const refusal = await run({ kind: 'service', service: 'vpn' });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'vpn' });
+    expect(refusal?.message).toContain('"socket-proxy"');
+  });
+
   it('treats an empty service label like a missing one', async () => {
     mockListContainers.mockResolvedValue([senchoContainer, stray({ 'com.docker.compose.service': '', [INFRASTRUCTURE_LABEL]: 'true' })]);
 
