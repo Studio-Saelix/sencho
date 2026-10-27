@@ -365,21 +365,26 @@ describe('NodeUpdatesSheet', () => {
       expect(summaryCount('Failed')).toBe('0');
     });
 
-    // The status column is a fixed 160px and the sheet has a fixed width, so a
-    // cell that cannot wrap grows left over the Latest column and clips it
-    // (v0.98.1 read as v0.98). jsdom has no layout, so pin the wrapping classes
-    // on every row that stacks several controls in the cell.
+    // The status column is a fixed 160px, so a cell that cannot wrap overflows to
+    // the left over the Latest column and clips it (v0.98.1 read as v0.98). jsdom
+    // has no layout, so pin `flex-wrap` on representative rows that stack several
+    // controls, plus the hint's `basis-0` that keeps the common one-line row one line.
     it.each([
-      ['offline, skipped, Compose reapply unavailable', { ...DARK, skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }],
-      ['offline, skipped', { ...DARK, skipActive: true, skippedVersion: '1.1.0' }],
-      ['online, skipped, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }],
-      ['update available, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', updateAvailable: true, canReapplyCompose: false }],
-    ] as const)('lets the status cell wrap instead of covering the Latest column: %s', (_label, status) => {
+      ['offline, skipped, Compose reapply unavailable', { ...DARK, skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }, ['Offline', /Skipped\s*v?1\.1\.0/, 'Unskip', 'Reapply unavailable']],
+      ['offline, skipped', { ...DARK, skipActive: true, skippedVersion: '1.1.0' }, ['Offline', /Skipped\s*v?1\.1\.0/, 'Unskip']],
+      ['online, skipped, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }, [/Skipped\s*v?1\.1\.0/, 'Unskip', 'Reapply unavailable']],
+      ['update available, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', updateAvailable: true, canReapplyCompose: false }, ['Update', 'Reapply unavailable', 'Skip']],
+      ['up to date, Compose reapply unavailable', { ...DARK, online: true, version: '1.1.0', canReapplyCompose: false }, ['Up to date', 'Reapply unavailable']],
+    ] as const)('lets the status cell wrap instead of covering the Latest column: %s', (_label, status, stacked) => {
       render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], status as NodeUpdateStatus] })} />);
       const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
       const cell = row.lastElementChild as HTMLElement;
-      expect(cell).toHaveClass('flex-wrap', 'min-w-0');
-      expect(cell).toHaveTextContent(/Offline|Skipped|Update/);
+      expect(cell).toHaveClass('flex-wrap');
+      for (const part of stacked) {
+        expect(within(cell).getByText(part)).toBeInTheDocument();
+      }
+      const hint = within(cell).queryByText('Reapply unavailable');
+      if (hint) expect(hint).toHaveClass('basis-0');
     });
 
     it.each([

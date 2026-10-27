@@ -418,7 +418,7 @@ export function NodeUpdatesSheet({
                                             ? <span className="text-muted-foreground/70 italic text-[10px]">Integration build</span>
                                             : formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
-                                    <div className="flex min-w-0 flex-wrap justify-end items-center gap-1">
+                                    <div className="flex flex-wrap justify-end items-center gap-1">
                                         {s.updateStatus && (
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
@@ -506,7 +506,7 @@ export function NodeUpdatesSheet({
                                         )}
                                         {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
                                             <span
-                                                className="text-[10px] text-muted-foreground/70 max-w-[9rem] text-right leading-tight"
+                                                className="text-[10px] text-muted-foreground/70 min-w-[4rem] max-w-[9rem] flex-1 basis-0 text-right leading-tight"
                                                 title={s.type === 'local'
                                                     ? 'This node is not Compose-managed, so configuration reapply is unavailable.'
                                                     : 'This node does not advertise Compose self-management, or is unreachable.'}
