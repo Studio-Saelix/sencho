@@ -449,7 +449,7 @@ describe('blocked-deploy log line', () => {
   });
 
   // The total matches the one stored row, so evaluation takes the full-detail
-  // path (where getCveIntel runs) instead of the fail-closed aggregate fallback.
+  // path instead of the fail-closed aggregate fallback.
   function criticalScan(): VulnerabilityScan {
     return mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 });
   }
@@ -647,6 +647,8 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
+    // A severity-only policy with suppressions off never loads detail rows, so
+    // truncated rows cannot reach the fail-closed fallback: the match is verified.
     it('keeps the matched wording for a severity-only policy when suppressions are off', async () => {
       dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
       trivyStub.scanImagePreflight.mockResolvedValue(
@@ -672,7 +674,11 @@ describe('blocked-deploy log line', () => {
         trivyStub.scanImagePreflight.mockResolvedValue(CRITICAL_TRUNCATED());
       });
 
-      it('names unapplied suppressions, not a severity match, when the rows are truncated', async () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+      });
+
+      it('reports the severity match as unverified, not as a plain match, when the rows are truncated', async () => {
         const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
 
         expect(result.ok).toBe(false);
@@ -712,6 +718,28 @@ describe('blocked-deploy log line', () => {
         expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
         expect(blockLines()).toEqual([
           `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; ${BEFORE_SUPPRESSIONS}`,
+        ]);
+      });
+
+      it('lists the unapplied severity match under unverified, not matched, on the debug line', async () => {
+        vi.stubEnv('DATA_DIR', '/unused');
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1', developer_mode: '1' });
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        const scanned = logSpy.mock.calls.map((args) => format(...args)).filter((line) => line.includes('scanned:'));
+        expect(scanned).toEqual(['[Policy:debug] nginx:1.14 scanned: severity=CRITICAL kev=0 fixable=0 matched=[] unverified=[severity]']);
+      });
+
+      it('does not mark severity unverified for a KEV-only policy even when the raw severity is critical', async () => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.violations[0].reasons).toEqual(['kev']);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV) not verified, ${TRUNCATED}`,
         ]);
       });
 
@@ -763,7 +791,7 @@ describe('blocked-deploy log line', () => {
         ]);
       });
 
-      it('leaves the violation and the deploy decision exactly as before', async () => {
+      it('keeps the plain violation, with no unverified field, and still blocks', async () => {
         const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
 
         expect(result.ok).toBe(false);
@@ -799,7 +827,7 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
-    it('leaves the violation and the deploy decision exactly as before', async () => {
+    it('keeps the plain violation, with no unverified field, for assumed KEV/fixable inputs', async () => {
       trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
 
       const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
