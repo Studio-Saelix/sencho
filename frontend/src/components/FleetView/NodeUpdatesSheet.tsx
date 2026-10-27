@@ -418,7 +418,7 @@ export function NodeUpdatesSheet({
                                             ? <span className="text-muted-foreground/70 italic text-[10px]">Integration build</span>
                                             : formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
-                                    <div className="flex justify-end items-center gap-1">
+                                    <div className="flex min-w-0 flex-wrap justify-end items-center gap-1">
                                         {s.updateStatus && (
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}

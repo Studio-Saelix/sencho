@@ -365,6 +365,23 @@ describe('NodeUpdatesSheet', () => {
       expect(summaryCount('Failed')).toBe('0');
     });
 
+    // The status column is a fixed 160px and the sheet has a fixed width, so a
+    // cell that cannot wrap grows left over the Latest column and clips it
+    // (v0.98.1 read as v0.98). jsdom has no layout, so pin the wrapping classes
+    // on every row that stacks several controls in the cell.
+    it.each([
+      ['offline, skipped, Compose reapply unavailable', { ...DARK, skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }],
+      ['offline, skipped', { ...DARK, skipActive: true, skippedVersion: '1.1.0' }],
+      ['online, skipped, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }],
+      ['update available, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', updateAvailable: true, canReapplyCompose: false }],
+    ] as const)('lets the status cell wrap instead of covering the Latest column: %s', (_label, status) => {
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], status as NodeUpdateStatus] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      const cell = row.lastElementChild as HTMLElement;
+      expect(cell).toHaveClass('flex-wrap', 'min-w-0');
+      expect(cell).toHaveTextContent(/Offline|Skipped|Update/);
+    });
+
     it.each([
       ['updating', 'Updating'],
       ['failed', 'Failed'],
