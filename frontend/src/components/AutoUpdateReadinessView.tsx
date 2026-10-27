@@ -576,7 +576,7 @@ function NodeGroupSection({
         <span className="font-heading text-xl leading-tight tracking-tight text-stat-value truncate">
           {group.nodeName}
         </span>
-        <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0 self-center">
+        <Badge variant="outline" size="compact" className="self-center">
           {group.nodeType}
         </Badge>
         <span className="font-mono text-[11px] text-stat-subtitle/80">

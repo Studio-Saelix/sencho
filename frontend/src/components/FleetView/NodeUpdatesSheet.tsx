@@ -407,7 +407,7 @@ export function NodeUpdatesSheet({
                                         </div>
                                         <span className="text-sm font-medium truncate">{s.name}</span>
                                     </div>
-                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 w-fit">
+                                    <Badge variant="outline" size="compact" className="w-fit">
                                         {s.type}
                                     </Badge>
                                     <span className="text-xs font-mono tabular-nums text-muted-foreground">

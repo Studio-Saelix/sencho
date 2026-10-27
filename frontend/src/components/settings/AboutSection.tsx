@@ -26,14 +26,14 @@ const mono = 'font-mono text-sm text-stat-value';
 function BuildChannelChip({ label }: { label: string }) {
     if (label === 'Dev') {
         return (
-            <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+            <Badge size="compact" className="bg-warning/15 text-warning border-warning/30">
                 <FlaskConical className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Dev
             </Badge>
         );
     }
     if (label === 'Preview') {
         return (
-            <Badge className="text-[10px] px-1.5 py-0 h-4 bg-brand/15 text-brand border-brand/30 shrink-0">
+            <Badge size="compact" className="bg-brand/15 text-brand border-brand/30">
                 Preview
             </Badge>
         );
