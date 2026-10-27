@@ -7,7 +7,8 @@
  *   - The failure-class terminal transitions emit an operator-visible WARN.
  *   - POST /api/fleet/nodes/:id/update concurrency guard (409).
  *   - Unreachable nodes: a proxy node with no target or a failed poll reports
- *     online=false and no update available, and an in-flight update stays visible.
+ *     online=false and no update available, an in-flight update stays visible, and
+ *     a failed poll of the local row leaves it online with its version.
  *   - Authorization: both DELETE clear routes require admin.
  *   - The forced-recheck throttle on DELETE /update-status?recheck=true.
  */
@@ -242,6 +243,27 @@ describe('GET /api/fleet/update-status unreachable nodes', () => {
     expect(row.updateStatus).toBeNull();
     expect(rows.find(n => n.nodeId === localNodeId)!.online).toBe(true);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed'), expect.any(Error));
+  });
+
+  it('keeps the local row online with its version when only its own poll fails', async () => {
+    mockCompareTargetFetch();
+    mockMeta(ONLINE());
+    const baseline = (await getRows()).find(n => n.nodeId === localNodeId)!;
+    expect(baseline.online).toBe(true);
+
+    // The gateway is serving this request, so a throw while reading its pin
+    // state must not turn the local row into a node that is offline or unread.
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const rows = await getRows();
+    const local = rows.find(n => n.nodeId === localNodeId)!;
+    expect(local.online).toBe(true);
+    expect(local.version).toBe(baseline.version);
+    expect(local.version).not.toBeNull();
+    expect(local.updateAvailable).toBe(baseline.updateAvailable);
+    expect(local.updateStatus).toBeNull();
+    expect(rows.find(n => n.nodeId === proxyNodeId)!.online).toBe(true);
   });
 
   it('keeps an in-flight update visible while the node is unreachable', async () => {

@@ -352,6 +352,16 @@ describe('NodeUpdatesSheet', () => {
       expect(summaryCount('Failed')).toBe('0');
     });
 
+    it('shows Offline beside Skipped, and leaves the node out of the counts, when an unreachable node has a skipped version', () => {
+      const skipped: NodeUpdateStatus = { ...DARK, skipActive: true, skippedVersion: '1.1.0' };
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], skipped] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      expect(within(row).getByText('Offline')).toBeInTheDocument();
+      expect(within(row).getByText(/Skipped/)).toBeInTheDocument();
+      expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
+      expect(summaryCount('Up to date')).toBe('1');
+    });
+
     it.each([
       ['updating', 'Updating'],
       ['failed', 'Failed'],

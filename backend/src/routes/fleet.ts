@@ -1447,14 +1447,18 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
+      // A remote whose poll failed is unreadable, so it reads as offline with
+      // no version. The local row is the process serving this request: it is
+      // online and its version is known whatever else the poll threw on.
+      const isLocal = nodes[i].type === 'local';
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
         type: nodes[i].type,
-        version: null,
+        version: isLocal ? gatewayVersion : null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
-        online: false,
-        updateAvailable: false,
+        online: isLocal,
+        updateAvailable: isLocal && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
         updateStatus: null,
         error: null,
         skipActive: false,

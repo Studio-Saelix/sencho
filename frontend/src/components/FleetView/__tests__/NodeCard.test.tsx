@@ -170,6 +170,19 @@ describe('NodeCard', () => {
     expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
   });
 
+  it('keeps the Skipped pill beside Offline on an unreachable node with a skipped version', () => {
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateAvailable: false, skipActive: true, skippedVersion: '1.1.0' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.getByText('Skipped')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+  });
+
   it('keeps Update available on a reachable node', () => {
     render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
     expect(screen.getByText('Update available')).toBeInTheDocument();
