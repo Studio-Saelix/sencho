@@ -377,7 +377,9 @@ export class ImageOperationService {
     if (!outcome) {
       const ack = await this.verifyDockerThroughProvider(operation, provider);
       try {
-        await this.atomicWrite(helperFiles.ack(this.dataDir(), operation.operationId), JSON.stringify(ack));
+        const ackFile = helperFiles.ack(this.dataDir(), operation.operationId);
+        await fs.mkdir(path.dirname(ackFile), { recursive: true, mode: 0o700 });
+        await this.atomicWrite(ackFile, JSON.stringify(ack));
       } catch (error) {
         console.error('[ImageOperation] Could not answer the Docker endpoint helper:', error);
       }
