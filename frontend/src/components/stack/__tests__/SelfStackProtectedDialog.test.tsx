@@ -27,6 +27,14 @@ describe('SelfStackProtectedDialog', () => {
     expect(props.onOpenFleetUpdates).not.toHaveBeenCalled();
   });
 
+  it('says Compose may recreate the services Sencho depends on, without promising that it will', () => {
+    renderDialog({ onReapply: vi.fn().mockResolvedValue(undefined) });
+
+    const copy = screen.getByText(/Reapply recreates Sencho/).textContent ?? '';
+    expect(copy).toMatch(/Compose may also recreate a service it lists in depends_on/);
+    expect(copy).not.toMatch(/whether or not they changed/);
+  });
+
   it('stays open after confirming until the handler closes it, so a not-ready node can be retried', async () => {
     const onReapply = vi.fn().mockResolvedValue(undefined);
     const props = renderDialog({ onReapply });

@@ -27,17 +27,24 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * containers, running or stopped, and does not need the render), when Compose's
  * recreate decision cannot be predicted, and when a deploy would remove a
  * protected container as an orphan (it is not stopped, carries a project label,
- * and has no service label). A protected container that has stopped passes a
+ * and its service label is missing or names a service the rendered file does
+ * not contain). That is wider than what Compose 5.1.3 removes: it removes only
+ * a container that also carries `com.docker.compose.oneoff=False`, and leaves a
+ * hand-made one with just a project label alone. The guard does not read
+ * `oneoff`, because another Compose version may remove more and a false refusal
+ * costs less than a cut connection. A protected container that has stopped passes a
  * deploy that does not recreate it (removing a stopped orphan is one) and
  * Auto-Heal's restart of the detected provider (`allowProvider`, the way a
  * stopped proxy comes back). Every other operation still refuses it. A stop,
  * restart, take down, delete, or container operation then says the container is
  * not running and names the host-side removal, wherever the state is known (the
  * container list, with every replica of the service stopped, or an inspect that
- * answered). A deploy that would recreate it or cannot predict that, an update
- * or a service redeploy, an unidentified provider, and a refusal decided before
- * the state is read (an inspect that failed or was denied, matched by id or
- * name) keep their own advice. It otherwise lets the operation through: when the stack holds no protected container, no owner of a
+ * answered). An update (a rollback is one) that finds every container of the
+ * service stopped says that too, because it does not stop or recreate anything
+ * it names; it refuses because the stack holds the container. A deploy that would
+ * recreate it or cannot predict that, a service redeploy, an unidentified
+ * provider, and a refusal decided before the state is read (an inspect that
+ * failed or was denied, matched by id or name) keep their own advice. It otherwise lets the operation through: when the stack holds no protected container, no owner of a
  * namespace one runs in, and nothing the operation would recreate that they
  * depend on; for a restart of Sencho itself (both evaluators); and for a remote
  * node (its own Sencho guards it).
@@ -386,14 +393,39 @@ function reasonOf(role: ProtectedRole): DockerEndpointRefusal['reason'] {
   }
 }
 
-/** A protected container that has not stopped, with a project label and no Compose service label: a deploy that removes orphans removes it. */
-function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: string, via?: string): DockerEndpointRefusal {
+/**
+ * Whether a deploy that removes orphans could remove this container: it carries
+ * a project label and no rendered service owns it, because it has no service
+ * label or its service is not among the rendered ones (removed from the file, or
+ * in a profile that is not enabled). One with no project label is outside the
+ * project and left alone. Compose 5.1.3 removes only such a container that also
+ * carries `oneoff=False`; the guard does not require it (see the header).
+ */
+function isRemovableOrphan(container: ListedContainer, rendered: Map<string, RenderedService>): boolean {
+  if (!container.Labels?.['com.docker.compose.project']) return false;
+  const service = serviceOf(container);
+  return service === null || !rendered.has(service);
+}
+
+/** A protected container that has not stopped and that a deploy removing orphans could remove (see `isRemovableOrphan`). */
+function orphanRemovalRefusal(role: ProtectedRole, name: string, service: string | null, stackName: string, via?: string): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
+  const why = service === null
+    ? 'it has no Compose service label'
+    : `its service "${service}" is not among the services Compose renders for "${stackName}" (it was removed from the file, or is in a profile that is not enabled)`;
+  // A container Compose created for a service the file no longer holds is the
+  // orphan a deploy removes for certain. A hand-made one with only a project
+  // label survives Compose 5.1.3, so its message says "can remove", not "would".
+  const effect = service === null
+    ? `so a deploy of "${stackName}" that removes orphans can remove it`
+    : `so Compose treats it as an orphan of "${stackName}" and this deploy, which removes orphans, would remove it`;
   return {
     reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
-    service: name,
-    message: `Container "${name}" ${subject}, but it has no Compose service label, so Compose treats it as an orphan of "${stackName}" and this deploy, which removes orphans, would remove it. `
-      + 'Make it a service of the Compose file, or recreate it from the host without the project label, while Sencho is idle. '
+    service: service ?? name,
+    message: `Container "${name}" ${subject}, but ${why}, ${effect}. `
+      + (service === null
+        ? 'Make it a service of the Compose file, or recreate it from the host without the project label, while Sencho is idle. '
+        : `Keep "${service}" in the Compose file (or enable its profile), or recreate the container from the host without the project label, while Sencho is idle. `)
       + 'If it is a leftover you no longer need, stop and remove it from the host first: a container that has stopped does not block a deploy.',
   };
 }
@@ -406,7 +438,13 @@ function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: stri
  * container name `docker rm` takes; `service` is what the refusal reports, the
  * Compose service where it has one.
  */
-function stoppedContainerRefusal(role: ProtectedRole, name: string, service: string, via?: string): DockerEndpointRefusal {
+function stoppedContainerRefusal(
+  role: ProtectedRole,
+  name: string,
+  service: string,
+  via?: string,
+  refuses = 'Sencho still does not stop, restart, or remove it',
+): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
   const label = role === 'mislabeled' && !via
     ? ` It is labeled ${INFRASTRUCTURE_LABEL} with a value other than "true"; correct the label when you start it again.`
@@ -414,7 +452,7 @@ function stoppedContainerRefusal(role: ProtectedRole, name: string, service: str
   return {
     reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
     service,
-    message: `Container "${name}" ${subject}. "${name}" is not running, but Sencho still does not stop, restart, or remove it. `
+    message: `Container "${name}" ${subject}. "${name}" is not running, but ${refuses}. `
       + `If it is a leftover you no longer need, remove it from the host (docker rm ${name}); otherwise start it again from the host (docker compose up -d) while Sencho is idle.${label}`,
   };
 }
@@ -774,10 +812,12 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     // A protected container without a Compose service label (a stale or hand-made
     // container carrying the stack label) is still protected, under its name. On a
     // deploy it is not one of the stack's services, so what Compose decides for a
-    // service of the same name says nothing about it; `up --remove-orphans`
-    // removes it outright when it carries any project label (the stack is matched
-    // by project label or by working directory, and the project name Compose runs
-    // under can differ from the stack name in case or through a `name:` key).
+    // service of the same name says nothing about it; `up --remove-orphans` can
+    // remove it when it carries a project label (the stack is matched by project
+    // label or by working directory, and the project name Compose runs under can
+    // differ from the stack name in case or through a `name:` key). The same goes
+    // for a container whose service label names a service the rendered file no
+    // longer holds (a removed service is the orphan Compose removes for sure).
     // One with no project label at all is outside the project and left alone.
     // One that has stopped is removed too, but the guard lets it through:
     // removing it cannot cut the connection. (It could be started between this
@@ -785,9 +825,13 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     // is not guarded again.)
     let judged = entry.containers;
     if (mutation.kind === 'up') {
-      const orphan = entry.containers.find(c => !serviceOf(c) && !isStopped(c) && !!c.Labels?.['com.docker.compose.project']);
-      if (orphan) return orphanRemovalRefusal(entry.role, nameOf(orphan) || orphan.Id || 'unknown', stackName, entry.via);
-      judged = entry.containers.filter(c => !!serviceOf(c));
+      const orphan = entry.containers.find(c => !isStopped(c) && isRemovableOrphan(c, rendered));
+      if (orphan) return orphanRemovalRefusal(entry.role, nameOf(orphan) || orphan.Id || 'unknown', serviceOf(orphan), stackName, entry.via);
+      // What is left is judged as a service: an orphan that has stopped is not one, and a container outside the project is not recreated by this deploy.
+      judged = entry.containers.filter(c => {
+        const service = serviceOf(c);
+        return service !== null && rendered.has(service);
+      });
     }
     const services = [...new Set(judged.map(reportedServiceOf))];
     for (const service of services) {
@@ -801,8 +845,16 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
       // A stop, restart, take down, or delete of a service whose containers have all stopped: recreating it is not the advice that fits.
       // (An unidentified provider keeps its own refusal: the cause is that detection failed, not the container.)
       const ofService = judged.filter(c => reportedServiceOf(c) === service);
-      if (isEngineDriven(mutation) && entry.role !== 'unknown_provider' && ofService.length > 0 && ofService.every(isStopped)) {
-        return stoppedContainerRefusal(entry.role, nameOf(ofService[0]) || ofService[0].Id || service, service, entry.via);
+      if (entry.role !== 'unknown_provider' && ofService.length > 0 && ofService.every(isStopped)) {
+        const stoppedName = nameOf(ofService[0]) || ofService[0].Id || service;
+        if (isEngineDriven(mutation)) return stoppedContainerRefusal(entry.role, stoppedName, service, entry.via);
+        // An update (a rollback is one) refuses because the stack holds the container, not because it would stop or recreate it.
+        if (mutation.kind === 'update') {
+          return stoppedContainerRefusal(
+            entry.role, stoppedName, service, entry.via,
+            `an update or rollback of "${stackName}" recreates the stack's services, and Sencho does not run one while a container that carries the Docker connection is in the stack`,
+          );
+        }
       }
       return entry.via
         ? namespaceOwnerRefusal(entry.role, service, entry.via)

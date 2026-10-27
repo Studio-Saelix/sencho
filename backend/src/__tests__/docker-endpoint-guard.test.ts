@@ -93,9 +93,16 @@ function stubSelf(state: 'resolved' | 'none' | 'unresolved') {
   vi.spyOn(self, 'getComposeLocation').mockReturnValue({ service: 'sencho', workingDir: '/srv/compose/sencho' });
 }
 
+/** The Compose file as most tests mean it: it still lists every service that has a deployed container. */
+async function renderListingDeployedServices(): Promise<string> {
+  const listed = await mockListContainers() as Array<{ Labels?: Record<string, string> }>;
+  const names = new Set(listed.map(c => c.Labels?.['com.docker.compose.service']).filter((name): name is string => !!name));
+  return names.size === 0 ? 'services: {}\n' : `services:\n${[...names].map(name => `  ${name}: {}`).join('\n')}\n`;
+}
+
 function probes(over: Partial<EndpointGuardProbes> = {}): EndpointGuardProbes {
   return {
-    renderConfig: vi.fn().mockResolvedValue('services: {}\n'),
+    renderConfig: vi.fn().mockImplementation(renderListingDeployedServices),
     configHash: vi.fn().mockResolvedValue('hash-current'),
     localImage: vi.fn().mockResolvedValue({ state: 'unknown' }),
     ...over,
@@ -475,7 +482,7 @@ describe('the Docker socket proxy', () => {
   describe('services that own a namespace the protected service runs in', () => {
     const vpnContainer = container('d'.repeat(64), 'vpn');
     const siblingContainer = container('e'.repeat(64), 'sibling');
-    const rendered = 'services:\n  socket-proxy:\n    network_mode: service:vpn\n  vpn:\n    command: run\n  sibling:\n    network_mode: service:vpn\n';
+    const rendered = 'services:\n  sencho: {}\n  socket-proxy:\n    network_mode: service:vpn\n  vpn:\n    command: run\n  sibling:\n    network_mode: service:vpn\n';
     const renderedProbes = (changed: string[] = [], renderedYaml = rendered) => probes({
       renderConfig: vi.fn().mockResolvedValue(renderedYaml),
       configHash: vi.fn(async (service: string) => (changed.includes(service) ? 'hash-new' : 'hash-current')),
@@ -559,7 +566,7 @@ describe('the Docker socket proxy', () => {
     const vpn = container(VPN_ID, 'vpn');
     const sibling = container('e'.repeat(64), 'sibling');
     // The file no longer declares the namespace the proxy still runs in.
-    const edited = 'services:\n  socket-proxy:\n    command: run\n  vpn:\n    command: run\n  sibling:\n    command: run\n';
+    const edited = 'services:\n  sencho: {}\n  socket-proxy:\n    command: run\n  vpn:\n    command: run\n  sibling:\n    command: run\n';
     const editedProbes = (changed: string[] = []) => probes({
       renderConfig: vi.fn().mockResolvedValue(edited),
       configHash: vi.fn(async (service: string) => (changed.includes(service) ? 'hash-new' : 'hash-current')),
@@ -1892,15 +1899,17 @@ describe('a provider recreated under the same name, whatever labels the new cont
 });
 
 describe('a protected container with no Compose service label on a deploy', () => {
-  // `up -d --remove-orphans` removes a container that carries the project label
-  // and no service label, whatever a service of the same name decides.
+  // `up -d --remove-orphans` can remove a container that carries the project
+  // label and no service label, whatever a service of the same name decides.
+  // (Compose 5.1.3 removes one only when it also carries `oneoff=False`; the
+  // guard refuses without reading that label, so it never trusts a version.)
   const stray = (labels: Record<string, string>) => ({
     Id: PROXY_ID,
     Names: ['/socket-proxy'],
     Labels: { 'com.docker.compose.project': 'sencho', ...labels },
     NetworkSettings: { Networks: {} },
   });
-  const renderedProxy = 'services:\n  socket-proxy:\n    image: tecnativa/docker-socket-proxy\n';
+  const renderedProxy = 'services:\n  sencho: {}\n  socket-proxy:\n    image: tecnativa/docker-socket-proxy\n';
   const deployProbes = () => probes({ renderConfig: vi.fn().mockResolvedValue(renderedProxy), configHash: vi.fn().mockResolvedValue('hash-current'), localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'same' }) });
   const officialProxy = container('1'.repeat(64), 'socket-proxy', { imageId: 'same', labels: { 'io.sencho.infrastructure': 'true' } });
 
@@ -1914,6 +1923,10 @@ describe('a protected container with no Compose service label on a deploy', () =
 
     expect(refusal).toMatchObject({ reason, service: 'socket-proxy' });
     expect(refusal?.message).toContain('orphan');
+    // A hand-made container with only a project label survives Compose 5.1.3,
+    // so the refusal says the deploy can remove it, not that Compose will.
+    expect(refusal?.message).toContain('that removes orphans can remove it');
+    expect(refusal?.message).not.toContain('would remove it');
   });
 
   it('refuses it when an unchanged service of the same name is running too', async () => {
@@ -2044,6 +2057,107 @@ describe('a protected container with no Compose service label on a deploy', () =
     }]);
 
     expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+  });
+
+  describe('whose service label names a service the Compose file no longer holds', () => {
+    // The orphan Compose removes for sure: it was deployed from a service that
+    // has since been deleted from the file (or whose profile is not enabled).
+    const removed = (labels: Record<string, string> = {}, over: Record<string, unknown> = {}) => ({
+      ...container(PROXY_ID, 'old', { labels }),
+      ...over,
+    });
+
+    it.each([
+      ['labeled true', 'true', 'provider'],
+      ['labeled with another value', 'maybe', 'invalid_label'],
+    ])('refuses its removal as an orphan when it is %s, and names the file as the cause', async (_name, value, reason) => {
+      mockListContainers.mockResolvedValue([senchoContainer, removed({ [INFRASTRUCTURE_LABEL]: value })]);
+      // Compose reports no hash for a service that is not in the file.
+      const hashProbe = vi.fn(async (service: string) => (service === 'old' ? null : 'hash-current'));
+
+      const refusal = await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(renderedProxy), configHash: hashProbe }));
+
+      expect(refusal).toMatchObject({ reason, service: 'old' });
+      expect(refusal?.message).toContain('its service "old" is not among the services Compose renders for "sencho"');
+      expect(refusal?.message).toContain('would remove it');
+      expect(refusal?.message).toContain('Keep "old" in the Compose file');
+      expect(refusal?.message).not.toContain('could not tell');
+      expect(refusal?.message).not.toContain('recreate service');
+      expect(hashProbe).not.toHaveBeenCalledWith('old');
+    });
+
+    it('refuses the detected provider, which carries no label, the same way', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('old'));
+      mockListContainers.mockResolvedValue([senchoContainer, removed()]);
+
+      const refusal = await run({ kind: 'up' }, deployProbes());
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'old' });
+      expect(refusal?.message).toContain('would remove it');
+    });
+
+    it('names the owner of a namespace the proxy runs in when that owner was removed from the file', async () => {
+      mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+      runtimeModes.set(PROXY_ID, { name: 'socket-proxy', modes: { NetworkMode: `container:${VPN_ID}` } });
+      mockListContainers.mockResolvedValue([
+        senchoContainer,
+        container(PROXY_ID, 'socket-proxy', { imageId: 'same' }),
+        container(VPN_ID, 'vpn'),
+      ]);
+
+      const refusal = await run({ kind: 'up' }, deployProbes());
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'vpn' });
+      expect(refusal?.message).toContain('"socket-proxy"');
+      expect(refusal?.message).toContain('its service "vpn" is not among the services');
+    });
+
+    it('lets it through when it has stopped, as for a service-less orphan', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, removed({ [INFRASTRUCTURE_LABEL]: 'true' }, { State: 'exited' })]);
+      const noHashForOld = probes({
+        renderConfig: vi.fn().mockResolvedValue(renderedProxy),
+        configHash: vi.fn(async (service: string) => (service === 'old' ? null : 'hash-current')),
+      });
+
+      expect(await run({ kind: 'up' }, noHashForOld)).toBeNull();
+    });
+
+    it('still refuses a removed protected service that has a replica still running', async () => {
+      mockListContainers.mockResolvedValue([
+        senchoContainer,
+        removed({ [INFRASTRUCTURE_LABEL]: 'true' }, { State: 'exited' }),
+        { ...removed({ [INFRASTRUCTURE_LABEL]: 'true' }), Id: '9'.repeat(64), Names: ['/old-2'], State: 'running' },
+      ]);
+
+      expect(await run({ kind: 'up' }, deployProbes())).toMatchObject({ reason: 'provider', service: 'old' });
+    });
+
+    it('leaves one with no project label alone, since Compose does not remove what is outside the project', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, {
+        ...removed({ [INFRASTRUCTURE_LABEL]: 'true' }),
+        Labels: {
+          'com.docker.compose.service': 'old',
+          'com.docker.compose.project.working_dir': '/srv/compose/sencho',
+          [INFRASTRUCTURE_LABEL]: 'true',
+        },
+      }]);
+
+      expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+    });
+
+    it('does not refuse an unprotected service that was removed from the file', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, container(WEB_ID, 'gone')]);
+
+      expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+    });
+
+    it('still lets a listed service through, and judges it by what Compose would recreate', async () => {
+      mockListContainers.mockResolvedValue([senchoContainer, officialProxy]);
+
+      expect(await run({ kind: 'up' }, deployProbes())).toBeNull();
+      expect(await run({ kind: 'up' }, probes({ renderConfig: vi.fn().mockResolvedValue(renderedProxy), configHash: vi.fn(async (service: string) => (service === 'socket-proxy' ? 'hash-new' : 'hash-current')) })))
+        .toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    });
   });
 
   it('refuses Sencho itself when it has a project label and no service label', async () => {
@@ -2199,11 +2313,71 @@ describe('a protected container that has already stopped, on a stack operation',
     expect((await run({ kind: 'stop' }))?.message).toMatch(RECREATE_ADVICE);
   });
 
-  it('keeps the recreate advice on an update and on a service redeploy, which recreate the service', async () => {
+  it('keeps the recreate advice on a service redeploy, which recreates the service', async () => {
     mockListContainers.mockResolvedValue([stopped()]);
 
-    expect((await run({ kind: 'update' }))?.message).toMatch(RECREATE_ADVICE);
     expect((await run({ kind: 'service', service: 'socket-proxy' }))?.message).toMatch(RECREATE_ADVICE);
+  });
+
+  describe('an update, which is also what a rollback runs', () => {
+    // A rollback that follows a failed deploy is the same evaluation, so its
+    // "The rollback did not run: ..." sentence is this message.
+    it('says the stopped proxy is not running and names why the stack is refused, without claiming it would stop or recreate it', async () => {
+      mockListContainers.mockResolvedValue([stopped()]);
+
+      const refusal = await run({ kind: 'update' });
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+      expect(refusal?.message).toContain('"socket-proxy" is not running');
+      expect(refusal?.message).toContain('an update or rollback of "sencho" recreates the stack\'s services');
+      expect(refusal?.message).toContain('docker rm socket-proxy');
+      expect(refusal?.message).not.toMatch(RECREATE_ADVICE);
+      expect(refusal?.message).not.toContain('would stop or recreate');
+    });
+
+    it('names a stopped hand-made container by its name, since it has no service', async () => {
+      mockListContainers.mockResolvedValue([{
+        Id: PROXY_ID,
+        Names: ['/qa-orphan'],
+        Labels: { 'com.docker.compose.project': 'sencho', [INFRASTRUCTURE_LABEL]: 'true' },
+        NetworkSettings: { Networks: {} },
+        State: 'exited',
+      }]);
+
+      const refusal = await run({ kind: 'update' });
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'qa-orphan' });
+      expect(refusal?.message).toContain('Container "qa-orphan" carries the Docker connection Sencho is using. "qa-orphan" is not running');
+      expect(refusal?.message).toContain('docker rm qa-orphan');
+      expect(refusal?.message).not.toContain('would stop or recreate');
+    });
+
+    it('keeps the label correction for a stopped container labeled with a value other than "true"', async () => {
+      mockResolveProvider.mockResolvedValue({ state: 'none', reason: 'local socket' });
+      mockListContainers.mockResolvedValue([{ ...container(WEB_ID, 'web', { labels: { [INFRASTRUCTURE_LABEL]: 'maybe' } }), State: 'exited' }]);
+
+      expect(await run({ kind: 'update' })).toMatchObject({ reason: 'invalid_label', service: 'web' });
+      expect((await run({ kind: 'update' }))?.message).toContain('correct the label');
+    });
+
+    it('keeps the recreate advice while a replica of the service is running', async () => {
+      mockListContainers.mockResolvedValue([stopped(), { ...container('9'.repeat(64), 'socket-proxy'), State: 'running' }]);
+
+      const refusal = await run({ kind: 'update' });
+
+      expect(refusal?.message).toMatch(RECREATE_ADVICE);
+      expect(refusal?.message).not.toContain('is not running');
+    });
+
+    it('keeps the endpoint-permission advice when the provider could not be identified', async () => {
+      mockResolveProvider.mockResolvedValue({ state: 'unresolved', reason: 'inspect denied' });
+      mockListContainers.mockResolvedValue([{ ...container(WEB_ID, 'web', { project: 'blog', networks: ['proxy-net'] }), State: 'exited' }]);
+
+      const refusal = await run({ kind: 'update' }, probes(), 'blog');
+
+      expect(refusal).toMatchObject({ reason: 'unresolved', service: 'web' });
+      expect(refusal?.message).toContain('allows container list and inspect requests');
+    });
   });
 });
 
@@ -2357,17 +2531,23 @@ describe('a deploy when Compose reports no config hash for a service', () => {
     expect(refusal?.message).toContain('configuration hash');
   });
 
-  it('refuses it for the provider when the Compose file no longer lists the service, and Compose reports no hash for it', async () => {
+  it('refuses the removal of the provider as an orphan, not as an unpredictable recreate, when the Compose file no longer lists the service', async () => {
     mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
     mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
     const hashes: Record<string, string> = { web: 'hash-current' };
+    const hashProbe = vi.fn(async (service: string) => hashes[service] ?? null);
 
     const refusal = await run({ kind: 'up' }, probes({
       renderConfig: vi.fn().mockResolvedValue(commandOnly('web')),
-      configHash: vi.fn(async (service: string) => hashes[service] ?? null),
+      configHash: hashProbe,
     }));
 
-    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('its service "socket-proxy" is not among the services Compose renders for "sencho"');
+    expect(refusal?.message).toContain('would remove it');
+    expect(refusal?.message).not.toContain('could not tell');
+    expect(refusal?.message).not.toContain('recreate service');
+    expect(hashProbe).not.toHaveBeenCalledWith('socket-proxy');
   });
 
   it('refuses it when the provider is unchanged but a service it is linked to has no hash', async () => {
