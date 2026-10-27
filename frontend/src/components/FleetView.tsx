@@ -376,6 +376,7 @@ export function FleetView({
             <LocalUpdateConfirmDialog
                 open={confirmOpen}
                 mode={confirmMode}
+                nodeId={confirmNodeId}
                 nodeType={
                     confirmMode === 'reapply'
                         ? (updateStatus.reapplyConfirmTarget?.type ?? 'local')

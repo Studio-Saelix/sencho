@@ -361,6 +361,8 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
       )}
       <LocalUpdateConfirmDialog
         open={updateStatus.localUpdateConfirm !== null}
+        nodeId={updateStatus.localUpdateConfirm}
+        nodeType={confirmStatus?.type ?? 'local'}
         onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
         onConfirm={updateStatus.confirmLocalUpdate}
         imagePinKind={confirmStatus?.imagePinKind}

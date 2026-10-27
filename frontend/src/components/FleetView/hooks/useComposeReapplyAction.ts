@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import type { NodeUpdateStatus } from '../types';
+import type { UpdateConfirmChoice } from '../LocalUpdateConfirmDialog';
 
 export type ComposeReapplyTarget = {
     nodeId: number;
@@ -54,13 +55,15 @@ export function useComposeReapplyAction(options: UseComposeReapplyActionOptions 
         setConfirmTarget(null);
     }, []);
 
-    const runReapply = useCallback(async (target: ComposeReapplyTarget) => {
+    const runReapply = useCallback(async (target: ComposeReapplyTarget, choice?: UpdateConfirmChoice) => {
         if (dispatchingRef.current) return;
 
         dispatchingRef.current = true;
         setBusyNodeId(target.nodeId);
         const path = `/fleet/nodes/${target.nodeId}/reapply-compose`;
-        const init = { method: 'POST', localOnly: true } as const;
+        const init = choice?.replaceEndpointProvider
+            ? { method: 'POST', localOnly: true, body: JSON.stringify({ replaceEndpointProvider: true }) } as const
+            : { method: 'POST', localOnly: true } as const;
 
         try {
             if (target.type === 'local') {
@@ -92,11 +95,11 @@ export function useComposeReapplyAction(options: UseComposeReapplyActionOptions 
         }
     }, []);
 
-    const confirmReapply = useCallback(async () => {
+    const confirmReapply = useCallback(async (choice?: UpdateConfirmChoice) => {
         const target = confirmTarget;
         setConfirmTarget(null);
         if (!target) return;
-        await runReapply(target);
+        await runReapply(target, choice);
     }, [confirmTarget, runReapply]);
 
     // While reconnecting, poll fleet update-status so a validation/helper failure

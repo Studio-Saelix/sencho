@@ -162,10 +162,11 @@ export function ShellOverlays({
         open={composeReapplyCapture !== null}
         mode="reapply"
         nodeType={composeReapplyCapture?.nodeType ?? 'local'}
+        nodeId={composeReapplyCapture?.nodeId ?? null}
         onOpenChange={(open) => {
           if (!open) setComposeReapplyCapture(null);
         }}
-        onConfirm={() => {
+        onConfirm={(choice) => {
           // Readiness loss keeps the dialog open with the confirmation blocked;
           // the capture is only cleared on an actual dispatch.
           if (!hydrationReady()) return;
@@ -176,7 +177,7 @@ export function ShellOverlays({
             nodeId: capture.nodeId,
             type: capture.nodeType,
             name: capture.nodeName,
-          });
+          }, choice);
         }}
       />
 

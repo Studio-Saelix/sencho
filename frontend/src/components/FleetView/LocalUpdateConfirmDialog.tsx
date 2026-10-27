@@ -1,16 +1,27 @@
 import { Download, FlaskConical, RefreshCw } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 import { ConfirmModal } from '@/components/ui/modal';
 import { formatVersion } from '@/lib/version';
+import { useEndpointProviderOption, type EndpointProviderOption } from './hooks/useEndpointProviderOption';
 import type { ImagePinKind } from './types';
+
+/** What the operator chose in the dialog, passed to the confirm handler. */
+export interface UpdateConfirmChoice {
+    /** Also recreate the container carrying the node's Docker API. */
+    replaceEndpointProvider: boolean;
+}
 
 interface LocalUpdateConfirmDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onConfirm: () => void;
+    onConfirm: (choice: UpdateConfirmChoice) => void | Promise<void>;
     mode?: 'update' | 'reapply';
-    /** Distinguishes local vs remote reapply copy. Ignored for update mode. */
+    /** Distinguishes local vs remote copy. */
     nodeType?: 'local' | 'remote';
+    /** The node being updated; when set, the dialog offers to recreate its Docker endpoint. */
+    nodeId?: number | null;
     imagePinKind?: ImagePinKind | null;
     composeImageRef?: string | null;
     targetImageRef?: string | null;
@@ -21,21 +32,31 @@ interface LocalUpdateConfirmDialogProps {
 }
 
 export function LocalUpdateConfirmDialog({
-    open, onOpenChange, onConfirm, mode = 'update', nodeType = 'local',
+    open, onOpenChange, onConfirm, mode = 'update', nodeType = 'local', nodeId,
     imagePinKind, composeImageRef, targetImageRef, targetVersion, isDevImage,
 }: LocalUpdateConfirmDialogProps) {
     const isReapply = mode === 'reapply';
     const isRemoteReapply = isReapply && nodeType === 'remote';
+    const isRemoteUpdate = !isReapply && nodeType === 'remote';
     const isDevUpdate = !isReapply && isDevImage;
     const versionLabel = formatVersion(targetVersion) ?? 'the latest release';
+    const endpointOption = useEndpointProviderOption(nodeId, open);
+    const [replaceEndpointProvider, setReplaceEndpointProvider] = useState(false);
 
     let kicker = 'LOCAL · UPDATE';
     if (isRemoteReapply) kicker = 'REMOTE · REAPPLY';
     else if (isReapply) kicker = 'LOCAL · REAPPLY';
+    else if (isRemoteUpdate) kicker = 'REMOTE · UPDATE';
     else if (isDevUpdate) kicker = 'LOCAL · DEV UPDATE';
 
     let body: ReactNode;
-    if (isRemoteReapply) {
+    if (isRemoteUpdate) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Pulls Sencho {versionLabel} on this node and restarts it. Fleet tracks reconnection.
+            </p>
+        );
+    } else if (isRemoteReapply) {
         body = (
             <p className="text-sm text-stat-subtitle">
                 Recreates this remote Sencho service from its current Compose configuration.
@@ -79,9 +100,13 @@ export function LocalUpdateConfirmDialog({
     return (
         <ConfirmModal
             open={open}
-            onOpenChange={onOpenChange}
+            onOpenChange={(next) => {
+                // A fresh dialog never carries the previous choice.
+                if (!next) setReplaceEndpointProvider(false);
+                onOpenChange(next);
+            }}
             kicker={kicker}
-            title={isReapply ? 'Reapply configuration' : 'Update local node'}
+            title={isReapply ? 'Reapply configuration' : isRemoteUpdate ? 'Update node' : 'Update local node'}
             confirmLabel={
                 isReapply ? (
                     <>
@@ -100,9 +125,61 @@ export function LocalUpdateConfirmDialog({
                     </>
                 )
             }
-            onConfirm={onConfirm}
+            onConfirm={() => {
+                const choice = { replaceEndpointProvider: endpointOption?.state === 'available' && replaceEndpointProvider };
+                setReplaceEndpointProvider(false);
+                // Returned so an async confirm keeps the dialog open, as before.
+                return onConfirm(choice);
+            }}
         >
             {body}
+            <EndpointProviderChoice
+                option={endpointOption}
+                checked={replaceEndpointProvider}
+                onCheckedChange={setReplaceEndpointProvider}
+            />
         </ConfirmModal>
     );
+}
+
+/**
+ * The opt-in to recreate the node's Docker endpoint with Sencho, shown only
+ * when the node reports one. A provider that cannot be replaced from here is
+ * named with the reason instead, so the operator knows it is left alone.
+ */
+function EndpointProviderChoice({ option, checked, onCheckedChange }: {
+    option: EndpointProviderOption | null;
+    checked: boolean;
+    onCheckedChange: (checked: boolean) => void;
+}) {
+    if (option?.state === 'available') {
+        return (
+            <div className="space-y-1 pt-2">
+                <div className="flex items-center space-x-2">
+                    <Checkbox
+                        id="replace-endpoint-provider"
+                        checked={checked}
+                        onCheckedChange={(value) => onCheckedChange(value === true)}
+                    />
+                    <Label htmlFor="replace-endpoint-provider" className="text-sm cursor-pointer">
+                        Also recreate the Docker endpoint <code className="text-stat-value">{option.service}</code>
+                    </Label>
+                </div>
+                <p className="text-xs text-stat-subtitle pl-6">
+                    Sencho reaches Docker through this container. It is recreated from its current
+                    Compose configuration and image before Sencho restarts. If the new container
+                    does not give Sencho working Docker access, the previous one is restored.
+                </p>
+            </div>
+        );
+    }
+    if (option?.state === 'unavailable') {
+        return (
+            <p className="text-xs text-stat-subtitle pt-2">
+                The Docker endpoint{option.service ? <> <code className="text-stat-value">{option.service}</code></> : null} is
+                left running: {option.reason}
+            </p>
+        );
+    }
+    return null;
 }
