@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const useAuthMock = vi.fn();
@@ -150,6 +150,26 @@ describe('NodeCard', () => {
     useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
     render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
     expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
+  });
+
+  it('shows no Update available or Pinned pill on an unreachable node', () => {
+    render(<NodeCard {...baseProps(offlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+    cleanup();
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
+  });
+
+  it('keeps Update available on a reachable node', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Update available')).toBeInTheDocument();
   });
 
   it('hides the update button and shows Pinned when updateBlocked', () => {

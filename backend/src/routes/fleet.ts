@@ -1341,8 +1341,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
         let updateAvailable = false;
         if (!isValidVersion(version)) {
-          // Assume remote nodes are outdated when their version is unresolvable.
-          updateAvailable = node.type === 'remote';
+          // Assume a reachable remote is outdated when it reports no parseable
+          // version. An unreachable one has no reading at all, so claiming an
+          // update for it would be a guess about a node nobody can see.
+          updateAvailable = node.type === 'remote' && remoteOnline;
         } else if (compareValid) {
           updateAvailable = semver.lt(version, compareVersion!);
         }
@@ -1420,6 +1422,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           type: node.type,
           version,
           latestVersion: latestValid ? latestVersion : gatewayVersion,
+          online: node.type === 'local' || remoteOnline,
           updateAvailable,
           updateStatus: currentTracker?.status ?? null,
           error: currentTracker?.error ?? null,
@@ -1450,6 +1453,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         type: nodes[i].type,
         version: null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
+        online: false,
         updateAvailable: false,
         updateStatus: null,
         error: null,

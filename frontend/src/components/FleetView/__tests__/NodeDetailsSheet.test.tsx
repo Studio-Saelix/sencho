@@ -188,6 +188,13 @@ describe('NodeDetailsSheet', () => {
     expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
   });
 
+  it('renders Update status as Unknown when the node could not be reached', () => {
+    render(<NodeDetailsSheet {...baseProps({ updateStatus: { ...UPDATE_STATUS, online: false, version: null } })} />);
+    const updateStatusField = screen.getByText('Update status').parentElement as HTMLElement;
+    expect(within(updateStatusField).getByText('Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
+  });
+
   it('still renders Up to date when updateStatus confirms no update is available', () => {
     render(<NodeDetailsSheet {...baseProps({ updateStatus: { ...UPDATE_STATUS, updateAvailable: false } })} />);
     expect(screen.getByText('Up to date')).toBeInTheDocument();

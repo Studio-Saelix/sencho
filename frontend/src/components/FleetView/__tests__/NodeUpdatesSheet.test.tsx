@@ -323,6 +323,18 @@ describe('NodeUpdatesSheet', () => {
     expect(changelogTab.querySelector('.animate-ping')).toBeNull();
   });
 
+  it('shows an unreachable node as Offline, never Up to date, and offers no update', () => {
+    const statuses: NodeUpdateStatus[] = [
+      STATUSES[0],
+      { nodeId: 4, name: 'Dark', type: 'remote', version: null, latestVersion: '1.1.0', online: false, updateAvailable: false, updateStatus: null },
+    ];
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: statuses })} />);
+    const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+    expect(within(row).getByText('Offline')).toBeInTheDocument();
+    expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button')).not.toBeInTheDocument();
+  });
+
   it('lights the changelog dot from a stable-only update', () => {
     render(<NodeUpdatesSheet {...baseProps()} />);
     const changelogTab = screen.getByRole('tab', { name: /Changelog/ });
