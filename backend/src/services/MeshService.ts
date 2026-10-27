@@ -503,10 +503,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     /**
      * Counts refresh starts. A run that began earlier can finish later, and
      * its observation is then older than one already applied, so it must not
-     * persist or publish anything. See `refreshAliasCache`.
+     * persist or publish anything. See `runAliasRefresh`.
      */
     private refreshGeneration = 0;
-    /** The most recently started refresh, which a superseded run waits for. */
+    /**
+     * The refresh holding the highest generation, which a superseded run waits
+     * for. It is assigned together with the generation, so the two always name
+     * the same run.
+     */
     private latestAliasRefresh: Promise<void> = Promise.resolve();
     // Populated on pilot nodes via the D-1 override push. Central's
     // db.listMeshStacks() is authoritative on central; pilots have no
@@ -2416,23 +2420,30 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * refresh that started no earlier than this call has published: a caller
      * goes on to write overrides from `aliasCache`, so it must not resume
      * while the cache still describes the world from before its mutation.
+     * A call that a newer one supersedes shares that newer call's outcome,
+     * including its failure: nothing was published for it, so the caller must
+     * not carry on as if the cache were current.
      */
     public refreshAliasCache(): Promise<void> {
-        const run = this.runAliasRefresh();
+        // The generation and the latest run are set in the same turn, before
+        // anything in the run can throw, so a failing run is still the newest
+        // one and the runs it supersedes wait for it.
+        const generation = ++this.refreshGeneration;
+        const run = this.runAliasRefresh(generation);
         this.latestAliasRefresh = run;
         return run;
     }
 
-    private async runAliasRefresh(): Promise<void> {
+    private async runAliasRefresh(generation: number): Promise<void> {
         const t0 = Date.now();
         const db = DatabaseService.getInstance();
         const next = new Map<string, MeshGlobalAlias>();
         const portMap = new Map<number, MeshGlobalAlias>();
-        const stacks = db.listMeshStacks();
         // A refresh that started earlier can finish later, and its answer then
-        // describes an older state of the world. Record the start order so a
-        // superseded run can be dropped before it persists or publishes.
-        const generation = ++this.refreshGeneration;
+        // describes an older state of the world. The generation records the
+        // start order so a superseded run can be dropped before it persists or
+        // publishes.
+        const stacks = db.listMeshStacks();
 
         // Inspect all stacks in parallel; each remote-node lookup involves an
         // HTTP fetch with its own 5 s AbortSignal. Sequential awaiting would
@@ -2481,13 +2492,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 return { row, node, services, reservedServices: resolved, snapshot };
             }),
         );
-        // Nothing below awaits, so a newer refresh either started before this
-        // block and wins, or starts after it and is ordered behind it. A
-        // superseded run leaves both the database and the caches untouched,
-        // and hands its caller the newer run's outcome. That run read the
-        // membership after this one began, so it includes whatever the caller
-        // changed before asking. The newest run is never superseded, so the
-        // chain of waits ends and never loops back to itself.
+        // Nothing between this check and the cache assignments below awaits,
+        // so a newer refresh either started before this block and wins, or
+        // starts after it and is ordered behind it. A superseded run leaves
+        // both the database and the caches untouched, and hands its caller the
+        // newer run's outcome. That run read the membership after this one
+        // began, so it includes whatever the caller changed before asking. The
+        // newest run is never superseded, so the chain of waits ends and never
+        // loops back to itself.
         if (generation !== this.refreshGeneration) {
             this.logDiag('alias cache refresh superseded', { stacks: stacks.length, ms: Date.now() - t0 });
             await this.latestAliasRefresh;

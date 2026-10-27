@@ -30,11 +30,35 @@ import type { ResolvedRollbackInventory } from '../types/rollbackGeneration';
 const NODE = 1;
 
 /**
+ * Make the first write of `rel` fail, after the files restored before it have
+ * been published. Only the first, so the revert that follows can write it back.
+ */
+async function failWriteOf(rel: string): Promise<void> {
+  const { FileSystemService } = await import('../services/FileSystemService');
+  const realWrite = FileSystemService.prototype.writeStackFile;
+  let failed = false;
+  vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(async function (
+    this: InstanceType<typeof FileSystemService>,
+    stack,
+    relPath,
+    content,
+    opts,
+  ) {
+    if (relPath === rel && !failed) {
+      failed = true;
+      throw new Error('injected write failure');
+    }
+    return realWrite.call(this, stack, relPath, content, opts);
+  });
+}
+
+/**
  * Make the first staged write of `name` fail to apply its permission bits, as a
- * filesystem that refuses chmod would. The mode rides with the bytes in one
+ * filesystem that refuses chmod would (`EPERM`) or as a failing disk would
+ * (any other code). The mode rides with the bytes in one
  * staged write, so the restore of a private entry fails before it publishes.
  */
-function failFirstStagedChmod(name: string): void {
+function failFirstStagedChmod(name: string, code = 'EPERM'): void {
   let failed = false;
   const realOpen = fsPromises.open.bind(fsPromises);
   vi.spyOn(fsPromises, 'open').mockImplementation((async (...args: Parameters<typeof fsPromises.open>) => {
@@ -42,7 +66,7 @@ function failFirstStagedChmod(name: string): void {
     if (failed || !path.basename(String(args[0])).startsWith(`${name}.sencho-tmp`)) return fh;
     fh.chmod = (async () => {
       failed = true;
-      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+      throw Object.assign(new Error(`chmod failed: ${code}`), { code });
     }) as typeof fh.chmod;
     return fh;
   }) as typeof fsPromises.open);
@@ -738,37 +762,38 @@ describe('RollbackGenerationStore', () => {
       nodeId: NODE,
       stackName,
       generationId,
+      // The env file comes first, so it is restored before compose.yaml fails.
       inventory: inventoryFor(stackName, [
-        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
         {
           relativePath: 'app.env',
           absolutePath: path.join(stackDir, 'app.env'),
           kind: 'env_file',
           sensitivity: 'medium',
         },
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
       ]),
     });
 
     // Before restore, an operator swaps the managed env file for a link that
     // stays inside the stack. The restore write follows the link, so the bytes
-    // that change are the target's, and the sensitive-entry mode is then
-    // refused, which is the failure this has to survive.
+    // that change are the target's, and the next file then fails to restore,
+    // which is the failure this has to survive.
     const targetPath = path.join(stackDir, 'target.env');
     await fsPromises.rm(path.join(stackDir, 'app.env'));
     await fsPromises.writeFile(targetPath, 'MARK=before-restore\n', 'utf8');
     await fsPromises.chmod(targetPath, 0o600);
     await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
 
-    // The restored mode rides with the bytes, so a filesystem that refuses it
-    // fails the restore before the bytes are published.
-    failFirstStagedChmod('target.env');
+    // The env file is restored first, through the link, and compose.yaml then
+    // fails, so the target's bytes have been replaced when the revert starts.
+    await failWriteOf('compose.yaml');
     // The preimage target is owner-only. The promotion of the restored bytes
     // must carry that mode, not the process umask's creation mode.
     const previousUmask = process.umask(0o022);
     try {
       await expect(
-        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
-      ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['app.env', 'compose.yaml']),
+      ).rejects.toThrow(/injected write failure/);
     } finally {
       process.umask(previousUmask);
     }
@@ -787,6 +812,46 @@ describe('RollbackGenerationStore', () => {
     await expect(
       RollbackGenerationStore.hasPendingRestoreIntent(NODE, stackName, generationId),
     ).resolves.toBe(false);
+  });
+
+  it('restores a sensitive entry behind an in-stack link into the link target, owner-only', async () => {
+    if (process.platform === 'win32') return;
+
+    const stackName = 'linksensitive';
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'app.env'), 'MARK=captured\n', 'utf8');
+
+    const generationId = randomUUID();
+    await RollbackGenerationStore.captureGeneration({
+      nodeId: NODE,
+      stackName,
+      generationId,
+      inventory: inventoryFor(stackName, [
+        {
+          relativePath: 'app.env',
+          absolutePath: path.join(stackDir, 'app.env'),
+          kind: 'env_file',
+          sensitivity: 'medium',
+        },
+      ]),
+    });
+
+    // The managed env file has become a link that stays inside the stack, to a
+    // target that is readable by others.
+    const targetPath = path.join(stackDir, 'target.env');
+    await fsPromises.rm(path.join(stackDir, 'app.env'));
+    await fsPromises.writeFile(targetPath, 'MARK=before-restore\n', 'utf8');
+    await fsPromises.chmod(targetPath, 0o644);
+    await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
+
+    await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['app.env']);
+
+    // The mode rides with the bytes on the staged target, so the sensitive
+    // content is owner-only and the link is still the operator's.
+    expect(await fsPromises.readFile(targetPath, 'utf8')).toBe('MARK=captured\n');
+    expect((await fsPromises.stat(targetPath)).mode & 0o777).toBe(0o600);
+    expect((await fsPromises.lstat(path.join(stackDir, 'app.env'))).isSymbolicLink()).toBe(true);
   });
 
   it('keeps the snapshot and intent when the compensation cannot restore a private mode, then retries', async () => {
@@ -820,9 +885,9 @@ describe('RollbackGenerationStore', () => {
     await fsPromises.chmod(targetPath, 0o600);
     await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
 
-    // Fail only the mode application on the target's own staging file, which is
-    // the compensation write. The restore's sensitive chmod still refuses the
-    // link first, so the revert is the step under test.
+    // Refuse the mode on every staging file of the target. The restore's own
+    // write fails with the permission error, and the revert's write for the
+    // same file fails the same way, so the revert cannot complete.
     const fsModule = await import('fs');
     const originalOpen = fsModule.promises.open;
     const openSpy = vi.spyOn(fsModule.promises, 'open').mockImplementation(async (...args) => {
@@ -888,14 +953,15 @@ describe('RollbackGenerationStore', () => {
       nodeId: NODE,
       stackName,
       generationId,
+      // The env file comes first, so it is restored before compose.yaml fails.
       inventory: inventoryFor(stackName, [
-        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
         {
           relativePath: 'app.env',
           absolutePath: path.join(stackDir, 'app.env'),
           kind: 'env_file',
           sensitivity: 'medium',
         },
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
       ]),
     });
 
@@ -904,34 +970,32 @@ describe('RollbackGenerationStore', () => {
     await fsPromises.writeFile(path.join(stackDir, 'target.env'), 'MARK=before-restore\n', 'utf8');
     await fsPromises.symlink('target.env', path.join(stackDir, 'app.env'));
 
-    // Restore runs, then the link is removed before the revert, which is the
-    // window a revert has to survive.
+    // The env file is restored first, through the link, then the link is
+    // removed and compose.yaml fails, which is the window a revert has to
+    // survive.
     const { FileSystemService } = await import('../services/FileSystemService');
     let linkRemoved = false;
+    let composeFailed = false;
     const realWrite = FileSystemService.prototype.writeStackFile;
     vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(
       async function (this: InstanceType<typeof FileSystemService>, stack, rel, content, opts) {
-        try {
-          return await realWrite.call(this, stack, rel, content, opts);
-        } finally {
-          // The link is removed once the restore has tried the entry, which is
-          // the window a revert has to survive. Once, so the revert's own
-          // write is left alone.
-          if (rel === 'app.env' && !linkRemoved) {
-            linkRemoved = true;
-            await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
-          }
+        if (rel === 'compose.yaml' && !composeFailed) {
+          composeFailed = true;
+          throw new Error('injected write failure');
         }
+        const result = await realWrite.call(this, stack, rel, content, opts);
+        // Once, so the revert's own write is left alone.
+        if (rel === 'app.env' && !linkRemoved) {
+          linkRemoved = true;
+          await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
+        }
+        return result;
       },
     );
-    // The real chmod refuses a symlink, which is what makes the restore of a
-    // sensitive linked entry fail and hand over to the revert. A revert skips
-    // the chmod for a linked entry, so this only ever fires on the restore.
-    failFirstStagedChmod('target.env');
 
     await expect(
-      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
-    ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['app.env', 'compose.yaml']),
+    ).rejects.toThrow(/injected write failure/);
 
     // The bytes belong to the target, so a revert that dropped the link first
     // would leave them in a plain file and the target still mutated.
@@ -952,14 +1016,15 @@ describe('RollbackGenerationStore', () => {
       nodeId: NODE,
       stackName,
       generationId,
+      // The env file comes first, so it is restored before compose.yaml fails.
       inventory: inventoryFor(stackName, [
-        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
         {
           relativePath: 'app.env',
           absolutePath: path.join(stackDir, 'app.env'),
           kind: 'env_file',
           sensitivity: 'medium',
         },
+        { relativePath: 'compose.yaml', absolutePath: path.join(stackDir, 'compose.yaml') },
       ]),
     });
 
@@ -969,26 +1034,30 @@ describe('RollbackGenerationStore', () => {
 
     const { FileSystemService } = await import('../services/FileSystemService');
     let swapDone = false;
+    let composeFailed = false;
     const realWrite = FileSystemService.prototype.writeStackFile;
     vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(
       async function (this: InstanceType<typeof FileSystemService>, stack, rel, content, opts) {
-        try {
-          return await realWrite.call(this, stack, rel, content, opts);
-        } finally {
-          if (rel === 'app.env' && !swapDone) {
-            swapDone = true;
-            await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
-            await fsPromises.writeFile(path.join(stackDir, 'other.env'), 'MARK=operator\n', 'utf8');
-            await fsPromises.symlink('other.env', path.join(stackDir, 'app.env'));
-          }
+        // The env file is restored first, through the link; the operator then
+        // swaps the link and compose.yaml fails once.
+        if (rel === 'compose.yaml' && !composeFailed) {
+          composeFailed = true;
+          throw new Error('injected write failure');
         }
+        const result = await realWrite.call(this, stack, rel, content, opts);
+        if (rel === 'app.env' && !swapDone) {
+          swapDone = true;
+          await fsPromises.rm(path.join(stackDir, 'app.env'), { force: true });
+          await fsPromises.writeFile(path.join(stackDir, 'other.env'), 'MARK=operator\n', 'utf8');
+          await fsPromises.symlink('other.env', path.join(stackDir, 'app.env'));
+        }
+        return result;
       },
     );
-    failFirstStagedChmod('target.env');
 
     await expect(
-      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'app.env']),
-    ).rejects.toMatchObject({ code: 'RESTORE_CHMOD_FAILED' });
+      RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['app.env', 'compose.yaml']),
+    ).rejects.toThrow(/injected write failure/);
 
     // The revert restores the link the snapshot recorded, so the bytes land
     // back on the target the restore changed. Writing through the replacement
@@ -1544,15 +1613,18 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
     });
 
     /**
-     * A restore that fails after its first file reverts it from the pre-restore
-     * snapshot. The snapshot is edited in place to give the preimage a group
-     * other than the live file's, which is what a restore leaves behind when
-     * it could not hand the file over: the live file belongs to the process.
+     * A restore of two files that fails on its second write and so reverts from
+     * the pre-restore snapshot. The snapshot entry of `tamperedRel` is edited in
+     * place before the revert reads it: to give the preimage a group other than
+     * the live file's (which is what a restore leaves behind when it could not
+     * hand the file over, since the live file then belongs to the process), or
+     * to corrupt the recorded owner.
      */
     async function failedRestoreWithTamperedIndex(
       stackName: string,
       tamper: (entry: { uid?: number; gid?: number }) => void,
-    ): Promise<{ file: string; generationId: string; outcome: Promise<unknown> }> {
+      tamperedRel = 'compose.yaml',
+    ): Promise<{ file: string; aux: string; generationId: string; outcome: Promise<unknown> }> {
       const stackDir = path.join(composeDir, stackName);
       await fsPromises.mkdir(stackDir, { recursive: true });
       const file = path.join(stackDir, 'compose.yaml');
@@ -1593,7 +1665,7 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
         if (writes === 2) {
           const index = JSON.parse(await fsPromises.readFile(indexPath, 'utf8'));
           for (const entry of index.entries) {
-            if (entry.relativePath === 'compose.yaml') tamper(entry);
+            if (entry.relativePath === tamperedRel) tamper(entry);
           }
           await fsPromises.writeFile(indexPath, JSON.stringify(index), 'utf8');
           throw new Error('injected write failure');
@@ -1617,7 +1689,7 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
 
       const outcome = RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml', 'aux.yaml']);
       await outcome.catch(() => undefined);
-      return { file, generationId, outcome };
+      return { file, aux, generationId, outcome };
     }
 
     const withPreimageGroup = (stackName: string, preimageGid: number) =>
@@ -1641,17 +1713,95 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
       expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o640);
     });
 
-    posixOnly('does not guess a group from a pre-restore index that records only half of the owner', async () => {
-      const { file, outcome, generationId } = await failedRestoreWithTamperedIndex('revert-half', (entry) => { delete entry.uid; });
+    it.each([
+      ['uid', (entry: { uid?: number; gid?: number }) => { delete entry.uid; }],
+      ['gid', (entry: { uid?: number; gid?: number }) => { delete entry.gid; }],
+      ['a negative id', (entry: { uid?: number; gid?: number }) => { entry.gid = -1; }],
+      ['a fractional id', (entry: { uid?: number; gid?: number }) => { entry.uid = 1.5; }],
+    ])('refuses a pre-restore index with an invalid owner (%s) before putting anything back', async (_label, tamper) => {
+      if (process.platform === 'win32') return;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => { /* the failed revert is logged */ });
+      const { file, aux, generationId, outcome } = await failedRestoreWithTamperedIndex('revert-invalid-owner', tamper, 'aux.yaml');
 
-      // The revert refuses the entry, so the restored bytes stay where they
-      // are and the snapshot is kept for a retry, instead of a group being
-      // assumed for the preimage.
+      // The restore wrote compose.yaml and failed on aux.yaml. The revert
+      // reports why it stopped and put nothing back, not even the entry with
+      // a sound owner that comes before the bad one, and the snapshot is kept
+      // for a retry once the index is repaired.
       await expect(outcome).rejects.toMatchObject({ restoreRevertFailed: true });
+      expect(error.mock.calls.flat().join(' ')).toContain('invalid owner');
       expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect(await fsPromises.readFile(aux, 'utf8')).toBe('NEW_AUX\n');
       await expect(
-        RollbackGenerationStore.hasPendingRestoreIntent(NODE, 'revert-half', generationId),
+        RollbackGenerationStore.hasPendingRestoreIntent(NODE, 'revert-invalid-owner', generationId),
       ).resolves.toBe(true);
+    });
+
+    posixOnly('reverts against the live file\'s group when the snapshot recorded no owner', async () => {
+      const { file, outcome } = await failedRestoreWithTamperedIndex('revert-no-owner', (entry) => {
+        delete entry.uid;
+        delete entry.gid;
+      });
+
+      // An index written before owners were kept: the mode and bytes come back
+      // as before, judged against the group the live file has.
+      await expect(outcome).rejects.toThrow(/injected write failure/);
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('NEW\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o640);
+    });
+
+    posixOnly('keeps a non-sensitive file\'s bytes when its captured mode is refused', async () => {
+      const stackName = 'restore-mode-refused';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      const file = path.join(stackDir, 'compose.yaml');
+      await fsPromises.writeFile(file, 'OLD\n', 'utf8');
+      await fsPromises.chmod(file, 0o640);
+      const generationId = randomUUID();
+      await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId,
+        inventory: inventoryFor(stackName, [{ relativePath: 'compose.yaml', absolutePath: file }]),
+        operationKind: 'manual_backup',
+      });
+      await fsPromises.writeFile(file, 'NEW\n', 'utf8');
+      await fsPromises.chmod(file, 0o644);
+      failFirstStagedChmod('compose.yaml');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* the refused mode is logged */ });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml']);
+
+      // The mode is best effort for a non-sensitive file: the bytes still come
+      // back, the refusal is logged with the file it concerned.
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect(warn.mock.calls.flat().join(' ')).toContain('"compose.yaml"');
+    });
+
+    posixOnly('fails the restore instead of publishing without the mode when the chmod hits an I/O error', async () => {
+      const stackName = 'restore-mode-io';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      const file = path.join(stackDir, 'compose.yaml');
+      await fsPromises.writeFile(file, 'OLD\n', 'utf8');
+      await fsPromises.chmod(file, 0o640);
+      const generationId = randomUUID();
+      await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId,
+        inventory: inventoryFor(stackName, [{ relativePath: 'compose.yaml', absolutePath: file }]),
+        operationKind: 'manual_backup',
+      });
+      await fsPromises.writeFile(file, 'NEW\n', 'utf8');
+      await fsPromises.chmod(file, 0o644);
+      failFirstStagedChmod('compose.yaml', 'EIO');
+
+      // A refused mode is best effort for a non-sensitive file; a disk error is not.
+      await expect(
+        RollbackGenerationStore.restoreGeneration(NODE, stackName, generationId, ['compose.yaml']),
+      ).rejects.toMatchObject({ code: 'EIO' });
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('NEW\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o644);
     });
   });
 

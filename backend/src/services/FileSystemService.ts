@@ -164,9 +164,9 @@ function openDeclarationSet(key: string): DeclarationSetPublication {
  * Keep the original owner on a staging file when the process is allowed to set
  * it (the common root-in-a-container case). A non-root process cannot hand a
  * file to another user; the replacement stays owned by the process, keeping
- * the owner's group when the process belongs to it. The change goes through the open
- * descriptor: a path-based chown would follow a link swapped in for the
- * staging name by a container that shares the directory.
+ * the owner's group when the process belongs to it. The change goes through
+ * the open descriptor: a path-based chown would follow a link swapped in for
+ * the staging name by a container that shares the directory.
  */
 async function chownStaged(
   handle: { chown(uid: number, gid: number): Promise<void> },
@@ -181,6 +181,13 @@ async function chownStaged(
   if (ownUid !== undefined && ownUid !== owner.uid) await tryChown(handle, ownUid, owner.gid);
 }
 
+/** The errors a filesystem or kernel gives for an owner or mode change it will not make. */
+const CHANGE_REFUSED_CODES = new Set(['EPERM', 'EINVAL', 'ENOSYS', 'ENOTSUP']);
+
+function isChangeRefused(err: unknown): boolean {
+  return CHANGE_REFUSED_CODES.has((err as NodeJS.ErrnoException).code ?? '');
+}
+
 /** One ownership change through the descriptor; false when the system refuses it. */
 async function tryChown(
   handle: { chown(uid: number, gid: number): Promise<void> },
@@ -191,17 +198,16 @@ async function tryChown(
     await handle.chown(uid, gid);
     return true;
   } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
+    if (!isChangeRefused(err)) throw err;
     return false;
   }
 }
 
 /**
- * A failure to apply an explicit permission mode to a staged file. The write
+ * A refusal to apply an explicit permission mode to a staged file. The write
  * did not publish, so a caller that treats the mode as best effort can tell
- * this from every other write failure and publish the bytes with the mode the
- * file already had.
+ * this from every other write failure (an I/O error on the same call is not
+ * one) and publish the bytes with the mode the file already had.
  */
 function modeApplicationError(err: unknown): Error {
   const error = err instanceof Error ? err : new Error(String(err));
@@ -2579,10 +2585,10 @@ export class FileSystemService {
     // can drop leading zeros which narrows entropy unpredictably.
     const suffix = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
     const tmpPath = `${safePath}.sencho-tmp-${suffix}`;
-    // Without an explicit mode, a replaced regular file's own mode and owner
-    // carry over, so a file kept private to another user does not become
-    // unreadable to them. A new file takes the process default, as a direct
-    // create would.
+    // A replaced regular file's owner carries over unless the caller names
+    // one, and so does its mode unless the caller gives a mode, so a file kept
+    // private to another user does not become unreadable to them. A new file
+    // takes the process default, as a direct create would.
     const existing = opts.mode === undefined || !opts.owner ? await existingFileIdentity(safePath) : undefined;
     const publishedMode = opts.mode ?? existing?.mode;
     const owner = opts.owner ?? (existing ? { uid: existing.uid, gid: existing.gid } : undefined);
@@ -2631,28 +2637,27 @@ export class FileSystemService {
           const finalMode = handedOver ? handoverMode : handoverMode & 0o707;
           if (!handedOver) {
             console.warn(
-              `[FileSystemService] Could not hand ${sanitizeForLog(path.basename(safePath))} to its owner; its group permissions are dropped`,
+              `[FileSystemService] Could not keep ${sanitizeForLog(path.basename(safePath))} in its owner's group; its group permissions are dropped`,
             );
           }
           try {
             await fh.chmod(finalMode);
           } catch (err: unknown) {
-            const code = (err as NodeJS.ErrnoException).code;
+            if (!isChangeRefused(err)) throw err;
             // An explicit mode that the filesystem refuses is an error. A mode
             // carried over from the replaced file may be refused by a
             // filesystem that cannot set modes, which leaves the staging file
             // owner-only, the narrower outcome.
             if (opts.mode !== undefined) throw modeApplicationError(err);
-            if (code !== 'EPERM' && code !== 'EINVAL' && code !== 'ENOSYS' && code !== 'ENOTSUP') throw err;
             console.warn(
-              `[FileSystemService] Could not restore mode ${finalMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${code}); the file stays owner-only`,
+              `[FileSystemService] Could not restore mode ${finalMode.toString(8)} on ${sanitizeForLog(path.basename(safePath))} (${(err as NodeJS.ErrnoException).code}); the file stays owner-only`,
             );
           }
         } else if (opts.mode !== undefined) {
           try {
             await fh.chmod(opts.mode);
           } catch (err: unknown) {
-            throw modeApplicationError(err);
+            throw isChangeRefused(err) ? modeApplicationError(err) : err;
           }
         }
         await fh.sync();
@@ -2692,9 +2697,10 @@ export class FileSystemService {
   /**
    * Write `content` to a stack-relative path. `mode`, when given, is set on the
    * staging file before promotion, so the target lands with that mode
-   * instead of the process umask's creation mode. When the replaced file
-   * belongs to another group and the process cannot hand the new file over,
-   * the group bits are dropped.
+   * instead of the process umask's creation mode. `owner` names the owner and
+   * group the file should have when they are not the replaced file's. When the
+   * published file cannot be kept in that group the group bits are dropped;
+   * `writeStackFileAtomic` describes the rule.
    */
   async writeStackFile(
     stackName: string,

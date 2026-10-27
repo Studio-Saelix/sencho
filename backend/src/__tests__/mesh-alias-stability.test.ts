@@ -1323,6 +1323,57 @@ describe('overlapping refreshes', () => {
         await timer;
     });
 
+    it('hands every superseded caller back only after the newest of three refreshes has published', async () => {
+        const db = DatabaseService.getInstance();
+        db.insertMeshStack(remoteNodeId, 'api', 'tester');
+        const gate = gatedInspect();
+        const svc = MeshService.getInstance();
+        const settled: string[] = [];
+
+        const first = svc.refreshAliasCache().then(() => { settled.push('first'); });
+        const second = svc.refreshAliasCache().then(() => { settled.push('second'); });
+        const third = svc.refreshAliasCache().then(() => { settled.push('third'); });
+        await gate.waitForCalls(3);
+
+        // The oldest answers carry a stale port; only the newest's is published.
+        gate.answer(0, [{ service: 'web', ports: [1111], running: true }]);
+        gate.answer(1, [{ service: 'web', ports: [2222], running: true }]);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(settled).toEqual([]);
+        expect(await svc.listAliases()).toEqual([]);
+
+        gate.answer(2, [{ service: 'web', ports: [3333], running: true }]);
+        await Promise.all([first, second, third]);
+        expect((await svc.listAliases()).map((a) => a.port)).toEqual([3333]);
+        expect(settled).toHaveLength(3);
+    });
+
+    it('hands a superseded caller the newest refresh\'s failure instead of a stale cache', async () => {
+        const db = DatabaseService.getInstance();
+        db.insertMeshStack(remoteNodeId, 'api', 'tester');
+        const gate = gatedInspect();
+        const svc = MeshService.getInstance();
+
+        const older = svc.refreshAliasCache();
+        const olderOutcome = older.then(() => 'resolved', (err: unknown) => (err as Error).message);
+        await gate.waitForCalls(1);
+        // The newest refresh cannot even read the membership.
+        vi.spyOn(db, 'listMeshStacks').mockImplementationOnce(() => { throw new Error('database unavailable'); });
+        const newest = svc.refreshAliasCache();
+        await expect(newest).rejects.toThrow('database unavailable');
+
+        // The older run's own answer would be a stale cache. It must not
+        // publish, and its caller must not be told all is well.
+        gate.answer(0, [{ service: 'web', ports: [8080], running: true }]);
+        expect(await olderOutcome).toBe('database unavailable');
+        expect(await svc.listAliases()).toEqual([]);
+
+        // The next refresh works as usual.
+        mockInspect(async () => [{ service: 'web', ports: [8080], running: true }]);
+        await svc.refreshAliasCache();
+        expect((await svc.listAliases()).map((a) => a.host)).toContain('web.api.edge.sencho');
+    });
+
     describe('a mutation that a timer refresh supersedes', () => {
         type Mutating = {
             syncForwarderListeners: () => Promise<void>;
@@ -1517,28 +1568,30 @@ describe('overlapping refreshes', () => {
 
             // Applying the override records the stack as meshed, so each
             // refresh inspects it as well as the stack already opted in.
-            const apply = svc.applyLocalOverride('overlay-app', [], [{
-                host: 'api.overlay-app.hub.sencho', nodeId: 99, nodeName: 'hub', stackName: 'overlay-app', serviceName: 'api', port: 9090,
-            }]);
-            await gate.waitForCalls(2);
-            const timer = svc.refreshAliasCache();
-            await gate.waitForCalls(4);
+            try {
+                const apply = svc.applyLocalOverride('overlay-app', [], [{
+                    host: 'api.overlay-app.hub.sencho', nodeId: 99, nodeName: 'hub', stackName: 'overlay-app', serviceName: 'api', port: 9090,
+                }]);
+                await gate.waitForCalls(2);
+                const timer = svc.refreshAliasCache();
+                await gate.waitForCalls(4);
 
-            gate.answer(0, web);
-            gate.answer(1, [{ service: 'app', ports: [3000], running: true }]);
-            await new Promise((resolve) => setTimeout(resolve, 20));
-            expect(synced).toEqual([]);
-            gate.answer(2, web);
-            gate.answer(3, [{ service: 'app', ports: [3000], running: true }]);
-            await apply;
-            await timer;
+                gate.answer(0, web);
+                gate.answer(1, [{ service: 'app', ports: [3000], running: true }]);
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                expect(synced).toEqual([]);
+                gate.answer(2, web);
+                gate.answer(3, [{ service: 'app', ports: [3000], running: true }]);
+                await apply;
+                await timer;
 
-            // The overlay and the sender address belong to the singleton, so they are put back.
-            internals.pilotAliasOverlay.delete('overlay-app');
-            internals.senchoIp = null;
-
-            expect(synced).toHaveLength(1);
-            expect(synced[0]).toEqual(expect.arrayContaining(['api.overlay-app.hub.sencho', 'web.kept.edge.sencho']));
+                expect(synced).toHaveLength(1);
+                expect(synced[0]).toEqual(expect.arrayContaining(['api.overlay-app.hub.sencho', 'web.kept.edge.sencho']));
+            } finally {
+                // The overlay and the sender address belong to the singleton.
+                internals.pilotAliasOverlay.delete('overlay-app');
+                internals.senchoIp = null;
+            }
         });
 
         it('a pilot override removal syncs listeners from the refreshed aliases', async () => {
@@ -1577,10 +1630,11 @@ describe('overlapping refreshes', () => {
 });
 
 /**
- * An inspection stub whose answers the test releases one at a time, so two
- * refreshes can be made to finish in either order. The first `immediate`
- * calls answer at once with one running `web` service on port 8080 (opt-in's
- * own look at the stack before it inserts the membership).
+ * An inspection stub whose answers the test releases one at a time, so refreshes
+ * can be made to finish in either order. Answer `index` is the index-th call to
+ * the inspector, whichever stack it was for. The first `immediate` calls answer
+ * at once with one running `web` service on port 8080 (opt-in's look at the
+ * stack before it inserts the membership).
  */
 function gatedInspect(opts: { immediate?: number } = {}): {
     waitForCalls: (count: number) => Promise<void>;

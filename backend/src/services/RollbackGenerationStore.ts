@@ -14,6 +14,7 @@ import path from 'path';
 import { CryptoService } from './CryptoService';
 import { FileSystemService, isModeApplicationError, type DeclarationSetPublication } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
   type ResolvedRollbackInventory,
@@ -868,8 +869,8 @@ export class RollbackGenerationStore {
             );
           }
           console.warn(
-            '[RollbackGenerationStore] Could not restore mode on entry:',
-            (e as Error).message,
+            `[RollbackGenerationStore] Could not restore mode on "${sanitizeForLog(item.relativePath)}":`,
+            sanitizeForLog((e as Error).message),
           );
           // Nothing was published. The bytes still come back, with the mode
           // the file already had.
@@ -1289,6 +1290,16 @@ export class RollbackGenerationStore {
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
 
+    // Refuse a malformed recorded mode or owner before the first file is put
+    // back: a revert that stops at a bad entry halfway leaves the stack in a
+    // mixture that every retry hits again.
+    for (const entry of index.entries) {
+      const rel = posixRel(entry.relativePath);
+      if (!rel || entry.state !== 'present') continue;
+      this.preRestoreWriteMode(rel, entry.mode);
+      this.preRestoreWriteOwner(rel, entry);
+    }
+
     for (const entry of index.entries) {
       const rel = posixRel(entry.relativePath);
       if (!rel) continue;
@@ -1369,12 +1380,14 @@ export class RollbackGenerationStore {
       // the file. Judged against the preimage, a process that cannot put the
       // file back in its group publishes it without the group bits.
       const mode = this.preRestoreWriteMode(rel, entry.mode);
-      const owner = mode === undefined ? undefined : this.preRestoreWriteOwner(rel, entry);
+      const owner = this.preRestoreWriteOwner(rel, entry);
       await fsSvc.writeStackFile(
         stackName,
         rel,
         buf,
-        mode === undefined ? undefined : { mode, ...(owner ? { owner } : {}) },
+        mode === undefined && owner === undefined
+          ? undefined
+          : { ...(mode === undefined ? {} : { mode }), ...(owner ? { owner } : {}) },
       );
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
@@ -1403,10 +1416,10 @@ export class RollbackGenerationStore {
 
   /**
    * The owner and group to hand a reverted file back to, or undefined when the
-   * snapshot recorded none (an index written before they were kept, or a
-   * platform without them). A half-recorded or malformed pair is refused
-   * rather than guessed at, so a corrupt index cannot move a file to a group
-   * it never had.
+   * snapshot recorded none (an index written before they were kept) or the
+   * platform has no POSIX owners, in which case the live file's own are
+   * carried over. A half-recorded or malformed pair is refused rather than
+   * guessed at, so a corrupt index cannot move a file to a group it never had.
    */
   private static preRestoreWriteOwner(
     rel: string,
