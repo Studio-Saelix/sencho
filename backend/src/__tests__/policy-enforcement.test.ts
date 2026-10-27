@@ -506,19 +506,36 @@ describe('blocked-deploy log line', () => {
       .mockRejectedValueOnce(new Error('pull timed out'))
       .mockRejectedValueOnce(new Error('trivy crashed'));
 
-    await enforcePolicyForImageRefs('web', 1, ['alpine:3.17', 'alpine:3.19'], { bypass: false, actor: 'u' });
+    const result = await enforcePolicyForImageRefs('web', 1, ['alpine:3.17', 'alpine:3.19'], { bypass: false, actor: 'u' });
 
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(2);
     expect(blockLines()).toEqual([
       '[Policy] Blocked deploy for "web": 2 image(s) could not be evaluated (policy "block-high"): alpine:3.17: Pre-flight scan failed: pull timed out; alpine:3.19: Pre-flight scan failed: trivy crashed',
     ]);
   });
 
-  it('redacts credentials and strips control characters from the logged cause', async () => {
-    await enforcePolicyForImageRefs('web', 1, ['user:secret@registry.example.com/app:1\nINJECTED'], { bypass: false, actor: 'u' }, undefined, true);
+  it('redacts credentials and strips control characters from a logged image reference', async () => {
+    const result = await enforcePolicyForImageRefs('web', 1, ['user:secret@registry.example.com/app:1\nINJECTED'], { bypass: false, actor: 'u' }, undefined, true);
 
+    expect(result.ok).toBe(false);
+    expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
     const lines = blockLines();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('[redacted]@registry.example.com/app:1');
+    expect(lines[0]).not.toContain('secret');
+    expect(lines[0]).not.toMatch(/[\r\n]/);
+  });
+
+  it('redacts credentials and strips control characters from a logged scan error', async () => {
+    trivyStub.scanImagePreflight.mockRejectedValue(new Error('pull failed: https://user:secret@registry.example.com/v2/\nstderr line'));
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['registry.example.com/app:1'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    const lines = blockLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('https://[redacted]@registry.example.com/v2/');
     expect(lines[0]).not.toContain('secret');
     expect(lines[0]).not.toMatch(/[\r\n]/);
   });
@@ -528,7 +545,10 @@ describe('blocked-deploy log line', () => {
       .mockResolvedValueOnce(criticalScan())
       .mockRejectedValueOnce(new Error('trivy crashed'));
 
-    await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'alpine:3.19'], { bypass: false, actor: 'u' });
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'alpine:3.19'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(2);
 
     expect(blockLines()).toEqual([
       '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
