@@ -136,9 +136,10 @@ interface ImageRiskEvaluation {
     unverified?: { reasons: PolicyBlockReason[]; cause: string };
 }
 
-/** Why `aggregateFallback` could not read KEV/fixability from the detail rows. */
-const DETAIL_READ_FAILED = 'detail rows could not be read';
-const DETAIL_ROWS_TRUNCATED = 'stored detail rows do not match the scan total';
+/** Why `aggregateFallback` could not read KEV/fixability from the stored evidence. */
+const EVIDENCE_READ_FAILED = 'stored scan evidence could not be read';
+const detailRowsTruncated = (stored: number, total: number): string =>
+    `stored detail rows (${stored}) do not match the scan total (${total})`;
 
 interface SuppressionPass {
     imageRef: string;
@@ -213,7 +214,7 @@ function evaluateImageRisk(
         // KEV/fixable gate must not silently degrade to "allow" on a transient
         // read error. The admin bypass path stays available.
         console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
-        return aggregateFallback(inputs, rawSeverity, scan, DETAIL_READ_FAILED);
+        return aggregateFallback(inputs, rawSeverity, scan, EVIDENCE_READ_FAILED);
     }
 
     // The stored detail rows must reproduce the scan's full finding set before
@@ -229,7 +230,7 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        return aggregateFallback(inputs, rawSeverity, scan, DETAIL_ROWS_TRUNCATED);
+        return aggregateFallback(inputs, rawSeverity, scan, detailRowsTruncated(findings.length, scan.total_vulnerabilities));
     }
 
     // KEV membership is the same for the full set and the non-suppressed subset,

@@ -559,8 +559,8 @@ describe('blocked-deploy log line', () => {
   });
 
   describe('fail-closed on missing evidence', () => {
-    const TRUNCATED = 'stored detail rows do not match the scan total';
-    const UNREADABLE = 'detail rows could not be read';
+    const TRUNCATED = 'stored detail rows (1) do not match the scan total (5)';
+    const UNREADABLE = 'stored scan evidence could not be read';
 
     // Five findings counted, one stored row: the cache-hit preflight shape.
     function lowOnlyTruncatedScan(): VulnerabilityScan {
@@ -587,6 +587,28 @@ describe('blocked-deploy log line', () => {
       expect(result.ok).toBe(false);
       expect(blockLines()).toEqual([
         `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${UNREADABLE}`,
+      ]);
+    });
+
+    it('names the stored row count against the scan total when only some rows were kept', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+      const row = { id: 1, scan_id: 43, vulnerability_id: 'CVE-2024-9', pkg_name: 'p', installed_version: '1', fixed_version: null, severity: 'LOW', title: null, description: null, primary_url: null };
+      dbStub.getAllVulnerabilityDetails.mockReturnValue([row, row, row]);
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        '[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, stored detail rows (3) do not match the scan total (5)',
+      ]);
+    });
+
+    it('lists every image with unverified evidence on one line', async () => {
+      trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+      await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'redis:6'], { bypass: false, actor: 'u' });
+
+      expect(blockLines()).toEqual([
+        `[Policy] Blocked deploy for "web": 2 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; redis:6: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
       ]);
     });
 
@@ -654,7 +676,7 @@ describe('blocked-deploy log line', () => {
       expect(result.violations).toHaveLength(3);
       expect(blockLines()).toEqual([
         '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH, KEV, fixable Critical/High (policy "block-high")',
-        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): redis:6: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}`,
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): redis:6: known-exploited CVE (KEV), fixable Critical/High not verified, stored detail rows (0) do not match the scan total (5)`,
         '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): alpine:3.19: Pre-flight scan failed: trivy crashed',
       ]);
     });
