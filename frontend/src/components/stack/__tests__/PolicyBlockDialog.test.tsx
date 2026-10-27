@@ -508,3 +508,18 @@ describe('PolicyBlockDialog names the operation it blocked', () => {
     expect(screen.getByText(/Resolve the failure and update again/)).toBeInTheDocument();
   });
 });
+
+describe('PolicyBlockDialog lead sentence', () => {
+  // The screen-reader description repeats the sentence, so a join defect in the
+  // visible paragraph hides behind a document-wide match. Read the paragraph.
+  it.each([
+    ['deploy', 'deploys'],
+    ['update', 'updates'],
+    ['rollback', 'rollbacks'],
+  ] as const)('separates "%s" from the conditions in the visible paragraph', (action, plural) => {
+    render(<PolicyBlockDialog open payload={publicPayload} stackName="web" action={action} onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    const lead = [...document.body.querySelectorAll('p')].find((el) => el.textContent?.startsWith('Policy prod-gate') && el.querySelector('span'));
+    expect(lead).toBeDefined();
+    expect(lead?.textContent).toMatch(new RegExp(`^Policy prod-gate blocks ${plural} on `));
+  });
+});

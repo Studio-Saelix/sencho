@@ -190,7 +190,7 @@ export function PolicyBlockDialog({
       />
       <ModalBody>
         <p className="text-sm text-muted-foreground">
-          Policy <span className="font-medium text-foreground">{policyName}</span> blocks {copy.plural}
+          Policy <span className="font-medium text-foreground">{policyName}</span> blocks {copy.plural}{' '}
           on <span className="font-medium text-foreground">{inputsText}</span>.{' '}
           {hasGenuineViolation
             ? // Counted over the genuine matches only. On a mixed payload the
