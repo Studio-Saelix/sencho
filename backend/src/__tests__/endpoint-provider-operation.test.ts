@@ -226,11 +226,11 @@ describe('reconcileOnStartup (the new process)', () => {
 
   it('answers negatively when Docker does not answer through the new provider', async () => {
     const { service, operationId } = await claimRecreating();
-    mockDocker({ ping: async () => { throw new Error('connect ECONNREFUSED socket-proxy:2375'); } });
+    mockDocker({ ping: async () => { throw new Error('(HTTP code 403) unexpected - <html><body><h1>403 Forbidden</h1>\nRequest forbidden by administrative rules.\n</body></html>\n'); } });
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
-      expect(ack).toMatchObject({ ok: false, detail: expect.stringContaining('ECONNREFUSED') });
+      expect(ack).toMatchObject({ ok: false, detail: 'Docker did not answer through "socket-proxy": (HTTP code 403) unexpected - 403 Forbidden Request forbidden by administrative rules.' });
     });
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
     await reconcile;

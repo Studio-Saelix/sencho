@@ -63,6 +63,15 @@ export type HardenedPreflight =
 const OPERATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/**
+ * One line of operator text from an error that may carry a proxy's HTML error
+ * page or multi-line Compose output: tags dropped, whitespace collapsed, capped.
+ */
+function plainText(text: string): string {
+  const flat = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return flat.length > 400 ? `${flat.slice(0, 400)}...` : flat;
+}
+
 const NON_TERMINAL_STATES: ReadonlyArray<ImageOperationState> = ['pending_pull', 'pulling', 'patching', 'recreating'];
 
 export class ImageOperationService {
@@ -409,7 +418,7 @@ export class ImageOperationService {
           detail = `"${provider.service}" healthcheck is ${health}`;
         }
       } catch (error) {
-        detail = `Docker did not answer through "${provider.service}": ${getErrorMessage(error, 'request failed')}`;
+        detail = `Docker did not answer through "${provider.service}": ${plainText(getErrorMessage(error, 'request failed'))}`;
       }
       if (Date.now() >= deadline) return { operationId: operation.operationId, ok: false, detail };
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
@@ -459,7 +468,7 @@ export class ImageOperationService {
     }
     const restored = outcome?.rollback.restored === true;
     const failureCode: EndpointProviderFailureCode = restored ? 'endpoint_provider_restored' : 'endpoint_provider_recovery_required';
-    const cause = outcome?.error ?? 'The replacement helper did not report an outcome in time.';
+    const cause = plainText(outcome?.error ?? 'The replacement helper did not report an outcome in time.');
     const detail = restored
       ? `Replacing the Docker endpoint "${service}" failed: ${cause} The previous "${service}" container was restored and Sencho reaches Docker again. Fix the Compose configuration of "${service}", then run Reapply again.`
       : `Replacing the Docker endpoint "${service}" failed: ${cause} The previous container could not be restored${outcome?.rollback.error ? ` (${outcome.rollback.error})` : ''}. Sencho may not reach Docker on this node until "${service}" runs again: on the host, run "docker compose up -d ${service}" in Sencho's Compose project directory, then check Fleet. The helper log is in the Sencho data directory under ${path.dirname(helperFiles.plan('', current.operationId)).replace(/^\//, '')}.`;
