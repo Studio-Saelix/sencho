@@ -512,6 +512,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * the same run.
      */
     private latestAliasRefresh: Promise<void> = Promise.resolve();
+    /**
+     * Snapshots a refresh computed but could not store, by membership row id.
+     * The replay for an unreachable node reads the saved snapshot, and a stale
+     * one would drop the alias and reservation of a service that arrived since:
+     * the newer snapshot is replayed from here until a write succeeds. Row ids
+     * are never reused (AUTOINCREMENT), and the refresh drops the ids of rows
+     * that no longer exist.
+     */
+    private unpersistedSnapshots = new Map<number, string>();
     // Populated on pilot nodes via the D-1 override push. Central's
     // db.listMeshStacks() is authoritative on central; pilots have no
     // mesh_stacks rows (C-3 design), so the push payload carries the alias
@@ -2462,7 +2471,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 const reach = { reachable: true };
                 const live = await this.inspectStackServices(row.node_id, row.stack_name, reach);
                 const { reachable } = reach;
-                const lastKnown = parseLastKnownServices(row.last_known_services);
+                const lastKnown = parseLastKnownServices(this.savedSnapshotOf(row));
                 // Docker reports no port bindings for a stopped container, and
                 // a container that is mid-removal is absent from the inventory
                 // entirely. Neither is evidence that the stack no longer
@@ -2505,6 +2514,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             await this.latestAliasRefresh;
             return;
         }
+        const liveRowIds = new Set(stacks.map((row) => row.id));
+        for (const id of this.unpersistedSnapshots.keys()) {
+            if (!liveRowIds.has(id)) this.unpersistedSnapshots.delete(id);
+        }
         for (let index = 0; index < inspections.length; index += 1) {
             const result = inspections[index];
             const row = stacks[index];
@@ -2525,16 +2538,34 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 console.warn(
                     `[MeshService] alias refresh inspection failed for ${sanitizeForLog(row.stack_name)}; replaying saved services`,
                 );
-                services = parseLastKnownServices(row.last_known_services);
+                services = parseLastKnownServices(this.savedSnapshotOf(row));
                 reservedServices = services;
                 snapshot = null;
             }
-            if (snapshot !== null && snapshot !== row.last_known_services) {
+            // A snapshot an earlier tick could not store is tried again here,
+            // including on a tick that observed nothing, so the database
+            // catches up as soon as it can write.
+            const toStore = snapshot ?? this.unpersistedSnapshots.get(row.id) ?? null;
+            if (toStore !== null && toStore !== row.last_known_services) {
                 try {
-                    db.setMeshStackLastKnownServices(row.id, snapshot);
+                    db.setMeshStackLastKnownServices(row.id, toStore);
+                    this.unpersistedSnapshots.delete(row.id);
                 } catch (err) {
+                    const firstFailure = !this.unpersistedSnapshots.has(row.id);
+                    this.unpersistedSnapshots.set(row.id, toStore);
                     console.warn('[MeshService] failed to persist last known mesh services:', sanitizeForLog((err as Error).message));
+                    // Once per failing stretch, not once per 60 s tick.
+                    if (firstFailure) {
+                        this.logActivity({
+                            source: 'mesh', level: 'warn', type: 'forwarder.error',
+                            nodeId: row.node_id,
+                            message: `could not save the last known services of ${row.stack_name}; they are kept in memory and lost on restart`,
+                            details: { stackName: row.stack_name },
+                        });
+                    }
                 }
+            } else if (toStore !== null) {
+                this.unpersistedSnapshots.delete(row.id);
             }
             for (const svc of reservedServices) {
                 for (const port of svc.ports) {
@@ -2591,6 +2622,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             ports: portMap.size,
             ms: Date.now() - t0,
         });
+    }
+
+    /** The snapshot a replay starts from: the newest one computed, stored or not. */
+    private savedSnapshotOf(row: { id: number; last_known_services?: string | null }): string | null | undefined {
+        return this.unpersistedSnapshots.get(row.id) ?? row.last_known_services;
     }
 
     public async listAliases(): Promise<MeshGlobalAlias[]> {
@@ -2746,6 +2782,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         if (relFiles.length === 0) return null;
         const names = new Set<string>();
+        // Folders other than the stack's own that hold a layer's real file,
+        // reached through in-root links. A multi-file write brackets the
+        // folder it writes, so the declaration is whole only while none of
+        // these folders has a publication open or abandoned.
+        const sharedFolders = new Set<string>();
         for (const relFile of relFiles) {
             let parsed: unknown;
             let content: string;
@@ -2765,6 +2806,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 if (!layer.publishedBySencho) {
                     this.logDiag('compose declaration layer not published by Sencho', { stackName, relFile });
                     return null;
+                }
+                if (layer.ownerFolder !== null && layer.ownerFolder !== stackName) {
+                    sharedFolders.add(layer.ownerFolder);
                 }
                 content = layer.content;
                 parsed = YAML.parse(content, { merge: true });
@@ -2804,6 +2848,22 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (fsSvc.declarationSetEpoch(stackName) !== setBefore) {
             this.logDiag('compose declaration set changed while it was being read', { stackName });
             return null;
+        }
+        // The clock check above covers a bracket that opened or closed during
+        // the read, and this one a bracket that was already open or abandoned
+        // when it began: a shared layer is whole only if its own folder is.
+        // A folder name that is not a stack folder cannot hold a bracket.
+        for (const folder of sharedFolders) {
+            let whole: boolean;
+            try {
+                whole = fsSvc.declarationSetEpoch(folder) !== null;
+            } catch {
+                whole = true;
+            }
+            if (!whole) {
+                this.logDiag('shared compose layer is being rewritten', { stackName, folder });
+                return null;
+            }
         }
         // A Compose stack declares at least one service. An empty union means
         // no file contributed a readable services map, not that the stack

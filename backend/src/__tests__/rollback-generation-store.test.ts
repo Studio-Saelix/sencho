@@ -1612,6 +1612,139 @@ it('restores a snapshotted Git manifesto on compensate path helper', async () =>
       expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o604);
     });
 
+    /** A process that is not root can give a file only to a group it is in. */
+    function refuseForeignGroups(): void {
+      const ownGid = process.getgid?.() ?? 0;
+      const realOpen = fsPromises.open.bind(fsPromises);
+      vi.spyOn(fsPromises, 'open').mockImplementation((async (...args: Parameters<typeof fsPromises.open>) => {
+        const fh = await realOpen(...args);
+        if (!String(args[0]).includes('sencho-tmp')) return fh;
+        const realChown = fh.chown.bind(fh);
+        fh.chown = (async (uid: number, gid: number) => {
+          if (gid !== ownGid) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+          return realChown(uid, gid);
+        }) as typeof fh.chown;
+        return fh;
+      }) as typeof fsPromises.open);
+    }
+
+    /** Edit the captured entry of compose.yaml in place, as if it had been captured with another owner. */
+    async function editCapturedEntry(
+      stackName: string,
+      generationId: string,
+      edit: (entry: { uid?: number; gid?: number; mode: number | null }) => void,
+    ): Promise<void> {
+      const manifestPath = path.join(RollbackGenerationStore.getGenerationDir(NODE, stackName, generationId), 'generation.json');
+      const manifest = JSON.parse(await fsPromises.readFile(manifestPath, 'utf8'));
+      edit(manifest.entries[0]);
+      await fsPromises.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
+    }
+
+    posixOnly('records the owner and group of a captured file in the manifest', async () => {
+      const stackName = 'capture-owner';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      const file = path.join(stackDir, 'compose.yaml');
+      await fsPromises.writeFile(file, 'OLD\n', 'utf8');
+      const manifest = await RollbackGenerationStore.captureGeneration({
+        nodeId: NODE,
+        stackName,
+        generationId: randomUUID(),
+        inventory: inventoryFor(stackName, [{ relativePath: 'compose.yaml', absolutePath: file }]),
+        operationKind: 'manual_backup',
+      });
+      const st = await fsPromises.stat(file);
+      expect(manifest.entries[0]).toMatchObject({ uid: st.uid, gid: st.gid });
+    });
+
+    posixOnly('does not publish group bits when the live file was deleted and the group cannot be kept', async () => {
+      const { generationId, file } = await captured('restore-deleted');
+      // Captured in a group the process is not in; the live file is gone, so
+      // there is no group on disk to judge the bits against.
+      const ownGid = process.getgid?.() ?? 0;
+      await editCapturedEntry('restore-deleted', generationId, (entry) => { entry.gid = ownGid + 1; });
+      await fsPromises.rm(file);
+      refuseForeignGroups();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-deleted', generationId, ['compose.yaml']);
+
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o600);
+      expect(warn.mock.calls.flat().join(' ')).toContain('its group permissions are dropped');
+    });
+
+    posixOnly('stays group-safe on a second restore, when the live file already belongs to the process group', async () => {
+      const { generationId, file } = await captured('restore-twice');
+      const ownGid = process.getgid?.() ?? 0;
+      await editCapturedEntry('restore-twice', generationId, (entry) => { entry.gid = ownGid + 1; });
+      refuseForeignGroups();
+      vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-twice', generationId, ['compose.yaml']);
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o600);
+
+      // The first restore left the live file in the process group. Judged
+      // against that group, the second would hand the captured bits back.
+      await fsPromises.writeFile(file, 'NEWER\n', 'utf8');
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-twice', generationId, ['compose.yaml']);
+
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o600);
+    });
+
+    posixOnly('stays group-safe when a save moved the live file to the process group before the restore', async () => {
+      const { generationId, file } = await captured('restore-after-save');
+      const ownGid = process.getgid?.() ?? 0;
+      await editCapturedEntry('restore-after-save', generationId, (entry) => { entry.gid = ownGid + 1; });
+      refuseForeignGroups();
+      vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+      // A non-root save of the same file: owned by the process, group bits dropped.
+      const { FileSystemService } = await import('../services/FileSystemService');
+      await FileSystemService.getInstance(NODE).writeStackFile('restore-after-save', 'compose.yaml', 'SAVED\n', { mode: 0o600 });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-after-save', generationId, ['compose.yaml']);
+
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o600);
+    });
+
+    posixOnly('keeps the captured group bits when the captured group is the process\'s, even for a deleted file', async () => {
+      const { generationId, file } = await captured('restore-deleted-held');
+      await fsPromises.rm(file);
+      refuseForeignGroups();
+      vi.spyOn(console, 'warn').mockImplementation(() => { /* the fallback is logged */ });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-deleted-held', generationId, ['compose.yaml']);
+
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o640);
+    });
+
+    posixOnly('falls back to the live file\'s group for a generation captured before owners were kept', async () => {
+      const { generationId, file } = await captured('restore-legacy');
+      await editCapturedEntry('restore-legacy', generationId, (entry) => { delete entry.uid; delete entry.gid; });
+
+      await RollbackGenerationStore.restoreGeneration(NODE, 'restore-legacy', generationId, ['compose.yaml']);
+
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('OLD\n');
+      expect((await fsPromises.stat(file)).mode & 0o777).toBe(0o640);
+    });
+
+    it.each([
+      ['only a uid', (entry: { uid?: number; gid?: number }) => { delete entry.gid; }],
+      ['a negative id', (entry: { uid?: number; gid?: number }) => { entry.gid = -1; }],
+      ['a fractional id', (entry: { uid?: number; gid?: number }) => { entry.uid = 1.5; }],
+    ])('refuses a generation manifest with an invalid owner (%s) before writing anything', async (_label, tamper) => {
+      if (process.platform === 'win32') return;
+      const { generationId, file } = await captured('restore-invalid-owner');
+      await editCapturedEntry('restore-invalid-owner', generationId, tamper);
+
+      await expect(
+        RollbackGenerationStore.restoreGeneration(NODE, 'restore-invalid-owner', generationId, ['compose.yaml']),
+      ).rejects.toThrow(/invalid owner/);
+      expect(await fsPromises.readFile(file, 'utf8')).toBe('NEW\n');
+    });
+
     /**
      * A restore of two files that fails on its second write and so reverts from
      * the pre-restore snapshot. The snapshot entry of `tamperedRel` is edited in

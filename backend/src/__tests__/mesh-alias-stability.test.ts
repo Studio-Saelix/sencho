@@ -12,6 +12,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
+import YAML from 'yaml';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { MeshError, parseLastKnownServices } from '../services/MeshService';
 
@@ -213,7 +214,10 @@ describe('mesh alias stability', () => {
         mockInspect(async (_n, stack) => (stack === 'api' ? [{ service: 'web', ports: [5432] }] : []));
 
         await expect(svc.optInStack(localNodeId, 'api', 'tester'))
-            .rejects.toThrow(/port 5432 is already claimed by db\.pg\.edge\.sencho/);
+            .rejects.toMatchObject({
+                code: 'port_collision',
+                message: expect.stringMatching(/port 5432 is already claimed by db\.pg\.edge\.sencho/),
+            });
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 
@@ -238,7 +242,10 @@ describe('mesh alias stability', () => {
         expect((svc as unknown as Internals).reservedPorts.get(5432)?.host).toBe('db.pg.edge.sencho');
 
         await expect(svc.optInStack(localNodeId, 'api', 'tester'))
-            .rejects.toThrow(/port 5432 is already claimed by db\.pg\.edge\.sencho/);
+            .rejects.toMatchObject({
+                code: 'port_collision',
+                message: expect.stringMatching(/port 5432 is already claimed by db\.pg\.edge\.sencho/),
+            });
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 
@@ -341,7 +348,10 @@ describe('mesh alias stability', () => {
 
         if (!file) throw new Error('no override was written');
         const text = await fs.readFile(file, 'utf8');
-        expect(text).toContain('db.pg.edge.sencho');
+        // The hostname is an extra_hosts entry of the consumer's service, not
+        // just text somewhere in the file.
+        const services = (YAML.parse(text) as { services: Record<string, { extra_hosts?: string[] }> }).services;
+        expect(services.app.extra_hosts?.some((entry) => entry.startsWith('db.pg.edge.sencho'))).toBe(true);
     });
 });
 
@@ -1958,6 +1968,276 @@ describe('a multi-file publication in progress does not release claims', () => {
         ]);
         await svc.refreshAliasCache();
         expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+    });
+});
+
+/**
+ * A stack can share a compose layer with another stack through a link that
+ * stays inside the compose root. A multi-file write brackets the folder it
+ * writes, so the sharer is whole only while the owning folder is too.
+ */
+describe('a layer shared through an in-root link follows the owner\'s publication', () => {
+    const owner = 'shared-owner';
+    const sharer = 'shared-sharer';
+
+    beforeEach(() => {
+        const root = process.env.COMPOSE_DIR as string;
+        for (const entry of [owner, sharer, 'own-layers-stack', 'root-level.yml']) {
+            fsSync.rmSync(path.join(root, entry), { recursive: true, force: true });
+        }
+    });
+
+    /** The sharer declares web itself and db through a discovered override that links into the owner. */
+    async function sharedStack(): Promise<{ id: number; name: string }> {
+        const db = DatabaseService.getInstance();
+        const localNode = db.getDefaultNode();
+        if (!localNode) throw new Error('missing default node');
+        db.insertMeshStack(localNode.id, sharer, 'tester');
+        seedLastKnown(localNode.id, sharer, [
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]);
+        await writeComposeFile(owner, ['db'], 'compose.override.yml');
+        await writeComposeFile(sharer, ['web']);
+        fsSync.symlinkSync(
+            path.join('..', owner, 'compose.override.yml'),
+            path.join(process.env.COMPOSE_DIR as string, sharer, 'compose.override.yml'),
+        );
+        await withLocalDocker(async () => []);
+        return localNode;
+    }
+
+    function savedServices(nodeId: number): Array<{ service: string; ports: number[] }> {
+        const row = DatabaseService.getInstance().listMeshStacks(nodeId).find((r) => r.stack_name === sharer);
+        return parseLastKnownServices(row?.last_known_services);
+    }
+
+    async function beginOwnerPublication(): Promise<{ complete(): void; abandon(): void; skip(): void }> {
+        const { FileSystemService } = await import('../services/FileSystemService');
+        return FileSystemService.getInstance().beginDeclarationSetPublication(owner);
+    }
+
+    it('reads the sharer\'s declaration once the owner\'s layers are whole', async () => {
+        await sharedStack();
+        expect((await MeshService.getInstance().getLocalDeclaredServiceNames(sharer))?.sort()).toEqual(['db', 'web']);
+    });
+
+    it('treats the sharer\'s declaration as unknown while the owner\'s bracket is open', async () => {
+        const localNode = await sharedStack();
+        const publication = await beginOwnerPublication();
+        try {
+            // The owner's first layer has landed, and db has moved out of the
+            // shared one: the sharer would read web alone.
+            await writeComposeFile(owner, ['other'], 'compose.override.yml');
+            const svc = MeshService.getInstance();
+            expect(await svc.getLocalDeclaredServiceNames(sharer)).toBeNull();
+
+            await svc.refreshAliasCache();
+            expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+            expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(true);
+        } finally {
+            publication.abandon();
+        }
+    });
+
+    it('keeps the sharer unknown after the owner\'s bracket was abandoned, until a later publication completes', async () => {
+        const localNode = await sharedStack();
+        const svc = MeshService.getInstance();
+        const abandoned = await beginOwnerPublication();
+        await writeComposeFile(owner, ['other'], 'compose.override.yml');
+        abandoned.abandon();
+
+        expect(await svc.getLocalDeclaredServiceNames(sharer)).toBeNull();
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual(expect.arrayContaining([{ service: 'db', ports: [5432] }]));
+
+        const completed = await beginOwnerPublication();
+        await writeComposeFile(owner, ['other'], 'compose.override.yml');
+        completed.complete();
+
+        // Whole again: the shared layer no longer declares db, so the claim is released.
+        expect((await svc.getLocalDeclaredServiceNames(sharer))?.sort()).toEqual(['other', 'web']);
+        await svc.refreshAliasCache();
+        expect(savedServices(localNode.id)).toEqual([{ service: 'web', ports: [8080] }]);
+        expect((svc as unknown as Internals).reservedPorts.has(5432)).toBe(false);
+    });
+
+    it('does not let an open bracket on an unrelated stack change the sharer\'s declaration', async () => {
+        await sharedStack();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const unrelated = FileSystemService.getInstance().beginDeclarationSetPublication('unrelated-stack');
+        try {
+            expect((await MeshService.getInstance().getLocalDeclaredServiceNames(sharer))?.sort()).toEqual(['db', 'web']);
+        } finally {
+            unrelated.abandon();
+        }
+    });
+
+    it('still reads a stack whose layers stay in its own folder while the owner\'s bracket is open', async () => {
+        await sharedStack();
+        await writeComposeFile('own-layers-stack', ['api']);
+        const publication = await beginOwnerPublication();
+        try {
+            expect(await MeshService.getInstance().getLocalDeclaredServiceNames('own-layers-stack')).toEqual(['api']);
+        } finally {
+            publication.abandon();
+        }
+    });
+
+    it('names the folder that holds a layer\'s real file, or none for a file in the root itself', async () => {
+        await sharedStack();
+        const { FileSystemService } = await import('../services/FileSystemService');
+        const fsSvc = FileSystemService.getInstance();
+        expect((await fsSvc.readComposeLayer(sharer, 'compose.yaml')).ownerFolder).toBe(sharer);
+        expect((await fsSvc.readComposeLayer(sharer, 'compose.override.yml')).ownerFolder).toBe(owner);
+
+        const root = process.env.COMPOSE_DIR as string;
+        await fsSync.promises.writeFile(path.join(root, 'root-level.yml'), composeYaml(['x']));
+        fsSync.symlinkSync(path.join('..', 'root-level.yml'), path.join(root, sharer, 'root-link.yml'));
+        const layer = await fsSvc.readComposeLayer(sharer, 'root-link.yml');
+        expect(layer.ownerFolder).toBeNull();
+    });
+});
+
+/**
+ * The saved snapshot is the only thing an unreachable node's aliases and
+ * reservations are rebuilt from. A write that fails must not leave the replay
+ * on an older snapshot than the one the refresh computed.
+ */
+describe('a snapshot that could not be stored is still replayed', () => {
+    const SERVICES = [
+        { service: 'db', ports: [5432] },
+        { service: 'cache', ports: [6379] },
+    ];
+
+    function failNextSnapshotWrites(count: number): ReturnType<typeof vi.spyOn> {
+        let failures = 0;
+        const real = DatabaseService.prototype.setMeshStackLastKnownServices;
+        return vi.spyOn(DatabaseService.prototype, 'setMeshStackLastKnownServices').mockImplementation(
+            function (this: ReturnType<typeof DatabaseService.getInstance>, ...args: Parameters<typeof real>) {
+                if (failures < count) {
+                    failures += 1;
+                    throw new Error('database or disk is full');
+                }
+                return real.apply(this, args);
+            },
+        );
+    }
+
+    function savedServices(): Array<{ service: string; ports: number[] }> {
+        const row = DatabaseService.getInstance().listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'pg');
+        return parseLastKnownServices(row?.last_known_services);
+    }
+
+    function seedPg(): void {
+        DatabaseService.getInstance().insertMeshStack(remoteNodeId, 'pg', 'tester');
+        seedLastKnown(remoteNodeId, 'pg', [{ service: 'db', ports: [5432] }]);
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence the persist warn */ });
+    }
+
+    /** The two ways a tick fails to observe the node. */
+    const unobservable: Array<[string, Inspect]> = [
+        ['the node is unreachable', async (_n, _s, reach) => {
+            if (reach) reach.reachable = false;
+            return [];
+        }],
+        ['the inspection throws', async () => { throw new Error('unexpected inspector failure'); }],
+    ];
+
+    it.each(unobservable)('keeps the new service\'s alias and reservation when %s after a failed write', async (_label, offline) => {
+        seedPg();
+        failNextSnapshotWrites(1);
+        mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        // The write failed, so the database still holds the older snapshot.
+        expect(savedServices()).toEqual([{ service: 'db', ports: [5432] }]);
+
+        mockInspect(offline);
+        await svc.refreshAliasCache();
+
+        const hosts = (await svc.listAliases()).map((a) => a.host);
+        expect(hosts).toEqual(expect.arrayContaining(['cache.pg.edge.sencho', 'db.pg.edge.sencho']));
+        const reserved = (svc as unknown as Internals).reservedPorts;
+        expect(reserved.get(6379)?.host).toBe('cache.pg.edge.sencho');
+        expect(reserved.get(5432)?.host).toBe('db.pg.edge.sencho');
+    });
+
+    it('refuses an opt-in on the port of the service whose snapshot could not be stored', async () => {
+        const db = DatabaseService.getInstance();
+        seedPg();
+        failNextSnapshotWrites(1);
+        mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        mockInspect(unobservable[0][1]);
+        await svc.refreshAliasCache();
+
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: (n?: number, s?: string) => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        const localNodeId = db.getNodes()[0].id;
+        mockInspect(async (_n, stack) => (stack === 'api' ? [{ service: 'web', ports: [6379] }] : []));
+        await expect(svc.optInStack(localNodeId, 'api', 'tester'))
+            .rejects.toThrow(/port 6379 is already claimed by cache\.pg\.edge\.sencho/);
+    });
+
+    it('stores the snapshot on the next tick that can write, even one that observed nothing', async () => {
+        seedPg();
+        failNextSnapshotWrites(1);
+        mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+        expect(savedServices()).toEqual([{ service: 'db', ports: [5432] }]);
+
+        mockInspect(unobservable[0][1]);
+        await svc.refreshAliasCache();
+
+        expect(savedServices()).toEqual(expect.arrayContaining(SERVICES));
+        expect(savedServices()).toHaveLength(2);
+        // Stored now, so the memory copy is gone and the database is the source again.
+        expect((svc as unknown as { unpersistedSnapshots: Map<number, string> }).unpersistedSnapshots.size).toBe(0);
+    });
+
+    it('keeps replaying the newest snapshot while every write keeps failing, and says so once', async () => {
+        seedPg();
+        failNextSnapshotWrites(Number.POSITIVE_INFINITY);
+        const svc = MeshService.getInstance();
+        const before = svc.getActivity({ source: 'mesh' }).filter((e) => e.message.includes('last known services')).length;
+        mockInspect(async () => SERVICES.map((s) => ({ ...s, running: true })));
+        await svc.refreshAliasCache();
+        // A third service arrives before the node drops. The two earlier ones
+        // are not observed this tick, which does not release their claims.
+        mockInspect(async () => [{ service: 'queue', ports: [5672], running: true }]);
+        await svc.refreshAliasCache();
+        mockInspect(unobservable[0][1]);
+        await svc.refreshAliasCache();
+
+        const reserved = (svc as unknown as Internals).reservedPorts;
+        expect([...reserved.keys()].sort()).toEqual([5432, 5672, 6379]);
+        const warned = svc.getActivity({ source: 'mesh' }).filter((e) => e.message.includes('last known services')).length;
+        expect(warned - before).toBe(1);
+    });
+
+    it('does not replay a memory copy for a membership that was opted out and in again', async () => {
+        const db = DatabaseService.getInstance();
+        seedPg();
+        failNextSnapshotWrites(1);
+        mockInspect(async () => SERVICES.map((svc) => ({ ...svc, running: true })));
+        const svc = MeshService.getInstance();
+        await svc.refreshAliasCache();
+
+        db.deleteMeshStack(remoteNodeId, 'pg');
+        mockInspect(unobservable[0][1]);
+        await svc.refreshAliasCache();
+        db.insertMeshStack(remoteNodeId, 'pg', 'tester');
+        seedLastKnown(remoteNodeId, 'pg', [{ service: 'db', ports: [5432] }]);
+        await svc.refreshAliasCache();
+
+        const reserved = (svc as unknown as Internals).reservedPorts;
+        expect(reserved.has(5432)).toBe(true);
+        expect(reserved.has(6379)).toBe(false);
     });
 });
 

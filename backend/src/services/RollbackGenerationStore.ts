@@ -330,9 +330,13 @@ export class RollbackGenerationStore {
         }
 
         let fileMode: number | null = null;
+        let fileOwner: { uid: number; gid: number } | undefined;
         try {
           const st = await fsPromises.lstat(realPath);
-          if (st.isFile()) fileMode = st.mode & 0o777;
+          if (st.isFile()) {
+            fileMode = st.mode & 0o777;
+            if (process.platform !== 'win32') fileOwner = { uid: st.uid, gid: st.gid };
+          }
         } catch (e) {
           console.warn(
             `[RollbackGenerationStore] Could not read mode for ${relativePath}:`,
@@ -394,6 +398,7 @@ export class RollbackGenerationStore {
           sensitivity: inv.sensitivity,
           encrypted: encrypt,
           mode: fileMode,
+          ...(fileOwner ?? {}),
         });
       }
 
@@ -751,6 +756,7 @@ export class RollbackGenerationStore {
       content: Buffer;
       sensitivity: RollbackGenerationEntry['sensitivity'];
       mode: number | null;
+      owner: { uid: number; gid: number } | undefined;
     }> = [];
     for (const entry of presentByKey.values()) {
       restores.push({
@@ -758,6 +764,8 @@ export class RollbackGenerationStore {
         content: await this.readPresentEntryBytes(genDir, entry),
         sensitivity: entry.sensitivity,
         mode: entry.mode ?? null,
+        // Validated before the first write, like the pre-restore snapshot's.
+        owner: this.recordedWriteOwner(entry.relativePath, entry, 'Generation'),
       });
     }
 
@@ -852,12 +860,19 @@ export class RollbackGenerationStore {
           continue;
         }
         // The mode goes through the writer with the bytes. Its group rule
-        // judges the bits against the file being replaced, so a restore that
-        // cannot hand the file back to its group does not publish group
-        // access the file never had there; a mode applied by path afterwards
-        // would put the captured bits back whatever the group.
+        // judges the bits against the owner and group the file had at
+        // capture, so a restore that cannot hand the file back to its group
+        // does not publish group access the file never had there, whether the
+        // live file was deleted, belongs to someone else, or was already
+        // moved to this process's group by a save or an earlier restore. A
+        // generation captured before the owner was kept falls back to the
+        // live file's. A mode applied by path afterwards would put the
+        // captured bits back whatever the group.
         try {
-          await fsSvc.writeStackFile(stackName, item.relativePath, item.content, { mode: targetMode });
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content, {
+            mode: targetMode,
+            ...(item.owner ? { owner: item.owner } : {}),
+          });
         } catch (e) {
           if (!isModeApplicationError(e)) throw e;
           if (sensitive) {
@@ -1297,7 +1312,7 @@ export class RollbackGenerationStore {
       const rel = posixRel(entry.relativePath);
       if (!rel || entry.state !== 'present') continue;
       this.preRestoreWriteMode(rel, entry.mode);
-      this.preRestoreWriteOwner(rel, entry);
+      this.recordedWriteOwner(rel, entry, 'Pre-restore');
     }
 
     for (const entry of index.entries) {
@@ -1380,7 +1395,7 @@ export class RollbackGenerationStore {
       // the file. Judged against the preimage, a process that cannot put the
       // file back in its group publishes it without the group bits.
       const mode = this.preRestoreWriteMode(rel, entry.mode);
-      const owner = this.preRestoreWriteOwner(rel, entry);
+      const owner = this.recordedWriteOwner(rel, entry, 'Pre-restore');
       await fsSvc.writeStackFile(
         stackName,
         rel,
@@ -1415,23 +1430,25 @@ export class RollbackGenerationStore {
   }
 
   /**
-   * The owner and group to hand a reverted file back to, or undefined when the
-   * snapshot recorded none (an index written before they were kept) or the
-   * platform has no POSIX owners, in which case the live file's own are
-   * carried over. A half-recorded or malformed pair is refused rather than
-   * guessed at, so a corrupt index cannot move a file to a group it never had.
+   * The owner and group to hand a restored or reverted file back to, or
+   * undefined when the record kept none (an index or manifest written before
+   * they were kept) or the platform has no POSIX owners, in which case the
+   * live file's own are carried over. A half-recorded or malformed pair is
+   * refused rather than guessed at, so a corrupt record cannot move a file to
+   * a group it never had.
    */
-  private static preRestoreWriteOwner(
+  private static recordedWriteOwner(
     rel: string,
-    recorded: Pick<PreRestoreIndexEntry, 'uid' | 'gid'>,
+    recorded: { uid?: number; gid?: number },
+    source: 'Pre-restore' | 'Generation',
   ): { uid: number; gid: number } | undefined {
     const { uid, gid } = recorded;
     if (uid === undefined && gid === undefined) return undefined;
     const valid = (id: unknown): id is number => Number.isInteger(id) && (id as number) >= 0 && (id as number) <= 0xffffffff;
     if (!valid(uid) || !valid(gid)) {
       throw Object.assign(
-        new Error(`Pre-restore entry for "${rel}" has an invalid owner`),
-        { code: 'PRE_RESTORE_INDEX_INVALID' },
+        new Error(`${source} entry for "${rel}" has an invalid owner`),
+        { code: source === 'Pre-restore' ? 'PRE_RESTORE_INDEX_INVALID' : 'GENERATION_MANIFEST_INVALID' },
       );
     }
     return process.platform === 'win32' ? undefined : { uid, gid };

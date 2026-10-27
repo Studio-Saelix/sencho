@@ -915,11 +915,17 @@ export class FileSystemService {
    * Sencho published through the stage-and-rename helper in this process. A
    * file read from disk cannot show that its writer has finished, so a caller
    * that releases a saved claim trusts a layer only when this holds.
+   *
+   * `ownerFolder` names the top-level folder of the compose root that holds the
+   * layer's real file, or null when it sits directly in the root. It differs
+   * from `stackName` for a layer shared through an in-root link. A multi-file
+   * publication brackets the folder it writes, so a caller that trusts the
+   * layer as part of a whole declaration also checks that folder's bracket.
    */
   async readComposeLayer(
     stackName: string,
     relFile: string,
-  ): Promise<{ content: string; mtimeMs: number; publishedBySencho: boolean }> {
+  ): Promise<{ content: string; mtimeMs: number; publishedBySencho: boolean; ownerFolder: string | null }> {
     if (relFile === '' || !isValidRelativeStackPath(relFile)) {
       throw Object.assign(new Error('Invalid compose layer path'), { code: 'INVALID_PATH' });
     }
@@ -965,7 +971,13 @@ export class FileSystemService {
         && published.ino === after.ino
         && published.size === after.size
         && published.mtimeMs === after.mtimeMs;
-      return { content, mtimeMs: after.mtimeMs, publishedBySencho };
+      const [ownerFolder, ...rest] = path.relative(realBase, realLayerPath).split(path.sep);
+      return {
+        content,
+        mtimeMs: after.mtimeMs,
+        publishedBySencho,
+        ownerFolder: rest.length > 0 ? ownerFolder : null,
+      };
     } finally {
       await fh.close();
     }
