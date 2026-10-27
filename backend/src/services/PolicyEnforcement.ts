@@ -366,9 +366,9 @@ function partialFindingsReason(what: string, inputs: PolicyRiskInputs): string {
         inputs.blockOnKev ? 'known-exploited' : null,
         inputs.blockOnFixable ? 'fixability' : null,
     ].filter((x): x is string => x !== null);
-    return enabled.length > 0
-        ? `${what}, so ${enabled.join(' and ')} ${enabled.length > 1 ? 'were' : 'was'} treated as risky`
-        : `${what}, so suppressions could not be applied to every finding`;
+    if (enabled.length === 0) return `${what}, so suppressions could not be applied to every finding`;
+    const verb = enabled.length > 1 ? 'were' : 'was';
+    return `${what}, so ${enabled.join(' and ')} ${verb} treated as risky`;
 }
 
 /** Why `aggregateFallback` could not rely on the stored evidence: KEV/fixability, and suppressions when honored. */
