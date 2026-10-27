@@ -129,9 +129,12 @@ interface ImageRiskEvaluation {
     /** True when the same inputs would have matched if suppressions were ignored. */
     rawWouldBlock: boolean;
     /**
-     * Log-only: the KEV/fixable reasons in `reasons` that were assumed because
-     * the detail rows could not be trusted, not observed on the image, and why.
-     * Never reaches the API: the violation keeps the plain `reasons`.
+     * Log-only: the reasons in `reasons` that were not established on verified
+     * evidence, and why. KEV/fixable are assumed because the detail rows could
+     * not be trusted. `severity` is listed only when suppressions are honored:
+     * it matched on the raw aggregate, but the suppressions that could lift it
+     * could not be applied. Never reaches the API: the violation keeps the plain
+     * `reasons`.
      */
     unverified?: { reasons: PolicyBlockReason[]; cause: string };
 }
@@ -140,6 +143,25 @@ interface ImageRiskEvaluation {
 const EVIDENCE_READ_FAILED = 'stored scan evidence could not be read';
 const detailRowsTruncated = (stored: number, total: number): string =>
     `stored detail rows (${stored}) do not match the scan total (${total})`;
+
+/**
+ * What one image's unverified-evidence entry says. KEV/fixable read "not
+ * verified, <cause>"; a severity match that suppressions could have lifted reads
+ * "matched before suppressions could be applied"; a severity match on verified
+ * evidence reads "matched".
+ */
+function describeUnverified(
+    violation: PolicyViolation,
+    { reasons: unverified, cause }: NonNullable<ImageRiskEvaluation['unverified']>,
+): string {
+    const assumed = unverified.filter((r) => r !== 'severity');
+    const severityNote = unverified.includes('severity')
+        ? `${describeReason('severity')} matched before suppressions could be applied`
+        : violation.reasons.includes('severity') ? `${describeReason('severity')} matched` : null;
+    if (assumed.length === 0) return `${severityNote}, ${cause}`;
+    const head = `${assumed.map(describeReason).join(', ')} not verified, ${cause}`;
+    return severityNote ? `${head}; ${severityNote}` : head;
+}
 
 interface SuppressionPass {
     imageRef: string;
@@ -152,21 +174,27 @@ interface SuppressionPass {
  * when the detail rows cannot be trusted. Severity stays verifiable from the
  * stored aggregate counts, so it always gates. KEV/fixability cannot be read
  * from aggregates: when `failClosedCause` is set the active KEV/fixable inputs
- * block anyway, because their absence cannot be proven without the details; the
- * cause is carried in `unverified` so the block log can name it.
+ * block anyway, because their absence cannot be proven without the details. When
+ * suppressions are honored the raw severity also gates without them, so a severity
+ * match is not a verified one. The cause is carried in `unverified` so the block
+ * log can name it.
  */
 function aggregateFallback(
     inputs: PolicyRiskInputs,
     rawSeverity: VulnSeverity,
     scan: PreflightScan,
     failClosedCause: string | null,
+    honorSuppressions: boolean,
 ): ImageRiskEvaluation {
     const reasons: PolicyBlockReason[] = [];
-    if (inputs.blockOnSeverity && isSeverityAtLeast(rawSeverity, inputs.maxSeverity)) reasons.push('severity');
-    const assumed: PolicyBlockReason[] = [];
-    if (failClosedCause && inputs.blockOnKev) assumed.push('kev');
-    if (failClosedCause && inputs.blockOnFixable) assumed.push('fixable');
-    reasons.push(...assumed);
+    const unverified: PolicyBlockReason[] = [];
+    if (inputs.blockOnSeverity && isSeverityAtLeast(rawSeverity, inputs.maxSeverity)) {
+        reasons.push('severity');
+        if (failClosedCause && honorSuppressions) unverified.push('severity');
+    }
+    if (failClosedCause && inputs.blockOnKev) unverified.push('kev');
+    if (failClosedCause && inputs.blockOnFixable) unverified.push('fixable');
+    reasons.push(...unverified.filter((r) => r !== 'severity'));
     return {
         reasons,
         severity: rawSeverity,
@@ -176,7 +204,7 @@ function aggregateFallback(
         fixableCount: 0,
         suppressedCves: [],
         rawWouldBlock: reasons.length > 0,
-        ...(failClosedCause && assumed.length > 0 ? { unverified: { reasons: assumed, cause: failClosedCause } } : {}),
+        ...(failClosedCause && unverified.length > 0 ? { unverified: { reasons: unverified, cause: failClosedCause } } : {}),
     };
 }
 
@@ -198,7 +226,7 @@ function evaluateImageRisk(
     const rawSeverity = scan.highest_severity ?? 'UNKNOWN';
     const needsDetails = inputs.blockOnKev || inputs.blockOnFixable || honorSuppressions;
     if (!needsDetails) {
-        return aggregateFallback(inputs, rawSeverity, scan, null);
+        return aggregateFallback(inputs, rawSeverity, scan, null, false);
     }
 
     const db = DatabaseService.getInstance();
@@ -214,7 +242,7 @@ function evaluateImageRisk(
         // KEV/fixable gate must not silently degrade to "allow" on a transient
         // read error. The admin bypass path stays available.
         console.error('[Policy] Detail read failed for %s; gating severity on aggregate, failing closed on KEV/fixable:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(err, 'db read failed')));
-        return aggregateFallback(inputs, rawSeverity, scan, EVIDENCE_READ_FAILED);
+        return aggregateFallback(inputs, rawSeverity, scan, EVIDENCE_READ_FAILED, honorSuppressions);
     }
 
     // The stored detail rows must reproduce the scan's full finding set before
@@ -230,7 +258,7 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        return aggregateFallback(inputs, rawSeverity, scan, detailRowsTruncated(findings.length, scan.total_vulnerabilities));
+        return aggregateFallback(inputs, rawSeverity, scan, detailRowsTruncated(findings.length, scan.total_vulnerabilities), honorSuppressions);
     }
 
     // KEV membership is the same for the full set and the non-suppressed subset,
@@ -505,9 +533,10 @@ export async function enforcePolicyForImageRefs(
     }
 
     // Three causes, each logged as what it is. `error`: the image could not be
-    // scanned or evaluated. `unverified`: KEV/fixable reasons were assumed
-    // because the detail rows could not be trusted (any severity match on the
-    // same image is named too). Everything else matched a policy input.
+    // scanned or evaluated. `unverified`: KEV/fixable reasons were assumed, or a
+    // severity match could not be checked against honored suppressions, because
+    // the detail rows could not be trusted (any other severity match on the same
+    // image is named too). Everything else matched a policy input.
     const unevaluated = violations.filter((v) => v.error);
     const unverified = violations.filter((v) => !v.error && unverifiedByViolation.has(v));
     const matched = violations.filter((v) => !v.error && !unverifiedByViolation.has(v));
@@ -521,12 +550,9 @@ export async function enforcePolicyForImageRefs(
         console.warn(
             '[Policy] Blocked deploy for "%s": %d image(s) had evidence that could not be verified (policy "%s"): %s',
             sanitizeForLog(stackName), unverified.length, sanitizeForLog(policy.name),
-            unverified.map((v) => {
-                const { reasons: assumed, cause } = unverifiedByViolation.get(v)!;
-                const observed = v.reasons.filter((r) => !assumed.includes(r));
-                const observedNote = observed.length > 0 ? `; ${observed.map(describeReason).join(', ')} matched` : '';
-                return sanitizeForLog(redactSensitiveText(`${v.imageRef}: ${assumed.map(describeReason).join(', ')} not verified, ${cause}${observedNote}`));
-            }).join('; '),
+            unverified.map((v) => sanitizeForLog(redactSensitiveText(
+                `${v.imageRef}: ${describeUnverified(v, unverifiedByViolation.get(v)!)}`,
+            ))).join('; '),
         );
     }
     if (unevaluated.length > 0) {

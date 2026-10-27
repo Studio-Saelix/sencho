@@ -647,9 +647,8 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
-    it('keeps the matched wording for a severity-only policy whose truncated rows assume nothing', async () => {
+    it('keeps the matched wording for a severity-only policy when suppressions are off', async () => {
       dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
-      dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
       trivyStub.scanImagePreflight.mockResolvedValue(
         mkScan({ id: 45, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 }),
       );
@@ -660,6 +659,125 @@ describe('blocked-deploy log line', () => {
       expect(blockLines()).toEqual([
         '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")',
       ]);
+    });
+
+    describe('with suppressions honored', () => {
+      const BEFORE_SUPPRESSIONS = 'severity threshold matched before suppressions could be applied';
+      const CRITICAL_TRUNCATED = (): VulnerabilityScan =>
+        mkScan({ id: 45, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 });
+
+      beforeEach(() => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
+        dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+        trivyStub.scanImagePreflight.mockResolvedValue(CRITICAL_TRUNCATED());
+      });
+
+      it('names unapplied suppressions, not a severity match, when the rows are truncated', async () => {
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(result.violations[0].reasons).toEqual(['severity']);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: ${BEFORE_SUPPRESSIONS}, ${TRUNCATED}`,
+        ]);
+      });
+
+      it('names unapplied suppressions when the suppression read failed', async () => {
+        dbStub.getCveSuppressions.mockImplementation(() => { throw new Error('db locked'); });
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: ${BEFORE_SUPPRESSIONS}, ${UNREADABLE}`,
+        ]);
+      });
+
+      it('names unapplied suppressions when the detail read failed', async () => {
+        dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('db locked'); });
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: ${BEFORE_SUPPRESSIONS}, ${UNREADABLE}`,
+        ]);
+      });
+
+      it('names the unapplied suppressions beside the unverified KEV/fixable inputs', async () => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1, block_on_fixable: 1 }));
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${TRUNCATED}; ${BEFORE_SUPPRESSIONS}`,
+        ]);
+      });
+
+      it('does not name suppressions for an image whose raw severity is below the threshold', async () => {
+        dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_kev: 1 }));
+        trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(blockLines()).toEqual([
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV) not verified, ${TRUNCATED}`,
+        ]);
+      });
+
+      it('allows the deploy when nothing is assumed and raw severity is below the threshold', async () => {
+        trivyStub.scanImagePreflight.mockResolvedValue(lowOnlyTruncatedScan());
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(true);
+        expect(blockLines()).toEqual([]);
+      });
+
+      it('still reads matched for an image whose full rows cross the threshold unsuppressed', async () => {
+        trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(blockLines()).toEqual([
+          '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")',
+        ]);
+      });
+
+      it('logs the unapplied suppressions and a real match on their own lines', async () => {
+        trivyStub.scanImagePreflight
+          .mockResolvedValueOnce(CRITICAL_TRUNCATED())
+          .mockResolvedValueOnce(criticalScan());
+        dbStub.getAllVulnerabilityDetails.mockImplementation((scanId: number) => (scanId === 42
+          ? [{ id: 1, scan_id: 42, vulnerability_id: 'CVE-2024-1', pkg_name: 'p', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null }]
+          : []));
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'redis:6'], { bypass: false, actor: 'u' });
+
+        expect(result.violations).toHaveLength(2);
+        expect(blockLines()).toEqual([
+          '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")',
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: ${BEFORE_SUPPRESSIONS}, stored detail rows (0) do not match the scan total (5)`,
+        ]);
+      });
+
+      it('leaves the violation and the deploy decision exactly as before', async () => {
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(result.violations).toEqual([{
+          imageRef: 'nginx:1.14',
+          severity: 'CRITICAL',
+          criticalCount: 2,
+          highCount: 0,
+          kevCount: 0,
+          fixableCount: 0,
+          reasons: ['severity'],
+          scanId: 45,
+        }]);
+      });
     });
 
     it('logs every cause on its own line when one block mixes all three', async () => {
