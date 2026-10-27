@@ -23,10 +23,14 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * inspect fails (Docker being unreachable included: a failed read proves
  * nothing about the mutation that follows it), when the Compose model of a
  * stack that is deployed, updated, or changed per service cannot be rendered
- * (a stop, restart, take down, or delete is judged from the running containers
- * and does not need the render), when Compose's recreate decision cannot be
+ * (a stop, restart, take down, or delete is judged from the deployed
+ * containers, running or stopped, and does not need the render), when Compose's recreate decision cannot be
  * predicted, and when a deploy would remove a protected container as an orphan
- * (it is not stopped, carries a project label, and has no service label). It
+ * (it is not stopped, carries a project label, and has no service label). A
+ * protected container that has stopped passes that one case, a deploy's orphan
+ * removal, and nothing else: every other operation still refuses it, and where
+ * the refusal can tell the container is not running (the Compose list or an
+ * inspect that answered) it says so and names the host-side removal. It
  * otherwise lets the operation through: when the stack holds no protected container, no owner of a
  * namespace one runs in, and nothing the operation would recreate that they
  * depend on; for a restart of Sencho itself (both evaluators); and for a remote
@@ -83,12 +87,12 @@ export type EndpointMutation =
    * A service-scoped operation: refused when it targets a protected service, and
    * when the stack's Compose model cannot be rendered. `restart` marks a restart
    * of that service; `engineOnly` marks a stop or restart driven through the
-   * Engine API, which is judged from the running containers and does not need
+   * Engine API, which is judged from the deployed containers and does not need
    * the render (like a stack-level stop, restart, take down, or delete).
    */
   | { kind: 'service'; service: string; restart?: boolean; engineOnly?: boolean };
 
-/** A stop, restart, take down, or delete: the guard decides it from the running containers and does not read the Compose file. */
+/** A stop, restart, take down, or delete: the guard decides it from the deployed containers (running or stopped) and does not read the Compose file. */
 function isEngineDriven(mutation: EndpointMutation): boolean {
   return mutation.kind === 'stop' || mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.engineOnly === true);
 }
@@ -134,9 +138,11 @@ type ProviderView =
   | { state: 'none' };
 
 /**
- * A container that has stopped holds no namespace and carries no connection, so
- * removing it cannot cut one. Every other state (restarting, paused, removing,
- * a missing or unknown one) counts as running.
+ * Whether a Docker container state means the container has stopped (exited,
+ * created, dead). Every other state (restarting, paused, removing, a missing or
+ * unknown one) counts as running. What a stopped container is let through for
+ * is each caller's call: a deploy removes a stopped orphan, because that cannot
+ * cut a connection, while a stop, restart, or removal still refuses it.
  */
 function isStoppedState(state: string | undefined): boolean {
   return state === 'exited' || state === 'created' || state === 'dead';
@@ -390,15 +396,20 @@ function orphanRemovalRefusal(role: ProtectedRole, name: string, stackName: stri
  * A protected container that has already stopped, refused on a stop, restart, or
  * removal (a deploy lets a stopped orphan through, see `orphanRemovalRefusal`).
  * Recreating it from the host is not the way out of this refusal: it is not
- * running, so what is left is removing it or starting it again.
+ * running, so what is left is removing it or starting it again. `name` is the
+ * container name `docker rm` takes; `service` is what the refusal reports, the
+ * Compose service where it has one.
  */
-function stoppedContainerRefusal(role: ProtectedRole, name: string, via?: string): DockerEndpointRefusal {
+function stoppedContainerRefusal(role: ProtectedRole, name: string, service: string, via?: string): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
+  const label = role === 'mislabeled' && !via
+    ? ` It is labeled ${INFRASTRUCTURE_LABEL} with a value other than "true"; correct the label when you start it again.`
+    : '';
   return {
     reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
-    service: name,
+    service,
     message: `Container "${name}" ${subject}. It is not running, but Sencho still does not stop, restart, or remove it. `
-      + `If it is a leftover you no longer need, remove it from the host (docker rm ${name}); otherwise start it again from the host (docker compose up -d) while Sencho is idle.`,
+      + `If it is a leftover you no longer need, remove it from the host (docker rm ${name}); otherwise start it again from the host (docker compose up -d) while Sencho is idle.${label}`,
   };
 }
 
@@ -706,8 +717,8 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   }
   // A container carrying the label is protected wherever it runs: its namespace
   // owner may live in another project, and a proxy detection missed is
-  // protected by the label alone. (A deploy still removes a stopped orphan with
-  // the label, which is why the label means "protected while it is not stopped".)
+  // protected by the label alone. (A stopped container with the label stays
+  // protected here, so every operation but a deploy's orphan removal refuses it.)
   for (const c of labeledContainers(allContainers)) {
     if (typeof c.Id !== 'string' || roots.has(c.Id)) continue;
     roots.set(c.Id, { role: 'provider', target: { containerId: c.Id, containerName: nameOf(c) }, label: serviceOf(c) ?? (nameOf(c) || c.Id) });
@@ -774,10 +785,11 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
         if (recreate === 'no') continue;
         if (recreate === 'unknown' || recreate === 'unreliable') return unknownRecreateRefusal(entry.role, service, entry.via, recreate === 'unreliable');
       }
-      // A stop, restart, take down, or delete of a container that is already stopped: recreating it is not the advice that fits.
+      // A stop, restart, take down, or delete of a service whose containers have all stopped: recreating it is not the advice that fits.
+      // (An unidentified provider keeps its own refusal: the cause is that detection failed, not the container.)
       const ofService = judged.filter(c => (serviceOf(c) || nameOf(c) || c.Id || 'unknown') === service);
-      if (isEngineDriven(mutation) && ofService.length > 0 && ofService.every(isStopped)) {
-        return stoppedContainerRefusal(entry.role, nameOf(ofService[0]) || service, entry.via);
+      if (isEngineDriven(mutation) && entry.role !== 'unknown_provider' && ofService.length > 0 && ofService.every(isStopped)) {
+        return stoppedContainerRefusal(entry.role, nameOf(ofService[0]) || ofService[0].Id || service, service, entry.via);
       }
       return entry.via
         ? namespaceOwnerRefusal(entry.role, service, entry.via)
@@ -864,11 +876,14 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
  * the Sencho container is refused on stop and removal only (a restart brings it
  * back, which is the one intended way to bounce Sencho). The owner of a network,
  * pid, or ipc namespace that the provider, Sencho, or any container carrying the
- * infrastructure label runs in is refused as well, whatever the action. A
- * container in any of those roles that has already stopped is still refused (a
- * removal is evaluated as a stop, and it force-removes a container that was
- * started since the check), but the refusal says it is not running and names
- * the host-side removal rather than advising a recreate.
+ * infrastructure label runs in is refused as well, whatever the action. One of
+ * those (the provider, a labeled or mislabeled container, or a namespace
+ * owner) that has already stopped is still refused, because a removal is
+ * evaluated as a stop and force-removes a container that was started since the
+ * check; when the state is known (an inspect that answered, or the labeled
+ * list), the refusal says it is not running and names the host-side removal
+ * rather than advising a recreate. A refusal decided before the state is read
+ * (a denied inspect matched by id or name) keeps the recreate advice.
  *
  * A container that cannot be inspected is refused, except one that does not
  * exist (HTTP 404, the operation then fails by itself), a restart of Sencho, a
@@ -889,7 +904,7 @@ export async function evaluateDockerEndpointContainer(
   const provider = viewOf(await resolveDockerEndpointProvider());
   const providerVerdict = (service: string, resolved: DockerEndpointContainer, selfProject: string | null, stoppedAs?: string): DockerEndpointRefusal | null => {
     if (options.allowProvider && action === 'restart') return null;
-    return stoppedAs ? stoppedContainerRefusal('provider', stoppedAs) : refusalFor('provider', service, resolved, selfProject);
+    return stoppedAs ? stoppedContainerRefusal('provider', stoppedAs, service) : refusalFor('provider', service, resolved, selfProject);
   };
 
   // Null when the endpoint denied the inspect and the container is judged without it.
@@ -934,7 +949,7 @@ export async function evaluateDockerEndpointContainer(
     const labelValue = labels[INFRASTRUCTURE_LABEL];
     if (labelValue !== undefined) {
       const role = labelValue === 'true' ? 'provider' : 'mislabeled';
-      return infoStoppedAs ? stoppedContainerRefusal(role, infoStoppedAs) : refusalFor(role, service, null, selfProject);
+      return infoStoppedAs ? stoppedContainerRefusal(role, infoStoppedAs, service) : refusalFor(role, service, null, selfProject);
     }
   }
 
@@ -980,7 +995,7 @@ export async function evaluateDockerEndpointContainer(
         return providerVerdict(serviceOf(asLabeled) ?? service, provider.provider, selfProject, listedStoppedAs);
       }
       const role = asLabeled.Labels?.[INFRASTRUCTURE_LABEL] === 'true' ? 'provider' : 'mislabeled';
-      return listedStoppedAs ? stoppedContainerRefusal(role, listedStoppedAs) : refusalFor(role, serviceOf(asLabeled) ?? service, null, selfProject);
+      return listedStoppedAs ? stoppedContainerRefusal(role, listedStoppedAs, serviceOf(asLabeled) ?? service) : refusalFor(role, serviceOf(asLabeled) ?? service, null, selfProject);
     }
   }
 
@@ -1017,7 +1032,7 @@ export async function evaluateDockerEndpointContainer(
       return providerVerdict(service, provider.provider, selfProject);
     }
     if (namesAnyOwner(owns.owners, fullId, info?.Name ?? containerId)) {
-      return infoStoppedAs ? stoppedContainerRefusal(dependent.role, infoStoppedAs, dependent.label) : namespaceOwnerRefusal(dependent.role, service, dependent.label);
+      return infoStoppedAs ? stoppedContainerRefusal(dependent.role, infoStoppedAs, service, dependent.label) : namespaceOwnerRefusal(dependent.role, service, dependent.label);
     }
   }
 
