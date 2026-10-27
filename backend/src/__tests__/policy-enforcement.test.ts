@@ -448,8 +448,8 @@ describe('blocked-deploy log line', () => {
     vi.restoreAllMocks();
   });
 
-  // A KEV/fixable policy reads per-finding rows, so a scan that should match
-  // needs one stored Critical finding behind its counts.
+  // The total matches the one stored row, so evaluation takes the full-detail
+  // path (where getCveIntel runs) instead of the fail-closed aggregate fallback.
   const criticalScan = () => mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 });
 
   function blockLines(): string[] {
@@ -481,8 +481,9 @@ describe('blocked-deploy log line', () => {
   });
 
   it('names an invalid image reference as the cause', async () => {
-    await enforcePolicyForImageRefs('web', 1, ['${IMAGE}'], { bypass: false, actor: 'u' }, undefined, true);
+    const result = await enforcePolicyForImageRefs('web', 1, ['${IMAGE}'], { bypass: false, actor: 'u' }, undefined, true);
 
+    expect(result.ok).toBe(false);
     expect(blockLines()).toEqual([
       '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): ${IMAGE}: Invalid image reference; the image could not be scanned',
     ]);
@@ -492,11 +493,34 @@ describe('blocked-deploy log line', () => {
     trivyStub.scanImagePreflight.mockResolvedValue(criticalScan());
     dbStub.getCveIntel.mockImplementation(() => { throw new Error('intel db read failed'); });
 
-    await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
 
+    expect(result.ok).toBe(false);
     expect(blockLines()).toEqual([
       '[Policy] Blocked deploy for "web": 1 image(s) could not be evaluated (policy "block-high"): nginx:1.14: Policy evaluation failed: intel db read failed',
     ]);
+  });
+
+  it('lists every image that could not be evaluated, each with its own cause', async () => {
+    trivyStub.scanImagePreflight
+      .mockRejectedValueOnce(new Error('pull timed out'))
+      .mockRejectedValueOnce(new Error('trivy crashed'));
+
+    await enforcePolicyForImageRefs('web', 1, ['alpine:3.17', 'alpine:3.19'], { bypass: false, actor: 'u' });
+
+    expect(blockLines()).toEqual([
+      '[Policy] Blocked deploy for "web": 2 image(s) could not be evaluated (policy "block-high"): alpine:3.17: Pre-flight scan failed: pull timed out; alpine:3.19: Pre-flight scan failed: trivy crashed',
+    ]);
+  });
+
+  it('redacts credentials and strips control characters from the logged cause', async () => {
+    await enforcePolicyForImageRefs('web', 1, ['user:secret@registry.example.com/app:1\nINJECTED'], { bypass: false, actor: 'u' }, undefined, true);
+
+    const lines = blockLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('[redacted]@registry.example.com/app:1');
+    expect(lines[0]).not.toContain('secret');
+    expect(lines[0]).not.toMatch(/[\r\n]/);
   });
 
   it('logs each cause with its own count when a block mixes a real finding and a failed scan', async () => {

@@ -480,8 +480,9 @@ export async function enforcePolicyForImageRefs(
         return { ok: true, bypassed: true, policy, violations };
     }
 
-    // A violation with `error` set is evidence that could not be obtained, not a
-    // finding, so it is logged with its own cause instead of the policy inputs.
+    // A violation with `error` set was blocked because the image could not be
+    // scanned or evaluated, not because a policy input matched, so it is logged
+    // with its own cause instead of the policy inputs.
     const matched = violations.filter((v) => !v.error);
     const unevaluated = violations.filter((v) => v.error);
     if (matched.length > 0) {
