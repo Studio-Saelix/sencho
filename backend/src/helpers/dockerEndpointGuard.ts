@@ -24,14 +24,19 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * nothing about the mutation that follows it), when the Compose model of a
  * stack that is deployed, updated, or changed per service cannot be rendered
  * (a stop, restart, take down, or delete is judged from the deployed
- * containers, running or stopped, and does not need the render), when Compose's recreate decision cannot be
- * predicted, and when a deploy would remove a protected container as an orphan
- * (it is not stopped, carries a project label, and has no service label). A
- * protected container that has stopped passes that one case, a deploy's orphan
- * removal, and nothing else: every other operation still refuses it, and where
- * the refusal can tell the container is not running (the Compose list or an
- * inspect that answered) it says so and names the host-side removal. It
- * otherwise lets the operation through: when the stack holds no protected container, no owner of a
+ * containers, running or stopped, and does not need the render), when Compose's
+ * recreate decision cannot be predicted, and when a deploy would remove a
+ * protected container as an orphan (it is not stopped, carries a project label,
+ * and has no service label). A protected container that has stopped passes in
+ * two cases only: a deploy's orphan removal, and Auto-Heal's restart of the
+ * detected provider (`allowProvider`, the way a stopped proxy comes back). Every
+ * other operation still refuses it. A stop, restart, take down, delete, or
+ * container operation then says the container is not running and names the
+ * host-side removal, wherever the state is known (the Compose list or an
+ * inspect that answered). An update or a service redeploy, an unidentified
+ * provider, and a refusal decided before the state is read (a failed inspect
+ * matched by id or name) keep their own advice. It otherwise lets the operation
+ * through: when the stack holds no protected container, no owner of a
  * namespace one runs in, and nothing the operation would recreate that they
  * depend on; for a restart of Sencho itself (both evaluators); and for a remote
  * node (its own Sencho guards it).
@@ -278,7 +283,7 @@ function invalidLabelRefusal(service: string, value: string): DockerEndpointRefu
 /** Why a service might carry the connection, worded for the role that put it on the list. */
 function carriesClause(role: ProtectedRole): string {
   switch (role) {
-    case 'sencho': return 'is the running Sencho instance';
+    case 'sencho': return 'is the Sencho container';
     case 'unknown_provider': return 'shares a network with Sencho and may carry its Docker connection';
     case 'provider':
     case 'mislabeled': return 'carries the Docker connection Sencho is using';
@@ -723,7 +728,8 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   // A container carrying the label is protected wherever it runs: its namespace
   // owner may live in another project, and a proxy detection missed is
   // protected by the label alone. (A stopped container with the label stays
-  // protected here, so every operation but a deploy's orphan removal refuses it.)
+  // protected here, so every operation refuses it except a deploy's orphan
+  // removal and Auto-Heal's restart of the detected provider.)
   for (const c of labeledContainers(allContainers)) {
     if (typeof c.Id !== 'string' || roots.has(c.Id)) continue;
     roots.set(c.Id, { role: 'provider', target: { containerId: c.Id, containerName: nameOf(c) }, label: serviceOf(c) ?? (nameOf(c) || c.Id) });
@@ -885,7 +891,8 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
  * those (the provider, a labeled or mislabeled container, or a namespace
  * owner) that has already stopped is still refused, because a removal is
  * evaluated as a stop and force-removes a container that was started since the
- * check; when the state is known (an inspect that answered, or the labeled
+ * check (the one exception is `allowProvider`'s restart of the provider, in any
+ * state, which is how a stopped proxy comes back); when the state is known (an inspect that answered, or the labeled
  * list), the refusal says it is not running and names the host-side removal
  * rather than advising a recreate. A refusal decided before the state is read
  * (a denied inspect matched by id or name) keeps the recreate advice.
