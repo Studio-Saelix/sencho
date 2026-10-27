@@ -27,16 +27,17 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * containers, running or stopped, and does not need the render), when Compose's
  * recreate decision cannot be predicted, and when a deploy would remove a
  * protected container as an orphan (it is not stopped, carries a project label,
- * and has no service label). A protected container that has stopped passes in
- * two cases only: a deploy's orphan removal, and Auto-Heal's restart of the
- * detected provider (`allowProvider`, the way a stopped proxy comes back). Every
- * other operation still refuses it. A stop, restart, take down, delete, or
- * container operation then says the container is not running and names the
- * host-side removal, wherever the state is known (the Compose list or an
- * inspect that answered). An update or a service redeploy, an unidentified
- * provider, and a refusal decided before the state is read (a failed inspect
- * matched by id or name) keep their own advice. It otherwise lets the operation
- * through: when the stack holds no protected container, no owner of a
+ * and has no service label). A protected container that has stopped passes a
+ * deploy that does not recreate it (removing a stopped orphan is one) and
+ * Auto-Heal's restart of the detected provider (`allowProvider`, the way a
+ * stopped proxy comes back). Every other operation still refuses it. A stop,
+ * restart, take down, delete, or container operation then says the container is
+ * not running and names the host-side removal, wherever the state is known (the
+ * container list, with every replica of the service stopped, or an inspect that
+ * answered). A deploy that would recreate it or cannot predict that, an update
+ * or a service redeploy, an unidentified provider, and a refusal decided before
+ * the state is read (an inspect that failed or was denied, matched by id or
+ * name) keep their own advice. It otherwise lets the operation through: when the stack holds no protected container, no owner of a
  * namespace one runs in, and nothing the operation would recreate that they
  * depend on; for a restart of Sencho itself (both evaluators); and for a remote
  * node (its own Sencho guards it).
@@ -97,7 +98,7 @@ export type EndpointMutation =
    */
   | { kind: 'service'; service: string; restart?: boolean; engineOnly?: boolean };
 
-/** A stop, restart, take down, or delete: the guard decides it from the deployed containers (running or stopped) and does not read the Compose file. */
+/** A stop, restart, take down, or delete: the guard decides it from the deployed containers (running or stopped) and does not need the Compose render. */
 function isEngineDriven(mutation: EndpointMutation): boolean {
   return mutation.kind === 'stop' || mutation.kind === 'restart' || (mutation.kind === 'service' && mutation.engineOnly === true);
 }
@@ -413,7 +414,7 @@ function stoppedContainerRefusal(role: ProtectedRole, name: string, service: str
   return {
     reason: via && role !== 'sencho' ? 'provider' : reasonOf(role),
     service,
-    message: `Container "${name}" ${subject}. It is not running, but Sencho still does not stop, restart, or remove it. `
+    message: `Container "${name}" ${subject}. "${name}" is not running, but Sencho still does not stop, restart, or remove it. `
       + `If it is a leftover you no longer need, remove it from the host (docker rm ${name}); otherwise start it again from the host (docker compose up -d) while Sencho is idle.${label}`,
   };
 }
@@ -660,15 +661,16 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     if (maybeProvider.length > 0) found.push({ containers: maybeProvider, role: 'unknown_provider' });
   }
 
-  // The label is read from the running containers (what is actually deployed)
-  // and from the rendered file (what the next deploy would deploy), so removing
-  // it from the file does not unprotect a container that still carries it.
+  // The label is read from the deployed containers, running or stopped (what is
+  // actually deployed) and from the rendered file (what the next deploy would
+  // deploy), so removing it from the file does not unprotect a container that
+  // still carries it.
   const renderResult = await readRendered(input.probes);
   // A deploy, update, or per-service change is decided from the rendered model
   // (pull policy, wiring, labels), so one that cannot be rendered is refused
   // rather than guessed: Compose does not always fail by itself (a render that
   // times out or overflows its cap, while `up` has a far longer budget). A stop
-  // or restart does not need the render: a failed one falls back to the running
+  // or restart does not need the render: a failed one falls back to the deployed
   // containers, so it stays possible while the file is broken.
   if (renderResult.state === 'failed' && !isEngineDriven(mutation)) {
     return renderFailureRefusal(stackName, renderResult.detail);
@@ -711,7 +713,7 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     }
   }
 
-  // The running protected containers keep the namespaces they were created in,
+  // The deployed protected containers (running or stopped) keep the namespaces they were created in,
   // whatever the file says now: removing `pid: service:vpn` from the file does
   // not move the proxy out of vpn's namespace until the proxy is recreated.
   // Ownership is read from the containers themselves, across projects and
@@ -728,8 +730,8 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   // A container carrying the label is protected wherever it runs: its namespace
   // owner may live in another project, and a proxy detection missed is
   // protected by the label alone. (A stopped container with the label stays
-  // protected here, so every operation refuses it except a deploy's orphan
-  // removal and Auto-Heal's restart of the detected provider.)
+  // protected here, so every operation refuses it except a deploy that does not
+  // recreate it (a stopped orphan's removal is one).)
   for (const c of labeledContainers(allContainers)) {
     if (typeof c.Id !== 'string' || roots.has(c.Id)) continue;
     roots.set(c.Id, { role: 'provider', target: { containerId: c.Id, containerName: nameOf(c) }, label: serviceOf(c) ?? (nameOf(c) || c.Id) });
@@ -892,10 +894,11 @@ function inspectFailureRefusal(containerId: string, error: unknown): DockerEndpo
  * owner) that has already stopped is still refused, because a removal is
  * evaluated as a stop and force-removes a container that was started since the
  * check (the one exception is `allowProvider`'s restart of the provider, in any
- * state, which is how a stopped proxy comes back); when the state is known (an inspect that answered, or the labeled
- * list), the refusal says it is not running and names the host-side removal
- * rather than advising a recreate. A refusal decided before the state is read
- * (a denied inspect matched by id or name) keeps the recreate advice.
+ * state, which is how a stopped proxy comes back). When the state is known (an
+ * inspect that answered, or the labeled list), the refusal says it is not
+ * running and names the host-side removal rather than advising a recreate. A
+ * refusal decided before the state is read (an inspect that failed or was
+ * denied, matched by id or name) keeps the recreate advice.
  *
  * A container that cannot be inspected is refused, except one that does not
  * exist (HTTP 404, the operation then fails by itself), a restart of Sencho, a

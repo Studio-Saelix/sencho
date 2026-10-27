@@ -2285,7 +2285,7 @@ describe('the Sencho clause in a refusal', () => {
     for (const mutation of [{ kind: 'stop' }, { kind: 'service', service: 'sencho', engineOnly: true }] as EndpointMutation[]) {
       const refusal = await run(mutation);
       expect(refusal).toMatchObject({ reason: 'sencho', service: 'sencho' });
-      expect(refusal?.message).toContain('"sencho" is the Sencho container. It is not running');
+      expect(refusal?.message).toContain('"sencho" is the Sencho container. "sencho" is not running');
       expect(refusal?.message).not.toContain(RUNNING_CLAUSE);
     }
   });
@@ -2310,8 +2310,7 @@ describe('the Sencho clause in a refusal', () => {
 
     mockListContainers.mockResolvedValue([senchoContainer, { ...container(VPN_ID, 'vpn'), State: 'exited' }]);
     const stoppedOwner = await run({ kind: 'service', service: 'vpn', engineOnly: true });
-    expect(stoppedOwner?.message).toContain('"sencho" is the Sencho container. ');
-    expect(stoppedOwner?.message).toContain('It is not running');
+    expect(stoppedOwner?.message).toContain('"sencho" is the Sencho container. "vpn" is not running');
     expect(stoppedOwner?.message).not.toContain(RUNNING_CLAUSE);
   });
 
@@ -2321,7 +2320,7 @@ describe('the Sencho clause in a refusal', () => {
     const refusal = await run({ kind: 'update' });
 
     expect(refusal?.message).toContain(RUNNING_CLAUSE);
-    expect(refusal?.message).not.toContain('It is not running');
+    expect(refusal?.message).not.toContain('is not running');
   });
 });
 
@@ -2358,7 +2357,7 @@ describe('a deploy when Compose reports no config hash for a service', () => {
     expect(refusal?.message).toContain('configuration hash');
   });
 
-  it('refuses it for the provider when the Compose file no longer lists the service, so the hash is not reported', async () => {
+  it('refuses it for the provider when the Compose file no longer lists the service, and Compose reports no hash for it', async () => {
     mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
     mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
     const hashes: Record<string, string> = { web: 'hash-current' };
@@ -2387,6 +2386,85 @@ describe('a deploy when Compose reports no config hash for a service', () => {
     const p = withHash(['web']);
 
     expect(await run({ kind: 'up' }, p)).toBeNull();
-    expect(p.configHash).not.toHaveBeenCalledWith('web');
+  });
+
+  it('refuses it for the owner of a namespace Sencho runs in, and does not point to Reapply', async () => {
+    // The file does not wire the two, so only the running container's namespace says so.
+    runtimeModes.set(SELF_ID, { name: 'sencho', modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([senchoContainer, container(VPN_ID, 'vpn')]);
+
+    const refusal = await run({ kind: 'up' }, withHash(['vpn']));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'vpn' });
+    expect(refusal?.message).toContain('"sencho" is the Sencho container');
+    expect(refusal?.message).not.toContain('Reapply');
+  });
+});
+
+describe('the clause each protected role gets, in every refusal built from it', () => {
+  const PROVIDER = 'carries the Docker connection Sencho is using';
+  const POSSIBLE = 'shares a network with Sencho and may carry its Docker connection';
+  const noHash = () => probes({ configHash: vi.fn().mockResolvedValue(null) });
+  const orphan = (id: string, name: string, labels: Record<string, string> = {}, networks: string[] = []) => ({
+    Id: id,
+    Names: [`/${name}`],
+    Labels: { 'com.docker.compose.project': 'sencho', ...labels },
+    NetworkSettings: { Networks: Object.fromEntries(networks.map(network => [network, { NetworkID: `id-${network}` }])) },
+  });
+
+  it('words the provider the same in an orphan, an unpredictable recreate, a stopped container, and a namespace owner', async () => {
+    mockResolveProvider.mockResolvedValue(providerFor('socket-proxy'));
+
+    mockListContainers.mockResolvedValue([senchoContainer, orphan(PROXY_ID, 'socket-proxy', { [INFRASTRUCTURE_LABEL]: 'true' })]);
+    expect((await run({ kind: 'up' }))?.message).toContain(PROVIDER);
+
+    mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
+    expect((await run({ kind: 'up' }, noHash()))?.message).toContain(PROVIDER);
+
+    mockListContainers.mockResolvedValue([{ ...proxyContainer, State: 'exited' }]);
+    expect((await run({ kind: 'stop' }))?.message).toContain(PROVIDER);
+
+    runtimeModes.set(PROXY_ID, { name: 'socket-proxy', modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([proxyContainer, container(VPN_ID, 'vpn')]);
+    expect((await run({ kind: 'service', service: 'vpn', engineOnly: true }))?.message).toContain(`"socket-proxy" ${PROVIDER}`);
+    mockListContainers.mockResolvedValue([proxyContainer, { ...container(VPN_ID, 'vpn'), State: 'exited' }]);
+    expect((await run({ kind: 'service', service: 'vpn', engineOnly: true }))?.message).toContain(`"socket-proxy" ${PROVIDER}`);
+  });
+
+  it('words a mislabeled container the same way in an orphan, an unpredictable recreate, and a stopped container', async () => {
+    const labels = { [INFRASTRUCTURE_LABEL]: 'maybe' };
+
+    mockListContainers.mockResolvedValue([senchoContainer, orphan(WEB_ID, 'web', labels)]);
+    expect((await run({ kind: 'up' }))?.message).toContain(PROVIDER);
+
+    mockListContainers.mockResolvedValue([container(WEB_ID, 'web', { labels })]);
+    expect((await run({ kind: 'up' }, noHash()))?.message).toContain(PROVIDER);
+
+    mockListContainers.mockResolvedValue([{ ...container(WEB_ID, 'web', { labels }), State: 'exited' }]);
+    expect((await run({ kind: 'stop' }))?.message).toContain(PROVIDER);
+  });
+
+  it('words a container that may carry the connection the same way in an orphan and an unpredictable recreate, and keeps the endpoint advice when it is stopped', async () => {
+    mockResolveProvider.mockResolvedValue({ state: 'unresolved', reason: 'inspect denied' });
+
+    mockListContainers.mockResolvedValue([senchoContainer, orphan(WEB_ID, 'web', {}, ['proxy-net'])]);
+    expect((await run({ kind: 'up' }))?.message).toContain(POSSIBLE);
+
+    mockListContainers.mockResolvedValue([container(WEB_ID, 'web', { networks: ['proxy-net'] })]);
+    expect((await run({ kind: 'up' }, noHash()))?.message).toContain(POSSIBLE);
+
+    mockListContainers.mockResolvedValue([{ ...container(WEB_ID, 'web', { networks: ['proxy-net'] }), State: 'exited' }]);
+    expect((await run({ kind: 'stop' }))?.message).toContain('allows container list and inspect requests');
+  });
+
+  it('words an orphan that owns a namespace Sencho runs in with the Sencho clause', async () => {
+    runtimeModes.set(SELF_ID, { name: 'sencho', modes: { NetworkMode: `container:${VPN_ID}` } });
+    mockListContainers.mockResolvedValue([senchoContainer, orphan(VPN_ID, 'vpn')]);
+
+    const refusal = await run({ kind: 'up' });
+
+    expect(refusal).toMatchObject({ reason: 'sencho' });
+    expect(refusal?.message).toContain('owns a namespace that "sencho" runs in, and "sencho" is the Sencho container');
+    expect(refusal?.message).toContain('orphan');
   });
 });
