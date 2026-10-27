@@ -344,7 +344,7 @@ function unknownRecreateRefusal(role: ProtectedRole, service: string, via?: stri
   };
 }
 
-/** The reason a role is refused under, shared by every refusal that names it. */
+/** The reason a refusal of a protected container in this role carries (the same mapping `refusalFor` uses). */
 function reasonOf(role: ProtectedRole): DockerEndpointRefusal['reason'] {
   switch (role) {
     case 'sencho': return 'sencho';
@@ -721,13 +721,13 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
     // by project label or by working directory, and the project name Compose runs
     // under can differ from the stack name in case or through a `name:` key).
     // One with no project label at all is outside the project and left alone.
-    const unlabeled = entry.containers.filter(c => !serviceOf(c));
+    let judged = entry.containers;
     if (mutation.kind === 'up') {
-      const orphan = unlabeled.find(c => !!c.Labels?.['com.docker.compose.project']);
-      if (orphan) return orphanRemovalRefusal(entry.role, orphan.Names?.[0]?.replace(/^\//, '') || orphan.Id || 'unknown', stackName, entry.via);
+      const orphan = entry.containers.find(c => !serviceOf(c) && !!c.Labels?.['com.docker.compose.project']);
+      if (orphan) return orphanRemovalRefusal(entry.role, nameOf(orphan) || orphan.Id || 'unknown', stackName, entry.via);
+      judged = entry.containers.filter(c => !!serviceOf(c));
     }
-    const keyed = mutation.kind === 'up' ? entry.containers.filter(c => !!serviceOf(c)) : entry.containers;
-    const services = [...new Set(keyed.map(c => serviceOf(c) || c.Names?.[0]?.replace(/^\//, '') || c.Id || 'unknown'))];
+    const services = [...new Set(judged.map(c => serviceOf(c) || nameOf(c) || c.Id || 'unknown'))];
     for (const service of services) {
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
