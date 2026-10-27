@@ -16,7 +16,7 @@ import { NotificationService } from './NotificationService';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import TrivyService from './TrivyService';
 import { isSeverityAtLeast } from '../utils/severity';
-import { applySuppressions } from '../utils/suppression-filter';
+import { applySuppressions, mayDismissOnImage } from '../utils/suppression-filter';
 import { validateImageRef } from '../utils/image-ref';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
@@ -131,10 +131,10 @@ interface ImageRiskEvaluation {
     /**
      * Log-only: the reasons in `reasons` that were not established on verified
      * evidence, and why. KEV/fixable are assumed because the detail rows could
-     * not be trusted. `severity` is listed only when suppressions are honored:
-     * it matched on the raw aggregate, and suppressions, which might lift it,
-     * could not be applied without the rows. Never reaches the API: the
-     * violation keeps the plain `reasons`.
+     * not be trusted. `severity` is listed only when suppressions are honored and
+     * one may apply to this image: it matched on the raw aggregate, and that
+     * suppression, which might lift it, could not be applied without the rows.
+     * Never reaches the API: the violation keeps the plain `reasons`.
      */
     unverified?: { reasons: PolicyBlockReason[]; cause: string };
 }
@@ -266,12 +266,15 @@ function evaluateImageRisk(
                 scan.id, findings.length, scan.total_vulnerabilities,
             );
         }
-        // The suppressions were read, so with none defined the raw severity is the
-        // post-suppression severity and a match on it stands verified.
+        // The suppressions were read, so the raw severity is the post-suppression
+        // severity, and a match on it stands verified, unless some stored row could
+        // dismiss a finding on this image (a row for another image, an expired
+        // one, or one that does not dismiss never can). The missing rows might be
+        // the findings such a row covers.
         return aggregateFallback(
             inputs, rawSeverity, scan,
             detailRowsTruncated(findings.length, scan.total_vulnerabilities),
-            honorSuppressions && suppressions.length > 0,
+            honorSuppressions && suppressions.some((s) => mayDismissOnImage(s, imageRef)),
         );
     }
 

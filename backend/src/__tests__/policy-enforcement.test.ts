@@ -647,6 +647,28 @@ describe('blocked-deploy log line', () => {
       ]);
     });
 
+    // Suppressions are off, so a severity match on the aggregate is a real match:
+    // the unreadable evidence is only why KEV/fixable are assumed.
+    it.each([
+      ['detail', () => dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('db locked'); })],
+      ['suppression', () => dbStub.getCveSuppressions.mockImplementation(() => { throw new Error('db locked'); })],
+    ])('keeps the severity match plain when the %s read fails with suppressions off', async (_name, failRead) => {
+      trivyStub.scanImagePreflight.mockResolvedValue(
+        mkScan({ id: 44, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 }),
+      );
+      failRead();
+
+      const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+      expect(result.ok).toBe(false);
+      expect(result.violations[0].reasons).toEqual(['severity', 'kev', 'fixable']);
+      const lines = blockLines();
+      expect(lines).toEqual([
+        `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: known-exploited CVE (KEV), fixable Critical/High not verified, ${UNREADABLE}; severity threshold matched`,
+      ]);
+      expect(lines[0]).not.toContain('before suppressions could be applied');
+    });
+
     // A severity-only policy with suppressions off never loads detail rows, so
     // truncated rows cannot reach the fail-closed fallback: the match is verified.
     it('keeps the matched wording for a severity-only policy when suppressions are off', async () => {
@@ -667,6 +689,8 @@ describe('blocked-deploy log line', () => {
       const BEFORE_SUPPRESSIONS = 'severity threshold matched before suppressions could be applied';
       const CRITICAL_TRUNCATED = (): VulnerabilityScan =>
         mkScan({ id: 45, total_vulnerabilities: 5, highest_severity: 'CRITICAL', critical_count: 2 });
+      const MATCHED_ONLY = '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")';
+      const UNVERIFIED_SEVERITY = `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): nginx:1.14: ${BEFORE_SUPPRESSIONS}, ${TRUNCATED}`;
 
       beforeEach(() => {
         dbStub.getMatchingPolicy.mockReturnValue(mkPolicy());
@@ -689,14 +713,81 @@ describe('blocked-deploy log line', () => {
         ]);
       });
 
-      it('reads matched when the truncated rows leave no suppression that could lift the severity', async () => {
+      it('reads matched when no suppression is stored', async () => {
         dbStub.getCveSuppressions.mockReturnValue([]);
 
         const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
 
         expect(result.ok).toBe(false);
+        expect(blockLines()).toEqual([MATCHED_ONLY]);
+      });
+
+      // Each row below is stored, so the list is non-empty, but none can dismiss
+      // a finding on nginx:1.14: the aggregate severity is already post-suppression.
+      it.each([
+        ['scoped to another image', { image_pattern: 'redis:*' }],
+        ['expired', { expires_at: 1 }],
+        ['needs_review', { status: 'needs_review' }],
+        ['affected', { status: 'affected' }],
+      ])('reads matched when the only stored suppression is %s', async (_name, overrides) => {
+        dbStub.getCveSuppressions.mockReturnValue([mkSuppression(overrides)]);
+
+        const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(result.ok).toBe(false);
+        expect(result.violations[0].reasons).toEqual(['severity']);
+        expect(blockLines()).toEqual([MATCHED_ONLY]);
+      });
+
+      it('reads matched when every stored suppression is one that cannot dismiss', async () => {
+        dbStub.getCveSuppressions.mockReturnValue([
+          mkSuppression({ id: 1, image_pattern: 'redis:*' }),
+          mkSuppression({ id: 2, expires_at: 1 }),
+          mkSuppression({ id: 3, status: 'needs_review' }),
+        ]);
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(blockLines()).toEqual([MATCHED_ONLY]);
+      });
+
+      // The truncated rows may hold the finding such a row covers, so the
+      // post-suppression severity is unknown.
+      it.each([
+        ['image-wide', {}],
+        ['matching the image by glob', { image_pattern: 'nginx:*' }],
+        ['pinned to a package', { pkg_name: 'openssl' }],
+        ['not_affected', { status: 'not_affected' }],
+        ['not expired yet', { expires_at: Date.now() + 3_600_000 }],
+      ])('reports the severity match as unverified when an active dismissing suppression is %s', async (_name, overrides) => {
+        dbStub.getCveSuppressions.mockReturnValue([mkSuppression(overrides)]);
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(blockLines()).toEqual([UNVERIFIED_SEVERITY]);
+      });
+
+      it('reports the severity match as unverified when one usable suppression sits among ones that cannot dismiss', async () => {
+        dbStub.getCveSuppressions.mockReturnValue([
+          mkSuppression({ id: 1, image_pattern: 'redis:*' }),
+          mkSuppression({ id: 2, status: 'needs_review' }),
+          mkSuppression({ id: 3 }),
+        ]);
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+        expect(blockLines()).toEqual([UNVERIFIED_SEVERITY]);
+      });
+
+      it('judges each image against its own suppressions', async () => {
+        dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ image_pattern: 'redis:*' })]);
+        trivyStub.scanImagePreflight.mockResolvedValue(CRITICAL_TRUNCATED());
+
+        await enforcePolicyForImageRefs('web', 1, ['nginx:1.14', 'redis:6'], { bypass: false, actor: 'u' });
+
         expect(blockLines()).toEqual([
           '[Policy] Blocked deploy for "web": 1 image(s) matched severity>=HIGH (policy "block-high")',
+          `[Policy] Blocked deploy for "web": 1 image(s) had evidence that could not be verified (policy "block-high"): redis:6: ${BEFORE_SUPPRESSIONS}, ${TRUNCATED}`,
         ]);
       });
 
