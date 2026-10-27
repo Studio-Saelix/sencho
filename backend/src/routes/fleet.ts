@@ -1341,8 +1341,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
         let updateAvailable = false;
         if (!isValidVersion(version)) {
-          // Assume remote nodes are outdated when their version is unresolvable.
-          updateAvailable = node.type === 'remote';
+          // Assume a reachable remote is outdated when it reports no parseable
+          // version. An unreachable one has no reading at all, so flagging an
+          // update for it would be a guess.
+          updateAvailable = node.type === 'remote' && remoteOnline;
         } else if (compareValid) {
           updateAvailable = semver.lt(version, compareVersion!);
         }
@@ -1420,6 +1422,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           type: node.type,
           version,
           latestVersion: latestValid ? latestVersion : gatewayVersion,
+          online: node.type === 'local' || remoteOnline,
           updateAvailable,
           updateStatus: currentTracker?.status ?? null,
           error: currentTracker?.error ?? null,
@@ -1444,17 +1447,26 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
+      // A remote whose poll failed is unreadable, so it reads as offline with
+      // no version. The local row is the process serving this request, so it
+      // stays online with the gateway version and its gateway-versus-target
+      // result, with an active skip honored. Tracker and pin state are not
+      // recomputed here and read empty.
+      const isLocal = nodes[i].type === 'local';
+      const skipRow = isLocal ? db.getNodeUpdateSkip(nodes[i].id) : null;
+      const skipActive = skipRow !== null && compareValid && skipRow.skippedVersion === compareVersion;
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
         type: nodes[i].type,
-        version: null,
+        version: isLocal ? gatewayVersion : null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
-        updateAvailable: false,
+        online: isLocal,
+        updateAvailable: isLocal && !skipActive && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
         updateStatus: null,
         error: null,
-        skipActive: false,
-        skippedVersion: null,
+        skipActive,
+        skippedVersion: skipActive ? skipRow.skippedVersion : null,
         ...EMPTY_PIN_STATUS,
         isDevImage: false,
         devBuildUpdateAvailable: false,
