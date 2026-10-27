@@ -15,6 +15,7 @@ import { SettingsPrimaryButton } from '@/components/settings/SettingsActions';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
+import { EvidencePolicyPanel } from './EvidencePolicyPanel';
 import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
 
 const SEVERITY_OPTIONS: Array<{ value: VulnSeverity; label: string }> = [
@@ -54,7 +55,11 @@ const EMPTY_FORM: PolicyFormState = {
  * honor-suppressions toggle, and the replica "managed by control" state. This
  * is the governance surface for the Security page Policies tab. Policies are
  * control-governed: fetched localOnly and shown only on the local node,
- * mirroring how the rest of the fleet-governance UI behaves.
+ * mirroring how the rest of the fleet-governance UI behaves. The evidence
+ * availability panel is the exception: it configures the node that deploys, so
+ * it is shown on a remote node too (its read and write are pinned to the
+ * node on screen, not to whatever shared storage names) and is keyed by node id
+ * so a switch never shows the previous node's values.
  */
 export function ScanPolicyManager() {
   const { isAdmin, can } = useAuth();
@@ -434,6 +439,10 @@ export function ScanPolicyManager() {
           />
         </div>
       )}
+
+      {/* Held back until a node is active: the panel pins its requests to the node it
+          is given, and with none there is no node to pin them to. */}
+      {activeNode && <EvidencePolicyPanel key={activeNode.id} nodeId={activeNode.id} nodeName={activeNode.name} />}
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader

@@ -357,6 +357,21 @@ describe('git-source apply recovery (R1)', () => {
     expect(mockAbandon).not.toHaveBeenCalled();
   });
 
+  it('hands the caller\'s decision callback to the deploy gate, so a manual apply can report it', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const { buildSystemPolicyGateOptions } = await import('../helpers/policyGate');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+    const onAllowed = vi.fn();
+
+    await svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester', requirePlanFingerprint: false, onAllowed });
+
+    expect(buildSystemPolicyGateOptions).toHaveBeenCalledWith(
+      'tester',
+      expect.objectContaining({ onAllowed, auditPath: '/api/stacks/app/git-source/apply' }),
+    );
+  });
+
   it('refuses to promote when recovery capture fails', async () => {
     mockCaptureCandidate.mockRejectedValue(new Error('Exact authored-project rollback coverage is unavailable'));
     mockDeployStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });

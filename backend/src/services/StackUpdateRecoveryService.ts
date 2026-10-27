@@ -1159,8 +1159,10 @@ export class StackUpdateRecoveryService {
 
     let filesRestored = false;
     try {
-      // Eligibility (integrity + held images + security posture) before mutation.
-      const integrityVerdict = await assessGenerationEligibility(row);
+      // Eligibility (integrity + held images) before mutation. The security
+      // posture is decided by the policy gate below, which carries the caller's
+      // bypass and reports the decision.
+      const integrityVerdict = await assessGenerationEligibility(row, { deferSecurityPosture: true });
       if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
@@ -1187,26 +1189,28 @@ export class StackUpdateRecoveryService {
         );
       }
 
-      const context = await resolveRestoreContext(row);
-      const restoredManifest = await context.restoreFromContext(transactionMeta);
-      filesRestored = true;
-
       // Evaluate current policy against the exact held images rollback will launch
-      // (opaque tags / image ids), not the restored authored moving tags.
-      const restoredInvocation = restoredManifest?.invocation ?? null;
+      // (opaque tags / image ids), not the restored authored moving tags. This runs
+      // before any file moves, so a refusal changes nothing.
       const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+        onAllowed: policyOptions?.onAllowed,
       });
       if (!gate.ok) {
         throw Object.assign(
-          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
-          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback', gate.evidence)),
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations, evidence: gate.evidence },
         );
       }
+
+      const context = await resolveRestoreContext(row);
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      filesRestored = true;
+      const restoredInvocation = restoredManifest?.invocation ?? null;
 
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
@@ -1293,8 +1297,8 @@ export class StackUpdateRecoveryService {
       // before that leaves the previous workload provably intact. The same
       // classification rides the error to the rollback caller (this node's
       // stack route, or the hub restoring through it): this catch is the only
-      // place that knows, and a code such as ROLLBACK_PROHIBITED is thrown on
-      // both sides of the file move.
+      // place that knows, and a code does not say it on its own
+      // (RECOVERY_PROBE_FAILED is thrown only after the files moved).
       //
       // A failed restore's own revert counts as movement even before this
       // function saw a clean return: the live files may be a mix of the

@@ -40,6 +40,8 @@ The read-only banner above only appears when you sign in **directly** to the rep
   <img src="/images/fleet-sync/fleet-sync-proxy-notice.png" alt="The Security page Policies tab on the control, with the node switcher set to a remote. A callout reads 'Managed on the local instance: Scan policies are managed on the local Sencho instance. Switch to the local node to manage them,' with no policy list below it." />
 </Frame>
 
+The **Evidence availability** card below the Policies notice is the exception on that tab: it shows the selected node's own setting and is editable from the control, because it configures the node that runs the deploy and is not replicated.
+
 To see a replica's mirrored rules, sign in to that instance's own URL instead of viewing it through the control's node switcher. This is different from most other Security page tabs (Images, Secrets, Scanner setup) and most other Sencho pages generally, which do proxy through the node switcher; scan policies, CVE suppressions, and misconfig acknowledgements are the exception.
 
 ## What replicates

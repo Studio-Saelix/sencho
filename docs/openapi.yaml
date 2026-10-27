@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Sencho API
-  version: 0.97.1 # x-release-please-version
+  version: 0.98.1 # x-release-please-version
   description: |
     REST API for Sencho, a self-hosted Docker Compose management dashboard.
 
@@ -3705,6 +3705,9 @@ paths:
                           nullable: true
                         latestVersion:
                           type: string
+                        online:
+                          type: boolean
+                          description: Whether the gateway could reach the node when it polled. Always `true` for the local row. When `false`, `version` is `null` and `updateAvailable` is `false`, so a `false` `updateAvailable` does not mean the node is up to date.
                         updateAvailable:
                           type: boolean
                         updateStatus:

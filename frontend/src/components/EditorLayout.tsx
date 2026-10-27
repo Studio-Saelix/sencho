@@ -86,6 +86,9 @@ import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { useNavigateEventSurface } from './EditorLayout/hooks/useNavigateEventSurface';
+import { openPolicySettings } from './EditorLayout/openPolicySettings';
+import { useNodeViewQueue } from './EditorLayout/hooks/useNodeViewQueue';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
 import { HubOnlyGate } from './HubOnlyGate';
@@ -299,10 +302,14 @@ export default function EditorLayout() {
   const onDeletedOpenStackRef = useRef<() => void>(() => {});
   // openViewOnNode is declared further down; assigned once it exists.
   const hubOnlyFromRemoteRef = useRef<(apply: () => void) => void>(() => {});
+  // A navigate event from any dispatcher brings a phone to its content surface
+  // before the view changes; connected once the mobile surface helpers exist.
+  const navigateEventSurface = useNavigateEventSurface();
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
     onHubOnlyFromRemote: (apply) => hubOnlyFromRemoteRef.current(apply),
+    onNavigateEvent: navigateEventSurface.onNavigateEvent,
     hasFleetCapability: hasCapability('fleet'),
     containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
@@ -519,12 +526,14 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
-  // Pending-intent target for a cross-node "open this node's <view>" request
-  // (a Fleet networking signal, a Readiness security finding). Mirrors
-  // pendingStackLoadRef: setActiveNode first, then the node-settled effect below
-  // opens the view once activeNode actually reflects the target, so the view
-  // never briefly mounts and fetches against the previous node.
-  const pendingNodeViewRef = useRef<{ nodeId: number; open: () => void } | null>(null);
+  // Cross-node "open this node's <view>" requests (a Fleet networking signal, a
+  // Readiness security finding). Mirrors pendingStackLoadRef: setActiveNode
+  // first, then the node-settled effect below opens the view once activeNode
+  // actually reflects the target, so the view never briefly mounts and fetches
+  // against the previous node.
+  const {
+    openViewOnNode, takeQueuedView, dropQueuedView, parkForConfirmation,
+  } = useNodeViewQueue({ nodes, activeNode, setActiveNode });
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -666,6 +675,8 @@ export default function EditorLayout() {
     });
   };
 
+  navigateEventSurface.connect(isMobile, (then) => leaveToMobileSurface('content', then));
+
   const goToMobileList = () => leaveToMobileSurface('list');
   const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));
   const openSettingsMobileAware = (section?: SectionId) =>
@@ -739,21 +750,6 @@ export default function EditorLayout() {
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
 
-  // Open a node-scoped view (Networking from a Fleet card's networking signal,
-  // Security from a Readiness finding). Pending-intent gated (see
-  // pendingNodeViewRef above): if the node is already active, navigate
-  // immediately; otherwise switch nodes first and let the node-settled effect
-  // complete the navigation once activeNode reflects the switch.
-  const openViewOnNode = (nodeId: number, open: () => void) => {
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
-    if (activeNode?.id === nodeId) {
-      open();
-      return;
-    }
-    pendingNodeViewRef.current = { nodeId, open };
-    setActiveNode(node);
-  };
   // A hub-only destination (GitOps, Fleet, ...) asked for from a remote node,
   // e.g. a stack's Git indicator: switch to the hub, then open it there, the
   // same way Home reaches Fleet from a remote node.
@@ -774,6 +770,12 @@ export default function EditorLayout() {
   const handleOpenNodeNetworking = (nodeId: number) => {
     openViewOnNode(nodeId, () => setActiveView('networking'));
   };
+  const handleOpenPolicySettings = (nodeId: number | null) => openPolicySettings({
+    nodeId,
+    nodes,
+    openViewOnNode,
+    onNodeMissing: () => toast.error('That node is no longer registered.'),
+  });
   const handleOpenNodeSecurity = (nodeId: number, tab: SecurityTab | null) => {
     openViewOnNode(nodeId, () => {
       setSecurityTab(tab ?? 'overview');
@@ -1188,23 +1190,26 @@ export default function EditorLayout() {
     const previousId = lastSeenNodeIdRef.current;
     const isRealSwitch = previousId !== null && previousId !== activeNode.id;
 
-    // A node-switch prompt is already open. Ignore any further activeNode
-    // changes until the user resolves the current dialog; revert silently so
-    // the dialog's pendingUnsavedNode stays anchored to the first attempt.
-    if (isRealSwitch && overlayState.pendingUnsavedLoad === NODE_SWITCH_PENDING_TOKEN) {
-      const previousNode = nodes.find(n => n.id === previousId);
-      if (previousNode) {
-        // A reverted switch never lands, so a view queued for it must not
-        // fire on some later, unrelated arrival at that node.
-        pendingNodeViewRef.current = null;
-        revertingNodeSwitchRef.current = true;
-        setActiveNode(previousNode);
+    const previousNode = nodes.find(n => n.id === previousId);
+
+    // An unsaved-changes prompt is already open (a parked node switch, a stack
+    // load, or a stashed leave or back navigation). Ignore any further activeNode
+    // change until the user resolves it: revert, leaving the prompt with the
+    // navigation it was opened for. A view queued for the ignored switch is
+    // dropped, and if there was one the operator is told it was not followed.
+    // With no previous node to revert to, the switch lands and falls through to
+    // the discard path below.
+    if (isRealSwitch && previousNode
+      && (overlayState.pendingUnsavedLoad !== null || overlayState.pendingLeaveAction !== null)) {
+      if (dropQueuedView()) {
+        toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
       }
+      revertingNodeSwitchRef.current = true;
+      setActiveNode(previousNode);
       return;
     }
 
     if (isRealSwitch && stackActions.hasUnsavedChanges()) {
-      const previousNode = nodes.find(n => n.id === previousId);
       if (previousNode) {
         // Stash the attempted node + open the unsaved-changes dialog via the
         // existing pendingUnsavedLoad/Node fields. Revert activeNode back to
@@ -1213,9 +1218,10 @@ export default function EditorLayout() {
         overlayState.setPendingUnsavedNode(activeNode);
         overlayState.setPendingUnsavedLoad(NODE_SWITCH_PENDING_TOKEN);
         overlayState.setPendingLoadOptions(null);
-        // A reverted switch never lands, so a view queued for it must not
-        // fire on some later, unrelated arrival at that node.
-        pendingNodeViewRef.current = null;
+        // A view queued for this switch waits with the confirmation: accepting
+        // it re-queues the view and finishes the switch, cancelling drops it.
+        const resumeSwitch = parkForConfirmation(activeNode);
+        if (resumeSwitch) overlayState.setPendingLeaveAction({ run: resumeSwitch });
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
         return;
@@ -1231,8 +1237,7 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
-    const pendingNodeView = pendingNodeViewRef.current;
-    pendingNodeViewRef.current = null;
+    const pendingNodeView = takeQueuedView();
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
@@ -1574,6 +1579,7 @@ export default function EditorLayout() {
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           deleteVolumePreservation={deleteVolumePreservation}
           onOpenFleetNodeUpdates={() => openFleetUpdates('nodes')}
+          onOpenPolicySettings={handleOpenPolicySettings}
           hydrationReady={hydrationReady}
         />
       );

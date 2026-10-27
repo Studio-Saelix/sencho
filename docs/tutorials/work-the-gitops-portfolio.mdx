@@ -1,0 +1,154 @@
+---
+title: Clear Your GitOps Attention Queue From One Page
+sidebarTitle: Work the GitOps portfolio
+description: Read the GitOps portfolio verdict, clear the attention queue with Retry, Resume, and Review update, open an application, and filter the list.
+---
+
+It is Monday morning and four applications are connected to Git across three nodes. Overnight the Git host went down for maintenance, a teammate suspended one source during a registry move, and someone pushed a new nginx tag. You want to know what needs you and clear it without visiting each stack.
+
+This tutorial works the GitOps portfolio top to bottom. You read the verdict, clear each entry in the attention queue where it sits, open an application, and filter the list. It does not cover connecting a source, which is in [Deploy Compose Changes by Pulling From Git](/tutorials/connect-a-git-source), approving and authorizing a Blueprint rollout, which is in [Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One](/tutorials/roll-out-a-git-managed-blueprint), or what each drift class means, which is in [GitOps drift](/features/gitops-drift-model).
+
+## Prerequisites
+
+- The `admin` or `node-admin` role. Retry, Resume, and applying a change need the `stack:edit` permission, which `deployer`, `viewer`, and `auditor` do not hold. Without `stack:edit` the queue shows **Open Git source** where the others show **Retry** or **Resume**. Available on every tier, including Community.
+- Applications already connected to Git. The screenshots use four on three nodes, shown as **Local**, `edge-01`, and `edge-02`.
+- The hub selected as the active node. The portfolio lives on the hub and is hidden while a remote node is active.
+
+| Application | Target | What the queue shows |
+|---|---|---|
+| `status-page` | Direct, Local | Its last fetch failed while the Git host was down |
+| `docs-site` | Direct, `edge-01` | Suspended during a registry move |
+| `marketing-site` | Direct, `edge-02` | A new commit that bumps `nginx:1.27-alpine` to `nginx:1.28-alpine` |
+| `storefront` | Git-managed Blueprint, all three nodes | Nothing to do, opened later to read its targets |
+
+Your queue will differ. The steps work the same way on whatever it lists.
+
+<Steps>
+  <Step title="Open GitOps and read the verdict">
+    Select **GitOps** in the top navigation. The masthead leads with one verdict for the whole fleet, followed by five counts.
+
+    <Frame caption="The portfolio on Monday morning. The verdict is Needs action, and three applications are waiting on you.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/portfolio-needs-action.png" alt="The GitOps portfolio with the verdict Needs action, counts for applications, pending, drifted, converged, and attention, an Attention required list with three entries, and a table of four applications." />
+    </Frame>
+
+    **Needs action** means at least one application has failed, here `status-page`. The verdicts are ordered, so a failure outranks everything below it, and **Needs attention** appears when nothing has failed but something waits on you. **ATTENTION** counts the applications in the queue. **DRIFTED** counts confirmed drift, which is one item on `status-page`. The line under the verdict says how many nodes answered, here `3/3 nodes reporting`. [The feature page](/features/gitops-portfolio#reading-the-page) lists every verdict.
+  </Step>
+  <Step title="Read the attention queue">
+    The **Attention required** list above the table holds everything waiting on an operator. Failures sort ahead of pending decisions, and each group sorts by name. Each entry has a reason, the application name, one line of explanation, and the button that resolves it.
+
+    <Frame caption="Three entries, each with its own action.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/attention-queue.png" alt="The Attention required list with source failed on status-page and a Retry button, source suspended on docs-site and a Resume button, and review required on marketing-site and a Review update button." />
+    </Frame>
+
+    `status-page` reads `+1 more` because it has a second reason, the source drift counted in the masthead. The list shows the most urgent reason and counts the others. Selecting the body of an entry opens that application. The button runs the step without leaving the page.
+  </Step>
+  <Step title="Retry the source that failed">
+    The Git host is back, so select **Retry** on `status-page`. Retry fetches the source again now instead of waiting for the next scheduled poll. A toast reads `Retry started for status-page`. The toast means the attempt began, not that it worked.
+
+    <Frame caption="After a few seconds the entry changes from source failed to review required.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/after-retry.png" alt="The Attention required list with a single entry, review required on status-page, with a Review update button." />
+    </Frame>
+
+    The failure is gone, but the entry did not leave the queue. The source uses **Review only**, so a fetched commit waits for you before it applies, even when it is the commit the stack already runs. You clear it in step 6.
+  </Step>
+  <Step title="Resume the suspended source">
+    Select **Resume** on `docs-site`. A toast reads `Reconciliation resumed for docs-site`. Resume re-evaluates the source at once instead of waiting for the next poll. The source is no longer suspended, so polling, webhooks, and automatic apply run again.
+
+    <Frame caption="Resume succeeded. docs-site now asks for a review, like status-page.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/resume-toast.png" alt="The portfolio with a success toast reading Reconciliation resumed for docs-site, and review required entries for docs-site, marketing-site, and status-page." />
+    </Frame>
+
+    As with Retry, the source comes back asking for a review of the commit it fetched.
+  </Step>
+  <Step title="Review the commit that changed">
+    Select **Review update** on `marketing-site`. The Git Source sheet opens over the portfolio, pulls the latest commit, and shows the **GIT · CHANGE PLAN** dialog. The plan lists `compose.yaml` as **Modify**. That row is the nginx bump from `1.27-alpine` to `1.28-alpine`.
+
+    <Frame caption="The change plan for the commit that changed. Apply writes the file, and Deploy after apply also redeploys it.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/change-plan-modify.png" alt="The Git change plan dialog for marketing-site with one Modify row for compose.yaml, an unticked Deploy after apply checkbox, and Dismiss and Apply buttons." />
+    </Frame>
+
+    <Warning>
+      **Deploy after apply** recreates the container on `edge-02`. Leave it unticked to write the file now and deploy later from the stack.
+    </Warning>
+
+    Tick **Deploy after apply** and select **Apply**. A toast reads `Changes applied and deployed.` The sheet stays open. Press Esc to return to the portfolio.
+  </Step>
+  <Step title="Dismiss the reviews with nothing to apply">
+    Two entries are left, `docs-site` and `status-page`. Select **Review update** on `docs-site`. The plan reads `1 unchanged file`, and the dialog names the incoming commit `1ba32bb`, which is the commit the source already runs.
+
+    <Frame caption="Nothing in this plan differs from what is deployed.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/change-plan-unchanged.png" alt="The Git change plan dialog for docs-site reading 1 unchanged file, with Deploy after apply unticked and Dismiss and Apply buttons." />
+    </Frame>
+
+    There is nothing to deploy, so select **Dismiss**. A toast reads `Pending update dismissed.` and the sheet reads **Accepted**. Press Esc to close the sheet, then repeat for `status-page`. When the last entry is dismissed, the **Attention required** section disappears.
+  </Step>
+  <Step title="Open an application">
+    Select the `storefront` row. A Blueprint application opens its own sheet over the portfolio. It holds the identity of the application, its application state, and one card per target node.
+
+    <Frame caption="storefront has three target cards, each with its own health and digest comparison.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/application-sheet.png" alt="The storefront application sheet with an Identity section, an Application state block, and target cards for Local, edge-01, and edge-02 reading Synced and healthy." />
+    </Frame>
+
+    Read the cards, not only the headline. Each target reports its own runtime, health, and last known good state, so one unhealthy node is never averaged away. The address bar now carries the application, so you can bookmark or share the sheet. Close it with Esc, the close button, or the browser's Back button, and the list returns with its filters and scroll position. **Open Blueprint** at the top opens the Blueprint's own sheet. A Direct row opens its stack's Git Source sheet instead.
+  </Step>
+  <Step title="Narrow the list">
+    Select **Filters** to open the filter popover. Under **Target**, select **Direct** to hide Blueprint applications.
+
+    <Frame caption="The filter popover. A count badge on the button shows how many filters are in use.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/filters-popover.png" alt="The Filters popover over the portfolio with groups for Attention, Target, Node, Drift, and Evidence." />
+    </Frame>
+
+    Then select the search button and type `docs`. Search matches application names, repositories, and refs.
+
+    <Frame caption="Direct applications whose name, repository, or ref contains docs.">
+      <img src="/images/tutorials/work-the-gitops-portfolio/filtered-list.png" alt="The portfolio filtered to Direct applications and searched for docs, showing only the docs-site row, with Filters 1 and a Clear filters link." />
+    </Frame>
+
+    The filters live in the address bar, so a narrowed view can be shared. **Clear filters** resets all of them, including ones that arrived through a shared link. The attention queue ignores these filters, so a search cannot hide an exception.
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from three places, since the masthead alone can read well while one source still waits.
+
+**The portfolio.** **ATTENTION** reads `0` and the **Attention required** section is gone.
+
+<Frame caption="No queue, and no application waiting on you.">
+  <img src="/images/tutorials/work-the-gitops-portfolio/queue-cleared.png" alt="The portfolio after the queue is cleared, with an attention count of 0, no Attention required section, and four applications whose source reads accepted." />
+</Frame>
+
+The verdict here reads **Partially known** rather than **Converged**. That verdict means Sencho cannot yet prove every application, and it is not an alert. In this fleet it comes from `storefront`, whose three target cards each read **Synced and healthy** while its own headline stays unknown. Trust the cards for each node.
+
+**The changed application.** Open `marketing-site`. The sheet reads **Accepted** with the stages **Source accepted**, **Artifact qualified**, and **Runtime synced and healthy**. The stack itself now runs `nginx:1.28-alpine`.
+
+<Frame caption="The source accepted the new commit and the runtime matches it.">
+  <img src="/images/tutorials/work-the-gitops-portfolio/marketing-site-accepted.png" alt="The marketing-site Git source sheet reading Accepted, with Source accepted, Artifact qualified, and Runtime synced and healthy in the stage row." />
+</Frame>
+
+**Fleet.** Open **Fleet**. While the queue held entries, each node card showed a **GitOps · 1 attention** chip. The chips are gone.
+
+<Frame caption="No GitOps attention chip on the node cards.">
+  <img src="/images/tutorials/work-the-gitops-portfolio/fleet-after.png" alt="Fleet node cards for Local and edge-01 with no GitOps attention chip." />
+</Frame>
+
+## If something goes wrong
+
+The mistake most likely to cost you time is trusting the **Retry** toast. The toast appears as soon as Sencho accepts the request, even when the Git host is still unreachable. If the entry still reads **source failed** a few seconds later, the cause is still there. Select the row to open the Git Source sheet, read the failure, and fix the repository address, credentials, or host key on the **Source** tab. Then select **Retry** again. [Git Sources](/features/git-sources) has the troubleshooting table, and [Git hosts and authentication](/features/git-authentication) covers private repositories.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
+    Every verdict, the full attention queue, filters, and what the portfolio shows for unreachable nodes.
+  </Card>
+  <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
+    Apply behaviors, polling, suspend and resume, and the troubleshooting table.
+  </Card>
+  <Card title="Deploy Compose Changes by Pulling From Git" icon="git-branch" href="/tutorials/connect-a-git-source">
+    Connect a stack to a repository and apply a first commit.
+  </Card>
+  <Card title="Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One" icon="git-branch" href="/tutorials/roll-out-a-git-managed-blueprint">
+    The Blueprint side of the portfolio, from convert to rollback.
+  </Card>
+</CardGroup>

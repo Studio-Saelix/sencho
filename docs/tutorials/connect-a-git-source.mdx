@@ -6,7 +6,7 @@ description: Link a running stack to a Git repository, pull a real commit, revie
 
 Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
-This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, provider hooks, the apply behaviors beyond Review only, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see [Git Sources](/features/git-sources), [Trigger pulls from Git hosts and CI](/features/git-webhooks), and [Git-managed Blueprints](/features/git-managed-blueprints) for those.
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, provider hooks, the apply behaviors beyond Review only, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see [Git Sources](/features/git-sources), [Trigger pulls from Git hosts and CI](/features/git-webhooks), and [Git-managed Blueprints](/features/git-managed-blueprints) for those. To roll a Git source out across several nodes, follow [Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One](/tutorials/roll-out-a-git-managed-blueprint). To keep a sensitive env file in the repository encrypted, follow [Keep a Database Password in Git With SOPS and age](/tutorials/keep-secrets-in-git-with-sops).
 
 ## Prerequisites
 
@@ -98,7 +98,10 @@ Check from two places, since neither alone proves the pull was actually applied 
   <Card title="Git hosts and authentication" icon="key" href="/features/git-authentication">
     Private repositories over HTTPS tokens or SSH deploy keys, and custom certificate authorities.
   </Card>
+  <Card title="Deploy a Compose Change the Moment You Push It to GitHub or GitLab" icon="link" href="/tutorials/deploy-on-push-from-github-or-gitlab">
+    Add a provider hook so a push fetches the source without a manual pull.
+  </Card>
   <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
-    Trigger a Git source sync from CI when your pipeline already calls Sencho, or use provider hooks on the Git Source sheet when the Git host can post events directly.
+    Trigger a Git source sync from CI when your pipeline already calls Sencho.
   </Card>
 </CardGroup>

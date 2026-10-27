@@ -4,12 +4,16 @@ import * as toastStore from '@/components/ui/toast-store';
 
 beforeEach(() => {
   onConfirmMock.mockReset();
+  policyDialogProps.current = null;
 });
 
 // The dialog under test: capture its onConfirm so the tests exercise
 // ShellOverlays' gating wiring (the corrected surface) without dragging in
 // the real modal or its context providers.
-const { onConfirmMock } = vi.hoisted(() => ({ onConfirmMock: vi.fn() }));
+const { onConfirmMock, policyDialogProps } = vi.hoisted(() => ({
+  onConfirmMock: vi.fn(),
+  policyDialogProps: { current: null as null | Record<string, unknown> },
+}));
 vi.mock('@/components/ComposeDiffPreviewDialog', () => ({
   ComposeDiffPreviewDialog: (props: { onConfirm: () => void | Promise<void> }) => {
     onConfirmMock.mockImplementation(() => props.onConfirm());
@@ -28,7 +32,12 @@ vi.mock('@/components/BashExecModal', () => ({ default: () => null }));
 vi.mock('@/components/stack/UpdateReadinessDialog', () => ({ UpdateReadinessDialog: () => null }));
 vi.mock('@/components/stack/PreDeployScanDialog', () => ({ PreDeployScanDialog: () => null }));
 vi.mock('@/components/stack/MissingExternalNetworksDialog', () => ({ MissingExternalNetworksDialog: () => null }));
-vi.mock('@/components/stack/PolicyBlockDialog', () => ({ PolicyBlockDialog: () => null }));
+vi.mock('@/components/stack/PolicyBlockDialog', () => ({
+  PolicyBlockDialog: (props: Record<string, unknown>) => {
+    policyDialogProps.current = props;
+    return null;
+  },
+}));
 vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({
   SelfStackProtectedDialog: (props: { onReapply?: () => Promise<void> }) =>
     props.onReapply ? <button type="button" onClick={() => props.onReapply?.()}>self-reapply</button> : <span>self-info-only</span>,
@@ -82,6 +91,7 @@ function shellElement(
     hydrationReady?: () => boolean;
     reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null;
     composeReapply?: { dispatching: boolean; reconnecting?: boolean; runReapply: () => void };
+    onOpenPolicySettings?: (nodeId: number | null) => boolean;
   } = {},
 ) {
   return (
@@ -105,6 +115,7 @@ function shellElement(
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
+      onOpenPolicySettings={over.onOpenPolicySettings ?? (() => true)}
       hydrationReady={over.hydrationReady ?? (() => false)}
     />
   );
@@ -267,5 +278,42 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
     expect(setOpen).toHaveBeenCalledWith(false);
     expect(runReapply).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShellOverlays policy block dialog', () => {
+  const block = (action: 'deploy' | 'update' | 'rollback', nodeId: number | null) => ({
+    stackName: 'web',
+    stackFile: 'web.yml',
+    action,
+    payload: { error: 'blocked', policy: null, violations: [] },
+    nodeId,
+  });
+
+  it('tells the dialog which operation was blocked', () => {
+    renderShell(makeOverlay({ policyBlock: block('rollback', 1) }), {});
+    expect(policyDialogProps.current).toMatchObject({ open: true, action: 'rollback' });
+  });
+
+  it('opens the settings on the node the block was raised against, not the active node', () => {
+    const onOpenPolicySettings = vi.fn(() => true);
+    // Node 1 is the active node; the operation was sent to node 7.
+    renderShell(makeOverlay({ policyBlock: block('deploy', 7) }), {}, { onOpenPolicySettings });
+    (policyDialogProps.current!.onOpenSettings as () => void)();
+    expect(onOpenPolicySettings).toHaveBeenCalledTimes(1);
+    expect(onOpenPolicySettings).toHaveBeenCalledWith(7);
+  });
+
+  it('reports back whether the settings could be opened, so the dialog knows whether to close', () => {
+    const onOpenPolicySettings = vi.fn(() => false);
+    renderShell(makeOverlay({ policyBlock: block('deploy', 7) }), {}, { onOpenPolicySettings });
+    expect((policyDialogProps.current!.onOpenSettings as () => boolean)()).toBe(false);
+  });
+
+  it('passes no node when the block recorded none', () => {
+    const onOpenPolicySettings = vi.fn(() => true);
+    renderShell(makeOverlay({ policyBlock: block('update', null) }), {}, { onOpenPolicySettings });
+    (policyDialogProps.current!.onOpenSettings as () => void)();
+    expect(onOpenPolicySettings).toHaveBeenCalledWith(null);
   });
 });

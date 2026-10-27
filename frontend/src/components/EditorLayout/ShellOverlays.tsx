@@ -48,6 +48,8 @@ interface ShellOverlaysProps {
   canOfferVolumeRemoval: boolean;
   deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
+  /** Open the Policies tab on the node a policy block was raised against (null: the active node). */
+  onOpenPolicySettings: (nodeId: number | null) => boolean;
   /** Ref-backed readiness check, evaluated at confirmation time so a dialog
    *  opened while ready cannot dispatch after a node switch or failed refresh. */
   hydrationReady: () => boolean;
@@ -73,6 +75,7 @@ export function ShellOverlays({
   canOfferVolumeRemoval,
   deleteVolumePreservation,
   onOpenFleetNodeUpdates,
+  onOpenPolicySettings,
   hydrationReady,
 }: ShellOverlaysProps) {
   const {
@@ -269,8 +272,11 @@ export function ShellOverlays({
         payload={policyBlock?.payload ?? null}
         stackName={policyBlock?.stackName ?? ''}
         canBypass={isAdmin}
+        action={policyBlock?.action ?? 'deploy'}
+        canEditSettings={isAdmin}
         bypassing={policyBypassing}
         onClose={() => setPolicyBlock(null)}
+        onOpenSettings={() => onOpenPolicySettings(policyBlock?.nodeId ?? null)}
         onBypass={stackActions.bypassPolicyAndRetry}
       />
 

@@ -4,7 +4,10 @@ import * as AuthContext from '@/context/AuthContext';
 import * as LicenseContext from '@/context/LicenseContext';
 import * as NodeContext from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
+import { useState } from 'react';
 import { useViewNavigationState } from '../hooks/useViewNavigationState';
+import { deriveMobileSurface, type MobileView } from '../mobile-surface';
+import { useNavigateEventSurface } from '../hooks/useNavigateEventSurface';
 
 vi.mock('@/context/AuthContext');
 vi.mock('@/context/LicenseContext');
@@ -249,6 +252,89 @@ describe('useViewNavigationState', () => {
     });
     expect(onHubOnlyFromRemote).not.toHaveBeenCalled();
     expect(result.current.activeView).toBe('gitops');
+  });
+
+  // ── Phone surface ──────────────────────────────────────────────────────────
+  //
+  // A phone shows one surface at a time. The shell wires a navigate event
+  // through `applyNavigateEvent`; this harness is that wiring with the real
+  // surface derivation, so the assertion is on where the phone ends up.
+  function usePhoneShell(isMobile: boolean) {
+    const [mobileView, setMobileView] = useState<MobileView>('list');
+    const navigateEventSurface = useNavigateEventSurface();
+    const nav = useViewNavigationState({ onNavigateEvent: navigateEventSurface.onNavigateEvent });
+    navigateEventSurface.connect(isMobile, (then) => { setMobileView('content'); then(); });
+    const surface = deriveMobileSurface({
+      activeView: nav.activeView,
+      selectedFile: null,
+      mobileView,
+      pendingDetailStack: null,
+    }).surface;
+    return { nav, mobileView, surface };
+  }
+
+  it('brings a phone from the stack list to the content surface when an event opens a view', () => {
+    mockPaidAdmin();
+    const { result } = renderHook(() => usePhoneShell(true));
+    expect(result.current.surface).toBe('list');
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'policies' } }),
+      );
+    });
+    expect(result.current.nav.activeView).toBe('security');
+    expect(result.current.nav.securityTab).toBe('policies');
+    expect(result.current.surface).toBe('content');
+  });
+
+  it('brings a phone to the content surface for the other dispatchers of the event too', () => {
+    mockPaidAdmin();
+    const { result } = renderHook(() => usePhoneShell(true));
+    for (const view of ['fleet', 'resources', 'networking'] as const) {
+      act(() => { result.current.nav.handleNavigate('dashboard'); });
+      act(() => {
+        window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view } }));
+      });
+      expect(result.current.nav.activeView, view).toBe(view);
+      expect(result.current.surface, view).toBe('content');
+    }
+  });
+
+  it('leaves the layout as it was on a desktop', () => {
+    mockPaidAdmin();
+    const { result } = renderHook(() => usePhoneShell(false));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'policies' } }),
+      );
+    });
+    expect(result.current.nav.activeView).toBe('security');
+    expect(result.current.nav.securityTab).toBe('policies');
+    // The phone surface state is never touched off a phone.
+    expect(result.current.mobileView).toBe('list');
+  });
+
+  it('brings a phone to the content surface after the hub switch for a hub-only view', () => {
+    mockActiveNode('remote');
+    let queued: (() => void) | null = null;
+    const onHubOnlyFromRemote = vi.fn((apply: () => void) => { queued = apply; });
+    const { result, rerender } = renderHook(() => {
+      const [mobileView, setMobileView] = useState<MobileView>('list');
+      const navigateEventSurface = useNavigateEventSurface();
+      const nav = useViewNavigationState({ onHubOnlyFromRemote, onNavigateEvent: navigateEventSurface.onNavigateEvent });
+      navigateEventSurface.connect(true, (then) => { setMobileView('content'); then(); });
+      return { nav, mobileView };
+    });
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'gitops' } }));
+    });
+    // Nothing moved while the switch to the hub is in flight.
+    expect(result.current.mobileView).toBe('list');
+    mockActiveNode('local');
+    rerender();
+    act(() => queued!());
+    expect(result.current.nav.activeView).toBe('gitops');
+    expect(result.current.mobileView).toBe('content');
   });
 
   it('cleans up SENCHO_NAVIGATE_EVENT listener on unmount', () => {

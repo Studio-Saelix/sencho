@@ -77,7 +77,7 @@ describe('MeshService.triggerRedeploy (registry delivery refusal)', () => {
         const stackName = 'mesh-endpoint-refused-stack';
         const localNodeId = db.getNodes().find(n => n.type === 'local')!.id!;
         const policyGate = await import('../helpers/policyGate');
-        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
+        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue({});
         const { ComposeService } = await import('../services/ComposeService');
         const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
         vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new DockerEndpointProtectedError({

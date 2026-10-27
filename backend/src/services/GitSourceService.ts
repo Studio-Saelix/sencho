@@ -15,7 +15,7 @@ import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeploy
 import type { DeployInvocationContext } from './network/missingExternalNetworksError';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
@@ -60,6 +60,7 @@ import {
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
 import { candidateContentFingerprint } from './gitops/fingerprint';
 import type { CandidatePolicyEvaluation } from './PolicyEnforcement';
+import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -141,6 +142,74 @@ function storedCandidateContentSha256(raw: string | null): string | null {
     }
     if (!isRecord(decoded) || typeof decoded.candidateContentSha256 !== 'string') return null;
     return decoded.candidateContentSha256;
+}
+
+/**
+ * The decision half of a stored security-policy evidence column, for the reuse
+ * comparison.
+ *
+ * Compared as a projection rather than as raw text, so the comparison is about
+ * the decision rather than its encoding. The applications are part of it, which
+ * is the point: an acceptance on unproven evidence and a clean one share a
+ * status and a policy id, so a verdict-only comparison would reuse the
+ * generation recorded for one of them when the other is re-polled, leaving the
+ * attribution column describing a decision this poll did not reach.
+ *
+ * The records are part of it too, because the applications alone cannot tell a
+ * clean acceptance from one made on partial evidence: partial evidence has no
+ * application (no setting governs it), so a partial-only allow and a clean allow
+ * would otherwise compare equal and the older clean record would be reused for
+ * a candidate it no longer describes. Only the records that are not `current`
+ * are compared, and only by source, state and target. Collection time, digest
+ * and reason text are left out on purpose: a re-run that rescans an unchanged
+ * candidate changes them, and treating that as a different decision would mint
+ * a generation per poll.
+ *
+ * The application and record lists are sorted before they are compared, because
+ * the order the evaluator happens to produce is not part of the decision. Two
+ * polls that reach the same set of rules in a different order describe the same
+ * outcome, and treating them as different would mint a replacement generation
+ * for it.
+ *
+ * The evidence fields are normalized for a column written before they existed,
+ * so the first poll after an upgrade reuses its generation rather than minting a
+ * replacement for every existing source on an unchanged verdict. An absent list
+ * normalizes to empty and an absent outcome to `allow`, which is what
+ * `mostRestrictiveOutcome` returns for no applications at all, so a legacy clean
+ * acceptance and a freshly recorded one compare equal. That cannot hide a change:
+ * any outcome other than `allow`, any rule that acted, or any record that is not
+ * `current` differs from the defaults and replaces the row. An unparseable or absent column yields null,
+ * which never matches, so auto-accept re-evaluates and writes a fresh row instead
+ * of reusing an unreadable one.
+ */
+function securityPolicyDecision(raw: string | null): string | null {
+    if (!raw) return null;
+    let decoded: unknown;
+    try {
+        decoded = decodeGitOpsJson(raw);
+    } catch {
+        return null;
+    }
+    if (!isRecord(decoded)) return null;
+    const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
+    const byContent = (a: unknown, b: unknown): number => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    const ordered = [...applications].sort(byContent);
+    // A present-but-malformed list is unreadable, not empty: it must never compare
+    // equal to a clean decision, so it takes the same null path as bad JSON.
+    if (decoded.evidenceRecords !== undefined && decoded.evidenceRecords !== null && !Array.isArray(decoded.evidenceRecords)) return null;
+    const records: unknown[] = Array.isArray(decoded.evidenceRecords) ? decoded.evidenceRecords : [];
+    if (!records.every(isRecord)) return null;
+    const unproven = records
+        .filter((r) => r.state !== 'current')
+        .map((r) => ({ source: r.source ?? null, state: r.state ?? null, target: r.target ?? null }))
+        .sort(byContent);
+    return JSON.stringify({
+        status: decoded.status ?? null,
+        policyId: decoded.policyId ?? null,
+        evidenceOutcome: decoded.evidenceOutcome ?? 'allow',
+        evidenceApplications: ordered,
+        evidenceRecords: unproven,
+    });
 }
 
 function candidateContentSha256FromDisk(
@@ -447,6 +516,12 @@ export interface GitApplyOpts {
     requirePlanFingerprint?: boolean;
     /** Drives configured_policy acceptance for automated webhook deliveries. */
     reconcileTrigger?: ReconcileTrigger;
+    /**
+     * Receives the policy decision when the deploy gate allows on evidence that
+     * was not a clean pass, so the manual-apply response can carry it. A call that
+     * joins another in-flight apply is not called; the audit row still records it.
+     */
+    onAllowed?: (allowed: AllowedPolicyEvidence) => void;
 }
 
 export type WebhookPullOptions = {
@@ -4326,7 +4401,14 @@ export class GitSourceService {
      * The 'retry' trigger is recorded on the durable attempt for audit and
      * recovery on all three arms.
      */
-    public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+    public async retry(
+        stackName: string,
+        opts: {
+            actor: string;
+            /** Receives the policy decision when the deploy retry's gate allows on evidence that was not a clean pass. */
+            onAllowed?: (allowed: AllowedPolicyEvidence) => void;
+        },
+    ): Promise<ReconcileResult> {
         const app = this.liveSourceApplication(stackName);
         if (!app) return GitSourceService.noApplicationResult();
         // A source that is suspended, has an operation in flight, has an
@@ -4363,8 +4445,8 @@ export class GitSourceService {
             });
         }
         return dispatch.stage === 'promote'
-            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor)
-            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor);
+            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed)
+            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed);
     }
 
     /**
@@ -4380,6 +4462,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         let dispatch: DispatchResult;
         try {
@@ -4395,7 +4478,7 @@ export class GitSourceService {
             dispatch = await this.dispatchAcceptedGeneration(
                 buildAcceptedGeneration(generationRow),
                 GitSourceService.dispatchContextFor(application),
-                { trigger: 'retry', actor },
+                { trigger: 'retry', actor, onAllowed },
             );
         } catch (e) {
             // Nothing past this point throws once a reservation exists, so
@@ -4441,6 +4524,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const app = GitOpsStore.getInstance().getApplication(applicationId);
         if (!app?.stack_name) {
@@ -4466,7 +4550,7 @@ export class GitSourceService {
             stackName,
             'git_apply',
             actor,
-            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor),
+            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor, onAllowed),
             getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
@@ -4496,6 +4580,7 @@ export class GitSourceService {
         generationId: string,
         nodeId: number,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
@@ -4639,6 +4724,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(actor, {
                         bypass: false,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed,
                     }),
                 );
                 const autoDeploy = await (async () => {
@@ -4961,10 +5047,31 @@ export class GitSourceService {
         const securityEvidenceJson = encodeGitOpsJson({
             status: evaluation.status,
             policyId: evaluation.policy?.id ?? null,
+            // The rules that decided it, not just the verdict. A candidate held
+            // under the shipped defaults is recorded as `unavailable` either way,
+            // but an operator who sets the candidate rule to allow would
+            // otherwise leave a persisted row that reads exactly like a clean
+            // acceptance. Nothing downstream reads these applications, so this
+            // column is the only place an unattended acceptance on unproven
+            // evidence stays attributable.
+            //
+            // The records are stored too, since a partial-only acceptance has no
+            // application and would otherwise read as clean. They carry scan
+            // timestamps, so the reuse comparison below looks at a projection of
+            // them (see securityPolicyDecision), not at this text: a re-run that
+            // rescans the same candidate must not append a generation for an
+            // unchanged decision.
+            evidenceOutcome: evaluation.evidence?.outcome ?? null,
+            evidenceApplications: evaluation.evidence?.applications ?? null,
+            // Reason text is scanner output and can echo a registry credential, so
+            // it is redacted before it is stored; the comparison ignores it.
+            evidenceRecords: evaluation.evidence?.records.map((r) => (
+                r.reason === undefined ? r : { ...r, reason: redactSensitiveText(r.reason) }
+            )) ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
-            && generation.security_policy_evidence_json === securityEvidenceJson
+            && securityPolicyDecision(generation.security_policy_evidence_json) === securityPolicyDecision(securityEvidenceJson)
         ) {
             return { status: 'reuse', generation };
         }
@@ -5017,7 +5124,7 @@ export class GitSourceService {
     public async dispatchAcceptedGeneration(
         generation: AcceptedGeneration,
         context: DispatchContext,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
         if (!app) {
@@ -5067,7 +5174,7 @@ export class GitSourceService {
         generation: AcceptedGeneration,
         stackName: string,
         nodeId: number,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
@@ -5241,6 +5348,7 @@ export class GitSourceService {
                 legacyOwnedPaths: revalidation.legacyOwnedPaths,
                 deploy: deployRequested,
                 bypassPolicy: false,
+                onAllowed: opts.onAllowed,
                 started: { app: null, env: null, settled: true },
                 progress,
                 postPromote: () => this.recordGitOps(stackName, 'target binding', () => {
@@ -5747,6 +5855,7 @@ export class GitSourceService {
         legacyOwnedPaths: string[] | undefined;
         deploy: boolean;
         bypassPolicy: boolean;
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void;
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean };
         /**
          * By-reference out-param, required so no caller can silently opt out of
@@ -6084,6 +6193,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(captureActor, {
                         bypass: args.bypassPolicy === true,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed: args.onAllowed,
                     }),
                 );
                 if (recoveryId) {
@@ -6527,6 +6637,7 @@ export class GitSourceService {
                 legacyOwnedPaths,
                 deploy: opts.deploy ?? src.auto_deploy_on_apply,
                 bypassPolicy: opts.bypassPolicy === true,
+                onAllowed: opts.onAllowed,
                 started,
                 // applyLockedBody's wrapper tracks the operation via `started`;
                 // this flag exists only to keep the pipeline signature honest.

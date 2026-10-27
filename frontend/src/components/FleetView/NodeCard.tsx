@@ -218,12 +218,12 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                         onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
-                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
+                                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
                                     <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
                                         Update available
                                     </Badge>
                                 )}
-                                {(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
+                                {isOnline && (updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
                                     <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
                                 )}
                                 {updateStatus?.skipActive && (
