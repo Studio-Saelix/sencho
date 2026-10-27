@@ -1448,8 +1448,9 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
       if (r.status === 'fulfilled') return r.value;
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
       // A remote whose poll failed is unreadable, so it reads as offline with
-      // no version. The local row is the process serving this request: it is
-      // online and its version is known whatever else the poll threw on.
+      // no version. The local row is the process serving this request, so it
+      // stays online with the gateway version and the plain gateway-versus-target
+      // result. Tracker, skip and pin state are not recomputed here and read empty.
       const isLocal = nodes[i].type === 'local';
       return {
         nodeId: nodes[i].id,

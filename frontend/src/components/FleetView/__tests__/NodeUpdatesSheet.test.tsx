@@ -357,9 +357,12 @@ describe('NodeUpdatesSheet', () => {
       render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], skipped] })} />);
       const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
       expect(within(row).getByText('Offline')).toBeInTheDocument();
-      expect(within(row).getByText(/Skipped/)).toBeInTheDocument();
+      expect(row).toHaveTextContent(/Skipped\s*v?1\.1\.0/);
       expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
       expect(summaryCount('Up to date')).toBe('1');
+      expect(summaryCount('Available')).toBe('0');
+      expect(summaryCount('Updating')).toBe('0');
+      expect(summaryCount('Failed')).toBe('0');
     });
 
     it.each([

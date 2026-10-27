@@ -18,6 +18,7 @@ import jwt from 'jsonwebtoken';
 import type { RemoteMeta } from '../services/CapabilityRegistry';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { CacheService } from '../services/CacheService';
+import * as versionCheck from '../utils/version-check';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -245,24 +246,27 @@ describe('GET /api/fleet/update-status unreachable nodes', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed'), expect.any(Error));
   });
 
-  it('keeps the local row online with its version when only its own poll fails', async () => {
-    mockCompareTargetFetch();
+  it('keeps the local row online with its version and update result when only its own poll fails', async () => {
+    // Pin the compare target above the gateway so the update result is a real
+    // comparison, not the gateway-versus-itself fallback.
+    vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('99.0.0');
     mockMeta(ONLINE());
     const baseline = (await getRows()).find(n => n.nodeId === localNodeId)!;
     expect(baseline.online).toBe(true);
+    expect(baseline.updateAvailable).toBe(true);
 
     // The gateway is serving this request, so a throw while reading its pin
     // state must not turn the local row into a node that is offline or unread.
     vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const rows = await getRows();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed for node'), expect.any(Error));
     const local = rows.find(n => n.nodeId === localNodeId)!;
     expect(local.online).toBe(true);
-    expect(local.version).toBe(baseline.version);
     expect(local.version).not.toBeNull();
-    expect(local.updateAvailable).toBe(baseline.updateAvailable);
-    expect(local.updateStatus).toBeNull();
+    expect(local.version).toBe(baseline.version);
+    expect(local.updateAvailable).toBe(true);
     expect(rows.find(n => n.nodeId === proxyNodeId)!.online).toBe(true);
   });
 
