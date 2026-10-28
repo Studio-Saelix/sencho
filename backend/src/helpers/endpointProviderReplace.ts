@@ -42,13 +42,15 @@ export const ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS = 60_000 + 15_000 + 30_000 + 15
  * How long the detached helper may still mutate the endpoint, from spawn to
  * final exit. It bounds every Compose command, the ack wait and a rollback
  * (Docker calls, restore, readiness), so a consumer must not release the
- * operation claim before this has elapsed.
+ * operation claim before this has elapsed. The rollback budget covers serial
+ * container/network calls: a restore of 34 networks at the helper's 29-second
+ * connection timeout alone takes about 16 minutes.
  */
 export const ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS =
   3_000 // the deliberate pause that lets the route answer first
   + HELPER_COMPOSE_TIMEOUT_MS * 2 // provider and Sencho recreation
   + PROVIDER_ACK_SECONDS * 1_000
-  + 12 * 60_000 // rollback: serial container/network calls, restore, readiness
+  + 20 * 60_000 // rollback: serial container/network calls, restore, readiness
   + 60_000; // scheduling and handoff-write slack
 
 /** Names the detached helper so a create response that was lost can be inspected. */

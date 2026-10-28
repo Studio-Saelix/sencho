@@ -310,7 +310,15 @@ export class ImageOperationService {
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Community update failed:', error);
-      await this.fail(operation, 'update_failed');
+      if (operation.endpointProvider) {
+        void this.failEndpointProviderOperation(
+          operation,
+          'endpoint_provider_recovery_required',
+          this.endpointProviderFailureText(operation, 'after its helper launched', error),
+        ).catch(writeError => console.error('[ImageOperation] Could not settle the Docker endpoint failure:', writeError));
+      } else {
+        await this.fail(operation, 'update_failed');
+      }
       return { ok: false, failureCode: 'update_failed' };
     }
   }
@@ -355,7 +363,15 @@ export class ImageOperationService {
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Compose reapply failed:', error);
-      await this.fail(operation, 'update_failed');
+      if (operation.endpointProvider) {
+        void this.failEndpointProviderOperation(
+          operation,
+          'endpoint_provider_recovery_required',
+          this.endpointProviderFailureText(operation, 'after its helper launched', error),
+        ).catch(writeError => console.error('[ImageOperation] Could not settle the Docker endpoint failure:', writeError));
+      } else {
+        await this.fail(operation, 'update_failed');
+      }
       return { ok: false, failureCode: 'update_failed' };
     }
   }
@@ -447,8 +463,64 @@ export class ImageOperationService {
 
   /** Fails the operation with the helper's error; a Docker endpoint replacement keeps the text as its detail. */
   private async failFromLastError(operation: ImageOperation): Promise<void> {
-    const detail = operation.endpointProvider ? SelfUpdateService.getInstance().getLastError() ?? undefined : undefined;
-    await this.fail(operation, 'update_failed', detail);
+    if (operation.endpointProvider) {
+      await this.failEndpointProviderOperation(
+        operation,
+        'update_failed',
+        SelfUpdateService.getInstance().getLastError() ?? undefined,
+      );
+      return;
+    }
+    await this.fail(operation, 'update_failed');
+  }
+
+  /**
+   * Terminates a Docker endpoint operation only when releasing the claim is
+   * safe. A refusal before the helper ran still fails immediately, but once a
+   * labelled helper may exist the claim is held and reconciliation continues:
+   * the helper can still be replacing or restoring the endpoint, and letting a
+   * second operation claim it would put two helpers on the same endpoint. The
+   * elapsed-time budget is never termination evidence by itself.
+   */
+  private async failEndpointProviderOperation(
+    operation: ImageOperation,
+    failureCode: FailureCode,
+    detail: string | undefined,
+  ): Promise<void> {
+    if (!operation.endpointProvider) {
+      await this.fail(operation, failureCode, detail);
+      return;
+    }
+    if (operation.helperLabelVersion !== 1 || await this.helperHasTerminated(operation)) {
+      await this.fail(operation, failureCode, detail);
+      this.setLocalTracker(operation, 'failed', detail);
+      return;
+    }
+    this.endpointProviderPending = true;
+    console.warn('[ImageOperation] Docker endpoint failure while the helper may still run; keeping the claim:', detail);
+    const outcome = await this.awaitEndpointProviderMutationEnd(operation);
+    await this.finalizeEndpointProvider(operation, outcome, detail);
+  }
+
+  /**
+   * Waits until the labelled helper can no longer mutate the endpoint: it
+   * published a verdict, or Docker conclusively shows no helper for this
+   * operation. Docker being unreachable is not evidence either way, so this
+   * keeps waiting rather than releasing the claim on a guess.
+   */
+  private async awaitEndpointProviderMutationEnd(operation: ImageOperation): Promise<ProviderOutcome | null> {
+    for (;;) {
+      const outcome = await this.readProviderOutcome(operation);
+      if (outcome) return outcome;
+      if (await this.helperHasTerminated(operation)) return null;
+      await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
+    }
+  }
+
+  /** Operator text for an unexpected post-launch failure. */
+  private endpointProviderFailureText(operation: ImageOperation, phase: string, error: unknown): string {
+    const service = operation.endpointProvider?.service ?? 'the Docker endpoint';
+    return `Replacing the Docker endpoint "${service}" failed ${phase}: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that "${service}" runs and that Sencho reaches Docker, then retry.`;
   }
 
   private endpointProviderRequest(operation: ImageOperation, provider: OperationEndpointProvider) {
@@ -475,17 +547,24 @@ export class ImageOperationService {
       await this.finalizeEndpointProvider(operation, outcome);
     })().catch(async error => {
       // The watcher is a finalizer too: an unexpected throw must not leave the
-      // operation non-terminal with Fleet's timeout suppressed.
+      // operation non-terminal with Fleet's timeout suppressed. The claim stays
+      // held while the helper can still mutate; only a verdict or Docker's own
+      // container list may release it.
       console.error('[ImageOperation] Docker endpoint outcome watch failed:', error);
       const current = await this.getCurrentOperation().catch(() => null);
-      if (current && current.operationId === operation.operationId && NON_TERMINAL_STATES.includes(current.state)) {
-        const detail = `Replacing the Docker endpoint "${operation.endpointProvider?.service ?? 'the Docker endpoint'}" failed while Sencho was waiting for or applying the helper's outcome: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that the Docker endpoint runs and that Sencho reaches Docker, then retry.`;
-        SelfUpdateService.getInstance().recordUpdateFailure(detail, 'endpoint_provider_recovery_required');
-        await this.fail(current, 'endpoint_provider_recovery_required', detail)
-          .catch(writeError => console.error('[ImageOperation] Could not persist the Docker endpoint failure:', writeError));
-        this.setLocalTracker(current, 'failed', detail);
+      if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {
+        this.endpointProviderPending = false;
+        return;
       }
-      this.endpointProviderPending = false;
+      await this.failEndpointProviderOperation(
+        current,
+        'endpoint_provider_recovery_required',
+        this.endpointProviderFailureText(current, 'while Sencho was waiting for or applying the helper\'s outcome', error),
+      ).catch(writeError => {
+        // The claim intentionally stays held when even the failure cannot be
+        // persisted: an on-disk non-terminal operation still blocks a new one.
+        console.error('[ImageOperation] Could not settle the Docker endpoint failure:', writeError);
+      });
     });
   }
 
@@ -523,19 +602,22 @@ export class ImageOperationService {
       }
       await this.finalizeEndpointProvider(operation, outcome);
     } catch (error) {
-      // An unexpected throw must not leave the node "verifying" forever with the
-      // operation stuck non-terminal and Fleet suppressing its timeout.
+      // An unexpected throw must not leave the node "verifying" forever. The
+      // claim is held while the helper can still mutate and reconciliation
+      // continues; the terminal failure is recorded only once it is gone.
       console.error('[ImageOperation] Docker endpoint startup reconcile failed:', error);
       const current = await this.getCurrentOperation().catch(() => null);
-      if (current && current.operationId === operation.operationId && NON_TERMINAL_STATES.includes(current.state)) {
-        const detail = `Replacing the Docker endpoint "${provider.service}" failed while Sencho was verifying it: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that "${provider.service}" runs and that Sencho reaches Docker, then retry.`;
-        SelfUpdateService.getInstance().recordUpdateFailure(detail, 'endpoint_provider_recovery_required');
-        await this.fail(current, 'endpoint_provider_recovery_required', detail)
-          .catch(writeError => console.error('[ImageOperation] Could not persist the Docker endpoint failure:', writeError));
-        this.setLocalTracker(current, 'failed', detail);
+      if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {
+        this.endpointProviderPending = false;
+        return;
       }
-    } finally {
-      this.endpointProviderPending = false;
+      await this.failEndpointProviderOperation(
+        current,
+        'endpoint_provider_recovery_required',
+        this.endpointProviderFailureText(current, 'while Sencho was verifying it', error),
+      ).catch(writeError => {
+        console.error('[ImageOperation] Could not settle the Docker endpoint failure:', writeError);
+      });
     }
   }
 
@@ -565,18 +647,22 @@ export class ImageOperationService {
       const outcome = await this.waitForProviderOutcome(operation, deadline);
       await this.finalizeEndpointProvider(operation, outcome);
     })().catch(async error => {
-      // An unexpected throw must not leave the node "verifying" forever with the
-      // operation stuck non-terminal: record a recovery state the operator can act on.
+      // An unexpected throw must not leave the operation held silently: keep
+      // reconciling while the helper can still mutate, then record the
+      // recovery state the operator can act on.
       console.error('[ImageOperation] Docker endpoint in-place reconcile failed:', error);
       const current = await this.getCurrentOperation().catch(() => null);
-      if (current && current.operationId === operation.operationId && NON_TERMINAL_STATES.includes(current.state)) {
-        const detail = `Replacing the Docker endpoint "${provider.service}" failed while Sencho was verifying it: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that "${provider.service}" runs and that Sencho reaches Docker, then retry.`;
-        SelfUpdateService.getInstance().recordUpdateFailure(detail, 'endpoint_provider_recovery_required');
-        await this.fail(current, 'endpoint_provider_recovery_required', detail)
-          .catch(writeError => console.error('[ImageOperation] Could not persist the Docker endpoint failure:', writeError));
-        this.setLocalTracker(current, 'failed', detail);
+      if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {
+        this.endpointProviderPending = false;
+        return;
       }
-      this.endpointProviderPending = false;
+      await this.failEndpointProviderOperation(
+        current,
+        'endpoint_provider_recovery_required',
+        this.endpointProviderFailureText(current, 'while Sencho was verifying it', error),
+      ).catch(writeError => {
+        console.error('[ImageOperation] Could not settle the Docker endpoint failure:', writeError);
+      });
     });
   }
 
@@ -690,8 +776,14 @@ export class ImageOperationService {
     let detail: string;
     // The endpoint container was just recreated: a pooled connection from the
     // previous one is dead, so start from a fresh client instead of waiting for
-    // a request to fail against a stale socket.
-    DockerController.getInstance().resetDockerConnection();
+    // a request to fail against a stale socket. The controller itself may be
+    // unavailable in a torn-down process; that is a failed verification, not an
+    // exception that can escape the finalizer.
+    try {
+      DockerController.getInstance().resetDockerConnection();
+    } catch (error) {
+      console.warn('[ImageOperation] Could not reset the Docker client before verification:', getErrorMessage(error, 'unavailable'));
+    }
     for (;;) {
       try {
         const docker = DockerController.getInstance().getDocker();
@@ -781,7 +873,20 @@ export class ImageOperationService {
   }
 
   /** Persists the helper's verdict (or its absence) and mirrors it on the Fleet tracker and the update error. */
-  private async finalizeEndpointProvider(operation: ImageOperation, outcome: ProviderOutcome | null): Promise<void> {
+  private async finalizeEndpointProvider(
+    operation: ImageOperation,
+    outcome: ProviderOutcome | null,
+    missingCause?: string,
+  ): Promise<void> {
+    // A deadline is not termination evidence. Without a verdict the claim may
+    // only be released once Docker conclusively shows no labelled helper for
+    // this operation can run any more; until then this keeps reconciling and a
+    // second operation stays refused.
+    if (!outcome && operation.helperLabelVersion === 1 && !(await this.helperHasTerminated(operation))) {
+      this.endpointProviderPending = true;
+      console.warn('[ImageOperation] Docker endpoint helper still active; keeping the operation claim while it finishes');
+      outcome = await this.awaitEndpointProviderMutationEnd(operation);
+    }
     const current = await this.getCurrentOperation();
     if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {
       this.endpointProviderPending = false;
@@ -789,11 +894,14 @@ export class ImageOperationService {
     }
     const service = operation.endpointProvider?.service ?? 'the Docker endpoint';
     if (outcome?.ok) {
-      this.endpointProviderCompletedAt = Date.now();
       current.state = 'succeeded';
       current.resolvedAt = new Date().toISOString();
-      this.endpointProviderPending = false;
       await this.persist(current);
+      // Publish the completion stamp (used by a remote hub for a provider-only
+      // replacement) only after the terminal state is durable.
+      this.endpointProviderCompletedAt = Date.now();
+      // Only release the claim once the terminal state is durable.
+      this.endpointProviderPending = false;
       await this.cleanupOperationArtifacts(current);
       await fs.rm(path.dirname(helperFiles.plan(this.dataDir(), current.operationId)), { recursive: true, force: true })
         .catch(error => console.error('[ImageOperation] Failed to clean the Docker endpoint handoff files:', error));
@@ -824,7 +932,7 @@ export class ImageOperationService {
       : outcome && !rollbackAttempted
         ? 'update_failed'
         : 'endpoint_provider_recovery_required';
-    const cause = plainText(outcome?.error ?? 'The replacement helper did not report an outcome in time.');
+    const cause = plainText(outcome?.error ?? missingCause ?? 'The replacement helper did not report an outcome in time.');
     const helperLogPath = path.dirname(helperFiles.plan('', current.operationId)).replace(/^\//, '');
     const recoveryHint = `Sencho may not reach Docker on this node until "${service}" runs again: on the host, run "docker compose up -d ${service}" in Sencho's Compose project directory, then check Fleet. The helper log is in the Sencho data directory under ${helperLogPath}.`;
     let detail: string;
@@ -994,8 +1102,10 @@ export class ImageOperationService {
     operation.failureCode = failureCode;
     if (detail) operation.failureDetail = detail;
     operation.resolvedAt = new Date().toISOString();
-    if (operation.endpointProvider) this.endpointProviderPending = false;
     await this.persist(operation);
+    // Release the claim only after the terminal state is durable, so a write
+    // failure leaves the on-disk non-terminal operation blocking new claims.
+    if (operation.endpointProvider) this.endpointProviderPending = false;
     await this.cleanupOperationArtifacts(operation);
   }
 

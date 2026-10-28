@@ -275,7 +275,88 @@ describe('execute (the process that spawns the helper)', () => {
     expect(operation?.failureDetail).toContain('was restored, but Sencho could not reach Docker through it');
   });
 
-  it('terminalizes the operation when the stack-scope watcher throws', async () => {
+  it('keeps the claim when the record write after launch fails while the helper runs', async () => {
+    const selfUpdate = mockAvailableProvider();
+    const trigger = vi.spyOn(selfUpdate, 'triggerUpdate').mockResolvedValue(undefined);
+    const service = fastTimings();
+    mockDocker({ helperRunning: true });
+    await service.claimCommunityUpdate({ replaceEndpointProvider: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    let launched = false;
+    trigger.mockImplementation(async () => { launched = true; });
+    // A persistent post-launch EIO must not release ownership: the helper is
+    // already out there and may still replace or restore the endpoint.
+    const realWriteFile = fs.writeFile.bind(fs);
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+      const data = args[1];
+      if (launched && typeof data === 'string' && data.includes('"state":"recreating"')) {
+        launched = false;
+        throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      }
+      return realWriteFile(...args);
+    });
+    // The route does not await this; the operation settles in the background.
+    void service.executeClaimedCommunityUpdate();
+
+    await vi.waitFor(async () => expect(service.isEndpointProviderPending()).toBe(true));
+    expect((await service.getCurrentOperation())?.state).toBe('pulling');
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+
+    // The helper's late verdict is consumed and only then is the claim released.
+    await writeOutcome(operationId, { ok: true });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'), { timeout: 3_000 });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+    write.mockRestore();
+  });
+
+  it('does not release the claim when the watcher deadline passes while the helper still runs', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 200, watchMs: 150, recoveryMs: 20 };
+    mockDocker({ helperRunning: true });
+    await service.claimComposeReapply({ replace: true, only: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+
+    // Past the elapsed-time budget, but the helper is still alive: ownership stays.
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    expect(service.isEndpointProviderPending()).toBe(true);
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+
+    await writeOutcome(operationId, { ok: true });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+  });
+
+  it('keeps the claim when a post-launch exception leaves the helper running, then consumes its verdict', async () => {
+    const selfUpdate = mockAvailableProvider();
+    const trigger = vi.spyOn(selfUpdate, 'triggerComposeReapply');
+    const service = fastTimings();
+    mockDocker({ helperRunning: true });
+    await service.claimComposeReapply({ replace: true, only: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    trigger.mockImplementation(async () => {
+      // The helper launched, then Sencho failed to follow the operation.
+      throw new Error('probe: post-launch failure');
+    });
+    await expect(service.executeClaimedComposeReapply()).resolves.toEqual({ ok: false, failureCode: 'update_failed' });
+    expect(service.isEndpointProviderPending()).toBe(true);
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+
+    await writeOutcome(operationId, { ok: true });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+  });
+
+  it('terminalizes the operation when the stack-scope watcher throws after the helper is gone', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
@@ -286,10 +367,12 @@ describe('execute (the process that spawns the helper)', () => {
     const operationId = (await service.getCurrentOperation())!.operationId;
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'restored', rollback: { attempted: true, restored: true, error: null } });
     await service.executeClaimedComposeReapply();
-    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    // Docker is unavailable, so termination cannot be proven: the claim is held
+    // until the helper publishes its verdict. The verdict then settles it.
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
     const operation = await service.getCurrentOperation();
     expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
-    expect(operation?.failureDetail).toContain('waiting for or applying the helper');
+    expect(operation?.failureDetail).toContain('could not reach Docker through it');
     expect(service.isEndpointProviderPending()).toBe(false);
     expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_recovery_required');
     expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
@@ -512,6 +595,17 @@ describe('ownership lifetime', () => {
     expect(service.endpointProviderTimings.outcomeMs).toBeGreaterThanOrEqual(ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS);
   });
 
+  it('covers the measured worst-case serial rollback, not only the original estimate', () => {
+    const { ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS, PROVIDER_ACK_SECONDS } = selfUpdateModule;
+    // Worst observed rollback: the deliberate pause, two 599-second Compose
+    // calls, the acknowledgment wait, and 34 network connections at the
+    // helper's 29-second timeout. The old 12-minute rollback allowance ended
+    // 204 seconds before the restored provider even started.
+    const measured = 3_000 + 2 * 599_000 + PROVIDER_ACK_SECONDS * 1_000 + 34 * 29_000;
+    expect(measured).toBe(2_367_000);
+    expect(ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS).toBeGreaterThan(measured);
+  });
+
   it('keeps the claim while the helper can still mutate, then consumes a late marker and verdict', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
@@ -589,6 +683,26 @@ describe('reconcileOnStartup (the new process)', () => {
     release(null);
     await reconcile;
     expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
+  it('holds the claim through startup reconciliation when the helper outlives the deadline', async () => {
+    const { service, operationId } = await claimRecreating();
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 150, watchMs: 150, recoveryMs: 20 };
+    mockDocker({ helperRunning: true });
+    const reconcile = service.reconcileOnStartup();
+    await new Promise(resolve => setTimeout(resolve, 400));
+    // The estimate elapsed, but Docker still shows the labelled helper: the
+    // operation must stay non-terminal and block a second claim.
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    expect(service.isEndpointProviderPending()).toBe(true);
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+
+    await writeOutcome(operationId, { ok: true });
+    await reconcile;
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'succeeded' });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
   });
 
   it('answers the helper after Docker works through the new provider, and succeeds on its verdict', async () => {

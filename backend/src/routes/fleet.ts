@@ -1257,7 +1257,13 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteUpdateBlocked = meta.updateBlocked;
           remoteImageChannel = meta.imageChannel;
           remoteCapabilities = meta.capabilities ?? [];
-          endpointProviderPending = meta.endpointProviderPending === true;
+          // An unreachable node's meta is an empty placeholder, not an answer.
+          // A tracker that recorded an endpoint replacement keeps its pending
+          // state through transport loss so the row stays reconcilable and a
+          // duplicate dispatch stays conflicted.
+          endpointProviderPending = meta.online
+            ? meta.endpointProviderPending === true
+            : tracker?.endpointProviderPending === true;
           remoteEndpointProviderCompletedAt = meta.endpointProviderCompletedAt ?? null;
         }
 
@@ -1617,7 +1623,7 @@ function refuseUnsupportedEndpointProvider(res: Response, capabilities: string[]
 async function beginTrackerOperation(
   nodeId: number,
   conflictError: string,
-  endpointProviderPending?: () => Promise<boolean> | boolean,
+  endpointProviderPending?: (recordedPending: boolean) => Promise<boolean> | boolean,
 ): Promise<string | null> {
   const existing = updateTracker.get(nodeId);
   if (existing?.status === 'updating') {
@@ -1627,7 +1633,7 @@ async function beginTrackerOperation(
       let pending = existing.endpointProviderPending === true;
       if (endpointProviderPending) {
         try {
-          pending = await endpointProviderPending();
+          pending = await endpointProviderPending(existing.endpointProviderPending === true);
         } catch {
           // Keep the fallback.
         }
@@ -1644,12 +1650,22 @@ async function beginTrackerOperation(
   return null;
 }
 
-/** Whether a node is still verifying a Docker endpoint replacement, the only reason a stale tracker stays active. */
-function endpointProviderStillPending(node: { id: number; type: string }): Promise<boolean> | boolean {
+/**
+ * Whether a node is still verifying a Docker endpoint replacement, the only
+ * reason a stale tracker stays active. A remote answer is authoritative only
+ * when the probe succeeded: offline, timed-out or malformed metadata proves
+ * nothing, so a tracker that recorded an endpoint replacement keeps waiting
+ * instead of authorizing a second operation.
+ */
+function endpointProviderStillPending(
+  node: { id: number; type: string },
+  recordedPending: boolean,
+): Promise<boolean> | boolean {
   if (node.type === 'local') return ImageOperationService.getInstance().isEndpointProviderPending();
-  return NodeRegistry.getInstance().fetchMetaForNode(node.id)
-    .then(meta => meta.endpointProviderPending === true)
-    .catch(() => false);
+  if (!recordedPending) return false;
+  return NodeRegistry.getInstance().probeRemoteMeta(node.id)
+    .then(probe => probe.kind === 'ok' ? probe.meta.endpointProviderPending === true : true)
+    .catch(() => true);
 }
 
 function parseRemoteUpdateFailure(payload: unknown): { error: string; code?: string } {
@@ -1815,7 +1831,7 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     const conflict = await beginTrackerOperation(
       nodeId,
       'Update already in progress for this node.',
-      () => endpointProviderStillPending(node),
+      (recordedPending) => endpointProviderStillPending(node, recordedPending),
     );
     if (conflict) {
       res.status(409).json({ error: conflict });
@@ -1946,7 +1962,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
     const conflict = await beginTrackerOperation(
       nodeId,
       'An update or reapply is already in progress for this node.',
-      () => endpointProviderStillPending(node),
+      (recordedPending) => endpointProviderStillPending(node, recordedPending),
     );
     if (conflict) {
       res.status(409).json({ error: conflict });

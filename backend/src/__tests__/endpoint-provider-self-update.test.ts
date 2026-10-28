@@ -225,6 +225,24 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     });
   });
 
+  it('validates with the same authoritative project name staging and replacement use', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: 'p:1' }), stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    const internals = instance as unknown as { composeContext: { project: string } };
+    internals.composeContext.project = 'operator-project';
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    const validation = dockerCalls()[0];
+    const validationCmd = validation[validation.length - 1];
+    // The directory is /srv/stack; only the project flag makes a
+    // ${COMPOSE_PROJECT_NAME}-dependent input render as it will at run time.
+    expect(validationCmd).toContain("'-p' 'operator-project'");
+    expect(validationCmd.indexOf("'-p' 'operator-project'")).toBeLessThan(validationCmd.indexOf('config'));
+    expect(validationCmd).not.toContain('srv/stack.env');
+  });
+
   it('hands the process environment to validation, staging and replacement by key, never by value', async () => {
     process.env.SENCHO_ENDPOINT_TEST_TOKEN = 'compose-value';
     const keysByCall: string[][] = [];
@@ -358,18 +376,31 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
   });
 
-  it('does not claim nothing stopped when the detached helper start is unconfirmed', async () => {
+  it('proceeds to start when a lost create answer left a helper behind', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
-      if (args.includes('replace')) throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
+      if (args[0] === 'create') throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
       // The operation's helper exists even though the create answer was lost.
       if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
     await instance.triggerComposeReapply({ endpointProvider: request });
-    // The helper may have been created before its answer was lost. The outcome
-    // watcher decides instead of a false "nothing was stopped" failure.
+    expect(instance.getLastError()).toBeNull();
+    expect(instance.getLastErrorCode()).toBeNull();
+    expect(dockerCalls().some(args => args[0] === 'start')).toBe(true);
+  });
+
+  it('does not claim nothing stopped when an actual start answer is lost and the helper runs', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args[0] === 'create') return { stdout: 'helper-id\n', stderr: '' };
+      if (args[0] === 'start') throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
+      if (args[0] === 'inspect') return { stdout: 'running\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
     expect(instance.getLastError()).toBeNull();
     expect(instance.getLastErrorCode()).toBeNull();
   });
@@ -377,12 +408,13 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
   it('does not treat a losing start answer with stderr as a refusal when the helper exists', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
-      if (args.includes('replace')) {
+      if (args[0] === 'create') return { stdout: 'helper-id\n', stderr: '' };
+      if (args[0] === 'start') {
         // What a dropped connection looks like: Docker started the helper, then
         // the CLI reported EOF on stderr. Nonempty stderr is not proof of failure.
         throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
       }
-      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
+      if (args[0] === 'inspect') return { stdout: 'running\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -394,8 +426,9 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
   it('does not treat a losing start answer with a Buffer stderr as a refusal when the helper exists', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
-      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: Buffer.from('daemon said EOF') });
-      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
+      if (args[0] === 'create') return { stdout: 'helper-id\n', stderr: '' };
+      if (args[0] === 'start') throw Object.assign(new Error('exit 125'), { stderr: Buffer.from('daemon said EOF') });
+      if (args[0] === 'inspect') return { stdout: 'running\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -411,8 +444,10 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
   ])('keeps ownership for an ambiguous %s start with stderr and a live helper', async (_label, run) => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
-      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
-      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
+      if (args[0] === 'pull') return { stdout: '', stderr: '' };
+      if (args[0] === 'create') return { stdout: 'helper-id\n', stderr: '' };
+      if (args[0] === 'start') throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
+      if (args[0] === 'inspect') return { stdout: 'running\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();

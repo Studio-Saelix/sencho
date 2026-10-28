@@ -336,6 +336,27 @@ describe('buildComposeConfigValidateArgs', () => {
     expect(cmd).toContain(shQuote('docker-compose.yml'));
     expect(cmd).toContain(shQuote('/opt/sencho/override.yml'));
   });
+
+  it.each([
+    ['a custom project', 'operator-project', true],
+    ['no project label', null, false],
+  ])('passes %s to the preliminary render so it matches staging and replacement', (_label, project, expected) => {
+    const args = buildComposeConfigValidateArgs({
+      workingDir: '/opt/sencho',
+      imageName: 'saelix/sencho:1.0.0',
+      configFiles: 'docker-compose.yml',
+      hostBindMounts: [],
+      project,
+    });
+    const cmd = args[args.length - 1];
+    if (expected) {
+      expect(cmd).toContain(`'-p' ${shQuote(project!)}`);
+      expect(cmd.indexOf('-p')).toBeLessThan(cmd.indexOf(shQuote('docker-compose.yml')));
+      expect(cmd.endsWith(' config')).toBe(true);
+    } else {
+      expect(cmd).not.toContain(' -p ');
+    }
+  });
 });
 
 describe('isSenchoDevRepository', () => {

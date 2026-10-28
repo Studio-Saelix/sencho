@@ -86,16 +86,16 @@ function mockRemote(meta: RemoteMeta) {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) =>
     id === proxyNodeId ? { apiUrl: 'http://192.168.1.98:1852', apiToken: 'proxy-token', trustedLoopback: false } : null,
   );
-  vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue(meta);
+  const metaSpy = vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue(meta);
   vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('0.99.0');
   const calls: Array<{ url: string; body: unknown }> = [];
   const respond = { status: 202, body: { message: 'ok' } as unknown };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
-    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
     return new Response(JSON.stringify(respond.body), { status: respond.status });
   });
-  return { calls, respond };
+  return { calls, respond, metaSpy };
 }
 
 describe('POST /api/system/reapply-compose and /update with replaceEndpointProvider', () => {
@@ -417,6 +417,94 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
     mockRemote(ONLINE({ online: false, endpointProviderPending: false }));
     trackRemote(6 * 60_000);
     expect((await remoteStatus()).updateStatus).toBe('timeout');
+  });
+
+  it('keeps a recorded endpoint replacement reconcilable while remote metadata is unavailable', async () => {
+    const { metaSpy } = mockRemote(ONLINE({ online: false, capabilities: [], endpointProviderPending: false }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration', true),
+      startedAt: Date.now() - 6 * 60_000,
+      previousEndpointProviderCompletedAt: null,
+    });
+    // Unavailable metadata is not an authoritative "pending:false".
+    expect((await remoteStatus()).updateStatus).toBe('updating');
+
+    // The node comes back with its completion stamp: the row completes.
+    metaSpy.mockResolvedValue(ONLINE({ startedAt: 1, endpointProviderCompletedAt: Date.now() }));
+    expect((await remoteStatus()).updateStatus).toBe('completed');
+  });
+
+  it('fails a recorded endpoint replacement when the node returns with an error, not a timeout', async () => {
+    const { metaSpy } = mockRemote(ONLINE({ online: false, capabilities: [] }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration', true),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    expect((await remoteStatus()).updateStatus).toBe('updating');
+
+    metaSpy.mockResolvedValue(ONLINE({ updateError: 'endpoint_provider_restored' }));
+    const row = await remoteStatus();
+    expect(row.updateStatus).toBe('failed');
+    expect(row.error).toContain('restored its previous Docker endpoint container');
+  });
+
+  it('times out a recorded endpoint replacement once reachable metadata clears pending', async () => {
+    mockRemote(ONLINE({ endpointProviderPending: false }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration', true),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    // The node answered and no longer reports a replacement: this one is a
+    // genuine timeout, so the row does not stay active forever.
+    expect((await remoteStatus()).updateStatus).toBe('timeout');
+  });
+
+  it('keeps a stale recorded endpoint replacement conflicted while metadata is unavailable', async () => {
+    mockRemote(ONLINE({ online: false, capabilities: [] }));
+    vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({ kind: 'transport_failure', detail: 'disconnect' });
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration', true),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('already in progress');
+    expect(tracker.get(proxyNodeId)?.status).toBe('updating');
+  });
+
+  it('keeps a stale recorded endpoint update conflicted while metadata is unavailable', async () => {
+    mockRemote(ONLINE({ online: false, capabilities: [] }));
+    vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({ kind: 'transport_failure', detail: 'timeout' });
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'update', true),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/update`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('already in progress');
+    expect(tracker.get(proxyNodeId)?.status).toBe('updating');
+  });
+
+  it('reaps a stale recorded endpoint replacement once reachable metadata clears pending', async () => {
+    mockRemote(ONLINE({ capabilities: ['stacks', 'self-update', 'endpoint-provider-replace', 'endpoint-provider-only'] }));
+    vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue({
+      kind: 'ok', meta: ONLINE({ endpointProviderPending: false }),
+    });
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration', true),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(202);
   });
 });
 

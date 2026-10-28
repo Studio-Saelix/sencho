@@ -346,6 +346,42 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
     })).toThrow(/required proxy image/);
   }, 300_000);
 
+  it('renders project-dependent inputs only with the authoritative project name', async () => {
+    const dir = path.join(rootDir, 'project-context');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'compose.yaml'), [
+      'services:',
+      '  proxy:',
+      '    image: busybox:1.36.1',
+      '    env_file:',
+      '      - ${COMPOSE_PROJECT_NAME}.env',
+      '',
+    ].join('\n'), 'utf8');
+    await fs.writeFile(path.join(dir, 'operator-project.env'), 'SENCHO_E2E_PROJECT_MARKER=present\n', 'utf8');
+    const { buildComposeConfigValidateArgs } = await import('../../services/SelfUpdateService');
+    const args = (project: string | null) => buildComposeConfigValidateArgs({
+      workingDir: dir,
+      imageName: 'docker:27-cli',
+      hostBindMounts: [],
+      configFiles: path.join(dir, 'compose.yaml'),
+      envKeys: [],
+      project,
+    });
+
+    // The directory is "project-context"; only -p makes Compose read
+    // operator-project.env, exactly as staging and replacement will.
+    const rendered = execFileSync('docker', args('operator-project'), {
+      encoding: 'utf8', env: { ...process.env }, timeout: 300_000,
+    });
+    expect(rendered).toContain('SENCHO_E2E_PROJECT_MARKER: present');
+    expect(() => execFileSync('docker', args(null), {
+      encoding: 'utf8',
+      env: { ...process.env },
+      timeout: 300_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })).toThrow(/project-context\.env|no such file/i);
+  }, 300_000);
+
   it('restores the previous provider image and configuration after a failed recreation', async () => {
     const fix = await fixture('provider');
     const proxyBefore = await containerId(fix.project, fix.dir, 'socket-proxy');

@@ -340,21 +340,27 @@ export function buildSelfUpdateRunArgs(
  * Build the argv for a throwaway helper that runs `docker compose … config`
  * against the host compose project. Reuses the recreate helper's mount layout
  * (socket + working dir + host binds) without mounting /app/data, since
- * validation is read-only. Pure and exported for unit testing.
+ * validation is read-only. The authoritative project name is passed when the
+ * container carries one, so project-dependent inputs (`${COMPOSE_PROJECT_NAME}`
+ * in an env_file or interpolation) render exactly as staging and replacement do.
+ * Pure and exported for unit testing.
  */
 export function buildComposeConfigValidateArgs(
   ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'hostBindMounts'> & {
     configFiles: string;
     /** The same Compose interpolation inputs the staging and replacement helpers receive. */
     envKeys?: ReadonlyArray<string>;
+    /** Compose project of Sencho's own container, when it advertises one. */
+    project?: string | null;
   },
 ): string[] {
-  const { workingDir, imageName, hostBindMounts, configFiles, envKeys } = ctx;
+  const { workingDir, imageName, hostBindMounts, configFiles, envKeys, project } = ctx;
   const fFlags = configFiles.split(',').flatMap(f => {
     const trimmed = f.trim();
     return trimmed ? ['-f', trimmed] : [];
   });
-  const composeCmd = ['docker compose', ...fFlags.map(shQuote), 'config'].join(' ');
+  const projectFlags = project ? ['-p', project] : [];
+  const composeCmd = ['docker compose', ...projectFlags.map(shQuote), ...fFlags.map(shQuote), 'config'].join(' ');
   return buildSelfUpdateRunArgs(
     { workingDir, imageName, dataDirHost: null, hostBindMounts, envKeys },
     composeCmd,
@@ -776,7 +782,10 @@ class SelfUpdateService {
     try {
       await execFileAsync(
         'docker',
-        buildComposeConfigValidateArgs({ workingDir, imageName, hostBindMounts, configFiles, envKeys }),
+        buildComposeConfigValidateArgs({
+          workingDir, imageName, hostBindMounts, configFiles, envKeys,
+          project: this.composeContext.project,
+        }),
         { env, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
       );
     } catch (error) {
