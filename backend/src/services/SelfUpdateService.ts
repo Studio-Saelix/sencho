@@ -1,8 +1,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { disableCapability } from './CapabilityRegistry';
@@ -212,15 +210,15 @@ export function buildEndpointProviderHelperArgs(input: {
   imageId: string;
   composeWritable: boolean;
   /**
-   * The process environment Docker hands the helper, so `docker compose`
-   * interpolates the authored project exactly as Sencho would. Written by the
-   * caller to a private temporary file and removed after the helper is created.
+   * Keys Docker copies from the CLI environment into the helper, so `docker
+   * compose` interpolates the authored project as Sencho would. The values stay
+   * in this process's environment and never reach the command line.
    */
-  envFile: string | null;
+  envKeys: ReadonlyArray<string>;
   /** Application uid/gid that must read the helper's marker and outcome files. */
   handoffOwner: { uid: number; gid: number } | null;
 }): string[] {
-  const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable, envFile, handoffOwner } = input;
+  const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable, envKeys, handoffOwner } = input;
   const ownerArgs = handoffOwner
     ? ['-e', `SENCHO_HANDOFF_UID=${handoffOwner.uid}`, '-e', `SENCHO_HANDOFF_GID=${handoffOwner.gid}`]
     : [];
@@ -242,7 +240,7 @@ export function buildEndpointProviderHelperArgs(input: {
     // The Sencho image's HEALTHCHECK probes a server the helper never starts;
     // over a run of minutes it would report the helper unhealthy and alert.
     '--no-healthcheck',
-    ...(envFile ? ['--env-file', envFile] : []),
+    ...envKeys.flatMap(key => ['-e', key]),
     '-e', `DOCKER_HOST=unix://${HELPER_SOCKET_PATH}`,
     ...ownerArgs,
     '--entrypoint', 'node',
@@ -749,9 +747,13 @@ class SelfUpdateService {
     } catch (error) {
       const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
       const stdout = (error as { stdout?: Buffer | string })?.stdout?.toString().trim();
-      this.lastUpdateError =
-        stderr || stdout || (error as Error).message || 'Compose configuration validation failed.';
-      console.error('[SelfUpdate] Compose reapply validation failed:', this.lastUpdateError);
+      const detail = stderr || stdout || (error as Error).message || 'Compose configuration validation failed.';
+      if (options?.endpointProvider) {
+        this.refuseEndpointProviderReplacement(`Nothing was stopped. ${detail}`);
+      } else {
+        this.lastUpdateError = detail;
+        console.error('[SelfUpdate] Compose reapply validation failed:', this.lastUpdateError);
+      }
       return;
     }
 
@@ -821,29 +823,23 @@ class SelfUpdateService {
   }
 
   /**
-   * A private file Docker reads when it creates the helper, so Compose
-   * interpolation sees the same environment this process would use. The helper
-   * container receives the values at creation; the file can be removed once the
-   * detached run has returned.
+   * Environment keys Docker copies from this process into the helper, so
+   * Compose interpolation sees the same values Sencho would. The values stay in
+   * the CLI's environment and never reach the command line. Runtime-only keys
+   * are left out so the helper keeps its image defaults, and the project name
+   * and files stay the ones in the plan.
    */
-  private writeHelperEnvFile(env: NodeJS.ProcessEnv): { dir: string; file: string } {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-endpoint-provider-'));
-    const file = path.join(dir, 'compose.env');
-    // The container gets these values so Compose interpolates the authored
-    // project as this process would, not to change the helper's own runtime.
-    // Keep its image defaults for paths, home, hostname and the Docker client.
+  private helperEnvKeys(env: NodeJS.ProcessEnv): string[] {
     const runtimeOnly = new Set([
       'HOME', 'PATH', 'HOSTNAME', 'PWD', 'SHLVL', '_', 'TERM',
       'DOCKER_HOST', 'DOCKER_CONFIG', 'SENCHO_HANDOFF_UID', 'SENCHO_HANDOFF_GID',
+      'COMPOSE_FILE', 'COMPOSE_PROJECT_NAME',
     ]);
-    const lines = Object.entries(env)
+    return Object.entries(env)
       .filter(([key, value]) => !runtimeOnly.has(key)
         && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
-        && typeof value === 'string'
-        && !/[\r\n]/.test(value))
-      .map(([key, value]) => `${key}=${value}`);
-    fs.writeFileSync(file, `${lines.join('\n')}\n`, { mode: 0o600 });
-    return { dir, file };
+        && typeof value === 'string')
+      .map(([key]) => key);
   }
 
   /**
@@ -893,80 +889,62 @@ class SelfUpdateService {
       ackSeconds: PROVIDER_ACK_SECONDS,
     };
 
-    let helperEnv: { dir: string; file: string };
     try {
-      helperEnv = this.writeHelperEnvFile(env);
+      fs.mkdirSync(request.handoffDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(request.planFile, JSON.stringify(plan), { mode: 0o600 });
     } catch (error) {
-      this.refuseEndpointProviderReplacement(`Could not prepare the Compose environment for the replacement helper (${getErrorMessage(error, 'write failed')}).`);
+      this.refuseEndpointProviderReplacement(`Could not write the replacement plan to the data directory (${getErrorMessage(error, 'write failed')}).`);
       return;
     }
 
+    const helperInput = {
+      operationId: request.operationId,
+      socketSource: provider.socketBindSource,
+      workingDir: ctx.workingDir,
+      dataDirHost: ctx.dataDirHost!,
+      hostBindMounts: ctx.hostBindMounts,
+      imageId: ctx.runningImageId!,
+      composeWritable: composeCopy !== null,
+      envKeys: this.helperEnvKeys(env),
+      // The helper runs as root; the app may run as SENCHO_USER, so its
+      // marker and outcome files must be handed back to this process's uid.
+      handoffOwner: processHandoffOwner(),
+    };
+
+    console.log(`[SelfUpdate] Staging replacement of the Docker endpoint "${provider.service}"...`);
+    let staged: StageResult;
     try {
-      try {
-        fs.mkdirSync(request.handoffDir, { recursive: true, mode: 0o700 });
-        fs.writeFileSync(request.planFile, JSON.stringify(plan), { mode: 0o600 });
-      } catch (error) {
-        this.refuseEndpointProviderReplacement(`Could not write the replacement plan to the data directory (${getErrorMessage(error, 'write failed')}).`);
+      const { stdout } = await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'stage', composeWritable: false }), {
+        env, timeout: 10 * 60_000, maxBuffer: 10 * 1024 * 1024,
+      });
+      staged = parseStageResult(stdout);
+    } catch (error) {
+      const stdout = (error as { stdout?: Buffer | string })?.stdout?.toString() ?? '';
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      const parsed = parseStageResult(stdout);
+      staged = parsed.ok
+        ? { ok: false, message: stderr || getErrorMessage(error, 'The staging helper failed.') }
+        : (parsed.message === STAGE_UNREADABLE && stderr ? { ok: false, message: stderr } : parsed);
+    }
+    if (!staged.ok) {
+      this.refuseEndpointProviderReplacement(`Nothing was stopped. ${staged.message}`);
+      return;
+    }
+    console.log(`[SelfUpdate] Staged ${staged.providerImage} for "${provider.service}" (previous image ${staged.previousImageId}); spawning the replacement helper (last breath)`);
+
+    try {
+      await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'replace' }), { env, timeout: 60_000 });
+    } catch (error) {
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      if (!stderr) {
+        // The CLI may have created the detached helper before its answer was
+        // lost or its 60s bound expired. It is no longer true that nothing
+        // stopped: let the outcome watcher decide instead of failing the
+        // operation and releasing the claim under a helper that still runs.
+        console.warn('[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:', getErrorMessage(error, 'docker run failed'));
         return;
       }
-
-      const helperInput = {
-        operationId: request.operationId,
-        socketSource: provider.socketBindSource,
-        workingDir: ctx.workingDir,
-        dataDirHost: ctx.dataDirHost!,
-        hostBindMounts: ctx.hostBindMounts,
-        imageId: ctx.runningImageId!,
-        composeWritable: composeCopy !== null,
-        envFile: helperEnv.file,
-        // The helper runs as root; the app may run as SENCHO_USER, so its
-        // marker and outcome files must be handed back to this process's uid.
-        handoffOwner: processHandoffOwner(),
-      };
-
-      console.log(`[SelfUpdate] Staging replacement of the Docker endpoint "${provider.service}"...`);
-      let staged: StageResult;
-      try {
-        const { stdout } = await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'stage', composeWritable: false }), {
-          env, timeout: 10 * 60_000, maxBuffer: 10 * 1024 * 1024,
-        });
-        staged = parseStageResult(stdout);
-      } catch (error) {
-        const stdout = (error as { stdout?: Buffer | string })?.stdout?.toString() ?? '';
-        const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
-        const parsed = parseStageResult(stdout);
-        staged = parsed.ok
-          ? { ok: false, message: stderr || getErrorMessage(error, 'The staging helper failed.') }
-          : (parsed.message === STAGE_UNREADABLE && stderr ? { ok: false, message: stderr } : parsed);
-      }
-      if (!staged.ok) {
-        this.refuseEndpointProviderReplacement(`Nothing was stopped. ${staged.message}`);
-        return;
-      }
-      console.log(`[SelfUpdate] Staged ${staged.providerImage} for "${provider.service}" (previous image ${staged.previousImageId}); spawning the replacement helper (last breath)`);
-
-      try {
-        await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'replace' }), { env, timeout: 60_000 });
-      } catch (error) {
-        const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
-        if (!stderr) {
-          // The CLI may have created the detached helper before its answer was
-          // lost or its 60s bound expired. It is no longer true that nothing
-          // stopped: let the outcome watcher decide instead of failing the
-          // operation and releasing the claim under a helper that still runs.
-          console.warn('[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:', getErrorMessage(error, 'docker run failed'));
-          return;
-        }
-        this.refuseEndpointProviderReplacement(`Nothing was stopped. The replacement helper could not start: ${stderr}`);
-      }
-    } finally {
-      try {
-        fs.rmSync(helperEnv.dir, { recursive: true, force: true });
-      } catch (error) {
-        // The helper already has its environment; a leftover private temp file
-        // must not turn a dispatched replacement into a reported failure.
-        console.warn('[SelfUpdate] Could not remove the helper environment file:', getErrorMessage(error, 'remove failed'));
-      }
+      this.refuseEndpointProviderReplacement(`Nothing was stopped. The replacement helper could not start: ${stderr}`);
     }
   }
 

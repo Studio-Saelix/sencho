@@ -80,6 +80,23 @@ describe('postStackUpdate', () => {
     expect(await postStackUpdate({ nodeId: 1, stackName: 'sencho' })).toEqual({ kind: 'self-stack' });
   });
 
+  it('classifies a Docker endpoint refusal for the safe handoff', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(json(409, {
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }));
+    expect(await postStackUpdate({ nodeId: 1, stackName: 'web' })).toEqual({
+      kind: 'docker-endpoint',
+      refusal: {
+        message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        reason: 'provider',
+        service: 'socket-proxy',
+      },
+    });
+  });
+
   it('classifies a stack busy with another operation, naming who started it', async () => {
     vi.mocked(apiFetch).mockResolvedValue(json(409, {
       code: 'stack_op_in_progress',

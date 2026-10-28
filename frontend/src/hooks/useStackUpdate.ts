@@ -64,6 +64,11 @@ export function useStackUpdate() {
             toast.error(message, { action: openEditor });
             return { ok: false as const, errorMessage: message };
           }
+          case 'docker-endpoint':
+            // This view has no endpoint-preview surface; point the operator at
+            // the editor, which owns the same handoff.
+            toast.error(outcome.refusal.message, { action: openEditor });
+            return { ok: false as const, errorMessage: outcome.refusal.message };
           case 'busy':
             toast.error(outcome.message);
             return { ok: false as const, errorMessage: outcome.message };

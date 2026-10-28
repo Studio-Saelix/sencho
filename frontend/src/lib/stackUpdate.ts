@@ -211,6 +211,7 @@ export const parseStackActionError = (rawBody: string, fallback: string, status?
 export type StackUpdateOutcome =
   | { kind: 'ok'; healthGateId: string | null; recheckWarning?: string }
   | { kind: 'self-stack' }
+  | { kind: 'docker-endpoint'; refusal: DockerEndpointRefusal }
   | { kind: 'busy'; message: string }
   | { kind: 'policy-blocked'; payload: PolicyBlockPayload; policyName: string }
   | { kind: 'failed'; error: StackActionError };
@@ -243,6 +244,8 @@ export async function postStackUpdate({
   }
   const rawBody = await response.text();
   if (isSelfStackProtectedResponse(rawBody, response.status)) return { kind: 'self-stack' };
+  const endpointRefusal = dockerEndpointRefusal(rawBody, response.status);
+  if (endpointRefusal) return { kind: 'docker-endpoint', refusal: endpointRefusal };
   if (response.status === 409) {
     const inProgress = parseStackOpInProgress(rawBody);
     if (inProgress) return { kind: 'busy', message: stackOpInProgressMessage(stackName, inProgress) };

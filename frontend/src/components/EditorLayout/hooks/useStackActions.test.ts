@@ -2638,6 +2638,55 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 
+  it('opens the Docker endpoint handoff when a stack Update is refused', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This update would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({ stackList: { selectedFile: 'web.yml' } });
+    await act(async () => {
+      await result.current.updateStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith({
+      message: 'This update would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      reason: 'provider',
+      service: 'socket-proxy',
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'web.yml',
+    });
+  });
+
+  it.each([
+    ['update', () => 'requestServiceUpdate'],
+    ['restore', () => 'requestServiceRestore'],
+  ])('opens the Docker endpoint handoff when a service %s is refused', async (_label, pick) => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({ stackList: { selectedFile: 'web.yml' } });
+    await act(async () => {
+      if (pick() === 'requestServiceUpdate') {
+        await result.current.requestServiceUpdate('web.yml', 'socket-proxy');
+      } else {
+        await result.current.requestServiceRestore('web.yml', 'socket-proxy', 'rec-1');
+      }
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'socket-proxy',
+      nodeId: 1,
+      stackFile: 'web.yml',
+    }));
+  });
+
   it('binds a sidebar action handoff to the stack that was refused, not the selected file', async () => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({

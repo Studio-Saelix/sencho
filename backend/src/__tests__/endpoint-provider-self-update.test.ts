@@ -120,7 +120,7 @@ describe('buildEndpointProviderHelperArgs', () => {
     hostBindMounts: context.hostBindMounts,
     imageId: 'sha256:running',
     composeWritable: false,
-    envFile: null,
+    envKeys: [],
     handoffOwner: null,
   };
 
@@ -167,11 +167,12 @@ describe('buildEndpointProviderHelperArgs', () => {
     expect(args.some(arg => arg.startsWith('SENCHO_HANDOFF_'))).toBe(false);
   });
 
-  it('passes the Compose environment by file, never on the command line', () => {
-    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'stage', envFile: '/run/sencho/compose.env' });
-    expect(args).toContain('--env-file');
-    expect(args).toContain('/run/sencho/compose.env');
-    expect(args.join(' ')).not.toContain('SENCHO_HANDOFF_UID=');
+  it('passes Compose values by key, never on the command line', () => {
+    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'stage', envKeys: ['SENCHO_COMPOSE_TOKEN'] });
+    const keyAt = args.indexOf('SENCHO_COMPOSE_TOKEN');
+    expect(keyAt).toBeGreaterThan(0);
+    expect(args[keyAt - 1]).toBe('-e');
+    expect(args.join(' ')).not.toContain('super-secret-value');
   });
 });
 
@@ -213,26 +214,28 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     });
   });
 
-  it('hands the process environment to both helper runs and removes the private file afterwards', async () => {
+  it('hands the process environment to both helper runs by key, never by value', async () => {
     process.env.SENCHO_ENDPOINT_TEST_TOKEN = 'compose-value';
-    const seen: string[] = [];
-    const files: string[] = [];
-    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
-      const index = args.indexOf('--env-file');
-      if (index !== -1) {
-        const file = args[index + 1];
-        files.push(file);
-        expect(fs.existsSync(file)).toBe(true);
-        seen.push(fs.readFileSync(file, 'utf8'));
+    const keys: string[] = [];
+    const envs: NodeJS.ProcessEnv[] = [];
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+      if (args.includes('stage') || args.includes('replace')) {
+        for (let index = 0; index < args.length; index += 1) {
+          if (args[index] === '-e' && args[index + 1]) keys.push(args[index + 1]);
+        }
+        envs.push(options?.env ?? {});
       }
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       return { stdout: '', stderr: '' };
     });
     try {
       await service().triggerComposeReapply({ endpointProvider: request });
-      expect(seen.join('\n')).toContain('SENCHO_ENDPOINT_TEST_TOKEN=compose-value');
-      expect(files.length).toBeGreaterThanOrEqual(2);
-      for (const file of files) expect(fs.existsSync(file)).toBe(false);
+      expect(keys).toContain('SENCHO_ENDPOINT_TEST_TOKEN');
+      expect(keys).not.toContain('DOCKER_HOST');
+      expect(keys).not.toContain('PATH');
+      expect(keys).not.toContain('SENCHO_HANDOFF_UID');
+      expect(envs.some(env => env.SENCHO_ENDPOINT_TEST_TOKEN === 'compose-value')).toBe(true);
+      expect(keys.join(' ')).not.toContain('compose-value');
     } finally {
       delete process.env.SENCHO_ENDPOINT_TEST_TOKEN;
     }
@@ -271,6 +274,20 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
     expect(dockerCalls().some(args => args.includes('replace'))).toBe(false);
     expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('marks a Compose validation refusal before an endpoint reapply as endpoint_provider_refused', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.some(arg => typeof arg === 'string' && arg.endsWith(' config'))) {
+        throw Object.assign(new Error('exit 1'), { stderr: 'yaml: line 3: bad mapping' });
+      }
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toBe('Nothing was stopped. yaml: line 3: bad mapping');
+    expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
+    expect(dockerCalls().some(args => args.includes('stage'))).toBe(false);
   });
 
   it('refuses when the provider changed since the operator confirmed', async () => {

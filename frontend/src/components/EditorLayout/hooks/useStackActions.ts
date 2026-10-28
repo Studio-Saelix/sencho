@@ -9,6 +9,7 @@ import {
   parseUpdateSuccessBody,
   postStackUpdate,
   stackOpInProgressMessage,
+  type DockerEndpointRefusal,
   type StackActionError,
 } from '@/lib/stackUpdate';
 import {
@@ -522,6 +523,28 @@ export function useStackActions(options: UseStackActionsOptions) {
       return true;
     }
     return false;
+  };
+
+  /**
+   * Same handoff for a service-scoped update or restore, whose request helper
+   * returns the parsed refusal instead of the raw 409 body.
+   */
+  const openServiceEndpointRefusal = (
+    result: { endpointRefusal?: DockerEndpointRefusal },
+    stackFile: string,
+    opNodeId: number | null,
+  ): boolean => {
+    const refusal = result.endpointRefusal;
+    if (!refusal) return false;
+    const sameNode = activeNode?.id === opNodeId;
+    overlayState.openDockerEndpointProtected({
+      ...refusal,
+      nodeId: opNodeId,
+      nodeName: sameNode ? activeNode.name : null,
+      nodeType: sameNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
+      stackFile,
+    });
+    return true;
   };
 
   const openStackApp = (file: string) => {
@@ -2229,6 +2252,17 @@ export function useStackActions(options: UseStackActionsOptions) {
               case 'self-stack':
                 overlayState.openSelfStackProtected();
                 return { ok: false as const, errorMessage: 'Sencho instance protected' };
+              case 'docker-endpoint': {
+                const sameNode = activeNode?.id === opNodeId;
+                overlayState.openDockerEndpointProtected({
+                  ...outcome.refusal,
+                  nodeId: opNodeId,
+                  nodeName: sameNode ? activeNode.name : null,
+                  nodeType: sameNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
+                  stackFile,
+                });
+                return { ok: false as const, errorMessage: 'Protected by Sencho' };
+              }
               case 'busy':
                 toast.error(outcome.message);
                 return { ok: false as const, errorMessage: outcome.message };
@@ -2267,7 +2301,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
-            if (openProtectedRefusal(errText, response.status)) {
+            if (openProtectedRefusal(errText, response.status, stackFile)) {
               return { ok: false as const, errorMessage: 'Protected by Sencho' };
             }
             if (response.status === 409) {
@@ -2427,6 +2461,9 @@ export function useStackActions(options: UseStackActionsOptions) {
             deploySessionId: ds,
           });
           if (!result.ok) {
+            if (openServiceEndpointRefusal(result, stackFile, opNodeId)) {
+              return { ok: false as const, errorMessage: 'Protected by Sencho' };
+            }
             toast.error(result.error);
             return { ok: false as const, errorMessage: result.error };
           }
@@ -2489,6 +2526,9 @@ export function useStackActions(options: UseStackActionsOptions) {
           deploySessionId: ds,
         });
         if (!result.ok) {
+          if (openServiceEndpointRefusal(result, stackFile, opNodeId)) {
+            return { ok: false as const, errorMessage: 'Protected by Sencho' };
+          }
           toast.error(result.error);
           return { ok: false as const, errorMessage: result.error };
         }
