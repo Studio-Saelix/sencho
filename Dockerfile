@@ -119,7 +119,9 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA frames
 # buffered per-message). go-archive v0.2.0 is flagged for CVE-2026-17106
 # (HIGH), where a crafted tar archive can write outside the extraction
-# directory. Removing vendor/ keeps -mod=mod from reading the stale copy, and
+# directory. go-jose v4.1.4 is flagged for CVE-2026-116587 (HIGH, denial of
+# service while parsing JWKs that contain RSA keys), fixed in v4.1.6.
+# Removing vendor/ keeps -mod=mod from reading the stale copy, and
 # avoids `go mod tidy` (which does not run cleanly against docker/cli's
 # vendor.mod manifest). This stage now fetches modules at build time rather
 # than building fully offline.
@@ -153,7 +155,8 @@ RUN cp vendor.mod go.mod && cp vendor.sum go.sum && \
     go get golang.org/x/net@v0.60.0 \
            golang.org/x/text@v0.42.0 \
            google.golang.org/grpc@v1.83.2 \
-           github.com/moby/go-archive@v0.3.0 && \
+           github.com/moby/go-archive@v0.3.0 \
+           github.com/go-jose/go-jose/v4@v4.1.6 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
       -mod=mod \
       -ldflags "-extldflags=-static \
