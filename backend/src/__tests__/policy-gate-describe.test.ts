@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { describePolicyBlock } from '../helpers/policyGate';
+import { decideEvidenceGate } from '../services/securityEvidence';
 import type { PolicyViolation } from '../services/PolicyEnforcement';
 import type { ScanPolicy } from '../services/DatabaseService';
 
@@ -14,6 +15,252 @@ const violation = (over: Partial<PolicyViolation>): PolicyViolation => ({
 });
 
 describe('describePolicyBlock', () => {
+  it('reports an evidence block as missing evidence, not as a matched finding', () => {
+    // The unattended paths only have this sentence, so a scanner outage must
+    // not read as a policy match there.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ error: 'Pre-flight scan failed: scanner crashed' })],
+      'deploy',
+      {
+        outcome: 'block',
+        records: [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.14', collectedAt: null }],
+        applications: [
+          {
+            source: 'vulnerability_scan',
+            state: 'failed',
+            outcome: 'block',
+            rule: 'security_scan_failure=block',
+            target: 'nginx:1.14',
+          },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('required security evidence was unavailable');
+    expect(msg).not.toContain('matched');
+  });
+
+  it('does not contradict itself when no rule application exists', () => {
+    // An evaluation failure produces no application, and the summary for that
+    // case is "No security evidence was required", which would directly
+    // contradict the sentence it is appended to.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ error: 'Policy evaluation failed: database is locked' })],
+      'deploy',
+      { outcome: 'allow', records: [], applications: [], summary: 'No security evidence was required for this decision' },
+    );
+    expect(msg).toContain('could not be evaluated');
+    expect(msg).not.toContain('No security evidence was required');
+  });
+
+  it('counts only the genuine matches on a mixed payload', () => {
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ reasons: ['kev'] }), violation({ error: 'Pre-flight scan failed: scanner crashed' })],
+      'deploy',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block' },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('1 image(s) matched');
+  });
+
+  it('names the unproven images on an evidence block', () => {
+    // The case an operator cannot otherwise resolve: a scheduled auto-update on a
+    // two-image stack is blocked because one image's scan failed. Only that image
+    // is a violation, because the other one scanned clean, so before this the
+    // sentence named the rule and not the image and nothing on screen said which
+    // of the two had failed.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', error: 'Pre-flight scan failed: scanner crashed' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.14' },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('required security evidence was unavailable');
+    expect(msg).toContain('images=[nginx:1.14]');
+    // The image that scanned clean is not named: it is not why the update was
+    // blocked, and naming it would send the operator to the wrong service.
+    expect(msg).not.toContain('redis:7');
+  });
+
+  it('names the unscanned images alongside the matches on a mixed block', () => {
+    // A payload can carry both a real match and an image the gate could not scan.
+    // Naming only the match leaves the operator fixing what they can see, then
+    // redeploying into the same block, and on the unattended paths this sentence
+    // is all they get.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', reasons: ['kev'] }), violation({ imageRef: 'redis:7', error: 'Pre-flight scan failed: timeout' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('1 image(s) matched');
+    expect(msg).toContain('images=[nginx:1.14]');
+    // The unscanned image is named as its own clause, not folded into the match
+    // count, which would overstate how many images matched.
+    expect(msg).toContain('1 image(s) could not be evaluated');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('calls an evaluation failure unevaluated rather than unscanned', async () => {
+    // The scan completed; the evaluation is what threw. "Could not be scanned"
+    // would point the operator at the scanner rather than at the failure, so the
+    // wording covers both unevaluated shapes.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+    );
+    expect(msg).toContain('could not be evaluated');
+    expect(msg).not.toContain('could not be scanned');
+  });
+
+  it('names an image a rule blocked even when it produced no violation row', () => {
+    // Both sources of an unproven image are collected before the branch, so the
+    // matched clause and the evidence clause cannot disagree about which images
+    // were involved. Today every blocking rule also pushes a violation, so this is
+    // robustness rather than a reachable case, which is exactly why it should not
+    // depend on the two branches happening to agree today.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'nginx:1.14', reasons: ['kev'] })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'redis:7' },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('1 image(s) matched');
+    expect(msg).toContain('1 image(s) could not be evaluated');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('names an image that happens to be called node', () => {
+    // `node` is a valid bare image name. The node-wide evidence sentinel is
+    // parenthesised precisely so filtering it out of this list cannot swallow a
+    // real image called `node`, whose failed scan is exactly what the operator
+    // needs named.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'node', error: 'Pre-flight scan failed: timeout' })],
+      'update',
+      {
+        outcome: 'block',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'node' },
+        ],
+        summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      },
+    );
+    expect(msg).toContain('images=[node]');
+  });
+
+  it('puts operator wording, not source or rule identifiers, in the unattended message', () => {
+    // The sentence is the only account an auto-update alert or a Git source gives,
+    // so it carries the same wording the dialog does. Built through the real
+    // decision function so a change to the summary cannot leave this fixture
+    // describing a sentence the gate no longer produces.
+    const evidence = decideEvidenceGate(
+      [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null }],
+      [{ source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' }],
+    );
+    const msg = describePolicyBlock(policy, [violation({ imageRef: '(scanner unavailable)', error: 'The vulnerability scanner is not available on this node' })], 'update', evidence);
+    expect(msg).toContain('Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block');
+    expect(msg).not.toMatch(/scanner_availability|security_scanner_unavailable|=block/);
+  });
+
+  it('keeps a node-wide refusal out of the image list', () => {
+    // The other side: the sentinel itself must still be filtered out, or a
+    // scanner outage would be reported as though it were an image.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: '(scanner unavailable)', error: 'The vulnerability scanner is not available on this node' })],
+      'deploy',
+      {
+        outcome: 'block',
+        records: [{ source: 'scanner_availability', state: 'unavailable', target: '(node)', collectedAt: null }],
+        applications: [
+          { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
+        ],
+        summary: 'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block',
+      },
+    );
+    expect(msg).toContain('required security evidence was unavailable');
+    expect(msg).not.toContain('images=[');
+    expect(msg).not.toContain('(node)');
+  });
+
+  it('says nothing extra on a block with no evidence gap', () => {
+    const msg = describePolicyBlock(policy, [violation({ reasons: ['kev'] })], 'update');
+    expect(msg).not.toContain('could not be scanned');
+    expect(msg).not.toContain('could not be evaluated');
+  });
+
+  it('names the images it could not evaluate when no rule blocked', () => {
+    // An evaluation failure produces a record and a violation but no
+    // application, so this is the sentence that has to name the image.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+      { outcome: 'allow', records: [], applications: [], summary: 'No security evidence was required for this decision' },
+    );
+    expect(msg).toContain('could not be evaluated');
+    expect(msg).toContain('images=[redis:7]');
+  });
+
+  it('does not cite a rule that allowed or only warned', () => {
+    // Image A's scan failed with the setting on warn; image B's policy
+    // evaluation threw, which no setting governs. The block is B, so the message
+    // must not name A's rule as the reason.
+    const msg = describePolicyBlock(
+      policy,
+      [violation({ imageRef: 'redis:7', error: 'Policy evaluation failed: database is locked' })],
+      'update',
+      {
+        outcome: 'warn',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'warn', rule: 'security_scan_failure=warn', target: 'nginx:1.14' },
+        ],
+        summary: 'Vulnerability scan: failed, warned about by the Scan failed setting, set to warn',
+      },
+    );
+    expect(msg).not.toContain('security_scan_failure=warn');
+    expect(msg).toContain('could not be evaluated');
+  });
+
+  it('names the operation the caller asked about', () => {
+    expect(describePolicyBlock(policy, [violation({ reasons: ['kev'] })], 'rollback')).toContain('blocked rollback');
+  });
+
   it('names KEV without mentioning a severity threshold', () => {
     const msg = describePolicyBlock(policy, [violation({ kevCount: 1, reasons: ['kev'] })]);
     expect(msg).toContain('known-exploited');

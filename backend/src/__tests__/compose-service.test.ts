@@ -16,7 +16,7 @@ import { gitSecretsAreaBase } from '../services/gitops/managedPaths';
 const {
   mockSpawn,
   mockGetContainersByStack, mockGetLegacyOrphanContainersByStack, mockRemoveContainers, mockListContainers,
-  mockContainerInspect, mockContainerLogs,
+  mockContainerInspect, mockContainerLogs, mockImageInspect,
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
@@ -57,6 +57,7 @@ const {
   mockRemoveContainers: vi.fn().mockResolvedValue([]),
   mockListContainers: vi.fn().mockResolvedValue([]),
   mockContainerInspect: vi.fn().mockResolvedValue({ State: { ExitCode: 0 } }),
+  mockImageInspect: vi.fn(),
   mockContainerLogs: vi.fn().mockResolvedValue(Buffer.from('')),
   mockGetRegistries: vi.fn().mockReturnValue([]),
   mockResolveDockerConfig: vi.fn().mockResolvedValue({ config: { auths: {} }, warnings: [] }),
@@ -168,6 +169,15 @@ vi.mock('fs', () => ({
   },
 }));
 
+const { mockEvaluateDockerEndpointGuard } = vi.hoisted(() => ({
+  mockEvaluateDockerEndpointGuard: vi.fn(),
+}));
+
+vi.mock('../helpers/dockerEndpointGuard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../helpers/dockerEndpointGuard')>()),
+  evaluateDockerEndpointGuard: mockEvaluateDockerEndpointGuard,
+}));
+
 vi.mock('../services/NodeRegistry', () => ({
   NodeRegistry: {
     getInstance: () => ({
@@ -192,6 +202,7 @@ vi.mock('../services/DockerController', () => ({
           inspect: mockContainerInspect,
           logs: mockContainerLogs,
         }),
+        getImage: () => ({ inspect: mockImageInspect }),
       }),
     }),
   },
@@ -376,6 +387,7 @@ beforeEach(() => {
   mockGetRegistries.mockReturnValue([]);
   mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
   mockGetBindMounts.mockResolvedValue(null);
+  mockEvaluateDockerEndpointGuard.mockResolvedValue(null);
   mockLoadStackBuildServices.mockResolvedValue([]);
   mockResolveMissingExternalNetworks.mockResolvedValue({
     status: 'ok',
@@ -427,6 +439,352 @@ afterEach(() => {
   } else {
     process.env.SENCHO_MODE = originalSenchoMode;
   }
+});
+
+// ── Docker endpoint guard wiring ───────────────────────────────────────
+
+describe('ComposeService - Docker endpoint guard', () => {
+  const refusal = {
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+  };
+
+  it.each(['stop', 'restart', 'down'] as const)('refuses runCommand %s before spawning compose', async (action) => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', action)).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    });
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('classifies restart separately from stop, so restarting Sencho stays allowed', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const svc = ComposeService.getInstance(1);
+
+    const restart = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await restart;
+    const stop = svc.runCommand('my-stack', 'stop');
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+    proc.emit('close', 0);
+    await stop;
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['restart', 'stop']);
+  });
+
+  it('does not consult the guard for start', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).runCommand('my-stack', 'start');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+  });
+
+  it('refuses runDown, downStack, and a service-scoped update for the protected service', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.runDown('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    // downStack swallows teardown failures; a refusal is not one of them.
+    await expect(svc.downStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateService('my-stack', 'socket-proxy', false)).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.recreateServiceFromLocal('my-stack', 'socket-proxy')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const mutations = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation);
+    expect(mutations).toEqual([
+      { kind: 'stop' },
+      { kind: 'stop' },
+      { kind: 'service', service: 'socket-proxy' },
+      { kind: 'service', service: 'socket-proxy' },
+    ]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses deployStack and updateStack before any compose work starts', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.deployStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['up', 'update']);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a recovery up, which pins every service to its rollback tag, as an update of the stack', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(
+      ComposeService.getInstance(1).composeUpWithRecoveryOverride('my-stack', '/tmp/override.yml'),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation)).toEqual([{ kind: 'update' }]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('names the services a digest-pin overlay rewrites, which the config hash cannot see', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const pin = `socket-proxy@sha256:${'a'.repeat(64)}`;
+
+    await expect(
+      ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'blueprint', actor: 'system:blueprint', digestPins: { 'socket-proxy': pin } }),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls[0][0].mutation).toEqual({ kind: 'up', pinnedServices: ['socket-proxy'] });
+  });
+
+  it('computes the hash against the overlay directory a GitOps deploy runs, not the live stack', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' }, '/tmp/overlay-dir');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/overlay-dir' }));
+  });
+
+  it('hands the guard the overlay a Git deploy runs, so the hash is computed against it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return { reason: 'provider', service: 'socket-proxy', message: 'refused' };
+    });
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir: '/tmp/ov-guard' });
+    const settled = expect(deploy).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await settled;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/ov-guard' }));
+  });
+
+  it('looks up the local image id for the guard, and reports an uninspectable image as unknown', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const seen: unknown[] = [];
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { localImage(ref: string): Promise<unknown> } }) => {
+      mockImageInspect.mockResolvedValueOnce({ Id: 'sha256:abc' });
+      seen.push(await input.probes.localImage('proxy:latest'));
+      mockImageInspect.mockRejectedValueOnce(new Error('no such image'));
+      seen.push(await input.probes.localImage('proxy:latest'));
+      return null;
+    });
+
+    await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+    expect(seen).toEqual([{ state: 'id', id: 'sha256:abc' }, { state: 'unknown' }]);
+  });
+
+  it('hands the guard the Compose version that would run the deploy, so a container from another version is not called unchanged', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('5.6.0\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'version', '--short'], expect.anything());
+    expect(version).toBe('5.6.0');
+  });
+
+  it('reports an unreadable Compose version as null rather than throwing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('docker: unknown command'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(version).toBeNull();
+  });
+
+  it('gives up on a hung Compose version probe instead of blocking the deploy', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      let version: string | null = 'unset';
+      mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+        const pending = input.probes.composeVersion();
+        await vi.advanceTimersByTimeAsync(5_000);
+        version = await pending;
+        return null;
+      });
+
+      await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+      expect(proc.kill).toHaveBeenCalled();
+      expect(version).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands the guard the rendered Compose config, so a label set only in the file is seen', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let rendered: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      rendered = await input.probes.renderConfig();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'stop' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: { proxy: { labels: { 'io.sencho.infrastructure': 'true' } } } })));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.arrayContaining(['compose', 'config', '--format', 'json']), expect.anything());
+    expect(rendered).toContain('io.sencho.infrastructure');
+  });
+
+  it('tells the guard why the Compose config could not be rendered, so a failed render is a refusal and not an empty model', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('services.web.image must be a string\nsecond line'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('services.web.image must be a string');
+  });
+
+  it('says a render timed out, and withholds Compose\'s diagnostics for an overlay render', async () => {
+    const service = ComposeService.getInstance(1);
+    const render = vi.spyOn(service, 'renderConfig');
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: '', code: null, timedOut: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toBe('docker compose config timed out');
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: 'secret=hunter2 is invalid', code: 1, timedOut: false, withheld: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toContain('diagnostics are withheld');
+    expect((failure as Error).message).not.toContain('hunter2');
+    render.mockRestore();
+  });
+
+  it('names the error in the render failure, not a warning Compose printed before it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('time="2026-10-26T00:00:00Z" level=warning msg="The \\"FOO\\" variable is not set"\nWARN[0000] version is obsolete\nrequired variable BAR is missing a value: set BAR'));
+    proc.emit('close', 1);
+    await check;
+
+    expect((failure as Error).message).toBe('required variable BAR is missing a value: set BAR');
+  });
+
+  it('turns a guard check that cannot run into a refusal, never a pass', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockEvaluateDockerEndpointGuard.mockRejectedValue(new Error('node lookup failed'));
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      reason: 'unresolved',
+    });
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toThrow(/node lookup failed/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('computes the config hash with the authored invocation and parses `service hash` output', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const check = svc.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('socket-proxy 4f9a1c\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'config', '--hash=socket-proxy'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') }),
+    );
+    expect(hash).toBe('4f9a1c');
+  });
+
+  it('reports an unavailable hash as null rather than throwing', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid compose project'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(hash).toBeNull();
+  });
 });
 
 // ── runCommand ─────────────────────────────────────────────────────────
@@ -1439,6 +1797,30 @@ describe('ComposeService - deployStack', () => {
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 
+  it('keeps the original error and says why when the Docker endpoint guard refused the rollback', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockCompensateWithCandidate.mockRejectedValueOnce(
+      new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection.' }),
+    );
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).toContain('The rollback did not run: Service "socket-proxy" carries the Docker connection.');
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
   it('does not roll back when atomic=false', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([{
@@ -1700,6 +2082,9 @@ describe('ComposeService - deployStack', () => {
     // The refusal came before anything was pulled, created, or started.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(mockResolveMissingExternalNetworks).not.toHaveBeenCalled();
+    // The variable check speaks before the endpoint guard: a render that fails on
+    // a missing required variable is reported as that, not as an unreadable model.
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
     // The check is handed no stream to read at all, so the diagnostic could not
     // be collected even by a later change: this is not a promise about the code
     // that runs today, it is the shape of the spawn.
@@ -3017,5 +3402,46 @@ describe('ComposeService - updateStack safe ordering', () => {
 
     expect(mockHandoff).toHaveBeenCalled();
     expect(mockRemoveContainers).toHaveBeenCalledWith(['orphan-1']);
+  });
+
+  describe('when the Docker endpoint guard steps in after handoff', () => {
+    const refusalMessage = 'Service "socket-proxy" carries the Docker connection.';
+
+    it('names the guard\'s reason when it refuses to remove an orphan container', async () => {
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['proxy-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'proxy-1', success: false, error: refusalMessage, refused: true }]);
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(refusalMessage);
+    });
+
+    it('keeps the update error and says why when the guard refused the rollback', async () => {
+      const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['orphan-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'orphan-1', success: false, error: 'removal failed' }]);
+      mockCompensateWithCandidate.mockRejectedValueOnce(
+        new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: refusalMessage }),
+      );
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(`The rollback did not run: ${refusalMessage}`);
+      expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+    });
   });
 });

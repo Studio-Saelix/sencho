@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
     Search, Loader2, Check, CircleCheck, CircleAlert, AlertTriangle,
-    Download, RefreshCw, Monitor, Globe, ExternalLink, Ban, ScrollText,
+    Download, RefreshCw, Monitor, Globe, ExternalLink, Ban, ScrollText, WifiOff,
 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
@@ -216,7 +216,7 @@ export function NodeUpdatesSheet({
     const stableAvailable = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus).length;
     const devAvailable = updateStatuses.filter(s => s.devBuildUpdateAvailable && !s.updateStatus).length;
     const totalAvailable = stableAvailable + devAvailable;
-    const upToDate = updateStatuses.filter(s => !s.updateAvailable && !s.devBuildUpdateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
+    const upToDate = updateStatuses.filter(s => s.online && !s.updateAvailable && !s.devBuildUpdateAvailable && (!s.updateStatus || s.updateStatus === 'completed')).length;
     const updating = updateStatuses.filter(s => s.updateStatus === 'updating').length;
     const failed = updateStatuses.filter(s => s.updateStatus === 'failed' || s.updateStatus === 'timeout').length;
     const updatableRemoteCount = updateStatuses.filter(s => s.updateAvailable && !s.updateStatus && s.type === 'remote').length;
@@ -418,7 +418,7 @@ export function NodeUpdatesSheet({
                                             ? <span className="text-muted-foreground/70 italic text-[10px]">Integration build</span>
                                             : formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
-                                    <div className="flex justify-end items-center gap-1">
+                                    <div className="flex flex-wrap justify-end items-center gap-1">
                                         {s.updateStatus && (
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
@@ -432,7 +432,12 @@ export function NodeUpdatesSheet({
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
-                                        {!s.updateStatus && !s.updateAvailable && !s.devBuildUpdateAvailable && !s.skipActive && (
+                                        {!s.updateStatus && !s.online && (
+                                            <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap">
+                                                <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
+                                            </Badge>
+                                        )}
+                                        {!s.updateStatus && s.online && !s.updateAvailable && !s.devBuildUpdateAvailable && !s.skipActive && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
@@ -501,7 +506,7 @@ export function NodeUpdatesSheet({
                                         )}
                                         {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
                                             <span
-                                                className="text-[10px] text-muted-foreground/70 max-w-[9rem] text-right leading-tight"
+                                                className="text-[10px] text-muted-foreground/70 min-w-[4rem] max-w-[9rem] flex-1 basis-0 text-right leading-tight"
                                                 title={s.type === 'local'
                                                     ? 'This node is not Compose-managed, so configuration reapply is unavailable.'
                                                     : 'This node does not advertise Compose self-management, or is unreachable.'}

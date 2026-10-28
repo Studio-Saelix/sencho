@@ -15,7 +15,7 @@ import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController from '../services/DockerController';
-import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type ScanPolicy, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
 import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
 import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
@@ -36,7 +36,8 @@ import { encodeObservedArtifactIdentity } from '../services/gitops/json';
 import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyPreDeploy, type PolicyViolation } from '../services/PolicyEnforcement';
+import type { EvidenceGateDecision } from '../services/securityEvidence';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
@@ -78,7 +79,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -103,6 +104,8 @@ import {
   refuseIfSelfStack,
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
+import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -555,6 +558,8 @@ interface BulkResultItem {
   code?: string;
   /** Health gate run started for a successful update, when gating is enabled. */
   healthGateId?: string | null;
+  /** Set when an update proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 async function runStackBulkOp(
@@ -584,6 +589,19 @@ async function runStackBulkOp(
       return selfStackProtectedBulkResult(stackName);
     }
   }
+  if (action !== 'start') {
+    try {
+      const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(
+        stackName,
+        action === 'update' ? { kind: 'update' } : { kind: action },
+      );
+      if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    } catch (error) {
+      // An error here is not a pass: the stack is reported as failed and the batch carries on.
+      console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
+      return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: 'op_failed' };
+    }
+  }
 
   const user = req.user?.username ?? 'system';
   const lockAction: StackOpAction = action;
@@ -604,7 +622,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
+          error: describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence),
           code: 'policy_blocked',
         };
       }
@@ -629,11 +647,14 @@ async function runStackBulkOp(
       const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
       const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
       linkStackUpdateRecoveryGate(recoveryId, healthGateId);
-      return { stackName, ok: true, healthGateId };
+      return { stackName, ok: true, healthGateId, ...allowedPolicyEvidence(gate) };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
       if (outcome.kind === 'no-containers') {
         return { stackName, ok: false, error: 'No containers found for this stack', code: 'no_containers' };
+      }
+      if (outcome.kind === 'endpoint-protected') {
+        return { stackName, ok: false, error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
       }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
@@ -644,6 +665,10 @@ async function runStackBulkOp(
     }
     return { stackName, ok: true };
   } catch (err) {
+    // Raised inside the lock after the pre-check passed: still a refusal, not a failed operation.
+    if (isDockerEndpointProtectedError(err)) {
+      return { stackName, ok: false, error: err.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    }
     if (action !== 'start') notifyActionFailure(action, stackName, err, user);
     return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
   } finally {
@@ -1311,6 +1336,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     let deployed = false;
     let deployError: string | undefined;
+    let allowedEvidence: { policyEvidence?: AllowedPolicyEvidence } = {};
     if (deploy_now === true) {
       const gate = await enforcePolicyPreDeploy(
         stack_name,
@@ -1318,8 +1344,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = describePolicyBlock(gate.policy, gate.violations);
+        deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
       } else {
+        allowedEvidence = allowedPolicyEvidence(gate);
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(
             stack_name,
@@ -1350,6 +1377,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       warnings: result.warnings,
       deployed,
       deployError,
+      ...allowedEvidence,
     });
     if (deployed && skip_scan !== true) {
       triggerPostDeployScan(stack_name, req.nodeId).catch(err =>
@@ -1371,6 +1399,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:delete', 'stack', stackName)) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   const pruneVolumes = req.query.pruneVolumes === 'true';
   const debug = isDebugEnabled();
   const sanitizedName = sanitizeForLog(stackName);
@@ -1394,6 +1423,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     }
     if (result.code === 'source_claimed_by_blueprint') {
       res.status(409).json({ error: result.error, code: result.code });
+      return;
+    }
+    if (result.code === 'docker_endpoint_protected') {
+      res.status(409).json({ error: result.error, code: DOCKER_ENDPOINT_PROTECTED_CODE });
       return;
     }
     if (result.code === 'fs_failed') {
@@ -2183,6 +2216,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'up' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
   const t0 = Date.now();
@@ -2205,7 +2239,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null, { deployedGenerationId: deployResult.deployedGenerationId });
     linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
-    res.json({ message: 'Deployed successfully', healthGateId });
+    res.json({ message: 'Deployed successfully', healthGateId, ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -2214,6 +2248,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
@@ -2309,6 +2344,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   const t0 = Date.now();
@@ -2335,6 +2371,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     res.json({ status: 'Command started' });
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
@@ -2373,6 +2410,8 @@ export type ContainerActionOutcome =
   | { kind: 'ok'; count: number }
   | { kind: 'no-containers' }
   | { kind: 'docker-unavailable'; message: string }
+  /** The Docker endpoint guard refused the batch before any container was touched. */
+  | { kind: 'endpoint-protected'; message: string; reason: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2412,19 +2451,25 @@ export async function containerActionForStack(
     // concurrently against a 10s Docker timeout, and a gate poll landing in that
     // window would record the deliberate stop as a failed update.
     if (action !== 'start') {
+      // Refuse the whole batch before anything is touched or any gate ends.
+      await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
       HealthGateService.getInstance().supersedeForContainerOp(
         nodeId,
         stackName,
         `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
       );
     }
+    // The batch was just checked as a whole, so each container skips its own check.
     const op =
-      action === 'restart' ? (id: string) => dockerController.restartContainer(id)
-        : action === 'stop' ? (id: string) => dockerController.stopContainer(id)
+      action === 'restart' ? (id: string) => dockerController.restartContainer(id, { endpointGuard: 'batch-checked' })
+        : action === 'stop' ? (id: string) => dockerController.stopContainer(id, { endpointGuard: 'batch-checked' })
           : (id: string) => dockerController.startContainer(id);
     await Promise.all(containers.map(c => op(c.Id)));
     return { kind: 'ok', count: containers.length };
   } catch (error: unknown) {
+    if (isDockerEndpointProtectedError(error)) {
+      return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
+    }
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2441,6 +2486,7 @@ async function bulkContainerOp(
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (action === 'stop' && (await refuseIfSelfStack(req, res, stackName))) return;
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: action === 'stop' ? 'stop' : 'restart' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   const t0 = Date.now();
@@ -2458,6 +2504,10 @@ async function bulkContainerOp(
       console.error('[Stacks] %s failed: docker unavailable for %s', sanitizeForLog(titleCase), sanitizeForLog(stackName));
       if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), req.user?.username ?? 'system');
       res.status(503).json({ error: outcome.message, code: 'docker_unavailable' });
+      return;
+    }
+    if (outcome.kind === 'endpoint-protected') {
+      res.status(409).json({ error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: outcome.reason });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2503,6 +2553,7 @@ async function handleServiceAction(
     res.status(400).json({ error: 'Invalid service name' });
     return;
   }
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart', engineOnly: true })) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const all = await dockerController.getContainersByStack(stackName);
@@ -2547,6 +2598,7 @@ async function handleServiceAction(
     });
   } catch (error: unknown) {
     console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(action), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   }
 }
@@ -2572,6 +2624,7 @@ function serviceFailureStatus(code: string): number {
     case 'policy_blocked':
     case 'recovery_not_restorable':
     case 'recovery_claim_failed':
+    case DOCKER_ENDPOINT_PROTECTED_CODE:
       return 409;
     default:
       // Compose, retag, inspect, and replica-divergence failures are server-side.
@@ -2591,6 +2644,7 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       ...(result.previousImageId ? { previousImageId: result.previousImageId } : {}),
       ...(result.newImageId ? { newImageId: result.newImageId } : {}),
       ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
+      ...policyEvidenceFor(res),
     });
     return true;
   }
@@ -2638,6 +2692,7 @@ async function handleServiceScopedMutation(
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
   if (!requireServiceScopedUpdateCapability(res)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName })) return;
   if (!tryAcquireStackOpLock(req, res, stackName, options.lockAction)) return;
 
   const t0 = Date.now();
@@ -2688,6 +2743,7 @@ async function handleServiceScopedMutation(
       sanitizeForLog(serviceName),
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
@@ -2892,6 +2948,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   const t0 = Date.now();
@@ -2941,6 +2998,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     res.json({
       status: 'Update completed',
       healthGateId,
+      ...policyEvidenceFor(res),
       ...(recheckWarning ? { recheckWarning } : {}),
     });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
@@ -2951,6 +3009,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const rollbackInfo = getComposeRollbackInfo(error);
     const rolledBack = rollbackInfo?.rolledBack ?? false;
     if (rolledBack) {
@@ -2990,6 +3049,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // restore" from an anonymous failure it has to fail closed on.
   if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
@@ -3072,9 +3132,13 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         const compCode = (compError as { code?: string }).code;
         const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
+          // A policy refusal carries the decision the block dialog renders; an
+          // integrity or held-image refusal does not, and stays a plain 409.
+          const block = compError as { violations?: PolicyViolation[]; policy?: ScanPolicy; evidence?: EvidenceGateDecision };
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...(block.violations ? policyBlockPayload(block.policy, block.violations, block.evidence) : {}),
             ...compFailureClass,
           });
           return;
@@ -3120,6 +3184,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         message: 'Stack rolled back from recovery generation.',
         recoveryId: currentGen.id,
         gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+        ...policyEvidenceFor(res),
       });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;
@@ -3164,10 +3229,27 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-    res.json({ message: 'Stack rolled back: compose and env files restored.' });
+    res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    if (isDockerEndpointProtectedError(error)) {
+      // Refused before compose ran, so the restored files are put back.
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a refused rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+          // The files are a mix of the restore and what was there: say so, and
+          // let the hub treat the refusal as having moved something.
+          error.failureClass = 'post_mutation';
+          error.message += ' The restored files could not be put back; check the stack files before deploying again.';
+        }
+      }
+      sendIfDockerEndpointProtected(res, error);
+      return;
+    }
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       if (revertRestore) {

@@ -652,7 +652,21 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 const data = await res.json().catch(() => null);
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
-            toast.success(`Purged ${selectedOrphans.length} external container(s)`);
+            const data: { results?: Array<{ success: boolean; error?: string }> } | null = await res.json().catch(() => null);
+            if (!data?.results) {
+                // Nothing says which containers were removed, so success is not claimed.
+                toast.warning('The purge finished but its result could not be read. Check the list below.');
+                await refreshAll();
+                return;
+            }
+            const failed = data.results.filter(r => !r.success);
+            if (failed.length === 0) {
+                toast.success(`Purged ${selectedOrphans.length} external container(s)`);
+            } else if (failed.length === selectedOrphans.length) {
+                toast.error(failed[0].error || 'Failed to purge selected containers.');
+            } else {
+                toast.warning(`Purged ${selectedOrphans.length - failed.length} of ${selectedOrphans.length} external containers. ${failed[0].error ?? 'Some could not be removed.'}`);
+            }
             await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;

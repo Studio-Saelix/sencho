@@ -129,6 +129,28 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         expect(StackOpLockService.getInstance().get(1, 'apply-local-busy')?.action).toBe('update');
     });
 
+    it('returns 409 docker_endpoint_protected with the reason when the guard refuses the deploy', async () => {
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        const apply = vi.spyOn(BlueprintService.prototype, 'applyLocalUnderLock').mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'provider',
+            service: 'socket-proxy',
+            message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        }));
+        const res = await request(app)
+            .post('/api/blueprints/apply-local')
+            .set('Cookie', adminCookie)
+            .send({
+                stackName: 'apply-local-refused',
+                composeContent: 'services:\n  app:\n    image: nginx\n',
+                markerContent: JSON.stringify({ blueprintId: 1, revision: 1, lastApplied: 123 }),
+            });
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', reason: 'provider' });
+        expect(res.body.error).toContain('carries the Docker connection');
+        apply.mockRestore();
+    });
+
     it('rejects a malformed digestPins body', async () => {
         const res = await request(app)
             .post('/api/blueprints/apply-local')
@@ -258,6 +280,23 @@ describe('POST /api/blueprints/withdraw-local', () => {
             .send({ stackName: 'sencho-self', blueprintId: 1 });
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('self_stack_protected');
+    });
+
+    it('returns 409 docker_endpoint_protected when the teardown is refused, and keeps the stack', async () => {
+        const { DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService');
+        const withdraw = vi.spyOn(DeployedStackDeletionService.prototype, 'deleteDeployedStack').mockResolvedValue({
+            ok: false,
+            code: 'docker_endpoint_protected',
+            error: 'Service "socket-proxy" carries the Docker connection.',
+        });
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', adminCookie)
+            .send({ stackName: 'wd-refused-stack', blueprintId: 7 });
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'docker_endpoint_protected', error: 'Service "socket-proxy" carries the Docker connection.' });
+        expect(withdraw).toHaveBeenCalledTimes(1);
+        withdraw.mockRestore();
     });
 
     it('returns already_absent when the stack directory is missing', async () => {

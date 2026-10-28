@@ -75,7 +75,8 @@ const parseHealthGateId = async (response: Response): Promise<string | null> => 
 // Sentinel stored in overlayState.pendingUnsavedLoad to mark that the pending
 // confirmation is a node switch (not a stack load). When the user confirms the
 // discard, discardAndLoadPending calls setActiveNode(targetNode) and skips the
-// stack-load branch.
+// stack-load branch, unless a parked destination rides on pendingLeaveAction,
+// in which case that action finishes the switch instead.
 export const NODE_SWITCH_PENDING_TOKEN = '__node-switch-pending__';
 
 // Mirrors ImageUpdateService's post-update warning copy: UPDATE_STILL_PRESENT_WARNING,
@@ -2642,9 +2643,14 @@ export function useStackActions(options: UseStackActionsOptions) {
   // the list, Home, or any bottom-tab / hamburger / command-palette
   // destination. When the editor is dirty the navigation is stashed and the
   // unsaved-changes dialog opens; discardAndLoadPending runs it on confirm.
-  // When clean it runs immediately.
+  // When clean it runs immediately. A dialog that is already open keeps the
+  // navigation it was opened for: this one is refused, and the operator is told.
   const attemptLeaveEditor = (perform: () => void, onCancel?: () => void) => {
     if (stackListState.selectedFile && hasUnsavedChanges()) {
+      if (overlayState.pendingLeaveAction || overlayState.pendingUnsavedLoad) {
+        toast.info('Answer the unsaved-changes prompt first; that navigation was not followed.');
+        return;
+      }
       overlayState.setPendingLeaveAction({ run: perform, onCancel });
       return;
     }
@@ -2705,8 +2711,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     overlayState.setPendingLoadOptions(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
-    // A stashed "leave editor" navigation takes precedence; it already knows
-    // how to tear down editor state (resetEditorState) and move the surface.
+    // A stashed navigation takes precedence and finishes the move itself: a
+    // "leave editor" one tears down editor state (resetEditorState) and moves
+    // the surface, a parked node switch re-queues its destination and switches.
     if (leave) {
       leave.run();
       return;

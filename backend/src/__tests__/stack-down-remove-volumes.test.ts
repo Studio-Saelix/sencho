@@ -27,6 +27,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       ...actual.ComposeService,
       getInstance: () => ({
+        evaluateDockerEndpoint: async () => null,
         runDown: mockRunDown,
       }),
     },

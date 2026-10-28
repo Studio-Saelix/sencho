@@ -2,7 +2,7 @@
  * Recovery must execute the generation-captured Compose invocation, not the
  * live database-derived file / env selection after capture.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
 import net from 'net';
@@ -29,6 +29,13 @@ describe('captured invocation on recovery Compose args', () => {
 
   afterAll(() => {
     if (tmpDir) cleanupTestDb(tmpDir);
+  });
+
+  // These tests are about the captured invocation, not the Docker endpoint guard,
+  // which would render the stack's Compose files once more on its own.
+  beforeEach(async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   });
 
   afterEach(() => {

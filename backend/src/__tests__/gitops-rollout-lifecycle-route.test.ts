@@ -321,8 +321,11 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  // Restore routes check the Docker endpoint guard, which renders the stack's Compose config; these tests are not about it.
+  const { ComposeService } = await import('../services/ComposeService');
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
   GitOpsStore.resetForTests();
   setRegistryReadinessDepsForTests(registryReadyTestDeps());
@@ -710,6 +713,40 @@ describe('POST /api/gitops/applications/:id/rollout/rollback', () => {
     expect(target.expected_artifact_set_id).toBeTruthy();
     expect(target.latest_artifact_set_id).toBe(target.expected_artifact_set_id);
     expect(target.source_acceptance_ref).toBeTruthy();
+  });
+
+  it('reports the decision a restore was allowed on, and nothing for a clean restore', async () => {
+    const seeded = seedGitManagedBlueprint({ nodeCount: 2 });
+    await authorizeRollout(seeded);
+    insertRecoveryPoint(seeded, seeded.nodeIds[0], seeded.generationId);
+    insertRecoveryPoint(seeded, seeded.nodeIds[1], seeded.generationId);
+    const allowed = {
+      policy: { id: 3, name: 'prod-gate' },
+      bypassed: false,
+      evidence: { outcome: 'allow', records: [], applications: [], summary: 'scanner unavailable' },
+    };
+    // The first restore proceeds on incomplete evidence and says so through the
+    // callback it was handed; the second is a clean pass and calls nothing.
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'compensateWithCandidateOutcome')
+      .mockImplementationOnce(async (_id, _composeUp, policyOptions) => {
+        policyOptions?.onAllowed?.(allowed as never);
+        return { rolledBack: true };
+      })
+      .mockResolvedValueOnce({ rolledBack: true });
+
+    const res = await request(app)
+      .post(`/api/gitops/applications/bp:${seeded.blueprintId}/rollout/rollback`)
+      .set('Cookie', adminCookie)
+      .send({ generationId: seeded.generationId, scope: { kind: 'all_changed' } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    const withEvidence = res.body.results.filter((r: { policyEvidence?: unknown }) => r.policyEvidence);
+    const clean = res.body.results.filter((r: { policyEvidence?: unknown }) => !r.policyEvidence);
+    expect(withEvidence).toHaveLength(1);
+    expect(withEvidence[0]).toMatchObject({ status: 'restored', policyEvidence: { policy: { name: 'prod-gate' }, bypassed: false } });
+    expect(clean).toHaveLength(1);
+    expect(clean[0]).not.toHaveProperty('policyEvidence');
   });
 
   it('fails a target that has no recovery point and reports a partial rollback', async () => {

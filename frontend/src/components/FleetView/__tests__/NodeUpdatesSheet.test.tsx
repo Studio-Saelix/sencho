@@ -12,9 +12,9 @@ import { toast } from '@/components/ui/toast-store';
 import type { NodeUpdateStatus } from '../types';
 
 const STATUSES: NodeUpdateStatus[] = [
-  { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: 'completed' },
-  { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
-  { nodeId: 3, name: 'Db', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: 'failed', error: 'pull failed' },
+  { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: false, updateStatus: 'completed' },
+  { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: true, updateStatus: null },
+  { nodeId: 3, name: 'Db', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: false, updateStatus: 'failed', error: 'pull failed' },
 ];
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof NodeUpdatesSheet>> = {}) {
@@ -304,8 +304,8 @@ describe('NodeUpdatesSheet', () => {
   });
 
   const DEV_STATUSES: NodeUpdateStatus[] = [
-    { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
-    { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
+    { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
+    { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: true, updateStatus: null },
   ];
 
   it('counts stable and dev availability separately in the summary and meta text', () => {
@@ -316,11 +316,87 @@ describe('NodeUpdatesSheet', () => {
 
   it('does not light the changelog dot from a dev-only update', () => {
     const devOnly: NodeUpdateStatus[] = [
-      { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
+      { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: false, updateStatus: null, isDevImage: true, devBuildUpdateAvailable: true },
     ];
     render(<NodeUpdatesSheet {...baseProps({ updateStatuses: devOnly })} />);
     const changelogTab = screen.getByRole('tab', { name: /Changelog/ });
     expect(changelogTab.querySelector('.animate-ping')).toBeNull();
+  });
+
+  describe('unreachable nodes', () => {
+    const DARK: NodeUpdateStatus = {
+      nodeId: 4, name: 'Dark', type: 'remote', version: null, latestVersion: '1.1.0',
+      online: false, updateAvailable: false, updateStatus: null,
+    };
+
+    // The Summary tile is the count above its label; scope to the summary grid
+    // because a row badge can share the "Up to date" text with the tile.
+    function summaryCount(label: string): string {
+      const grid = document.querySelector('.grid-cols-4') as HTMLElement;
+      const tile = within(grid).getByText(label).parentElement as HTMLElement;
+      return tile.firstElementChild?.textContent ?? '';
+    }
+
+    it('shows an unreachable node as Offline instead of Up to date', () => {
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], DARK] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      expect(within(row).getByText('Offline')).toBeInTheDocument();
+      expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
+    });
+
+    it('leaves an unreachable node out of every summary count', () => {
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], DARK] })} />);
+      expect(summaryCount('Up to date')).toBe('1');
+      expect(summaryCount('Available')).toBe('0');
+      expect(summaryCount('Updating')).toBe('0');
+      expect(summaryCount('Failed')).toBe('0');
+    });
+
+    it('shows Offline beside Skipped, and leaves the node out of the counts, when an unreachable node has a skipped version', () => {
+      const skipped: NodeUpdateStatus = { ...DARK, skipActive: true, skippedVersion: '1.1.0' };
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], skipped] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      expect(within(row).getByText('Offline')).toBeInTheDocument();
+      expect(row).toHaveTextContent(/Skipped\s*v?1\.1\.0/);
+      expect(within(row).queryByText('Up to date')).not.toBeInTheDocument();
+      expect(summaryCount('Up to date')).toBe('1');
+      expect(summaryCount('Available')).toBe('0');
+      expect(summaryCount('Updating')).toBe('0');
+      expect(summaryCount('Failed')).toBe('0');
+    });
+
+    // The status column is a fixed 160px, so a cell that cannot wrap overflows to
+    // the left over the Latest column and clips it (v0.98.1 read as v0.98). jsdom
+    // has no layout, so pin `flex-wrap` on representative rows that stack several
+    // controls, plus the hint's `basis-0` that keeps the common one-line row one line.
+    it.each([
+      ['offline, skipped, Compose reapply unavailable', { ...DARK, skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }, ['Offline', /Skipped\s*v?1\.1\.0/, 'Unskip', 'Reapply unavailable']],
+      ['offline, skipped', { ...DARK, skipActive: true, skippedVersion: '1.1.0' }, ['Offline', /Skipped\s*v?1\.1\.0/, 'Unskip']],
+      ['online, skipped, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', skipActive: true, skippedVersion: '1.1.0', canReapplyCompose: false }, [/Skipped\s*v?1\.1\.0/, 'Unskip', 'Reapply unavailable']],
+      ['update available, Compose reapply unavailable', { ...DARK, online: true, version: '1.0.0', updateAvailable: true, canReapplyCompose: false }, ['Update', 'Reapply unavailable', 'Skip']],
+      ['up to date, Compose reapply unavailable', { ...DARK, online: true, version: '1.1.0', canReapplyCompose: false }, ['Up to date', 'Reapply unavailable']],
+    ] as const)('lets the status cell wrap instead of covering the Latest column: %s', (_label, status, stacked) => {
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], status as NodeUpdateStatus] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      const cell = row.lastElementChild as HTMLElement;
+      expect(cell).toHaveClass('flex-wrap');
+      for (const part of stacked) {
+        expect(within(cell).getByText(part)).toBeInTheDocument();
+      }
+      const hint = within(cell).queryByText('Reapply unavailable');
+      if (hint) expect(hint).toHaveClass('basis-0');
+    });
+
+    it.each([
+      ['updating', 'Updating'],
+      ['failed', 'Failed'],
+    ] as const)('keeps the %s badge and its summary count, not Offline, on an unreachable node', (updateStatus, badge) => {
+      render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [{ ...DARK, updateStatus }] })} />);
+      const row = screen.getByText('Dark').closest('.grid') as HTMLElement;
+      expect(within(row).getByText(badge)).toBeInTheDocument();
+      expect(within(row).queryByText('Offline')).not.toBeInTheDocument();
+      expect(summaryCount(badge)).toBe('1');
+    });
   });
 
   it('lights the changelog dot from a stable-only update', () => {
@@ -442,6 +518,7 @@ describe('NodeUpdatesSheet', () => {
         type: 'local',
         version: '1.1.0',
         latestVersion: '1.1.0',
+        online: true,
         updateAvailable: false,
         updateStatus: null,
         canReapplyCompose: true,

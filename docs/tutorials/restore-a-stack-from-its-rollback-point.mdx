@@ -1,0 +1,152 @@
+---
+title: Undo a Bad Image Update With a Stack's Rollback Point
+sidebarTitle: Roll back from a recovery generation
+description: Find the recovery generation Sencho captured before an image update on the Rollback tab, check the stack's rollback readiness, and restore the previous image and files in one action.
+---
+
+Say your pipeline republishes `registry.example.com/docs-web:stable` on every merge, and the latest build has a broken search index. The `docs-site` stack pulled it through **Update**, the container is running, and nothing in Sencho looks wrong, but the page is. Before that update started, Sencho captured a recovery generation: the stack's compose files and the exact image the containers were running. Restoring it puts the old build back without touching your registry.
+
+This tutorial uses the **Rollback** tab under **Resources** to find that generation, searches and filters the list, reads the stack's rollback readiness, and restores the stack from its **More actions** menu. By the end, `docs-site` serves the previous build again and you have confirmed it in three places.
+
+It covers one stack on the node you are signed in to. How generations are captured, how long they are kept, and releasing one early are on the feature pages, linked under Related.
+
+## Prerequisites
+
+- A stack that runs an image whose tag your pipeline republishes, deployed from Sencho at least once. This tutorial uses a `docs-site` stack on `registry.example.com/docs-web:stable`, published on host port `8090`, and a second stack named `status-page`. Any second stack works; it gives the search something to narrow.
+- Permission to deploy `docs-site`. Rollback is a deploy action. Step 1 changes a node setting and needs the `admin` role.
+- A shell on a machine that can reach the Docker host, for the `curl` checks in step 2 and the verification section.
+
+<Steps>
+  <Step title="Keep more than one generation per stack">
+    Open **Settings > Infrastructure > Stacks** and scroll to **Deploy Guardrails**. **Maximum retained rollback generations per stack** defaults to `1`, which keeps only the Current generation, so the Rollback tab never shows a Superseded row. Set it to `3` and select **Save settings**.
+
+    <Frame caption="Three generations per stack. A superseded generation is kept for the number of days in Superseded rollback retention, 7 by default.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/guardrails-generation-cap.png" alt="Deploy Guardrails section of Settings, Stacks, showing Superseded rollback retention at 7 days and Maximum retained rollback generations per stack at 3 generations." />
+    </Frame>
+
+    Each held generation keeps the image it captured on the node's disk until its retention passes or you release it, so a higher cap costs disk space on image-heavy stacks.
+  </Step>
+
+  <Step title="Pull the bad build with Update">
+    Your pipeline publishes build 42 under the same `stable` tag. Open `docs-site` and select **Update**. The readiness check lists what the update will do, and **Pending update** reads **Pending: a same-tag image refresh.** The check can show **Review required** for items such as a node disk warning; they are advisory, and **Update now** proceeds. Select **Update now**.
+
+    <Frame caption="The update readiness check. Sencho captures the recovery generation when the update starts.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/update-readiness.png" alt="The Ready to update dialog for docs-site with a Review required banner and rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup, Node disk, and Fleet snapshot, and Cancel and Update now buttons." />
+    </Frame>
+
+    Sencho recreates the container from the new image, and the stack header shows the health gate's observation window counting down.
+
+    <Frame caption="The updated container is up. The health gate watches it for 90 seconds by default.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/after-update.png" alt="The docs-site stack header with a Running badge, an Updating status line reading 11s of 90s, and one container, docs-site-web-1, published on port 8090." />
+    </Frame>
+
+    Confirm it from your shell. The container is healthy, so the health gate passes, but the content is wrong:
+
+    ```bash
+    curl http://<docker-host>:8090/
+    ```
+
+    ```text
+    Docs build 42: broken search index
+    ```
+  </Step>
+
+  <Step title="Open the Rollback tab">
+    Go to **Resources** and select **Rollback**. Each row is one recovery generation held on this node:
+
+    - **Stack** names the stack the generation belongs to. Select the name to open the stack.
+    - **Generation** is a short id.
+    - **Trigger** is the operation that captured it and who ran it: `update`, `deployment`, `git_apply`, or `manual_backup`.
+    - **State** is **Current** for the generation a rollback would restore, **Superseded** for an older one waiting out its retention, or **Recovery required**.
+    - **Retention** is **Protected while current** or the time until a superseded generation clears.
+
+    <Frame caption="docs-site has a Current generation from the update and two Superseded ones from earlier updates.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/rollback-tab.png" alt="Resources, Rollback tab, listing four generations: docs-site Current with trigger update, two docs-site Superseded generations with trigger update, and status-page Current with trigger deployment." />
+    </Frame>
+
+    The `docs-site` row with **Trigger** `update` and State **Current** is the one that holds the build you were running before the update.
+  </Step>
+
+  <Step title="Search and filter the list">
+    On a node with many stacks the list gets long. Select the search icon and type a stack name or part of a generation id. Typing `docs-site` narrows the list to that stack's three generations.
+
+    <Frame caption="Searching for docs-site. The counts on the filter buttons stay at the node totals while you search.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/search-stack.png" alt="The Rollback tab with docs-site typed in the search box and three docs-site rows listed: one Current and two Superseded." />
+    </Frame>
+
+    Select **Superseded** to see only the older generations, which a rollback does not use.
+
+    <Frame caption="Search and filter combine. Only docs-site's superseded generations remain.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/filter-superseded.png" alt="The Rollback tab with the Superseded filter selected and docs-site in the search box, listing two Superseded docs-site rows." />
+    </Frame>
+
+    Select **Current** to see what a rollback would restore on every stack. Select a column header to sort. A search that matches nothing shows **No generations match this filter.**
+
+    The tab lists generations; it has no restore button. Rollback always restores a stack's **Current** generation, and you start it from the stack itself.
+  </Step>
+
+  <Step title="Check the stack's rollback readiness">
+    Select the **docs-site** name in the **Current** row, open the **Dossier** tab, and scroll to **Rollback readiness**. It reads **Ready** and names the Current generation, `af30091a7d05` here, as available for exact restore. It confirms the compose files are covered and notes that the stack uses a moving image tag, so Sencho retained the exact prior image. **Healthchecks** shows a warning when no service defines one, and the verdict stays **Ready**. The panel also states that named volumes and bind-mounted application data are not part of a recovery generation.
+
+    <Frame caption="Rollback readiness for docs-site. Ready means the generation is intact and its held image is still on the node.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/rollback-readiness.png" alt="The Rollback readiness section of the docs-site Dossier with a Ready badge and rows for Recovery generation, Previous compose file, Previous env file, Previous image tag, Last successful deploy, Healthchecks, Rollback eligibility, Managed inputs, and Application data." />
+    </Frame>
+
+    A restore replaces the stack's files and image. If the break is in a volume or a database migration that already ran, rolling back will not undo it.
+  </Step>
+
+  <Step title="Restore the stack">
+    Open the **More actions** menu (the three dots next to **Update**) and select **Rollback**. The timestamp under the label is when the Current generation was captured, at the start of your update.
+
+    <Frame caption="Rollback sits at the top of More actions, with the Current generation's capture time beneath it.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/more-actions-rollback.png" alt="The More actions menu open on docs-site, with Rollback and a timestamp at the top, followed by Scan config, Monitor, Mute, and Delete." />
+    </Frame>
+
+    Sencho restores the captured compose files and recreates the container from the held image. A **Stack rolled back from recovery generation.** toast confirms it, and the Activity tab records `docs-site rolled back`. It takes a few seconds. The compose file still names `registry.example.com/docs-web:stable`, and your registry still serves build 42 under that tag, so run **Update** again only after your pipeline publishes a fixed build.
+
+    <Frame caption="The rollback toast. The container shows as freshly started because Sencho recreated it from the held image.">
+      <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/rollback-toast.png" alt="The docs-site stack page right after Rollback, with the container showing up less than a second, the Rollback readiness panel on the right, and a green toast reading Stack rolled back from recovery generation." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify the restore
+
+Check it from three places.
+
+1. **The page.** The old build is back:
+
+   ```bash
+   curl http://<docker-host>:8090/
+   ```
+
+   ```text
+   Docs build 41: published
+   ```
+
+2. **Stack Activity.** Open the **Activity** tab on `docs-site`. The newest entry is `docs-site rolled back by admin`, above the update you reversed.
+
+   <Frame caption="The rollback is recorded with the operator who ran it.">
+     <img src="/images/tutorials/restore-a-stack-from-its-rollback-point/stack-activity.png" alt="The Activity tab for docs-site listing docs-site rolled back by admin, a health gate entry, a vulnerability scan entry, docs-site updated by admin, and docs-site update started by admin." />
+   </Frame>
+
+3. **The container.** On the Docker host, `docker ps --filter name=docs-site` shows the container running an image named `sencho-rb/<generation>/<service>:hold`. That is the held copy of build 41 that the restore retargeted.
+
+## If something goes wrong
+
+If **Rollback** brings back the broken state, the most likely cause is a change you saved and deployed after the bad update. Every deploy and update captures a new generation from the files as saved at that moment, so a **Save & Deploy** made after the bad update makes your edit part of the Current generation, and Rollback restores it. Read the timestamp beneath **Rollback** in **More actions** before you use it. If it is later than the bad update, correct the files in the editor and select **Deploy**; that deploy captures a fresh generation of the good configuration.
+
+<CardGroup cols={2}>
+  <Card title="Atomic Deployments" icon="rotate-left" href="/features/atomic-deployments#manual-rollback">
+    How a generation is captured, what a restore covers, and the failure messages.
+  </Card>
+  <Card title="Resources" icon="boxes-stacked" href="/features/resources#rollback">
+    The Rollback tab, including releasing a generation early.
+  </Card>
+  <Card title="Health-Gated Updates" icon="heart-pulse" href="/features/health-gated-updates#automatic-rollback-images">
+    The retention window, the generation cap, and the observation window.
+  </Card>
+  <Card title="Stack Dossier" icon="file-lines" href="/features/stack-dossier">
+    The full Rollback readiness readout.
+  </Card>
+</CardGroup>

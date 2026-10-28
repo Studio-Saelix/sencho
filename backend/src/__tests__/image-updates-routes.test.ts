@@ -43,6 +43,9 @@ beforeAll(async () => {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
 
   ({ app } = await import('../index'));
+  // The update path's Docker endpoint check renders the stack's Compose config; these tests are not about it.
+  const { ComposeService } = await import('../services/ComposeService');
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   adminCookie = await loginAsTestAdmin(app);
 
   const viewerHash = await bcrypt.hash('viewerpass', 1);
@@ -778,7 +781,9 @@ describe('POST /api/auto-update/execute', () => {
         .set('Cookie', adminCookie)
         .send({ target: 'auto-upd-blocked' });
       expect(res.status).toBe(200);
-      expect(res.body.result).toContain('blocked auto-update');
+      // The reason-aware message: a KEV match is named, and a severity ceiling
+      // that was not enforced is not cited as the reason.
+      expect(res.body.result).toContain('blocked update');
       expect(res.body.result).toContain('matched known-exploited CVE (KEV)');
       expect(res.body.result).not.toContain('exceed');
       expect(res.body.result).not.toContain('HIGH');

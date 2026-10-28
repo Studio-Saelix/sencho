@@ -79,6 +79,25 @@ describe('StackIdentityHeader', () => {
     expect(screen.getByRole('button', { name: 'Take down' })).toBeTruthy();
   });
 
+  // The docs say these controls are disabled on the Sencho stack and that the
+  // protected dialog opens from a service's Stop service, not from them.
+  it('disables Stop, Take down, Update, Rollback, and Delete on the Sencho stack, so none of them opens the protected dialog', async () => {
+    const user = userEvent.setup();
+    const handlers = {
+      stopStack: vi.fn(), updateStack: vi.fn(), rollbackStack: vi.fn(), requestDeleteStack: vi.fn(), requestTakeDownStack: vi.fn(),
+    };
+    renderHeader({ isSelfStack: true, showTakeDown: true, backupInfo: { exists: true, timestamp: Date.now() }, ...handlers });
+
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Take down' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.getByRole('menuitem', { name: /Rollback/ })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('menuitem', { name: /Delete/ })).toHaveAttribute('aria-disabled', 'true');
+
+    for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled();
+  });
+
   it('hides Take down when showTakeDown is false', () => {
     renderHeader({ showTakeDown: false, isRunning: true });
 

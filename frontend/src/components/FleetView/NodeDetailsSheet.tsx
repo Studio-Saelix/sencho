@@ -289,7 +289,7 @@ export function NodeDetailsSheet({
                     </Field>
                     <Field label="Update status">
                         <p className="text-xs mt-0.5">
-                            {!updateStatus ? (
+                            {!updateStatus || !updateStatus.online ? (
                                 <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground">Unknown</Badge>
                             ) : updateStatus.updateBlocked ? (
                                 <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="h-5" />

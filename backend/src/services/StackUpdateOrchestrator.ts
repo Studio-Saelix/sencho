@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { HealthGateService } from './HealthGateService';
@@ -226,6 +227,13 @@ export class StackUpdateOrchestrator {
         `Service "${serviceName}" has neither an image nor a build, so it cannot be updated.`,
       );
     }
+    // Before the gate, the recovery row, or any retag exists: a refusal here
+    // leaves nothing behind.
+    const updateRefusal = await ComposeService.getInstance(nodeId)
+      .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    if (updateRefusal) {
+      return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, updateRefusal.message, { serviceName });
+    }
 
     AutoHealService.getInstance().suppress(nodeId, stackName, serviceName);
     let observing = false;
@@ -266,6 +274,13 @@ export class StackUpdateOrchestrator {
           stackName, serviceName, spec.hasBuild, options.terminalWs ?? undefined,
         );
       } catch (composeError) {
+        if (isDockerEndpointProtectedError(composeError)) {
+          return serviceFailed(
+            composeError.code,
+            composeError.message,
+            { serviceName, mutationStage: 'compose', recoveryId },
+          );
+        }
         return serviceFailed(
           'service_update_compose_failed',
           getErrorMessage(composeError, 'Service update failed'),
@@ -351,6 +366,12 @@ export class StackUpdateOrchestrator {
         { recoveryId },
       );
     }
+    // Before the claim, the retag, or the gate: a refusal here leaves nothing behind.
+    const restoreRefusal = await ComposeService.getInstance(nodeId)
+      .evaluateDockerEndpoint(stackName, { kind: 'service', service: serviceName });
+    if (restoreRefusal) {
+      return serviceFailed(DOCKER_ENDPOINT_PROTECTED_CODE, restoreRefusal.message, { serviceName, recoveryId });
+    }
 
     AutoHealService.getInstance().suppress(nodeId, stackName, serviceName);
     let observing = false;
@@ -412,6 +433,13 @@ export class StackUpdateOrchestrator {
           stackName, serviceName, options.terminalWs ?? undefined,
         );
       } catch (composeError) {
+        if (isDockerEndpointProtectedError(composeError)) {
+          return serviceFailed(
+            composeError.code,
+            composeError.message,
+            { serviceName, mutationStage: 'compose', recoveryId },
+          );
+        }
         return serviceFailed(
           'restore_compose_failed',
           getErrorMessage(composeError, 'Service restore failed'),
@@ -527,7 +555,7 @@ export class StackUpdateOrchestrator {
     if (gate.ok || gate.bypassed) return null;
     return serviceFailed(
       'policy_blocked',
-      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action)}`,
+      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action, gate.evidence)}`,
       { serviceName, mutationStage: 'policy', recoveryId },
     );
   }

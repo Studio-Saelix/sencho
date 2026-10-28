@@ -24,7 +24,9 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
-import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
+import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
+import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
@@ -1341,8 +1343,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
         let updateAvailable = false;
         if (!isValidVersion(version)) {
-          // Assume remote nodes are outdated when their version is unresolvable.
-          updateAvailable = node.type === 'remote';
+          // Assume a reachable remote is outdated when it reports no parseable
+          // version. An unreachable one has no reading at all, so flagging an
+          // update for it would be a guess.
+          updateAvailable = node.type === 'remote' && remoteOnline;
         } else if (compareValid) {
           updateAvailable = semver.lt(version, compareVersion!);
         }
@@ -1420,6 +1424,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           type: node.type,
           version,
           latestVersion: latestValid ? latestVersion : gatewayVersion,
+          online: node.type === 'local' || remoteOnline,
           updateAvailable,
           updateStatus: currentTracker?.status ?? null,
           error: currentTracker?.error ?? null,
@@ -1444,17 +1449,26 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
+      // A remote whose poll failed is unreadable, so it reads as offline with
+      // no version. The local row is the process serving this request, so it
+      // stays online with the gateway version and its gateway-versus-target
+      // result, with an active skip honored. Tracker and pin state are not
+      // recomputed here and read empty.
+      const isLocal = nodes[i].type === 'local';
+      const skipRow = isLocal ? db.getNodeUpdateSkip(nodes[i].id) : null;
+      const skipActive = skipRow !== null && compareValid && skipRow.skippedVersion === compareVersion;
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
         type: nodes[i].type,
-        version: null,
+        version: isLocal ? gatewayVersion : null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
-        updateAvailable: false,
+        online: isLocal,
+        updateAvailable: isLocal && !skipActive && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
         updateStatus: null,
         error: null,
-        skipActive: false,
-        skippedVersion: null,
+        skipActive,
+        skippedVersion: skipActive ? skipRow.skippedVersion : null,
         ...EMPTY_PIN_STATUS,
         isDevImage: false,
         devBuildUpdateAvailable: false,
@@ -2858,6 +2872,8 @@ interface RemoteProxyContext {
 async function remoteStackError(action: string, res: Awaited<ReturnType<typeof fetch>>): Promise<Error> {
   let detail = '';
   let code: string | undefined;
+  let remoteError: string | undefined;
+  let remoteReason: string | undefined;
   try {
     const raw = (await res.text()).trim();
     detail = raw.slice(0, 300);
@@ -2865,12 +2881,18 @@ async function remoteStackError(action: string, res: Awaited<ReturnType<typeof f
     if (typeof parsed === 'object' && parsed !== null && 'code' in parsed && typeof parsed.code === 'string') {
       code = parsed.code;
     }
+    if (typeof parsed === 'object' && parsed !== null && 'error' in parsed && typeof parsed.error === 'string') {
+      remoteError = parsed.error;
+    }
+    if (typeof parsed === 'object' && parsed !== null && 'reason' in parsed && typeof parsed.reason === 'string') {
+      remoteReason = parsed.reason;
+    }
   } catch {
     // Body missing or not JSON; status (and any truncated text) still name the failure.
   }
   return Object.assign(
     new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`),
-    { code, httpStatus: res.status },
+    { code, httpStatus: res.status, remoteError, remoteReason },
   );
 }
 
@@ -2929,8 +2951,10 @@ async function applySnapshotStackFiles(
 
 // Redeploys a stack after its files are restored. The deploy policy gate stays
 // with the caller (local deploys gate centrally; remote deploys are gated by
-// the remote node), so this only performs the deploy itself.
-async function redeploySnapshotStack(node: Node, stackName: string): Promise<void> {
+// the remote node), so this only performs the deploy itself. A remote node's
+// gate decision rides back on its deploy response; it is returned so the hub's
+// own response can report it, as the local arm does from its central gate.
+async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
@@ -2944,7 +2968,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     if (!lock.ran) {
       throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
     }
-    return;
+    return {};
   }
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
@@ -2988,6 +3012,8 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (verification.source === 'hub_authority' && verification.status !== 'verified') {
     console.warn(`[FleetSnapshot] Redeploy completed; verification incomplete for "${stackName}" on node ${node.id}: ${verification.detail}`);
   }
+  const policyEvidence = parseRemotePolicyEvidence(payload);
+  return policyEvidence ? { policyEvidence } : {};
 }
 
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
@@ -3114,11 +3140,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
       if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
-      await redeploySnapshotStack(node, stackName);
+      const redeployResult = await redeploySnapshotStack(node, stackName);
+      if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
-    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError });
+    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError, ...policyEvidenceFor(res) });
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
@@ -3134,6 +3161,15 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     const refusal = registryDeliveryRefusal(error);
     if (refusal) {
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
+      return;
+    }
+    const endpointRefusal = dockerEndpointRefusalOf(error);
+    if (endpointRefusal) {
+      res.status(409).json({
+        error: `The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`,
+        code: DOCKER_ENDPOINT_PROTECTED_CODE,
+        reason: endpointRefusal.reason,
+      });
       return;
     }
     console.error('[Fleet Snapshot] Restore error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -3153,8 +3189,10 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
-  /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
+  /** Machine-readable refusal code (registry delivery or Docker endpoint guard), when the redeploy failed on one. */
   code?: string;
+  /** Set when the redeploy proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -3243,14 +3281,27 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
 
         let redeployed = false;
+        let policyEvidence: AllowedPolicyEvidence | undefined;
         if (redeploy) {
-          if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
-          await redeploySnapshotStack(node, group.stackName);
+          if (node.type === 'local') ({ policyEvidence } = await assertPolicyGateAllows(group.stackName, node.id, policyOptions));
+          try {
+            const remoteRedeploy = await redeploySnapshotStack(node, group.stackName);
+            policyEvidence ??= remoteRedeploy.policyEvidence;
+          } catch (redeployError) {
+            const endpointRefusal = dockerEndpointRefusalOf(redeployError);
+            if (endpointRefusal) {
+              throw Object.assign(
+                new Error(`The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`),
+                { code: DOCKER_ENDPOINT_PROTECTED_CODE, httpStatus: 409, cause: redeployError },
+              );
+            }
+            throw redeployError;
+          }
           redeployed = true;
         }
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError, ...(policyEvidence ? { policyEvidence } : {}) });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code ?? (dockerEndpointRefusalOf(e) ? DOCKER_ENDPOINT_PROTECTED_CODE : undefined) });
       }
     }
 
