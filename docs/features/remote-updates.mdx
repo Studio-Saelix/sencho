@@ -61,11 +61,12 @@ Reapply:
 - Uses the same Compose project context as a version update (multiple Compose files, `env_file`, configs, secrets, and bind mounts).
 - Preserves the image reference declared in Compose. Sencho does not resolve a newer release or rewrite the pin.
 - Works for digest-pinned installs, because no repin step runs.
+- Recreates the Sencho service with `docker compose up -d --no-deps --force-recreate`, so a service it lists in `depends_on` (a Docker socket proxy in the same project, for example) is not recreated with it. Include the Docker endpoint in the confirmation when you want that.
 - Requires the admin role.
 
 Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Confirming a remote reapply uses the same required acknowledgement (recreate from current Compose, no newer version, no image rewrite) before the request is sent; Fleet then shows a **Reapplying** badge until the node restarts or the operation fails.
 
-Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. Clicking **Deploy**, **Update**, **Stop**, **Take down**, **Delete**, or **Rollback** on Sencho's own stack opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
+Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. On Sencho's own stack the stack-level **Start**, **Stop**, **Take down**, **Update**, **Rollback**, and **Delete** controls are disabled, and **Stop service** on one of its services opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
 
 Update and Reapply recreate only the Sencho service (`docker compose up -d --no-deps --force-recreate`). Other services in Sencho's Compose project, including the ones it lists in `depends_on`, keep running as they are.
 

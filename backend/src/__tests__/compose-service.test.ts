@@ -595,6 +595,67 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect(seen).toEqual([{ state: 'id', id: 'sha256:abc' }, { state: 'unknown' }]);
   });
 
+  it('hands the guard the Compose version that would run the deploy, so a container from another version is not called unchanged', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('5.6.0\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'version', '--short'], expect.anything());
+    expect(version).toBe('5.6.0');
+  });
+
+  it('reports an unreadable Compose version as null rather than throwing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('docker: unknown command'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(version).toBeNull();
+  });
+
+  it('gives up on a hung Compose version probe instead of blocking the deploy', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      let version: string | null = 'unset';
+      mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+        const pending = input.probes.composeVersion();
+        await vi.advanceTimersByTimeAsync(5_000);
+        version = await pending;
+        return null;
+      });
+
+      await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+      expect(proc.kill).toHaveBeenCalled();
+      expect(version).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hands the guard the rendered Compose config, so a label set only in the file is seen', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);

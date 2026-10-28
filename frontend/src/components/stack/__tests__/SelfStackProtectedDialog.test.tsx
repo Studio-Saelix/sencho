@@ -27,6 +27,14 @@ describe('SelfStackProtectedDialog', () => {
     expect(props.onOpenFleetUpdates).not.toHaveBeenCalled();
   });
 
+  it('says Reapply recreates Sencho alone and leaves its depends_on services running', () => {
+    renderDialog({ onReapply: vi.fn().mockResolvedValue(undefined) });
+
+    const copy = screen.getByText(/Reapply recreates Sencho/).textContent ?? '';
+    expect(copy).toMatch(/without recreating the services it lists in\s+depends_on/);
+    expect(copy).toMatch(/Docker socket proxy/);
+  });
+
   it('stays open after confirming until the handler closes it, so a not-ready node can be retried', async () => {
     const onReapply = vi.fn().mockResolvedValue(undefined);
     const props = renderDialog({ onReapply });

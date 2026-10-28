@@ -239,6 +239,19 @@ describe('buildComposeReadArgs', () => {
   });
 });
 
+describe('buildSelfUpdateComposeCmd (dependencies)', () => {
+  // A Sencho-only recreate never touches the services it depends on: --no-deps
+  // keeps Compose from recreating a Docker socket proxy (changed or unchanged),
+  // which is what cut the connection when a different Compose version than the
+  // running container's created it. The endpoint replacement is the only path
+  // that recreates that service, deliberately and with its own confirmation.
+  it('recreates Sencho alone and never lets Compose touch its depends_on services', () => {
+    const cmd = buildSelfUpdateComposeCmd(['-f', '/opt/sencho/docker-compose.yml'], 'sencho', '/tmp/_sencho_err', '/app/data/.sencho-update-error', false);
+    expect(cmd).toContain("up -d --no-deps --force-recreate 'sencho'");
+    expect(cmd).not.toContain('--always-recreate-deps');
+  });
+});
+
 describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
   const fFlags = ['-f', '/opt/sencho/docker-compose.yml'];
   const stderrTmp = '/tmp/_sencho_err';

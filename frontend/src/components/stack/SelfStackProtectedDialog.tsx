@@ -42,9 +42,11 @@ export function SelfStackProtectedDialog({
           This stack is the running Sencho instance, so anything that would stop
           or recreate it (Deploy, Update, Stop, Take down, Delete, Rollback) is
           blocked on it. Reapply recreates Sencho from its current Compose
-          configuration. No newer version is selected and the configured image
-          reference is not rewritten. The dashboard briefly disconnects and
-          reconnects automatically when the restart completes.
+          configuration, without recreating the services it lists in
+          depends_on (a Docker socket proxy in the same project, for example).
+          No newer version is selected and the configured image reference is
+          not rewritten. The dashboard briefly disconnects and reconnects
+          automatically when the restart completes.
         </p>
       </ConfirmModal>
     );
