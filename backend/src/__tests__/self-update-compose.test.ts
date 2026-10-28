@@ -239,6 +239,22 @@ describe('buildComposeReadArgs', () => {
   });
 });
 
+describe('buildSelfUpdateComposeCmd (dependencies)', () => {
+  // Reapply recreates Sencho and leaves the dependency decision to Compose: the
+  // command passes neither --no-deps nor --always-recreate-deps. Compose 5.6
+  // recreates a changed depends_on service (a Docker socket proxy) and leaves an
+  // unchanged one running; 5.1.3 also recreates an unchanged one. The Reapply
+  // dialog, docs/features/remote-updates.mdx, and docs/operations/self-hosting.mdx
+  // therefore say Compose may recreate one. A flag that fixes the behavior at
+  // either extreme must update those pages and the dialog copy with it.
+  it('recreates Sencho and leaves its depends_on services to Compose', () => {
+    const cmd = buildSelfUpdateComposeCmd(['-f', '/opt/sencho/docker-compose.yml'], 'sencho', '/tmp/_sencho_err', '/app/data/.sencho-update-error', false);
+    expect(cmd).toContain("up -d --force-recreate 'sencho'");
+    expect(cmd).not.toContain('--no-deps');
+    expect(cmd).not.toContain('--always-recreate-deps');
+  });
+});
+
 describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
   const fFlags = ['-f', '/opt/sencho/docker-compose.yml'];
   const stderrTmp = '/tmp/_sencho_err';

@@ -321,8 +321,11 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  // Restore routes check the Docker endpoint guard, which renders the stack's Compose config; these tests are not about it.
+  const { ComposeService } = await import('../services/ComposeService');
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
   GitOpsStore.resetForTests();
   setRegistryReadinessDepsForTests(registryReadyTestDeps());

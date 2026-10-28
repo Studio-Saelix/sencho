@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import * as toastStore from '@/components/ui/toast-store';
 
 beforeEach(() => {
   onConfirmMock.mockReset();
@@ -37,7 +38,10 @@ vi.mock('@/components/stack/PolicyBlockDialog', () => ({
     return null;
   },
 }));
-vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({ SelfStackProtectedDialog: () => null }));
+vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({
+  SelfStackProtectedDialog: (props: { onReapply?: () => Promise<void> }) =>
+    props.onReapply ? <button type="button" onClick={() => props.onReapply?.()}>self-reapply</button> : <span>self-info-only</span>,
+}));
 vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
 vi.mock('../FleetView/ReconnectingOverlay', () => ({ ReconnectingOverlay: () => null }));
 vi.mock('./DeleteStackDialog', () => ({ DeleteStackDialog: () => null }));
@@ -80,12 +84,17 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-function renderShell(
+function shellElement(
   overlay: OverlayState,
   stackActions: Partial<StackActionsHook>,
-  over: { hydrationReady?: () => boolean; onOpenPolicySettings?: (nodeId: number | null) => boolean } = {},
+  over: {
+    hydrationReady?: () => boolean;
+    reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null;
+    composeReapply?: { dispatching: boolean; reconnecting?: boolean; runReapply: () => void };
+    onOpenPolicySettings?: (nodeId: number | null) => boolean;
+  } = {},
 ) {
-  return render(
+  return (
     <ShellOverlays
       overlayState={overlay}
       stackActions={stackActions as unknown as StackActionsHook}
@@ -100,15 +109,20 @@ function renderShell(
       gitSourceOpen={false}
       setGitSourceOpen={() => {}}
       canSelfUpdate={false}
-      composeReapply={{} as never}
+      reapplySelfTarget={(over.reapplySelfTarget ?? null) as never}
+      composeReapply={(over.composeReapply ?? {}) as never}
       canSaveAndReapply={false}
       canOfferVolumeRemoval={false}
       deleteVolumePreservation="unknown"
       onOpenFleetNodeUpdates={() => {}}
       onOpenPolicySettings={over.onOpenPolicySettings ?? (() => true)}
       hydrationReady={over.hydrationReady ?? (() => false)}
-    />,
+    />
   );
+}
+
+function renderShell(...args: Parameters<typeof shellElement>) {
+  return render(shellElement(...args));
 }
 
 describe('ShellOverlays diff-preview confirmation', () => {
@@ -202,6 +216,68 @@ describe('ShellOverlays diff-preview confirmation', () => {
     // afterSave travels with the call: this path saved first too, so a pull that
     // skips has to report itself rather than hide behind the save's own toast.
     expect(pullStackImages).toHaveBeenCalledWith(undefined, { afterSave: true });
+  });
+});
+
+describe('ShellOverlays self-stack Reapply confirmation', () => {
+  const target = { nodeId: 1, type: 'local' as const, name: 'Local' };
+
+  it('offers no Reapply to a caller without a reapply target', () => {
+    renderShell(makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: vi.fn() }), {});
+    expect(screen.getByText('self-info-only')).toBeInTheDocument();
+  });
+
+  it('keeps the dialog open, says why, and sends nothing while the node is not ready', async () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    const toastError = vi.spyOn(toastStore.toast, 'error').mockImplementation(() => '' as never);
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => false },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    await vi.waitFor(() => expect(toastError).toHaveBeenCalledWith('Status data unavailable. Refresh and try again.'));
+    expect(setOpen).not.toHaveBeenCalled();
+    expect(runReapply).not.toHaveBeenCalled();
+  });
+
+  it('closes the dialog and reapplies once the node is ready', () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(runReapply).toHaveBeenCalledWith(target);
+  });
+
+  it('closes the dialog when the active node changes, so Reapply never targets a different Sencho', () => {
+    const setOpen = vi.fn();
+    const overlay = makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen });
+    const composeReapply = { dispatching: false, runReapply: vi.fn() };
+    const { rerender } = renderShell(overlay, {}, { reapplySelfTarget: target, composeReapply, hydrationReady: () => true });
+    expect(setOpen).not.toHaveBeenCalled();
+
+    rerender(shellElement(overlay, {}, { reapplySelfTarget: { ...target, nodeId: 2, name: 'Remote' }, composeReapply, hydrationReady: () => true }));
+
+    expect(setOpen).toHaveBeenCalledWith(false);
+  });
+
+  it('closes the dialog without starting a second reapply while one is in flight', () => {
+    const runReapply = vi.fn();
+    const setOpen = vi.fn();
+    renderShell(
+      makeOverlay({ selfStackProtectedOpen: true, setSelfStackProtectedOpen: setOpen }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: true, runReapply }, hydrationReady: () => true },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
+    expect(setOpen).toHaveBeenCalledWith(false);
+    expect(runReapply).not.toHaveBeenCalled();
   });
 });
 

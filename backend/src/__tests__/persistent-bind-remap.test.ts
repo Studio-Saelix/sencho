@@ -4,7 +4,7 @@
  * with it. A decrypted secret file that is itself mounted stays on the overlay.
  * A mount that covers both is refused before Compose is asked to start anything.
  */
-import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, expect, it, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -397,6 +397,11 @@ async function renderComposeArgs(cwd: string, args: string[]): Promise<string> {
 }
 
 describe('decrypt overlay keeps ordinary data binds on the live stack', () => {
+  // The Docker endpoint guard renders the stack once more on its own, which these tests count.
+  beforeEach(() => {
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+  });
+
   it('selects the live data path and keeps writes across overlay cleanup and a later operation', async () => {
     const stackName = 'bind-live';
     const { stackDir, dataDir, recipient } = await writeLiveStack(stackName, COMPOSE, 'data');

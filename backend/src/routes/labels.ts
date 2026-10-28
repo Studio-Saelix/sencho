@@ -242,7 +242,12 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             }
             allowedEvidence = allowedPolicyEvidence(gate);
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true, ...allowedEvidence });
+              // A dry run answers what the real run would, and the real run is
+              // refused when it would recreate the container carrying the Docker connection.
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: 'up' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true, ...allowedEvidence });
               continue;
             }
             // Per-stack lock so a bulk deploy cannot race a manual
@@ -261,10 +266,13 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               continue;
             }
           } else {
-            // stop / restart have no pre-action policy gate; dry-run just
-            // confirms the stack would be reached.
+            // stop / restart have no pre-action policy gate; dry-run confirms
+            // the stack would be reached and that the Docker endpoint guard allows it.
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true });
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: action === 'stop' ? 'stop' : 'restart' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true });
               continue;
             }
             const lock = await StackOpLockService.getInstance().runExclusive(
@@ -279,16 +287,20 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 // failed update. Only when there is something to act on, so a
                 // stack with no containers does not cost a live gate.
                 if (containers.length > 0) {
+                  // Before anything is touched: a batch that holds the Docker
+                  // endpoint container is refused whole, not half-stopped.
+                  await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
                   HealthGateService.getInstance().supersedeForContainerOp(
                     req.nodeId,
                     stackName,
                     `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
                   );
                 }
+                // The batch was just checked as a whole, so each container skips its own check.
                 if (action === 'stop') {
-                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 } else {
-                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 }
               },
             );

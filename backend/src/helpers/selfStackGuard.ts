@@ -3,6 +3,7 @@ import path from 'path';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import SelfIdentityService from '../services/SelfIdentityService';
+import { getErrorMessage } from '../utils/errors';
 
 export const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
 
@@ -21,19 +22,29 @@ function isHexId(value: string): boolean {
   return /^[a-f0-9]{12,64}$/i.test(value);
 }
 
-function matchesContainerId(fullId: string, candidate: string): boolean {
+export function matchesContainerId(fullId: string, candidate: string): boolean {
   if (!fullId || !candidate) return false;
   if (fullId === candidate) return true;
   if (!isHexId(fullId) || !isHexId(candidate)) return false;
   return fullId.startsWith(candidate) || candidate.startsWith(fullId);
 }
 
-async function getRuntimeContainerIdCandidates(): Promise<string[]> {
+export async function getRuntimeContainerIdCandidates(): Promise<string[]> {
   const candidates = new Set<string>();
   const hostname = process.env.HOSTNAME?.trim();
   if (hostname && isHexId(hostname)) candidates.add(hostname);
-  const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
-  if (cgroupId) candidates.add(cgroupId);
+  try {
+    const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    if (cgroupId) candidates.add(cgroupId);
+  } catch (error) {
+    console.warn('[SelfStackGuard] Could not read /proc/self/cgroup:', getErrorMessage(error, 'read failed'));
+  }
+  try {
+    const mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+    if (mountId) candidates.add(mountId);
+  } catch (error) {
+    console.warn('[SelfStackGuard] Could not read /proc/self/mountinfo:', getErrorMessage(error, 'read failed'));
+  }
   return [...candidates];
 }
 
@@ -45,7 +56,7 @@ function stackNameFromWorkingDir(workingDir: string | undefined, composeDir = pr
   return underComposeDir ? path.basename(resolvedWorkingDir) : null;
 }
 
-function workingDirMatchesStack(workingDir: string | undefined, stackName: string, composeDir?: string): boolean {
+export function workingDirMatchesStack(workingDir: string | undefined, stackName: string, composeDir?: string): boolean {
   return stackNameFromWorkingDir(workingDir, composeDir) === stackName;
 }
 

@@ -82,6 +82,8 @@ beforeAll(async () => {
 
   const { ComposeService } = await import('../services/ComposeService');
   vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:1.27']);
+  // The route's Docker endpoint check renders the stack's Compose config; this test is about the policy gate that follows it.
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
 
   const TrivyService = (await import('../services/TrivyService')).default;

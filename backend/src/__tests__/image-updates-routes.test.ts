@@ -43,6 +43,9 @@ beforeAll(async () => {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
 
   ({ app } = await import('../index'));
+  // The update path's Docker endpoint check renders the stack's Compose config; these tests are not about it.
+  const { ComposeService } = await import('../services/ComposeService');
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   adminCookie = await loginAsTestAdmin(app);
 
   const viewerHash = await bcrypt.hash('viewerpass', 1);

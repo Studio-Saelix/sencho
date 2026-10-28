@@ -541,3 +541,41 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         expect(beginSpy).toHaveBeenCalledWith(nodeId, stack, 'update', 'system:webhook', { deployedGenerationId: null });
     });
 });
+
+describe('WebhookService.execute: Docker endpoint guard refusals', () => {
+    // A webhook that would recreate the container carrying Sencho's Docker
+    // connection is recorded as a failure with the reason, never as a success
+    // and never with a begun health gate.
+    it.each([
+        ['deploy', 'deployStack'],
+        ['restart', 'runCommand'],
+        ['stop', 'runCommand'],
+        ['pull', 'updateStack'],
+    ] as const)('records a %s refused by the guard as a failure carrying the reason', async (action, method) => {
+        const stack = `hook-refused-${action}`;
+        const { id } = createWebhook({ action, stack });
+        const webhook = DatabaseService.getInstance().getWebhook(id)!;
+
+        const fs = await import('../services/FileSystemService');
+        const compose = await import('../services/ComposeService');
+        const policyGate = await import('../helpers/policyGate');
+        const { HealthGateService } = await import('../services/HealthGateService');
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue({});
+        vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
+        vi.spyOn(compose.ComposeService.prototype, method).mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'provider',
+            service: 'socket-proxy',
+            message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        }));
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack');
+
+        const result = await WebhookService.getInstance().execute(webhook, action, 'test', true);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('carries the Docker connection');
+        expect(DatabaseService.getInstance().getWebhookExecutions(id)[0]).toMatchObject({ status: 'failure' });
+        expect(DatabaseService.getInstance().getWebhookExecutions(id)[0].error).toContain('carries the Docker connection');
+        expect(beginSpy).not.toHaveBeenCalled();
+    });
+});

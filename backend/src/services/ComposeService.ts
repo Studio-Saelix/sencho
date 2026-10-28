@@ -66,6 +66,13 @@ import {
 } from '../helpers/decryptedComposeOutput';
 import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import {
+  DockerEndpointProtectedError,
+  evaluateDockerEndpointGuard,
+  type DockerEndpointRefusal,
+  type EndpointMutation,
+  type LocalImageLookup,
+} from '../helpers/dockerEndpointGuard';
 import type { NotificationCategory } from './NotificationService';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
@@ -115,8 +122,12 @@ export class ComposeRollbackError extends Error {
    */
   public gitopsDeployOperationId?: string;
 
-  constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean) {
-    super(getErrorMessage(originalError, 'Compose operation failed'));
+  /** `rollbackRefusal` is why the Docker endpoint guard refused the rollback; it is part of the message. */
+  constructor(originalError: unknown, rollbackAttempted: boolean, rolledBack: boolean, rollbackRefusal?: string) {
+    super(
+      getErrorMessage(originalError, 'Compose operation failed')
+      + (rollbackRefusal ? ` The rollback did not run: ${rollbackRefusal}` : ''),
+    );
     this.name = 'ComposeRollbackError';
     this.rollbackAttempted = rollbackAttempted;
     this.rolledBack = rolledBack;
@@ -137,10 +148,20 @@ function isNonFatalCompensationError(error: unknown): boolean {
   return code === 'HELD_IMAGE_MISSING' || code === 'RECOVERY_PROBE_FAILED';
 }
 
-async function compensateOrSwallow(compensate: () => Promise<boolean>): Promise<boolean> {
+async function compensateOrSwallow(
+  compensate: () => Promise<boolean>,
+  onRefused?: (message: string) => void,
+): Promise<boolean> {
   try {
     return await compensate();
   } catch (compError) {
+    // The Docker endpoint guard refused the recovery up before it ran: the
+    // failed operation's own error is what the caller must see, with the reason
+    // the rollback did not happen.
+    if (compError instanceof DockerEndpointProtectedError) {
+      onRefused?.(compError.message);
+      return false;
+    }
     if (!isNonFatalCompensationError(compError)) throw compError;
     return false;
   }
@@ -167,6 +188,16 @@ const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
 const EMPTY_ENV_FILE = '/dev/null';
+
+/** `docker compose version --short` is a local command and must answer quickly; a hung one must not stall a deploy's guard. */
+const COMPOSE_VERSION_TIMEOUT_MS = 5_000;
+
+/** The error line of `docker compose config` stderr: Compose prints warnings (`level=warning`, `WARN`) before the failure. */
+function renderErrorLine(stderr: string): string {
+  const lines = stderr.split('\n').map(line => line.trim()).filter(Boolean);
+  const isWarning = (line: string) => /level=warning|^warn/i.test(line);
+  return (lines.find(line => !isWarning(line)) ?? lines[0] ?? '').slice(0, 300);
+}
 
 function getComposeStallTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS);
@@ -264,6 +295,110 @@ export class ComposeService {
   /** Public wrapper for dual-arg assembly and recovery Compose invocations. */
   public async buildAuthoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
     return this.authoredComposeArgs(stackName, action);
+  }
+
+  /**
+   * The refusal for `mutation` when it would stop or recreate the container that
+   * carries this node's Docker API (Sencho itself or its socket proxy), else
+   * null. Routes call this for a clean 409 before they take a lock; deploy,
+   * update, stop/restart/down, and the service-scoped operations call it again
+   * through `assertDockerEndpointSafe`. This includes
+   * `composeUpWithRecoveryOverride`: a recovery up pins every service to its
+   * rollback tag, which changes the config hash and recreates the protected
+   * service even when the operation it compensates did not. Only `start` is not
+   * guarded (it stops nothing).
+   */
+  public evaluateDockerEndpoint(
+    stackName: string,
+    mutation: EndpointMutation,
+    stackDirOverride?: string,
+  ): Promise<DockerEndpointRefusal | null> {
+    return evaluateDockerEndpointGuard({
+      nodeId: this.nodeId,
+      stackName,
+      mutation,
+      probes: {
+        renderConfig: async () => {
+          const result = await this.renderConfig(stackName, stackDirOverride ? { stackDirOverride } : undefined);
+          if (result.rendered) return result.rendered;
+          // The guard refuses what it cannot see, so say why the render failed. The
+          // diagnostics are withheld for an overlay render (they quote secrets).
+          const why = result.timedOut ? 'docker compose config timed out'
+            : result.withheld ? 'docker compose config failed; its diagnostics are withheld'
+              : renderErrorLine(result.stderr) || `docker compose config exited with code ${result.code ?? 'unknown'}`;
+          throw new Error(why);
+        },
+        configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
+        localImage: (imageRef) => this.localImageLookup(imageRef),
+        composeVersion: () => this.composeVersion(),
+      },
+    });
+  }
+
+  private async assertDockerEndpointSafe(
+    stackName: string,
+    mutation: EndpointMutation,
+    stackDirOverride?: string,
+  ): Promise<void> {
+    let refusal: DockerEndpointRefusal | null;
+    try {
+      refusal = await this.evaluateDockerEndpoint(stackName, mutation, stackDirOverride);
+    } catch (error) {
+      // A guard that cannot run is not a pass. Raised as a refusal so callers
+      // that tolerate other teardown failures (delete, template rollback) keep
+      // the stack's files and records.
+      console.error('[ComposeService] Docker endpoint check failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      throw new DockerEndpointProtectedError({
+        reason: 'unresolved',
+        service: null,
+        message: `Sencho could not verify that this operation keeps its Docker connection safe (${getErrorMessage(error, 'check failed')}), so it was not run.`,
+      });
+    }
+    if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */
+  private async localImageLookup(imageRef: string): Promise<LocalImageLookup> {
+    try {
+      const info = await DockerController.getInstance(this.nodeId).getDocker().getImage(imageRef).inspect();
+      return info.Id ? { state: 'id', id: info.Id } : { state: 'unknown' };
+    } catch (error) {
+      console.warn('[ComposeService] image %s not inspectable for the Docker endpoint guard:', sanitizeForLog(imageRef), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return { state: 'unknown' };
+    }
+  }
+
+  /** The hash Compose would assign `service` now; null when it cannot be computed. */
+  private async composeConfigHash(stackName: string, service: string, stackDirOverride?: string): Promise<string | null> {
+    try {
+      const args = await this.authoredComposeArgs(stackName, ['config', `--hash=${service}`], stackDirOverride);
+      const cwd = stackDirOverride ?? path.join(this.baseDir, stackName);
+      const stdout = await this.captureCompose(args.slice(1), cwd);
+      for (const line of stdout.split('\n')) {
+        const [name, hash] = line.trim().split(/\s+/);
+        if (name === service && hash) return hash;
+      }
+      return null;
+    } catch (error) {
+      console.warn('[ComposeService] config hash for %s/%s unavailable:', sanitizeForLog(stackName), sanitizeForLog(service), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
+  }
+
+  /**
+   * The `docker compose` version that runs deploys on this node, which the
+   * endpoint guard compares with the version label of a container it would
+   * otherwise call unchanged; null when it cannot be read. The same binary is
+   * spawned as for a deploy, so a bundle, wrapper, or PATH difference is seen.
+   */
+  private async composeVersion(): Promise<string | null> {
+    try {
+      const stdout = await this.captureCompose(['version', '--short'], this.baseDir, COMPOSE_VERSION_TIMEOUT_MS);
+      return stdout.trim() || null;
+    } catch (error) {
+      console.warn('[ComposeService] compose version unavailable for the Docker endpoint guard:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
   }
 
   public async validateStackForMutation(stackName: string): Promise<void> {
@@ -859,6 +994,9 @@ export class ComposeService {
   }
 
   async runCommand(stackName: string, action: 'down' | 'start' | 'stop' | 'restart', ws?: WebSocket): Promise<void> {
+    if (action !== 'start') {
+      await this.assertDockerEndpointSafe(stackName, { kind: action === 'restart' ? 'restart' : 'stop' });
+    }
     const stackDir = path.join(this.baseDir, stackName);
     // Resolve the arguments first: a stack whose compose cannot be resolved is
     // refused before anything is touched, and must not cost a live gate.
@@ -878,6 +1016,7 @@ export class ComposeService {
 
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     const composeArgs = await this.authoredComposeArgs(stackName, args);
@@ -1425,8 +1564,15 @@ export class ComposeService {
       }
     }
     await this.assertSopsOverlayOrRefuse(stackName, ctx?.overlayDir);
-    const stackDir = this.resolveStackDir(stackName, ctx);
+    // Before the guard: a render that fails on a missing required variable
+    // should say so, not that the guard could not read the model.
     await this.assertRequiredEnvPresent(stackName, ctx?.overlayDir);
+    await this.assertDockerEndpointSafe(
+      stackName,
+      { kind: 'up', pinnedServices: Object.keys(ctx?.digestPins ?? {}) },
+      ctx?.overlayDir,
+    );
+    const stackDir = this.resolveStackDir(stackName, ctx);
     // The overlay is the project this deploy will actually run, so the guard
     // reads it rather than the live stack.
     await this.assertSafePilotBindMapping(stackName, ctx?.overlayDir);
@@ -1574,6 +1720,7 @@ export class ComposeService {
       if (atomic && recoverySvc && handedOff && recoveryId) {
         sendOutput('\n=== Deployment failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
+        let rollbackRefusal: string | undefined;
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
@@ -1585,8 +1732,12 @@ export class ComposeService {
               overlay,
             ),
           ),
+          (message) => {
+            rollbackRefusal = message;
+            sendOutput(`\n=== Rollback refused: ${message} ===\n`);
+          },
         );
-        const wrapped = new ComposeRollbackError(deployError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(deployError, true, rolledBack, rollbackRefusal);
         if (gitopsDeploy) {
           wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
         }
@@ -1846,6 +1997,9 @@ export class ComposeService {
         () => this.composeUpWithRecoveryOverride(stackName, overridePath, ws, invocation, overlay),
       );
     }
+    // A recovery up pins every service to its rollback tag, so it recreates a
+    // protected service whether or not the operation it compensates did.
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' }, overlay?.overlayDir);
     if (overlay?.overlayDir && overlay.overlayBinding) {
       GitOpsDecryptOverlay.getInstance().assertBinding(overlay.overlayDir, overlay.overlayBinding);
     }
@@ -2425,6 +2579,7 @@ export class ComposeService {
   ): Promise<{ recoveryId: string | null; deployedGenerationId: string | null; gitopsOperationId: string | null }> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'update' });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
@@ -2520,8 +2675,10 @@ export class ComposeService {
         const results = await dockerController.removeContainers(classified.ids);
         const failed = results.filter((r) => !r.success);
         if (failed.length > 0) {
+          const refused = failed.find((r) => r.refused);
           throw new Error(
-            `Failed to remove ${failed.length} legacy orphan container(s) after handoff`,
+            `Failed to remove ${failed.length} legacy orphan container(s) after handoff`
+            + (refused?.error ? `: ${refused.error}` : ''),
           );
         }
       }
@@ -2615,6 +2772,7 @@ export class ComposeService {
       if (handedOff && recoveryId) {
         sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
         const generationId = recoveryId;
+        let rollbackRefusal: string | undefined;
         const rolledBack = await compensateOrSwallow(() =>
           recoverySvc.compensateWithCandidate(
             generationId,
@@ -2626,8 +2784,12 @@ export class ComposeService {
               overlay,
             ),
           ),
+          (message) => {
+            rollbackRefusal = message;
+            sendOutput(`\n=== Rollback refused: ${message} ===\n`);
+          },
         );
-        const wrapped = new ComposeRollbackError(updateError, true, rolledBack);
+        const wrapped = new ComposeRollbackError(updateError, true, rolledBack, rollbackRefusal);
         if (gitopsDeploy) {
           wrapped.gitopsDeployOperationId = gitopsDeploy.gitopsOperationId;
         }
@@ -2729,6 +2891,7 @@ export class ComposeService {
   async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -2757,6 +2920,7 @@ export class ComposeService {
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
     await this.assertSopsOverlayOrRefuse(stackName);
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertDockerEndpointSafe(stackName, { kind: 'service', service: serviceName });
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
@@ -2769,6 +2933,8 @@ export class ComposeService {
   }
 
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
+    // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
+    await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes
@@ -2857,7 +3023,7 @@ export class ComposeService {
     );
   }
 
-  private captureCompose(args: string[], cwd: string): Promise<string> {
+  private captureCompose(args: string[], cwd: string, timeoutMs?: number): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn('docker', ['compose', ...args], {
         cwd,
@@ -2868,6 +3034,25 @@ export class ComposeService {
       });
       let stdout = '';
       let stderr = '';
+      let timer: NodeJS.Timeout | null = null;
+      let settled = false;
+      const finish = (error: Error | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(stdout);
+      };
+      if (timeoutMs) {
+        timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // best effort
+          }
+          finish(new Error(`docker compose ${args.join(' ')} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }
       child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
       child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
       child.on('error', (err: NodeJS.ErrnoException) => {
@@ -2875,11 +3060,11 @@ export class ComposeService {
         if (mapped.isLowMemory) {
           console.warn('[ComposeService] captureCompose spawn failed under memory pressure:', mapped.message);
         }
-        reject(new Error(mapped.message));
+        finish(new Error(mapped.message));
       });
       child.on('close', (code) => {
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));
+        if (code === 0) finish(null);
+        else finish(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));
       });
     });
   }

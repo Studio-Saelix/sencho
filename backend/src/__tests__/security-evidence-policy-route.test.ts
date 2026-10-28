@@ -302,6 +302,8 @@ describe('evidence policy on the deploy gate, end to end', () => {
   it('keeps a missing scanner allowing the deploy until an operator says otherwise', async () => {
     const { ComposeService } = await import('../services/ComposeService');
     const listImages = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
+    // The route's Docker endpoint check renders the stack's Compose config; this test is about the policy gate that follows it.
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
     const deploy = vi
       .spyOn(ComposeService.prototype, 'deployStack')
       .mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });

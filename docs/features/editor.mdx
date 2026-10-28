@@ -28,7 +28,7 @@ The top card on the left holds the stack's identity and primary controls.
 The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 <Note>
-  If a stack is the Sencho instance you are currently signed into, stop, take down, delete, update, and rollback stay protected: clicking them opens a **Sencho instance protected** dialog. Eligible admins can apply on-disk Compose changes with **Save &amp; Reapply** in this editor (same recreate procedure as Fleet Node Updates), or open **Fleet → Node Updates**. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
+  If a stack is the Sencho instance you are currently signed into, deploy, update, stop, take down, delete, and rollback stay protected: the stack-level **Start**, **Stop**, **Take down**, **Update**, **Rollback**, and **Delete** controls are disabled, and the API refuses the same actions. Choosing **Stop service** on one of its services opens a dialog instead of acting. For eligible admins it is the **Reapply Sencho** confirmation: **Reapply &amp; restart** recreates Sencho from its current Compose configuration (the same procedure as **Save &amp; Reapply** in this editor and Fleet Node Updates), and Compose may recreate a service it lists in `depends_on` (a Docker socket proxy, for example) with it. Other users get a **Sencho instance protected** dialog that links to **Fleet → Node Updates** where it applies. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
 </Note>
 
 | Button | Behavior |
@@ -267,8 +267,8 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
   </Accordion>
-  <Accordion title='"Sencho instance protected" dialog when I try to stop, update, or delete a stack'>
-    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
+  <Accordion title='"Sencho instance protected" dialog, or disabled Stop, Update, and Delete buttons'>
+    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked: their buttons are disabled, and **Stop service** on one of its services opens the dialog. **Restart** stays available. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

@@ -5,9 +5,11 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 
 let mockFsStacks: string[] = [];
 const deployStack = vi.fn();
+const evaluateDockerEndpoint = vi.fn();
 const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
 const restartContainer = vi.fn();
+const assertNoDockerEndpointContainers = vi.fn();
 const enforcePolicyPreDeploy = vi.fn();
 const invalidateNodeCaches = vi.fn();
 
@@ -21,7 +23,7 @@ vi.mock('../services/FileSystemService', () => ({
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
-    getInstance: vi.fn(() => ({ deployStack })),
+    getInstance: vi.fn(() => ({ deployStack, evaluateDockerEndpoint })),
   },
 }));
 
@@ -31,6 +33,7 @@ vi.mock('../services/DockerController', () => ({
       getContainersByStack,
       stopContainer,
       restartContainer,
+      assertNoDockerEndpointContainers,
     })),
   },
 }));
@@ -74,9 +77,11 @@ beforeEach(() => {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
   mockFsStacks = ['alpha', 'beta'];
   deployStack.mockResolvedValue(undefined);
+  evaluateDockerEndpoint.mockResolvedValue(null);
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
+  assertNoDockerEndpointContainers.mockResolvedValue(undefined);
   enforcePolicyPreDeploy.mockResolvedValue({ ok: true });
   activeBulkActions.clear();
   StackOpLockService.resetForTests();
@@ -138,8 +143,101 @@ describe('Stack Labels bulk actions', () => {
       { stackName: 'alpha', success: true },
       { stackName: 'beta', success: false, error: 'socket permission denied' },
     ]);
-    expect(stopContainer).toHaveBeenCalledWith('alpha-1');
+    expect(stopContainer).toHaveBeenCalledWith('alpha-1', { endpointGuard: 'batch-checked' });
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
+  });
+
+  it('refuses a stack whose containers include the Docker endpoint container before stopping any of them', async () => {
+    const label = await createAssignedLabel(['alpha', 'beta']);
+    getContainersByStack.mockImplementation(async (stackName: string) => [{ Id: `${stackName}-1` }, { Id: `${stackName}-proxy` }]);
+    assertNoDockerEndpointContainers.mockImplementation(async (ids: string[]) => {
+      if (ids.includes('alpha-proxy')) throw new Error('Service "socket-proxy" carries the Docker connection Sencho is using.');
+    });
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'stop' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: false, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+      { stackName: 'beta', success: true },
+    ]);
+    expect(assertNoDockerEndpointContainers).toHaveBeenCalledWith(['alpha-1', 'alpha-proxy'], 'stop');
+    expect(stopContainer).not.toHaveBeenCalledWith('alpha-1', expect.anything());
+    expect(stopContainer).toHaveBeenCalledWith('beta-1', { endpointGuard: 'batch-checked' });
+  });
+
+  it('refuses a restart whose stack includes the Docker endpoint container before restarting any of them', async () => {
+    const label = await createAssignedLabel(['alpha']);
+    getContainersByStack.mockResolvedValue([{ Id: 'alpha-1' }, { Id: 'alpha-proxy' }]);
+    assertNoDockerEndpointContainers.mockRejectedValue(new Error('Service "socket-proxy" carries the Docker connection Sencho is using.'));
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'restart' });
+
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: false, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+    ]);
+    expect(assertNoDockerEndpointContainers).toHaveBeenCalledWith(['alpha-1', 'alpha-proxy'], 'restart');
+    expect(restartContainer).not.toHaveBeenCalled();
+  });
+
+  it('reports a deploy the Docker endpoint guard refuses as a failed row carrying the reason', async () => {
+    const label = await createAssignedLabel(['alpha']);
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    deployStack.mockRejectedValue(new DockerEndpointProtectedError({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    }));
+
+    const res = await request(app)
+      .post(`/api/labels/${label.id}/action`)
+      .set('Authorization', authHeader)
+      .send({ action: 'deploy' });
+
+    expect(res.body.results).toEqual([
+      { stackName: 'alpha', success: false, error: 'Service "socket-proxy" carries the Docker connection Sencho is using.' },
+    ]);
+  });
+
+  describe('dry run', () => {
+    const refusal = { reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection Sencho is using.' };
+
+    it.each([
+      ['stop', { kind: 'stop' }],
+      ['restart', { kind: 'restart' }],
+      ['deploy', { kind: 'up' }],
+    ] as const)('answers a %s the guard would refuse as a failure, without running it', async (action, mutation) => {
+      const label = await createAssignedLabel(['alpha']);
+      evaluateDockerEndpoint.mockResolvedValue(refusal);
+
+      const res = await request(app)
+        .post(`/api/labels/${label.id}/action`)
+        .set('Authorization', authHeader)
+        .send({ action, dryRun: true });
+
+      expect(res.body.results).toEqual([{ stackName: 'alpha', success: false, error: refusal.message, dryRun: true }]);
+      expect(evaluateDockerEndpoint).toHaveBeenCalledWith('alpha', mutation);
+      expect(deployStack).not.toHaveBeenCalled();
+      expect(stopContainer).not.toHaveBeenCalled();
+      expect(restartContainer).not.toHaveBeenCalled();
+    });
+
+    it('still answers success when the guard allows it', async () => {
+      const label = await createAssignedLabel(['alpha']);
+
+      const res = await request(app)
+        .post(`/api/labels/${label.id}/action`)
+        .set('Authorization', authHeader)
+        .send({ action: 'stop', dryRun: true });
+
+      expect(res.body.results).toEqual([{ stackName: 'alpha', success: true, dryRun: true }]);
+    });
   });
 
   it('rejects a second bulk action while the node lock is held', async () => {

@@ -76,6 +76,14 @@ describe('checked automatic update route', () => {
     expect(response.body).toMatchObject({ applied: true, result: 'applied', healthGateId: 'health' });
     expect(response.body).not.toHaveProperty('recheckWarning');
   });
+  it('carries the Docker endpoint guard refusal back to the caller', async () => {
+    mocks.apply.mockResolvedValue({
+      applied: false, result: 'rejected', healthGateId: null, message: 'Stack "web": refused', endpointRefusal: 'Service "socket-proxy" carries the Docker connection.',
+    });
+    const response = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ applied: false, result: 'rejected', endpointRefusal: 'Service "socket-proxy" carries the Docker connection.' });
+  });
   it('reports the evidence the update was allowed on, and nothing on a clean pass', async () => {
     const clean = await request(app).post('/api/auto-update/execute-checked').set('x-test-machine', 'yes').send(body);
     expect(clean.body).not.toHaveProperty('policyEvidence');

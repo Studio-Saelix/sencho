@@ -37,11 +37,38 @@ export interface BuildInfo {
   revision: string | null;
 }
 
+/**
+ * Whether Sencho knows which container it is.
+ *   - `resolved`: the container was identified.
+ *   - `none`: no probe found Sencho's container and Docker did not fail (dev mode,
+ *     or a container whose id none of HOSTNAME, the cgroup, or the mount entries shows).
+ *   - `unresolved`: Docker did not answer the probes, so nothing is known.
+ * `resolved` and `none` are cached for the life of the process; `unresolved` is
+ * retried, because a lifecycle guard that treats "could not tell" as "not
+ * Sencho" fails open exactly when Docker is misbehaving.
+ */
+export type SelfIdentityState = 'resolved' | 'none' | 'unresolved';
+
+/** Minimum gap between background retries of an unresolved identity. Guards bypass it. */
+const UNRESOLVED_RETRY_MS = 5_000;
+
+type SelfInspect = Awaited<ReturnType<ReturnType<ReturnType<typeof DockerController.prototype.getDocker>['getContainer']>['inspect']>>;
+
+type SelfProbeResult =
+  | { state: 'resolved'; info: SelfInspect }
+  | { state: 'none' }
+  | { state: 'unresolved'; reason: string };
+
 class SelfIdentityService {
   private static instance: SelfIdentityService;
   private containerId: string | null = null;
   private containerName: string | null = null;
   private composeProjectName: string | null = null;
+  private composeServiceName: string | null = null;
+  private composeWorkingDir: string | null = null;
+  private state: SelfIdentityState = 'none';
+  private unresolvedReason: string | null = null;
+  private lastAttemptAt = 0;
   private imageIdHex: string | null = null;
   private imageRef: string | null = null;
   private revision: string | null = null;
@@ -62,21 +89,71 @@ class SelfIdentityService {
   async initialize(): Promise<void> {
     if (this.initializePromise) return this.initializePromise;
     if (this.initialized) return;
-    this.initializePromise = this.initializeInternal().finally(() => {
-      this.initialized = true;
+    // An unresolved identity is retried by readers, but not on every call: the
+    // hot read paths call initialize() per request.
+    if (this.state === 'unresolved' && Date.now() - this.lastAttemptAt < UNRESOLVED_RETRY_MS) return;
+    this.initializePromise = this.initializeInternal().catch((err: unknown) => {
+      // An identity that failed to settle must read as "could not tell", never
+      // as the "not in a container" default the guard would then trust.
+      this.state = 'unresolved';
+      this.unresolvedReason = `Self identification failed: ${err instanceof Error ? err.message : String(err)}`;
+      console.warn('[SelfIdentity] initialization failed:', this.unresolvedReason);
+    }).finally(() => {
+      this.initialized = this.state !== 'unresolved';
       this.initializePromise = null;
     });
     return this.initializePromise;
   }
 
+  /**
+   * Settles the identity for a caller that must not act on a guess (the
+   * lifecycle guard): retries an unresolved identity now, ignoring the
+   * background retry gap, and reports the resulting state.
+   */
+  async ensureResolved(): Promise<SelfIdentityState> {
+    if (this.initializePromise) await this.initializePromise;
+    if (this.state === 'unresolved') {
+      this.lastAttemptAt = 0;
+      await this.initialize();
+    } else if (!this.initialized) {
+      await this.initialize();
+    }
+    return this.state;
+  }
+
+  getState(): SelfIdentityState {
+    return this.state;
+  }
+
+  /** Why the identity is unresolved, null in every other state. */
+  getUnresolvedReason(): string | null {
+    return this.state === 'unresolved' ? this.unresolvedReason : null;
+  }
+
   private async initializeInternal(): Promise<void> {
     const docker = DockerController.getInstance().getDocker();
-    const info = await this.resolveSelfInspect(docker);
-    if (!info) return;
+    this.lastAttemptAt = Date.now();
+    const probe = await this.resolveSelfInspect(docker);
+    if (probe.state === 'unresolved') {
+      this.state = 'unresolved';
+      this.unresolvedReason = probe.reason;
+      return;
+    }
+    if (probe.state === 'none') {
+      this.state = 'none';
+      this.unresolvedReason = null;
+      return;
+    }
+    const info = probe.info;
+    this.state = 'resolved';
+    this.unresolvedReason = null;
 
     this.containerId = info.Id ?? null;
     this.containerName = (info.Name || '').replace(/^\//, '') || null;
-    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] ?? null;
+    // An empty label is stored as null, so a refusal never names an empty service.
+    this.composeProjectName = info.Config?.Labels?.['com.docker.compose.project'] || null;
+    this.composeServiceName = info.Config?.Labels?.['com.docker.compose.service'] || null;
+    this.composeWorkingDir = info.Config?.Labels?.['com.docker.compose.project.working_dir'] || null;
     this.imageIdHex = SelfIdentityService.stripSha(info.Image ?? '') || null;
     this.imageRef = info.Config?.Image ?? null;
     // Bounded revision enrichment runs detached so it never blocks the callers
@@ -109,41 +186,70 @@ class SelfIdentityService {
     );
   }
 
+  /**
+   * Probes HOSTNAME, then the cgroup id, then the container id in the engine's
+   * mount entries. A 404 on a probe means "that is not a container", which is a
+   * real answer; any other failure (Docker did not answer, or /proc could not be
+   * read) lets the next probe still run and, if nothing resolves, the result is
+   * `unresolved` rather than `none`.
+   */
   private async resolveSelfInspect(
     docker: ReturnType<typeof DockerController.prototype.getDocker>,
-  ): Promise<Awaited<ReturnType<ReturnType<typeof docker.getContainer>['inspect']>> | null> {
-    const hostname = process.env.HOSTNAME;
-    if (hostname) {
+  ): Promise<SelfProbeResult> {
+    let failure: string | null = null;
+    const attempt = async (id: string, label: string): Promise<SelfInspect | null> => {
       try {
-        return await docker.getContainer(hostname).inspect();
+        return await docker.getContainer(id).inspect();
       } catch (err) {
         const e = err as { statusCode?: number; message?: string };
-        if (e?.statusCode !== 404) {
-          console.warn('[SelfIdentity] HOSTNAME inspect failed:', e?.message || String(err));
-          return null;
-        }
-        // 404 on HOSTNAME means custom hostname or running outside Docker;
-        // fall through to the cgroup probe.
-      }
-    }
-
-    const cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
-    if (!cgroupId) {
-      console.log('[SelfIdentity] no HOSTNAME match and no container ID in /proc/self/cgroup; self-protection disabled (not running in Docker?)');
-      return null;
-    }
-
-    try {
-      return await docker.getContainer(cgroupId).inspect();
-    } catch (err) {
-      const e = err as { statusCode?: number; message?: string };
-      if (e?.statusCode === 404) {
-        console.log('[SelfIdentity] cgroup container ID inspect returned 404; self-protection disabled');
+        if (e?.statusCode === 404) return null;
+        const detail = e?.message || String(err);
+        failure = `${label} inspect failed: ${detail}`;
+        console.warn(`[SelfIdentity] ${label} inspect failed:`, detail);
         return null;
       }
-      console.warn('[SelfIdentity] cgroup-resolved inspect failed:', e?.message || String(err));
-      return null;
+    };
+
+    const hostname = process.env.HOSTNAME;
+    if (hostname) {
+      const info = await attempt(hostname, 'HOSTNAME');
+      if (info) return { state: 'resolved', info };
     }
+
+    let cgroupId: string | null = null;
+    try {
+      cgroupId = await SelfIdentityService.readContainerIdFromCgroup();
+    } catch (err) {
+      const detail = (err as Error)?.message || String(err);
+      failure = `cgroup read failed: ${detail}`;
+      console.warn('[SelfIdentity] cgroup read failed:', detail);
+    }
+    if (cgroupId) {
+      const info = await attempt(cgroupId, 'cgroup');
+      if (info) return { state: 'resolved', info };
+    }
+
+    // A container with its own hostname on a private cgroup namespace shows
+    // neither its id in HOSTNAME nor in /proc/self/cgroup; the engine's bind
+    // mounts for /etc/hostname and friends still name it.
+    let mountId: string | null = null;
+    try {
+      mountId = await SelfIdentityService.readContainerIdFromMountinfo();
+    } catch (err) {
+      const detail = (err as Error)?.message || String(err);
+      failure = `mountinfo read failed: ${detail}`;
+      console.warn('[SelfIdentity] mountinfo read failed:', detail);
+    }
+    if (mountId && mountId !== cgroupId) {
+      const info = await attempt(mountId, 'mountinfo');
+      if (info) return { state: 'resolved', info };
+    }
+    if (!cgroupId && !mountId && !failure) {
+      console.log('[SelfIdentity] no HOSTNAME match and no container ID in /proc/self/cgroup or /proc/self/mountinfo; self-protection disabled (not running in Docker?)');
+    }
+
+    if (failure) return { state: 'unresolved', reason: failure };
+    return { state: 'none' };
   }
 
   /**
@@ -253,13 +359,14 @@ class SelfIdentityService {
    */
   async getBindMounts(): Promise<Array<{ source: string; destination: string }> | null> {
     const docker = DockerController.getInstance().getDocker();
-    const info = await this.resolveSelfInspect(docker);
-    if (!info) {
-      if (this.containerId) {
+    const probe = await this.resolveSelfInspect(docker);
+    if (probe.state !== 'resolved') {
+      if (this.containerId || probe.state === 'unresolved') {
         throw new Error('container self-inspect unavailable; cannot read mounts');
       }
       return null;
     }
+    const info = probe.info;
     const mounts = (info.Mounts ?? []) as Array<{ Type?: string; Source?: string; Destination?: string }>;
     return mounts
       .filter(m => m.Type === 'bind' && m.Source && m.Destination)
@@ -285,11 +392,21 @@ class SelfIdentityService {
     };
   }
 
+  /** Compose service and working directory of the running container, null when unknown. */
+  getComposeLocation(): { service: string | null; workingDir: string | null } {
+    return { service: this.composeServiceName, workingDir: this.composeWorkingDir };
+  }
+
   /** Test hook: clear cached state so a fresh initialize() can run with a different stub. */
   resetForTesting(): void {
     this.containerId = null;
     this.containerName = null;
     this.composeProjectName = null;
+    this.composeServiceName = null;
+    this.composeWorkingDir = null;
+    this.state = 'none';
+    this.unresolvedReason = null;
+    this.lastAttemptAt = 0;
     this.imageIdHex = null;
     this.imageRef = null;
     this.revision = null;
@@ -321,18 +438,38 @@ class SelfIdentityService {
     return false;
   }
 
+  // The Docker engine bind-mounts /etc/hostname, /etc/hosts, and /etc/resolv.conf
+  // from `<root>/containers/<64hex>/`, which survives a custom hostname and a
+  // private cgroup namespace. A missing file means "not found"; any other read
+  // error throws, so the caller records an unresolved identity instead of
+  // caching "not in Docker".
+  static async readContainerIdFromMountinfo(path = '/proc/self/mountinfo'): Promise<string | null> {
+    let contents: string;
+    try {
+      contents = await fs.readFile(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      throw err;
+    }
+    const match = contents.match(/\/containers\/([a-f0-9]{64})\/(?:hostname|hosts|resolv\.conf)\b/i);
+    return match ? match[1].toLowerCase() : null;
+  }
+
   // Both cgroupv1 (`12:cpuset:/docker/<64hex>`) and cgroupv2
   // (`0::/system.slice/docker-<64hex>.scope`, also podman's
   // `libpod-<64hex>.scope`) embed the full container ID as a 64-hex run.
   // Matching the longest such run survives kernel + runtime variation.
+  // A missing file means "not found"; any other read error throws, as for mountinfo.
   static async readContainerIdFromCgroup(path = '/proc/self/cgroup'): Promise<string | null> {
+    let contents: string;
     try {
-      const contents = await fs.readFile(path, 'utf8');
-      const matches = contents.match(/[a-f0-9]{64}/gi);
-      return matches && matches.length > 0 ? matches[matches.length - 1].toLowerCase() : null;
-    } catch {
-      return null;
+      contents = await fs.readFile(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null;
+      throw err;
     }
+    const matches = contents.match(/[a-f0-9]{64}/gi);
+    return matches && matches.length > 0 ? matches[matches.length - 1].toLowerCase() : null;
   }
 }
 

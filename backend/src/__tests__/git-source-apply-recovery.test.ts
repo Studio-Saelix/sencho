@@ -333,6 +333,30 @@ describe('git-source apply recovery (R1)', () => {
     expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'applied');
   });
 
+  it('keeps the applied files and names the reason, without compensating, when the Docker endpoint guard refuses the deploy', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    mockDeployStack.mockRejectedValue(new DockerEndpointProtectedError({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    }));
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+
+    const result = await svc.apply('app', 'abc1234deadbeef', {
+      deploy: true,
+      actor: 'tester',
+      requirePlanFingerprint: false,
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.deployed).toBe(false);
+    expect(result.deployError).toContain('carries the Docker connection');
+    expect(mockCompensate).not.toHaveBeenCalled();
+    expect(mockAbandon).not.toHaveBeenCalled();
+  });
+
   it('hands the caller\'s decision callback to the deploy gate, so a manual apply can report it', async () => {
     const { GitSourceService } = await import('../services/GitSourceService');
     const { buildSystemPolicyGateOptions } = await import('../helpers/policyGate');

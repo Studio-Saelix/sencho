@@ -67,8 +67,12 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
+  // Container stop, restart, and removal consult the Docker endpoint guard; the
+  // tests that are not about it run with it out of the way.
+  const guard = await import('../helpers/dockerEndpointGuard');
+  vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockResolvedValue(null);
   composeDirRef.current = '/test/compose';
   mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
   // Empty held sets by default so the held-image exclusion paths (getDiskUsage
@@ -176,6 +180,92 @@ describe('DockerController - stopContainer', () => {
 
     const dc = DockerController.getInstance(1);
     await expect(dc.stopContainer('abc123')).rejects.toThrow('permission denied');
+  });
+});
+
+describe('DockerController - Docker endpoint guard on stop and restart', () => {
+  const refusal = {
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+  };
+
+  async function spyOnGuard(result: typeof refusal | null) {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    return vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockResolvedValue(result);
+  }
+
+  it.each(['stop', 'restart'] as const)('refuses %s of the protected container before touching Docker', async (action) => {
+    const evaluate = await spyOnGuard(refusal);
+    const op = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop: op, restart: op });
+
+    const dc = DockerController.getInstance(1);
+    const call = action === 'stop' ? dc.stopContainer('abc123') : dc.restartContainer('abc123');
+
+    await expect(call).rejects.toMatchObject({ name: 'DockerEndpointProtectedError', code: 'docker_endpoint_protected' });
+    expect(evaluate).toHaveBeenCalledWith('abc123', action, expect.anything(), { allowProvider: false });
+    expect(op).not.toHaveBeenCalled();
+  });
+
+  it('refuses to remove the protected container and removes the rest', async () => {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    const guardSpy = vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
+    const remove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ remove });
+
+    const results = await DockerController.getInstance(1).removeContainers(['proxy', 'orphan']);
+
+    expect(results[0]).toMatchObject({ id: 'proxy', success: false, refused: true, error: refusal.message });
+    expect(results[1]).toEqual({ id: 'orphan', success: true });
+    expect(guardSpy).toHaveBeenCalledWith('proxy', 'stop', expect.anything(), { allowProvider: false });
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a whole batch before touching any container when one of them is protected', async () => {
+    const guard = await import('../helpers/dockerEndpointGuard');
+    vi.spyOn(guard, 'evaluateDockerEndpointContainer').mockImplementation(async (id: string) => (id === 'proxy' ? refusal : null));
+    const stop = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop });
+
+    await expect(
+      DockerController.getInstance(1).assertNoDockerEndpointContainers(['web', 'proxy', 'db'], 'stop'),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it('skips the check for a caller that has just checked the whole batch', async () => {
+    const evaluate = await spyOnGuard(refusal);
+    const restart = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ restart });
+
+    await DockerController.getInstance(1).restartContainer('abc123', { endpointGuard: 'batch-checked' });
+
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the check for Auto-Heal and lets only the provider through, so a refusal still stops the restart', async () => {
+    const evaluate = await spyOnGuard(refusal);
+    const restart = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ restart });
+
+    await expect(
+      DockerController.getInstance(1).restartContainer('abc123', { endpointGuard: 'allow-provider-restart' }),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(evaluate).toHaveBeenCalledWith('abc123', 'restart', expect.anything(), { allowProvider: true });
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when the guard has no objection', async () => {
+    await spyOnGuard(null);
+    const stop = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getContainer.mockReturnValue({ stop });
+
+    await DockerController.getInstance(1).stopContainer('abc123');
+
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 });
 

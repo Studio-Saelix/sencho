@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import BashExecModal from '../BashExecModal';
 import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
@@ -20,7 +21,7 @@ import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffAc
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
-import type { useComposeReapplyAction } from '../FleetView/hooks/useComposeReapplyAction';
+import type { useComposeReapplyAction, ComposeReapplyTarget } from '../FleetView/hooks/useComposeReapplyAction';
 import type { StackAction } from './EditorView';
 import { resolveStackFileKey } from './hooks/resolveStackFileKey';
 
@@ -40,6 +41,8 @@ interface ShellOverlaysProps {
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
+  /** The active node when the caller may reapply Sencho from its Compose configuration, else null. */
+  reapplySelfTarget: ComposeReapplyTarget | null;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
@@ -66,6 +69,7 @@ export function ShellOverlays({
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
+  reapplySelfTarget,
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
@@ -91,6 +95,16 @@ export function ShellOverlays({
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
+
+  // The Reapply confirm acts on the active node, so a node switch closes it
+  // rather than leaving a dialog that now targets a different Sencho.
+  const reapplyNodeId = reapplySelfTarget?.nodeId ?? null;
+  const shownForNodeId = useRef(reapplyNodeId);
+  useEffect(() => {
+    if (shownForNodeId.current === reapplyNodeId) return;
+    shownForNodeId.current = reapplyNodeId;
+    setSelfStackProtectedOpen(false);
+  }, [reapplyNodeId, setSelfStackProtectedOpen]);
 
   const isDeleteConfirming =
     deleteTarget != null &&
@@ -128,6 +142,18 @@ export function ShellOverlays({
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
         onOpenChange={setSelfStackProtectedOpen}
+        onReapply={reapplySelfTarget ? async () => {
+          // Same readiness and single-flight checks as the Save & Reapply
+          // confirm. Returning a promise is what keeps the dialog open: readiness
+          // loss says so and sends nothing, and the confirm can be retried.
+          if (!hydrationReady()) {
+            toast.error('Status data unavailable. Refresh and try again.');
+            return;
+          }
+          setSelfStackProtectedOpen(false);
+          if (composeReapply.dispatching) return;
+          void composeReapply.runReapply(reapplySelfTarget);
+        } : undefined}
         canOpenFleetUpdates={canSelfUpdate}
         onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />
