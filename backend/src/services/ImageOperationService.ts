@@ -495,6 +495,16 @@ export class ImageOperationService {
       return;
     }
     if (await this.helperHasTerminated(operation)) {
+      // The helper writes its verdict with an atomic rename, then exits. A
+      // failed read just before that write can be followed by the helper
+      // disappearing, so a check that sees it gone reads once more. A verdict
+      // that exists is used to settle the failure; otherwise the caller's
+      // failure stands.
+      const settled = await this.readProviderOutcome(operation);
+      if (settled) {
+        await this.finalizeEndpointProvider(operation, settled, detail);
+        return;
+      }
       await this.fail(operation, failureCode, detail);
       this.setLocalTracker(operation, 'failed', detail);
       return;
@@ -515,6 +525,8 @@ export class ImageOperationService {
     for (;;) {
       const outcome = await this.readProviderOutcome(operation);
       if (outcome) return outcome;
+      // The caller settles the result and re-reads the verdict after seeing
+      // the helper gone; a null here is not yet the final answer.
       if (await this.helperHasTerminated(operation)) return null;
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
     }
@@ -897,6 +909,8 @@ export class ImageOperationService {
     for (;;) {
       const outcome = await this.readProviderOutcome(operation);
       if (outcome) return outcome;
+      // The caller settles the result and re-reads the verdict after seeing
+      // the helper gone; a null here is not yet the final answer.
       if (await this.helperHasTerminated(operation)) return null;
       if (Date.now() >= deadline) return null;
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
@@ -913,10 +927,23 @@ export class ImageOperationService {
     // only be released once Docker conclusively shows no labelled helper for
     // this operation can run any more; until then this keeps reconciling and a
     // second operation stays refused.
-    if (!outcome && !(await this.helperHasTerminated(operation))) {
-      this.endpointProviderPending = true;
-      console.warn('[ImageOperation] Docker endpoint helper still active; keeping the operation claim while it finishes');
-      outcome = await this.awaitEndpointProviderMutationEnd(operation);
+    if (!outcome) {
+      if (await this.helperHasTerminated(operation)) {
+        // The helper writes its verdict with an atomic rename and then exits. A
+        // poll can read just before that write and then observe the helper
+        // gone, so the settlement looks once more before deciding there is no
+        // verdict.
+        outcome = await this.readProviderOutcome(operation);
+      } else {
+        this.endpointProviderPending = true;
+        console.warn('[ImageOperation] Docker endpoint helper still active; keeping the operation claim while it finishes');
+        outcome = await this.awaitEndpointProviderMutationEnd(operation);
+        if (!outcome) {
+          // The wait also ends on termination; the rename may have landed
+          // between the last poll and the check that saw the helper gone.
+          outcome = await this.readProviderOutcome(operation);
+        }
+      }
     }
     const current = await this.getCurrentOperation();
     if (!current || current.operationId !== operation.operationId || !NON_TERMINAL_STATES.includes(current.state)) {

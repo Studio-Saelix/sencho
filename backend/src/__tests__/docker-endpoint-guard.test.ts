@@ -229,6 +229,30 @@ describe('the Docker socket proxy', () => {
     const separate = await run({ kind: 'stop' }, probes(), 'infra');
     expect(separate?.message).toContain('from the host');
     expect(separate?.message).not.toContain('Reapply');
+    expect(separate?.message).not.toContain('Recreate Docker endpoint');
+  });
+
+  it('names the in-app replacement when the proxy is in Sencho\'s own project', async () => {
+    const refusal = await run({ kind: 'restart' });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('same Compose project as Sencho');
+    expect(refusal?.message).toContain('Recreate Docker endpoint');
+    expect(refusal?.message).toContain('docker compose up -d');
+  });
+
+  it('keeps host advice for another labeled container, which the endpoint replacement would not change', async () => {
+    mockListContainers.mockResolvedValue([
+      senchoContainer,
+      proxyContainer,
+      container(WEB_ID, 'web', { labels: { [INFRASTRUCTURE_LABEL]: 'true' } }),
+    ]);
+
+    const refusal = await run({ kind: 'service', service: 'web', restart: true });
+
+    expect(refusal).toMatchObject({ reason: 'provider', service: 'web' });
+    expect(refusal?.message).toContain('from the host');
+    expect(refusal?.message).not.toContain('Recreate Docker endpoint');
   });
 
   it('lets a service-scoped operation on another service through', async () => {

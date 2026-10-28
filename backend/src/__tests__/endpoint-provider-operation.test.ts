@@ -85,12 +85,15 @@ interface MockDockerOptions {
   health?: string;
   /** Whether the detached helper still appears in Docker's list. */
   helperRunning?: boolean;
+  /** Runs before a helper-list answer, so a test can publish a verdict as the helper exits. */
+  onHelperList?: () => Promise<void> | void;
 }
 
 function mockDocker(options: MockDockerOptions = {}) {
   const defaultList = async (listOptions?: { filters?: { label?: string[] } }) => {
     const labels = listOptions?.filters?.label ?? [];
     if (labels.some(label => label.startsWith('io.sencho.operation='))) {
+      await options.onHelperList?.();
       return options.helperRunning ? [{ Id: 'helper-container', State: 'running' }] : [];
     }
     return options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }];
@@ -234,6 +237,74 @@ describe('execute (the process that spawns the helper)', () => {
     });
     expect(docker.listContainers).toHaveBeenCalled();
     expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_restored');
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
+  it('consumes a restored verdict published just as the helper exits on the shared watch path', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    let operationId = '';
+    let published = false;
+    mockDocker({
+      onHelperList: async () => {
+        if (published) return;
+        published = true;
+        await writeOutcome(operationId, {
+          ok: false,
+          phase: 'verify',
+          error: 'the new proxy is unhealthy',
+          rollback: { attempted: true, restored: true, error: null },
+        });
+      },
+    });
+    await service.claimComposeReapply({ replace: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
+  it('consumes a restored verdict published while settlement checks that the helper is gone', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    // The verdict poll gives up after one helper check while the helper still
+    // runs. Settlement then checks again, and that is when the helper exits
+    // with its restored verdict.
+    service.endpointProviderTimings = { pollMs: 10_000, requestMs: 20, verifyMs: 60, outcomeMs: 200, watchMs: 0, recoveryMs: 20 };
+    let operationId = '';
+    let helperChecks = 0;
+    let published = false;
+    const dockerOptions: MockDockerOptions = { helperRunning: true };
+    dockerOptions.onHelperList = async () => {
+      helperChecks += 1;
+      if (helperChecks < 2) return;
+      dockerOptions.helperRunning = false;
+      if (published) return;
+      published = true;
+      await writeOutcome(operationId, {
+        ok: false,
+        phase: 'verify',
+        error: 'the new proxy is unhealthy',
+        rollback: { attempted: true, restored: true, error: null },
+      });
+    };
+    mockDocker(dockerOptions);
+    await service.claimComposeReapply({ replace: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
     expect(service.isEndpointProviderPending()).toBe(false);
   });
 
@@ -396,6 +467,78 @@ describe('execute (the process that spawns the helper)', () => {
     await expect(service.claimComposeReapply({ replace: true })).resolves.toEqual({ ok: true });
   });
 
+  it('consumes a restored verdict when a post-launch failure finds the helper already gone', async () => {
+    const selfUpdate = mockAvailableProvider();
+    const trigger = vi.spyOn(selfUpdate, 'triggerComposeReapply');
+    const service = fastTimings();
+    let operationId = '';
+    let published = false;
+    mockDocker({
+      onHelperList: async () => {
+        if (published) return;
+        published = true;
+        await writeOutcome(operationId, {
+          ok: false,
+          phase: 'provider',
+          error: 'the new proxy did not start',
+          rollback: { attempted: true, restored: true, error: null },
+        });
+      },
+    });
+    await service.claimComposeReapply({ replace: true, only: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    trigger.mockImplementation(async () => {
+      throw new Error('probe: post-launch failure');
+    });
+    await expect(service.executeClaimedComposeReapply()).resolves.toEqual({ ok: false, failureCode: 'update_failed' });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
+  it('consumes a restored verdict published while a post-launch failure waits for the helper to exit', async () => {
+    const selfUpdate = mockAvailableProvider();
+    const trigger = vi.spyOn(selfUpdate, 'triggerComposeReapply');
+    const service = fastTimings();
+    let operationId = '';
+    let helperChecks = 0;
+    let published = false;
+    const dockerOptions: MockDockerOptions = {
+      helperRunning: true,
+      onHelperList: async () => {
+        helperChecks += 1;
+        if (helperChecks < 2) return;
+        dockerOptions.helperRunning = false;
+        if (published) return;
+        published = true;
+        await writeOutcome(operationId, {
+          ok: false,
+          phase: 'verify',
+          error: 'the new proxy is unhealthy',
+          rollback: { attempted: true, restored: true, error: null },
+        });
+      },
+    };
+    mockDocker(dockerOptions);
+    await service.claimComposeReapply({ replace: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    trigger.mockImplementation(async () => {
+      throw new Error('probe: post-launch failure');
+    });
+    await expect(service.executeClaimedComposeReapply()).resolves.toEqual({ ok: false, failureCode: 'update_failed' });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
   it('checks restored connectivity for a shared Update too, not only Reapply', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerUpdate').mockResolvedValue(undefined);
@@ -522,6 +665,42 @@ describe('provider-only reapply (Sencho stays running)', () => {
     const operation = await service.getCurrentOperation();
     expect(operation?.failureCode).toBe('endpoint_provider_recovery_required');
     expect(operation?.failureDetail).toContain('was restored, but Sencho could not reach Docker through it');
+  });
+
+  it('consumes a restored verdict published just as the helper exits, instead of reporting recovery required', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    let operationId = '';
+    let published = false;
+    mockDocker({
+      onHelperList: async () => {
+        if (published) return;
+        published = true;
+        // The helper restored the previous container and renamed its verdict
+        // into place, but the poll read the file just before that rename and
+        // then saw the helper gone.
+        await writeOutcome(operationId, {
+          ok: false,
+          phase: 'verify',
+          error: 'the new proxy is unhealthy',
+          rollback: { attempted: true, restored: true, error: null },
+        });
+      },
+    });
+    await service.claimComposeReapply({ replace: true, only: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    // The provider was already recreated, so the phase wait answers from the
+    // marker and the verdict poll is where the exit race happens.
+    await writeRecreatedMarker(operationId);
+    await service.executeClaimedComposeReapply();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
   });
 });
 
@@ -981,6 +1160,30 @@ describe('reconcileOnStartup (the new process)', () => {
     });
     expect(docker.listContainers).toHaveBeenCalled();
     expect((await service.getCurrentOperation())?.failureDetail).toContain('was restored and Sencho reaches Docker again');
+  });
+
+  it('consumes a restored verdict published as the helper exits during startup reconciliation', async () => {
+    const { service, operationId } = await claimRecreating();
+    let published = false;
+    mockDocker({
+      onHelperList: async () => {
+        if (published) return;
+        published = true;
+        await writeOutcome(operationId, {
+          ok: false,
+          phase: 'verify',
+          error: 'the new proxy is unhealthy',
+          rollback: { attempted: true, restored: true, error: null },
+        });
+      },
+    });
+    await service.reconcileOnStartup();
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
   });
 
   it('ignores a verdict written for another operation', async () => {
