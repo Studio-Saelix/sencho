@@ -197,6 +197,24 @@ describe('execute (the process that spawns the helper)', () => {
     expect(service.isEndpointProviderPending()).toBe(false);
   });
 
+  it('releases a pre-launch refusal even when Docker cannot be listed', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockImplementation(async () => {
+      selfUpdate.recordUpdateFailure('Nothing was stopped. Socket unreachable.', 'update_failed');
+    });
+    // A refusal proves the detached helper never launched, so the claim may be
+    // released even though the Docker endpoint itself cannot answer.
+    vi.spyOn(DockerController, 'getInstance').mockImplementation(() => {
+      throw new Error('probe: Docker controller unavailable');
+    });
+    const service = fastTimings();
+    await service.claimComposeReapply({ replace: true });
+    await expect(service.executeClaimedComposeReapply()).resolves.toEqual({ ok: false, failureCode: 'update_failed' });
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'failed', failureCode: 'update_failed' });
+    expect(service.isEndpointProviderPending()).toBe(false);
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+  });
+
   it('records a provider-phase failure the helper restored while this process still runs', async () => {
     const selfUpdate = mockAvailableProvider();
     const service = fastTimings();
@@ -356,25 +374,24 @@ describe('execute (the process that spawns the helper)', () => {
     await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
   });
 
-  it('terminalizes the operation when the stack-scope watcher throws after the helper is gone', async () => {
+  it('terminalizes the operation when the watcher throws after the helper is gone', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
-    vi.spyOn(DockerController, 'getInstance').mockImplementation(() => {
-      throw new Error('probe: Docker controller unavailable');
-    });
+    mockDocker({ helperRunning: false });
     await service.claimComposeReapply({ replace: true });
-    const operationId = (await service.getCurrentOperation())!.operationId;
-    await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'restored', rollback: { attempted: true, restored: true, error: null } });
     await service.executeClaimedComposeReapply();
-    // Docker is unavailable, so termination cannot be proven: the claim is held
-    // until the helper publishes its verdict. The verdict then settles it.
+    // The watcher's first terminal write throws. With Docker proving no helper
+    // for this operation can run, the exception handler must settle the
+    // operation instead of leaving it non-terminal forever.
+    vi.spyOn(service as unknown as { persist: (op: unknown) => Promise<void> }, 'persist')
+      .mockRejectedValueOnce(new Error('probe: terminal write failed'));
     await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
     const operation = await service.getCurrentOperation();
     expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
-    expect(operation?.failureDetail).toContain('could not reach Docker through it');
+    expect(operation?.failureDetail).toContain('while Sencho was waiting for or applying the helper');
+    expect(operation?.failureDetail).toContain('probe: terminal write failed');
     expect(service.isEndpointProviderPending()).toBe(false);
-    expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_recovery_required');
     expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
     await expect(service.claimComposeReapply({ replace: true })).resolves.toEqual({ ok: true });
   });
@@ -703,6 +720,64 @@ describe('reconcileOnStartup (the new process)', () => {
     await reconcile;
     expect(await service.getCurrentOperation()).toMatchObject({ state: 'succeeded' });
     await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+  });
+
+  it('holds a record from a build without helper labels while its named helper runs', async () => {
+    const { service, operationId } = await claimRecreating();
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 150, watchMs: 150, recoveryMs: 20 };
+    const currentFile = path.join(tmpDir, 'image-operation-current.json');
+    const raw = JSON.parse(await fs.readFile(currentFile, 'utf8'));
+    delete raw.helperLabelVersion;
+    await fs.writeFile(currentFile, JSON.stringify(raw));
+    const helperName = `sencho-endpoint-helper-${operationId}`;
+    const docker = {
+      ping: async () => 'OK',
+      listContainers: vi.fn(async (options?: { filters?: { name?: string[] } }) =>
+        options?.filters?.name
+          ? [{ Id: 'legacy-helper', Names: [`/${helperName}`], State: 'running' }]
+          : []),
+      getContainer: () => ({ inspect: async () => ({ State: {} }) }),
+    };
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => docker,
+      resetDockerConnection: vi.fn(),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const reconcile = service.reconcileOnStartup();
+    await new Promise(resolve => setTimeout(resolve, 400));
+    // The named helper proves mutation may still be in progress, so the claim is
+    // held even though the record predates the helper label.
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+    await writeOutcome(operationId, { ok: true });
+    await reconcile;
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'succeeded' });
+  });
+
+  it('settles a legacy record once its named helper is gone', async () => {
+    const { service } = await claimRecreating();
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 150, watchMs: 150, recoveryMs: 20 };
+    const currentFile = path.join(tmpDir, 'image-operation-current.json');
+    const raw = JSON.parse(await fs.readFile(currentFile, 'utf8'));
+    delete raw.helperLabelVersion;
+    await fs.writeFile(currentFile, JSON.stringify(raw));
+    const docker = {
+      ping: async () => 'OK',
+      listContainers: vi.fn(async () => []),
+      getContainer: () => ({ inspect: async () => ({ State: {} }) }),
+    };
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => docker,
+      resetDockerConnection: vi.fn(),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    await service.reconcileOnStartup();
+    expect(await service.getCurrentOperation()).toMatchObject({
+      state: 'failed',
+      failureCode: 'endpoint_provider_recovery_required',
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
   });
 
   it('answers the helper after Docker works through the new provider, and succeeds on its verdict', async () => {

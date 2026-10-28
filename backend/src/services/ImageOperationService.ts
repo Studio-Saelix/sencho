@@ -11,7 +11,7 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { getSenchoVersion } from './CapabilityRegistry';
-import { helperFiles, parseOutcome, type ProviderAck, type ProviderOutcome } from '../helpers/endpointProviderReplace';
+import { helperFiles, parseOutcome, endpointProviderHelperName, type ProviderAck, type ProviderOutcome } from '../helpers/endpointProviderReplace';
 import { getErrorMessage } from '../utils/errors';
 import { HardenedEntitlementService } from './HardenedEntitlementService';
 import { RegistryService } from './RegistryService';
@@ -464,11 +464,14 @@ export class ImageOperationService {
   /** Fails the operation with the helper's error; a Docker endpoint replacement keeps the text as its detail. */
   private async failFromLastError(operation: ImageOperation): Promise<void> {
     if (operation.endpointProvider) {
-      await this.failEndpointProviderOperation(
-        operation,
-        'update_failed',
-        SelfUpdateService.getInstance().getLastError() ?? undefined,
-      );
+      const detail = SelfUpdateService.getInstance().getLastError() ?? undefined;
+      // The trigger only records lastError for a refusal that proves the
+      // detached helper never launched (staging, an absent create, or a
+      // confirmed inert-container removal) or for a pull/repin that precedes
+      // it. That is reliable cancellation evidence, so the claim may be
+      // released even when Docker itself is unreachable.
+      await this.fail(operation, 'update_failed', detail);
+      this.setLocalTracker(operation, 'failed', detail);
       return;
     }
     await this.fail(operation, 'update_failed');
@@ -491,7 +494,7 @@ export class ImageOperationService {
       await this.fail(operation, failureCode, detail);
       return;
     }
-    if (operation.helperLabelVersion !== 1 || await this.helperHasTerminated(operation)) {
+    if (await this.helperHasTerminated(operation)) {
       await this.fail(operation, failureCode, detail);
       this.setLocalTracker(operation, 'failed', detail);
       return;
@@ -701,7 +704,35 @@ export class ImageOperationService {
    * can still run. An unreadable answer is never treated as terminated.
    */
   private async helperHasTerminated(operation: ImageOperation): Promise<boolean> {
-    if (operation.helperLabelVersion !== 1) return false;
+    if (operation.helperLabelVersion !== 1) {
+      // Compatibility record from a build before the helper label existed but
+      // after the helper was named deterministically. The name is the only
+      // evidence available; a live container with that name blocks release.
+      const helperName = endpointProviderHelperName(operation.operationId);
+      try {
+        const docker = DockerController.getInstance().getDocker();
+        const containers = await this.boundedDockerCall(
+          'Docker helper list',
+          Date.now() + this.endpointProviderTimings.requestMs,
+          signal => docker.listContainers({
+            all: true,
+            abortSignal: signal,
+            filters: { name: [helperName] },
+          }),
+        );
+        return !containers.some(container =>
+          (container.Names ?? []).some(name => name.replace(/^\//, '') === helperName)
+          && container.State !== 'exited'
+          && container.State !== 'dead');
+      } catch {
+        try {
+          DockerController.getInstance().resetDockerConnection();
+        } catch {
+          // DockerController itself may be unavailable in a torn-down process.
+        }
+        return false;
+      }
+    }
     try {
       const docker = DockerController.getInstance().getDocker();
       const containers = await this.boundedDockerCall(
@@ -882,7 +913,7 @@ export class ImageOperationService {
     // only be released once Docker conclusively shows no labelled helper for
     // this operation can run any more; until then this keeps reconciling and a
     // second operation stays refused.
-    if (!outcome && operation.helperLabelVersion === 1 && !(await this.helperHasTerminated(operation))) {
+    if (!outcome && !(await this.helperHasTerminated(operation))) {
       this.endpointProviderPending = true;
       console.warn('[ImageOperation] Docker endpoint helper still active; keeping the operation claim while it finishes');
       outcome = await this.awaitEndpointProviderMutationEnd(operation);

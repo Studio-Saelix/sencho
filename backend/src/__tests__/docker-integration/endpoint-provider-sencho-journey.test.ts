@@ -110,11 +110,17 @@ function proxyEnv(project: string, dir: string): string[] {
 }
 
 function composeFile(hostPort: number, dataDir: string, brokenProvider: boolean, subnetIndex: number): string {
+  const providerEnvFile = [
+    '    env_file:',
+    // Only resolvable through the project name, never the directory name.
+    '      - ${COMPOSE_PROJECT_NAME}.env',
+  ];
   const provider = brokenProvider
     ? [
       '  socket-proxy:',
       `    image: ${BUSYBOX_IMAGE}`,
       '    command: ["sh", "-c", "exit 1"]',
+      ...providerEnvFile,
     ]
     : [
       '  socket-proxy:',
@@ -140,6 +146,7 @@ function composeFile(hostPort: number, dataDir: string, brokenProvider: boolean,
       '      BUILD: "1"',
       '    volumes:',
       '      - /var/run/docker.sock:/var/run/docker.sock:ro',
+      ...providerEnvFile,
     ];
   return [
     'services:',
@@ -157,9 +164,6 @@ function composeFile(hostPort: number, dataDir: string, brokenProvider: boolean,
     '    depends_on:',
     '      - socket-proxy',
     ...provider,
-    '    env_file:',
-    // Only resolvable through the project name, never the directory name.
-    '      - ${COMPOSE_PROJECT_NAME}.env',
     'networks:',
     '  default:',
     '    ipam:',
