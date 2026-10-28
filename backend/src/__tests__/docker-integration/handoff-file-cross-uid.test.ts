@@ -7,8 +7,9 @@
  *
  * The unit test in handoff-file.test.ts records the chmod/chown calls through a
  * fake filesystem. This test proves the real result: a root process runs the
- * checked-in writeHandoffJson, and a separate process running as the application
- * uid reads the files back. The reader is a fixed unprivileged uid rather than
+ * checked-in handoff writer (bound from the same environment variables the
+ * helper receives), and a separate process running as the application uid reads
+ * the files back. The reader is a fixed unprivileged uid rather than
  * the test runner's uid, so the test also proves the chown when the CI runner
  * itself is root. Without the chown the files stay root-owned 0600 and the
  * reader fails with EACCES. Skipped when Docker is unavailable.
@@ -71,11 +72,13 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')(
 
     it('reads root-written files as the application uid', async () => {
       const writeScript = [
-        "import { writeHandoffJson } from '/code/handoffFile.mts';",
-        `const owner = { uid: ${APPLICATION_UID}, gid: ${APPLICATION_GID} };`,
+        "import { createHandoffWriter } from '/code/handoffFile.mts';",
+        // Bound exactly as endpointProviderDeps.buildDeps binds it: the helper
+        // runs as uid 0 and the application uid/gid arrive in the environment.
+        'const writeJson = createHandoffWriter(process.env, 0);',
         // The attached stage helper writes the snapshot; the detached replace
         // helper writes the marker and the terminal outcome.
-        ...FILES.map(([name, value]) => `await writeHandoffJson('/handoff/${name}', ${JSON.stringify(value)}, owner);`),
+        ...FILES.map(([name, value]) => `await writeJson('/handoff/${name}', ${JSON.stringify(value)});`),
       ].join('\n');
 
       execFileSync('docker', [
@@ -85,6 +88,8 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')(
         // loaded as CommonJS while the source uses import syntax.
         '-v', `${HELPER_SOURCE}:/code/handoffFile.mts:ro`,
         '-v', `${tmpDir}:/handoff:rw`,
+        '-e', `SENCHO_HANDOFF_UID=${APPLICATION_UID}`,
+        '-e', `SENCHO_HANDOFF_GID=${APPLICATION_GID}`,
         IMAGE,
         'node', '--input-type=module', '-e', writeScript,
       ], { encoding: 'utf8', timeout: 120_000 });
