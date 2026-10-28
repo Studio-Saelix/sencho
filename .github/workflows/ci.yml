@@ -57,7 +57,7 @@ jobs:
           echo "code=$code"; printf '%s\n' "$files"
 
   backend:
-    name: Backend (Build, Test, Lint)
+    name: Backend unit tests (Build, Test, Lint)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: changes
@@ -69,7 +69,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
           cache: 'npm'
@@ -90,17 +90,63 @@ jobs:
         working-directory: ./backend
         run: npm test
 
-      - name: Docker integration tests (dedicated Vitest config)
-        working-directory: ./backend
-        run: npm run test:docker-integration
-
       - name: Lint (ESLint)
         working-directory: ./backend
         run: npm run lint
 
       - name: Audit Dependencies
         working-directory: ./backend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
+
+  # Real-Docker integration tests, split out of the backend job so their
+  # ~1 minute of serial container work runs alongside the unit tests instead
+  # of after them.
+  backend-docker-integration:
+    name: Backend Docker integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version-file: '.node-version'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Docker integration tests (dedicated Vitest config)
+        working-directory: ./backend
+        run: npm run test:docker-integration
+
+  # Single status for branch protection, which requires this exact job name.
+  # Passes when both backend jobs passed, or both were skipped because change
+  # detection succeeded and found no code.
+  backend-result:
+    name: Backend (Build, Test, Lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, backend, backend-docker-integration]
+    if: always()
+    steps:
+      - name: Check backend results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.backend.result }}
+          DOCKER: ${{ needs.backend-docker-integration.result }}
+        run: |
+          echo "Change detection: $CHANGES, unit: $UNIT, docker integration: $DOCKER"
+          [ "$CHANGES" = success ] || exit 1
+          for r in "$UNIT" "$DOCKER"; do
+            [ "$r" = success ] || [ "$r" = skipped ] || exit 1
+          done
 
   frontend:
     name: Frontend (Build, Lint)
@@ -115,7 +161,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
           cache: 'npm'
@@ -139,7 +185,7 @@ jobs:
 
       - name: Audit Dependencies
         working-directory: ./frontend
-        run: npm audit --audit-level=high
+        run: node ../scripts/audit-with-vex.mjs
 
   docker-validate:
     name: Docker Build & Scan
@@ -215,6 +261,11 @@ jobs:
   e2e:
     name: E2E shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    # Backstop only. Each shard bounds itself with Playwright's `globalTimeout`
+    # (see playwright.config.ts), which fails the test step while the job is
+    # still alive to upload the report. This ceiling stays above that value so
+    # a cascading or wedged run produces evidence instead of a bare
+    # cancellation; a job cancelled by its own timeout runs no further steps.
     timeout-minutes: 20
     needs: changes
     # Runs unless detection positively found no code: a failed detection job
@@ -245,8 +296,10 @@ jobs:
         run: npx playwright test --project=chromium --shard=${{ matrix.shard }}/4
 
       - name: Upload E2E report and service logs
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        # `cancelled()` covers a run stopped by the concurrency group, where
+        # GitHub re-evaluates conditions for the job's unfinished steps.
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: playwright-report-shard-${{ matrix.shard }}
           path: |
@@ -288,21 +341,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version-file: '.node-version'
 
       - name: Validate workflows
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
         with:
-          args: .github/workflows/release-please.yml .github/workflows/ci.yml
+          args: .github/workflows/release-please.yml .github/workflows/ci.yml .github/workflows/pr-title.yml
 
       - name: Syntax check
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/audit-with-vex.mjs
+          node --check scripts/check-pr-title.mjs
+          node --check scripts/check-version-transition.mjs
 
       - name: Unit tests
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/audit-with-vex.test.mjs
+          node --test scripts/check-pr-title.test.mjs
+          node --test scripts/check-version-transition.test.mjs

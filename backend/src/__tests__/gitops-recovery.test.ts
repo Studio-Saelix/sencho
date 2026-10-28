@@ -11,10 +11,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { DatabaseService } from '../services/DatabaseService';
-import { GitOpsStore } from '../services/gitops/store';
+import { emptyTargetRow, GitOpsStore } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { projectApplication } from '../services/gitops/derive';
 import type { GitOpsApplicationRow, GitOpsGenerationRow } from '../services/gitops/types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops recovery', () => {
   let tmpDir: string;
@@ -271,14 +272,185 @@ describe('gitops recovery', () => {
       });
     };
 
+    const codes = (): string[] => projectApplication('app-rec-clear', true).limitations.map((l) => l.code);
+
     restore('art-b-app-rec-clear', 'acc-b-app-rec-clear');
     expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).not.toBeNull();
+    // The unprovable pointer is the artifact expectation, since this restore
+    // names a set the generation does not own.
+    expect(codes()).toContain('artifact_expectation_unprovable');
 
     restore('art-a-app-rec-clear', 'acc-a-app-rec-clear');
     // A stale limitation is worse than none: it would keep reporting doubt
     // about evidence that is now proven.
     expect(store.getTarget('app-rec-clear', 1)?.evidence_limitations_json).toBeNull();
-    expect(projectApplication('app-rec-clear', true).limitations).toHaveLength(0);
+    // Scoped to the code under test rather than to an empty list, because the
+    // restored artifact set is the unresolved placeholder the apply transition
+    // seeds and this fixture never resolves it. That target really does have no
+    // provable approved identity, so `artifact_expectation_unresolved` is a true
+    // caveat here and not the stale one this test is about.
+    expect(codes()).not.toContain('artifact_expectation_unprovable');
+    expect(codes()).toContain('artifact_expectation_unresolved');
+  });
+
+  it('retires a moved recovery claim when a direct deploy binds a generation', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-bind', 'rec-bind-web');
+    const genA = 'gen-a-app-rec-bind';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-bind',
+      nodeId: 1,
+      recoveryRef: 'rec-bind',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-bind-start'),
+    });
+    tx.recoveryFailed({
+      applicationId: 'app-rec-bind',
+      nodeId: 1,
+      recoveryRef: 'rec-bind',
+      failureClass: 'post_mutation',
+      envelope: env('op-rec-bind-fail'),
+    });
+    const failed = store.getTarget('app-rec-bind', 1)!;
+    expect(failed.recovery_phase).toBe('failed');
+    expect(failed.recovery_failure_class).toBe('post_mutation');
+    expect(store.getApplication('app-rec-bind')!.recovery_phase).toBe('failed');
+
+    // A manual deploy that Compose binds is success evidence: the workload is a
+    // generation applied after the failed restore, so the claim and the
+    // application hold are retired.
+    const applied = failed.applied_generation_id!;
+    const deployOperation = env('op-rec-bind-deploy');
+    tx.deployStarted('app-rec-bind', 1, applied, deployOperation);
+    tx.deployBound('app-rec-bind', 1, applied, deployOperation);
+
+    const bound = store.getTarget('app-rec-bind', 1)!;
+    expect(bound.recovery_phase).toBeNull();
+    expect(bound.recovery_failure_class).toBeNull();
+    expect(bound.failure_stage).toBeNull();
+    expect(store.getApplication('app-rec-bind')!.recovery_phase).toBeNull();
+  });
+
+  it('refuses a second recovery while the target is already restoring', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-serialized', 'rec-serialized-web');
+    const genA = 'gen-a-app-rec-serialized';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-serialized',
+      nodeId: 1,
+      recoveryRef: 'rec-serialized-a',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-serialized-a'),
+    });
+
+    // One restore per target across both recovery paths: the rollout rollback
+    // and the Direct recovery write the same slot.
+    expect(() => tx.recoveryStarted({
+      applicationId: 'app-rec-serialized',
+      nodeId: 1,
+      recoveryRef: 'rec-serialized-b',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-serialized-b'),
+    })).toThrow(/already in progress/);
+
+    const target = store.getTarget('app-rec-serialized', 1)!;
+    expect(target.recovery_phase).toBe('restoring');
+    expect(target.recovery_ref).toBe('rec-serialized-a');
+  });
+
+  it('does not let a recovery success lift a hold another target owns', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-sib', 'rec-sib-web');
+    store.upsertTarget(emptyTargetRow('app-rec-sib', 2, 1));
+    const genA = 'gen-a-app-rec-sib';
+
+    // Target 1 fails after a possible mutation and owns the application hold.
+    tx.recoveryStarted({
+      applicationId: 'app-rec-sib',
+      nodeId: 1,
+      recoveryRef: 'rec-sib-a',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-sib-a'),
+    });
+    tx.recoveryFailed({
+      applicationId: 'app-rec-sib',
+      nodeId: 1,
+      recoveryRef: 'rec-sib-a',
+      failureClass: 'post_mutation',
+      envelope: env('op-rec-sib-a-fail'),
+    });
+
+    // Target 2 restores successfully. The application stamp is derived from
+    // every live target, so the sibling's hold survives.
+    tx.recoveryStarted({
+      applicationId: 'app-rec-sib',
+      nodeId: 2,
+      recoveryRef: 'rec-sib-b',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-sib-b'),
+    });
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-sib',
+      nodeId: 2,
+      recoveryRef: 'rec-sib-b',
+      recoveryGenerationId: genA,
+      proven: true,
+      gitopsBinding: 'bound',
+      capturedArtifactSetId: 'art-a-app-rec-sib',
+      capturedSourceAcceptanceRef: 'acc-a-app-rec-sib',
+      envelope: env('op-rec-sib-b-ok'),
+    });
+
+    expect(store.getTarget('app-rec-sib', 2)?.recovery_phase).toBe('complete');
+    const app = store.getApplication('app-rec-sib')!;
+    expect(app.recovery_phase).toBe('failed');
+    expect(app.failure_stage).toBe('recovery');
+    expect(app.recovery_ref).toBe('rec-sib-a');
+    expect(app.failure_class).toBe('post_mutation');
+  });
+
+  it('retires a boot-reclassified recovery interruption when the restore succeeds', () => {
+    const store = GitOpsStore.getInstance();
+    const tx = GitOpsTransitions.getInstance();
+    seedTwoGenerations('app-rec-boot', 'rec-boot-web');
+    const genA = 'gen-a-app-rec-boot';
+
+    tx.recoveryStarted({
+      applicationId: 'app-rec-boot',
+      nodeId: 1,
+      recoveryRef: 'rec-boot',
+      recoveryGenerationId: genA,
+      envelope: env('op-rec-boot-start'),
+    });
+    // The process dies mid-restore; boot reclassifies it as an interruption.
+    tx.interruptActiveOperations('app-rec-boot', env('op-rec-boot-interrupt'));
+    const interrupted = store.getTarget('app-rec-boot', 1)!;
+    expect(interrupted.interruption_stage).toBe('recovery_started');
+    expect(interrupted.recovery_failure_class).toBe('interrupted');
+
+    // The restore reports success afterwards. The interruption describes the
+    // attempt it just finished, so it is retired with it.
+    tx.recoverySucceeded({
+      applicationId: 'app-rec-boot',
+      nodeId: 1,
+      recoveryRef: 'rec-boot',
+      recoveryGenerationId: genA,
+      proven: true,
+      gitopsBinding: 'bound',
+      capturedArtifactSetId: 'art-a-app-rec-boot',
+      capturedSourceAcceptanceRef: 'acc-a-app-rec-boot',
+      envelope: env('op-rec-boot-success'),
+    });
+
+    const done = store.getTarget('app-rec-boot', 1)!;
+    expect(done.recovery_phase).toBe('complete');
+    expect(done.interruption_stage).toBeNull();
+    expect(done.recovery_failure_class).toBeNull();
   });
 
   it('opens and closes a recovery from the restore path itself', async () => {
@@ -463,8 +635,13 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

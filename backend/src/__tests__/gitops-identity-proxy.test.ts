@@ -328,6 +328,26 @@ describe('gitops identity proxy', () => {
       expect((filtered as { nextCursor: string }).nextCursor).toBe('100.abc');
     });
 
+    it('authorizes each row against the node that owns it, not the node the caller is viewing', () => {
+      // Every role holds global stack:read, so which node a row is authorized
+      // against is invisible from the permission result alone. The node handed
+      // to the callback is what makes it observable, and getting it wrong makes
+      // a future role that lacks a global read authorize against the node the
+      // caller happens to be viewing.
+      const asked: number[] = [];
+      const payload = [sourceRow('web', 'active', true), sourceRow('gone', 'deleted', true)];
+      filterRemoteIdentityPayload(
+        '/git-sources',
+        payload,
+        (requirement, nodeId) => {
+          asked.push(nodeId);
+          return requirement.kind === 'stack_read';
+        },
+        7,
+      );
+      expect(asked).toEqual([7, 7]);
+    });
+
     it('leaves a drift payload unfiltered', () => {
       // The drift routes are per-stack, authorized by name before the hop, and
       // return one object rather than a cross-stack collection. Re-filtering

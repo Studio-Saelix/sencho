@@ -6,7 +6,7 @@ description: Link a running stack to a Git repository, pull a real commit, revie
 
 Say `marketing-site` is a small nginx stack you created directly in Sencho, and your team has decided the compose file should live in a Git repository instead, so changes go through a commit and a pull request before they reach the stack. This walks through connecting that already-running stack to a repository, pulling a real commit a teammate pushed, reviewing the classified change plan Sencho builds against what is on disk, and applying it, which both writes the new files and redeploys the container.
 
-This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, provider hooks, the three webhook-driven apply modes, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see the [Git Sources](/features/git-sources) and [Blueprints](/features/blueprint-model) feature pages for those.
+This tutorial covers linking an existing stack to a Git source and running one manual pull-review-apply cycle. It doesn't cover creating a brand-new stack directly from a repository, provider hooks, the apply behaviors beyond Review only, polling, suspend, multi-file compose sources, or converting the source onto a Git-managed Blueprint; see [Git Sources](/features/git-sources), [Trigger pulls from Git hosts and CI](/features/git-webhooks), and [Git-managed Blueprints](/features/git-managed-blueprints) for those. To roll a Git source out across several nodes, follow [Roll Out a Git Commit Across Your Fleet and Roll Back a Bad One](/tutorials/roll-out-a-git-managed-blueprint). To keep a sensitive env file in the repository encrypted, follow [Keep a Database Password in Git With SOPS and age](/tutorials/keep-secrets-in-git-with-sops).
 
 ## Prerequisites
 
@@ -28,38 +28,38 @@ This tutorial covers linking an existing stack to a Git source and running one m
 
 <Steps>
   <Step title="Open the Git Source sheet">
-    Open the `marketing-site` stack and select **Git Source** in the editor toolbar. The sheet opens from the right, empty, since nothing is linked yet.
+    Open the `marketing-site` stack and select **Edit compose**, then **Git Source** in the editor toolbar. (The **Source** row on the stack's Anatomy tab opens the same sheet.) The sheet opens from the right with the repository form, and its header reads **Not linked** since nothing is connected yet.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git Source sheet for the marketing-site stack, with crumb Stack, marketing-site, Git source, heading Git source, meta Not linked, a Save toolbar button, and Repository fields for URL, Ref, compose.yaml, Public (no auth), and Review only." />
+      <img src="/images/tutorials/connect-a-git-source/git-source-panel-empty.png" alt="Empty Git Source sheet for the marketing-site stack, with crumb Stack, marketing-site, Git source, heading Git source, meta Not linked, a Save toolbar button, and Repository fields for URL, Ref, Compose files with compose.yaml as primary, Project directory, Also sync sibling .env file, Authentication with Public (no auth) selected, and Apply behavior with Review only selected among Manual, Review only, Auto-write files, and Auto-deploy." />
     </Frame>
   </Step>
   <Step title="Point it at your repository">
-    Paste your repository's HTTPS URL into **Repository URL** (for example `https://github.com/your-org/your-repo.git`). Leave **Ref** on its default, `main`, unless your repository uses a different branch, tag, or pinned commit SHA.
+    Paste your repository's HTTPS URL into **Repository URL** (for example `https://github.com/your-org/your-repo.git`). Leave **Ref** on its default, `main`, unless your repository uses a different branch, tag, or pinned commit SHA. A **Custom CA certificate (optional)** field appears once the URL is HTTPS; leave it empty for a host like GitHub, and paste the certificate authority's PEM only when your Git server uses a private one.
 
     Select **Browse** to confirm Sencho can actually reach the repository and see its files, rather than trusting the URL is correct. The browser lists every file in the repository; `compose.yaml` is already ticked as the primary compose file, since that name matches the picker's default.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git Source sheet with a Repository URL filled in and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository." />
+      <img src="/images/tutorials/connect-a-git-source/browse-picker.png" alt="Git Source sheet with a Repository URL filled in, Ref main, and the Browse file picker open below the Compose files list, showing a checked compose.yaml and an unchecked README.md fetched live from the repository. The Custom CA certificate field sits below the Authentication choices." />
     </Frame>
 
-    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the safest default: a pull only stages a change plan for you to review, it never writes or deploys on its own. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the sheet reports why.
+    Leave **Authentication** on **Public (no auth)** for a public repository, and **Apply behavior** on **Review only**, the default: a fetched commit only stages a change plan for you to review, it never writes or deploys on its own. The other choices are **Manual** (Sencho fetches only when you ask), **Auto-write files**, and **Auto-deploy**; see [Git Sources](/features/git-sources) for what each does. Select **Save**. Sencho runs a reachability check against the repository before persisting anything; if that check fails, nothing is saved and the sheet reports why. On success the sheet reloads with a **Pull now** toolbar button and the **Overview**, **Source**, **Automation**, and **Secrets** tabs, and the Overview reads **Never reconciled**: no commit from the repository has been accepted yet.
   </Step>
   <Step title="Pull the latest commit">
     Now make a change the way your team actually would: edit the compose file in your repository (not in Sencho) and push a commit. For this tutorial, bump the pinned tag from `nginx:1.27-alpine` to `nginx:1.28-alpine` and push it to the ref you configured.
 
-    Back in the Git Source sheet, select **Pull now**. Sencho fetches the ref's current commit and opens a classified change plan against what's on disk.
+    Back in the Git Source sheet, select **Pull now**. Sencho fetches the ref's current commit and opens a **Git · Change plan** dialog that classifies each file against what's on disk.
 
     <Frame>
-      <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · CHANGE PLAN dialog for marketing-site, listing a Modify row for compose.yaml (image tag change) with Deploy after apply and Apply in the footer." />
+      <img src="/images/tutorials/connect-a-git-source/pull-preview-diff.png" alt="GIT · CHANGE PLAN dialog for marketing-site, listing an Add row for compose.yaml, with an unticked Deploy after apply checkbox and Dismiss and Apply buttons in the footer." />
     </Frame>
 
-    The plan lists only the files that actually change. If the incoming compose file failed `docker compose config` validation, an error banner would appear here and the **Apply** button would stay disabled; since this pull is clean, Apply is enabled.
+    The plan lists only the files that actually change, and files Sencho does not manage are left untouched. `compose.yaml` shows as **Add** here because this is the first commit Sencho takes from the repository: the path becomes Git-managed and the file on disk is replaced with the repository's version. Later pulls list the same file as **Modify**. If the incoming compose file failed `docker compose config` validation, an **Incoming compose failed validation** banner would appear and **Apply** would stay disabled; since this pull is clean, Apply is enabled. **Dismiss** discards the plan without writing anything.
   </Step>
   <Step title="Apply and deploy in one step">
     Tick **Deploy after apply** at the bottom of the dialog, then select **Apply**. This both writes the incoming file to disk and runs `docker compose up -d` against it, so the running container picks up the new tag immediately instead of just staging the file for a later manual deploy.
 
-    Sencho shows the deploy's progress the same way any other deploy does, ending in a health check on the recreated container.
+    A toast reads `Changes applied and deployed.` when the deploy finishes.
   </Step>
 </Steps>
 
@@ -67,33 +67,41 @@ This tutorial covers linking an existing stack to a Git source and running one m
 
 Check from two places, since neither alone proves the pull was actually applied and deployed.
 
-**The Git Source sheet.** Reopen it. The Status section now shows the short SHA of the commit you just pulled, a **Source state** of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files, and the footer shows when the source was last updated. Nothing is listed as pending at the top of Status, which is what a stack with complete evidence looks like.
+**The Git Source sheet.** Reopen it. The header now shows the short SHA of the commit you just pulled and a state of `accepted`, meaning Sencho took that commit as the current generation rather than merely writing its files, and the footer shows when the source was last updated. The Overview answers **Accepted**, with a stage row of **Source accepted**, **Artifact qualified**, and **Runtime synced and healthy**, and no **Review update** button because nothing is waiting. For a few seconds right after a deploy the runtime can read **Artifact unverified** while Sencho identifies the running image; reopen the sheet and it settles. **Evidence** stays collapsed until you open it to see the digests Sencho compared.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git Source sheet for marketing-site with Apply behavior still on Review only, Status showing a short commit SHA and Source state accepted, and a freshness line in the footer." />
+  <img src="/images/tutorials/connect-a-git-source/last-applied-commit.png" alt="Git Source sheet for marketing-site with the header showing a short commit SHA and the state accepted, an Overview answering Accepted, a stage row reading Source accepted, Artifact qualified, and Runtime synced and healthy, a collapsed Evidence control, an Open in GitOps portfolio link, and a freshness line in the footer." />
 </Frame>
 
-**The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor tab reflects the same change; if it still shows the old tag, reload the page, since the editor buffer doesn't refresh itself after a Git-driven write.
+**The stack itself.** Reopen `marketing-site`. The container recreated on the new image: a fresh uptime, and its logs now start with `nginx/1.28.3` instead of `1.27.5`. The compose editor reflects the same change, showing `nginx:1.28-alpine`, and the **Source** row on the Anatomy tab now names the repository and ref.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/stack-redeployed.png" alt="marketing-site stack page after redeploy, showing marketing-site-web-1 up about a minute, logs starting from nginx/1.28.3, and the compose editor showing image nginx:1.28-alpine." />
+  <img src="/images/tutorials/connect-a-git-source/stack-redeployed.png" alt="marketing-site stack page after redeploy, showing marketing-site-web-1 up about two minutes, logs reporting nginx/1.28.3, and the compose editor open with Git Source and Save & Deploy buttons and the image nginx:1.28-alpine." />
 </Frame>
 
 ## If something goes wrong
 
-**Saving the source fails with "The configured branch, tag, or commit was not found," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the ref against what your Git host actually shows before assuming the URL itself is wrong.
+**Saving the source fails with "The configured branch, tag, or commit was not found in the repository," even though the URL is right.** Ref names are case-sensitive, and a typo there (`Main` instead of `main`, for example) surfaces as a distinct not-found error rather than a repository error, because Sencho resolves the ref on the remote before fetching. Double-check the ref against what your Git host actually shows before assuming the URL itself is wrong.
+
+**You can't change the repository or branch of a linked stack.** Once Sencho manages the stack's files from Git, editing the source's repository or ref is refused with a message telling you to detach first. Select **Detach** (**Detach and export** renders the effective compose model into a single `compose.yaml`), then link the stack again with the new repository or ref.
 
 <Frame>
-  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git Source sheet with Ref set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found." />
+  <img src="/images/tutorials/connect-a-git-source/branch-error.png" alt="Git Source sheet with Ref set to the incorrect value Main, and a red error toast in the corner reading The configured branch, tag, or commit was not found in the repository." />
 </Frame>
 
 ## Related
 
 <CardGroup cols={2}>
   <Card title="Git Sources" icon="code-branch" href="/features/git-sources">
-    Provider hooks, multi-file sources, the three apply modes, private-repo authentication, and the full troubleshooting table.
+    Multi-file sources, the apply modes, polling, and the troubleshooting table.
+  </Card>
+  <Card title="Git hosts and authentication" icon="key" href="/features/git-authentication">
+    Private repositories over HTTPS tokens or SSH deploy keys, and custom certificate authorities.
+  </Card>
+  <Card title="Deploy a Compose Change the Moment You Push It to GitHub or GitLab" icon="link" href="/tutorials/deploy-on-push-from-github-or-gitlab">
+    Add a provider hook so a push fetches the source without a manual pull.
   </Card>
   <Card title="Deploy a Stack Automatically From Your CI Pipeline" icon="satellite-dish" href="/tutorials/set-up-a-webhook">
-    Trigger a Git source sync from CI when your pipeline already calls Sencho, or use provider hooks on the Git Source sheet when the Git host can post events directly.
+    Trigger a Git source sync from CI when your pipeline already calls Sencho.
   </Card>
 </CardGroup>

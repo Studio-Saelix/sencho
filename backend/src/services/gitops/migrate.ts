@@ -527,6 +527,9 @@ function migrateOneBlueprint(blueprint: Blueprint): MigrationResult {
         rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
         runtime_drift_policy: blueprint.drift_mode,
         stateful_policy_json: null,
+        // A migrated application has no intent authority behind it yet, so it
+        // starts on the default policy. There is no earlier operator choice to
+        // carry forward from.
         health_failure_rollback_policy_json: null,
         operation_id: envelope.operationId,
         actor: envelope.actor,

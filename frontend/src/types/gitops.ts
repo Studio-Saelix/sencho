@@ -80,11 +80,12 @@ export type GitOpsIdentityRef =
   | { kind: 'commit'; sha: string; repoUrl: string; ref: string }
   | { kind: 'generation'; id: string }
   | { kind: 'artifact_set'; id: string; qualification: ArtifactQualification; evidenceVersion: number }
-  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null }
+  | { kind: 'runtime_artifact'; identity: string; observedAt: number | null; services?: ServiceArtifactEvidence[] }
   | { kind: 'intent'; id: string; composeContentSha256: string }
   | { kind: 'rollout_candidate'; id: string }
   | { kind: 'rollout_generation'; id: string }
   | { kind: 'invocation'; authored: AuthoredInvocationIdentity }
+  | { kind: 'observed_invocation'; observed: AuthoredInvocationIdentity; observedAt: number }
   | { kind: 'health_run'; runId: string; deployedGenerationId: string | null };
 
 export interface GitOpsApprovalRefs {
@@ -93,6 +94,19 @@ export interface GitOpsApprovalRefs {
   rolloutAuthorizationRef: string | null;
   legacyCombinedApprovalRef: string | null;
 }
+
+/**
+ * The rollout scope an approved placement froze, which is what a dispatch would
+ * target. Not the same as `targets`, which are the nodes an application is
+ * observed to run on: a Blueprint approved for a node no rollout has reached yet
+ * has no row there, and a node it was withdrawn from keeps one. A confirmation
+ * that reads `targets` would name somewhere the action will not go.
+ */
+export type ApprovedRolloutScope =
+  | { status: 'not_applicable' }
+  | { status: 'unapproved' }
+  | { status: 'unresolved'; approvalRef: string; reason: 'no_candidate' | 'unreadable_required_targets' | 'approval_does_not_resolve' }
+  | { status: 'approved'; approvalRef: string; nodeIds: number[] };
 
 // --- source facet -----------------------------------------------------------
 
@@ -123,19 +137,22 @@ export type SourceFacet =
         | 'never_reconciled'
         | 'checking_fetching'
         | 'application_generation_accepted'
-        | 'candidate_ready'
-        | 'source_review_pending'
-        | 'source_conflict_blocker'
+         | 'candidate_ready'
+         | 'source_conflict_blocker'
         | 'source_reconcile_required';
-    })
-  | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
+     })
+   | (SourceIdentityFields & {
+       status: 'source_review_pending';
+       reviewBlockReason: 'stateful_withdrawal' | null;
+     })
+   | (SourceIdentityFields & { status: 'source_superseded'; supersededGenerationId: string })
   | (SourceIdentityFields & { status: 'applying'; activeOperationId: string; activeGenerationId: string })
   | (SourceIdentityFields & { status: 'source_poll_scheduled'; nextPollAt: number })
   | (SourceIdentityFields & { status: 'source_retry_scheduled'; retryAt: number; retryCount: number })
   | (SourceIdentityFields & { status: 'source_suspended'; suspendedAt: number; suspendedReason: string | null })
   | (SourceIdentityFields & {
       status: 'source_failed';
-      failureStage: 'fetch' | 'validation' | 'apply' | 'create';
+       failureStage: 'fetch' | 'validation' | 'apply' | 'create';
       failureClass: string;
       failureAt: number;
       retryAt: number | null;
@@ -301,6 +318,7 @@ export type RuntimeFacet =
         | 'evict_blocked'
         | 'drifted'
         | 'correcting'
+        | 'repair_held'
         | 'fully_deployed_health_pending'
         | 'health_checking'
         | 'synced_and_healthy'
@@ -334,6 +352,58 @@ export type LkgFacet =
   | { status: 'available'; generationId: string; artifactSetId: string | null }
   | { status: 'unavailable' }
   | { status: 'qualified'; generationId: string; artifactSetId: string };
+
+/**
+ * How a rollout reacts to a per-target health outcome.
+ *
+ * `observe` is the default and records outcomes without gating advancement, so a
+ * rollout behaves exactly as it did before an operator chose anything. The other
+ * four are opt-in because three of them can stop or restore work across a fleet.
+ */
+export type HealthRolloutPolicy = 'observe' | 'pause' | 'retry_once' | 'stop' | 'rollback';
+
+export const HEALTH_ROLLOUT_POLICIES: readonly HealthRolloutPolicy[] = [
+  'observe',
+  'pause',
+  'retry_once',
+  'stop',
+  'rollback',
+];
+
+/** Why a rollout stopped advancing on one target. */
+export type HealthStopReason =
+  | 'health_passed'
+  | 'health_failed'
+  | 'health_unknown'
+  | 'health_retried'
+  | 'health_retry_exhausted'
+  | 'rollout_stopped'
+  | 'rollback_completed'
+  | 'rollback_pending'
+  | 'stop_acknowledged'
+  | 'rollback_unavailable';
+
+/**
+ * The health-gated rollout's state for one target.
+ *
+ * `policy` is the frozen policy of the rollout this target is under, null when
+ * there is no authorized rollout, which is a different answer from a policy that
+ * is observe. `configuredPolicy` is what the operator has set on the current
+ * intent, which is what the next rollout will freeze; after a change only it
+ * moves, so reporting just the frozen one would make a saved change look lost.
+ * `recoveryAvailable` says
+ * whether a rollback has a captured pre-rollout generation to restore, which the
+ * LKG facet cannot answer: the LKG is the newest generation that ever passed, not
+ * what this target ran before the rollout.
+ */
+export interface HealthGateFacet {
+  policy: HealthRolloutPolicy | null;
+  configuredPolicy: HealthRolloutPolicy;
+  awaitingRunId: string | null;
+  attempts: number;
+  stopReason: HealthStopReason | null;
+  recoveryAvailable: boolean;
+}
 
 export type HealthFacet =
   | { status: 'not_applicable' | 'unbound' }
@@ -415,6 +485,8 @@ export interface GitOpsTargetProjection {
   legacyAppliedRevision: number | null;
   runtime: RuntimeFacet;
   health: HealthFacet;
+  /** Absent on a projection from a remote running an older version. */
+  healthGate?: HealthGateFacet;
   lkg: LkgFacet;
   tombstoned: boolean;
 }
@@ -422,6 +494,7 @@ export interface GitOpsTargetProjection {
 export type ConfiguredPolicy =
   | { kind: 'git_source'; autoApplyOnWebhook: boolean; autoDeployOnApply: boolean }
   | { kind: 'blueprint_drift'; driftMode: 'observe' | 'suggest' | 'enforce' }
+  | { kind: 'health_rollout'; healthPolicy: HealthRolloutPolicy }
   | null;
 
 /**
@@ -471,6 +544,7 @@ export interface GitOpsRevisionAbsent {
   limitations: readonly GitOpsLimitation[];
   availableActions: readonly [];
   approvals: null;
+  approvedRolloutScope?: ApprovedRolloutScope;
 }
 
 /** A live application. `availableActions` is never empty: "nothing to do" is ['none']. */
@@ -480,9 +554,17 @@ export interface GitOpsRevisionLive {
   applicationId: string;
   lifecycleStatus: GitOpsLifecycleStatus;
   stackName: string | null;
+  /** The stack whose Git source this application pulls. Direct rows copy their stack name here. A Git-managed Blueprint clears stackName and keeps the source stack here. Null when it has none. */
+  configuredSourceStackName: string | null;
   blueprintId: number | null;
   rolloutGenerationId: string | null;
   approvals: GitOpsApprovalRefs;
+  /**
+   * The rollout scope the placement approval froze. Absent on a projection from
+   * a remote running an older build, which reads as "no scope is proven" rather
+   * than as an empty approved scope.
+   */
+  approvedRolloutScope?: ApprovedRolloutScope;
   facets: GitOpsFacets;
   targets: readonly GitOpsTargetProjection[];
   drift: readonly GitOpsDriftItem[];
@@ -490,6 +572,45 @@ export interface GitOpsRevisionLive {
   // the absent arm above.
   limitations: readonly GitOpsLimitation[];
   availableActions: readonly GitOpsAvailableAction[];
+  /**
+   * The three authority policies, configured and effective. Empty on the absent
+   * arm, which is present rather than missing so a reader never has to tell "no
+   * application" from "a build that said nothing".
+   */
+  authorityPolicies: readonly AuthorityPolicyRead[];
+}
+
+// --- authority policies ------------------------------------------------------
+
+/**
+ * What one authority policy is set to, and what it actually did.
+ *
+ * The wire's spelling of the three domains. Kept as its own union rather than
+ * reusing the policy value unions, because a read type has to survive a
+ * vocabulary this build has not seen: `configured` and `effectiveFrozen` are
+ * strings here so an unfamiliar value is displayed as unfamiliar rather than
+ * dropped. A write may not do that, so the write unions live in the API module.
+ */
+export type AuthorityPolicyDomain = 'source' | 'placement' | 'rollout_authorization';
+
+export type AuthorityPolicyDecision =
+  | 'policy_authorized'
+  | 'operator_authorized'
+  | 'awaiting_operator'
+  | 'policy_declined'
+  | 'not_applicable'
+  | (string & {});
+
+export interface AuthorityPolicyRead {
+  domain: AuthorityPolicyDomain;
+  configured: string;
+  /** Null when no readable frozen snapshot exists. Never the current setting. */
+  effectiveFrozen: string | null;
+  decision: AuthorityPolicyDecision;
+  /** A closed decision reason, or null when nothing is outstanding. */
+  reason: string | null;
+  decidedBy: 'operator' | 'configured_policy' | null;
+  decidedAt: number | null;
 }
 
 /** Narrow on `targetMode === 'not_applicable'`; the live modes are disjoint from it. */

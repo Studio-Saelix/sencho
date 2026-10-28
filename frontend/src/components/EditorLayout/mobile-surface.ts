@@ -42,3 +42,18 @@ export function deriveMobileSurface({
     else surface = 'content';
     return { surface, detailReady, detailOpen };
 }
+
+/**
+ * What a navigate event does on each layout. A phone shows one surface at a
+ * time, so a view change that leaves the surface on the stack list is invisible:
+ * it has to bring the content surface up first. A desktop applies the change
+ * as is.
+ */
+export function applyNavigateEvent(
+    isMobile: boolean,
+    leaveToContentSurface: (then: () => void) => void,
+    apply: () => void,
+): void {
+    if (isMobile) leaveToContentSurface(apply);
+    else apply();
+}

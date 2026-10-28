@@ -73,6 +73,8 @@ export const CAPABILITIES = [
   'remote-auto-update-checked-v1',
   'gitops-source-controller',
   'fleet-readiness-v1',
+  'blueprint-digest-pins-v1',
+  'health-gate-observation-v1',
 ] as const;
 
 /**
@@ -172,6 +174,35 @@ export const GITOPS_SOURCE_CONTROLLER_CAPABILITY =
  * surface it feeds.
  */
 export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satisfies Capability;
+
+/**
+ * A node that serves `GET /api/stacks/:stackName/health-observation`: the
+ * runtime facts a hub-driven health gate reads for a rollout target on it.
+ *
+ * The gate runs on the instance that owns the rollout, so for a target on
+ * another node it cannot read that node's Docker. A node advertising this key
+ * answers for its own containers, which is what lets a rollout to it be
+ * health-gated.
+ *
+ * A hub probes this key before sending a non-observe policy to a remote target
+ * and refuses, before any deploy, when the target does not advertise it.
+ * `gitops-health-rollout-policy` was the placeholder for this switch and is
+ * deliberately never advertised by any build: a hub old enough to probe that
+ * key would run its own hub-local gate against the remote node, which can only
+ * end unknown, so only a hub that speaks this protocol may see it as supported.
+ */
+export const HEALTH_GATE_OBSERVATION_CAPABILITY =
+  'health-gate-observation-v1' as const satisfies Capability;
+
+/**
+ * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each
+ * service at the pinned digest with `--pull never` instead of its authored
+ * tag). A leaf without this flag ignores the field and redeploys by tag, so the
+ * hub refuses to send a digest-pinned apply to one rather than let a repair
+ * silently lose its pin.
+ */
+export const BLUEPRINT_DIGEST_PINS_V1_CAPABILITY =
+  'blueprint-digest-pins-v1' as const satisfies Capability;
 
 /** Contract version the hub and target negotiate for exact-ref proof. */
 export const REMOTE_REGISTRY_EXACT_REF_CONTRACT_VERSION = 1;

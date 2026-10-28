@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import BashExecModal from '../BashExecModal';
 import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
@@ -20,7 +21,7 @@ import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffAc
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
-import type { useComposeReapplyAction } from '../FleetView/hooks/useComposeReapplyAction';
+import type { useComposeReapplyAction, ComposeReapplyTarget } from '../FleetView/hooks/useComposeReapplyAction';
 import type { StackAction } from './EditorView';
 import { resolveStackFileKey } from './hooks/resolveStackFileKey';
 
@@ -40,11 +41,15 @@ interface ShellOverlaysProps {
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
+  /** The active node when the caller may reapply Sencho from its Compose configuration, else null. */
+  reapplySelfTarget: ComposeReapplyTarget | null;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
   deleteVolumePreservation: VolumePreservationOnDelete;
   onOpenFleetNodeUpdates: () => void;
+  /** Open the Policies tab on the node a policy block was raised against (null: the active node). */
+  onOpenPolicySettings: (nodeId: number | null) => boolean;
   /** Ref-backed readiness check, evaluated at confirmation time so a dialog
    *  opened while ready cannot dispatch after a node switch or failed refresh. */
   hydrationReady: () => boolean;
@@ -64,11 +69,13 @@ export function ShellOverlays({
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
+  reapplySelfTarget,
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
   deleteVolumePreservation,
   onOpenFleetNodeUpdates,
+  onOpenPolicySettings,
   hydrationReady,
 }: ShellOverlaysProps) {
   const {
@@ -88,6 +95,16 @@ export function ShellOverlays({
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
+
+  // The Reapply confirm acts on the active node, so a node switch closes it
+  // rather than leaving a dialog that now targets a different Sencho.
+  const reapplyNodeId = reapplySelfTarget?.nodeId ?? null;
+  const shownForNodeId = useRef(reapplyNodeId);
+  useEffect(() => {
+    if (shownForNodeId.current === reapplyNodeId) return;
+    shownForNodeId.current = reapplyNodeId;
+    setSelfStackProtectedOpen(false);
+  }, [reapplyNodeId, setSelfStackProtectedOpen]);
 
   const isDeleteConfirming =
     deleteTarget != null &&
@@ -125,6 +142,18 @@ export function ShellOverlays({
       <SelfStackProtectedDialog
         open={selfStackProtectedOpen}
         onOpenChange={setSelfStackProtectedOpen}
+        onReapply={reapplySelfTarget ? async () => {
+          // Same readiness and single-flight checks as the Save & Reapply
+          // confirm. Returning a promise is what keeps the dialog open: readiness
+          // loss says so and sends nothing, and the confirm can be retried.
+          if (!hydrationReady()) {
+            toast.error('Status data unavailable. Refresh and try again.');
+            return;
+          }
+          setSelfStackProtectedOpen(false);
+          if (composeReapply.dispatching) return;
+          void composeReapply.runReapply(reapplySelfTarget);
+        } : undefined}
         canOpenFleetUpdates={canSelfUpdate}
         onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />
@@ -243,8 +272,11 @@ export function ShellOverlays({
         payload={policyBlock?.payload ?? null}
         stackName={policyBlock?.stackName ?? ''}
         canBypass={isAdmin}
+        action={policyBlock?.action ?? 'deploy'}
+        canEditSettings={isAdmin}
         bypassing={policyBypassing}
         onClose={() => setPolicyBlock(null)}
+        onOpenSettings={() => onOpenPolicySettings(policyBlock?.nodeId ?? null)}
         onBypass={stackActions.bypassPolicyAndRetry}
       />
 
@@ -292,7 +324,23 @@ export function ShellOverlays({
                 return;
               }
               const saved = await stackActions.saveFile();
-              if (saved) await stackActions.deployStack();
+              // afterSave: this path saved before deploying too, so a deploy that
+              // skips is a split outcome here as well.
+              if (saved) await stackActions.deployStack(undefined, { afterSave: true });
+            } else if (snapshot?.mode === 'save-and-pull-images') {
+              // Same readiness contract as Save & Deploy: this writes the file
+              // first, so it must not proceed while status evidence is not
+              // authoritative.
+              if (!hydrationReady()) {
+                toast.error('Status data unavailable. Refresh and try again.');
+                return;
+              }
+              const saved = await stackActions.saveFile();
+              // afterSave: the diff-preview path saves before pulling too, so a
+              // pull that skips is a split outcome here as well.
+              if (saved) await stackActions.pullStackImages(undefined, { afterSave: true });
+            } else if (snapshot?.onConfirm) {
+              await snapshot.onConfirm();
             } else {
               // Plain Save is never gated by status readiness.
               await stackActions.saveFile();

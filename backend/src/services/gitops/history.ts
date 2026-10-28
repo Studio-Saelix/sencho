@@ -4,7 +4,7 @@ import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from '.
 import { enqueueHistoryPublication } from './publish';
 import { insertSettledOutbox, insertGitOpsEventOutbox } from './outbox';
 import { GITOPS_EVENT_PAYLOAD_VERSION, SETTLED_ATTEMPT_PAYLOAD_VERSION } from './attemptPayload';
-import { gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
+import { gitOpsCandidateState, gitOpsOutboxPlan, gitOpsPauseReason } from './notifications';
 import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   GitOpsApplicationRow,
@@ -42,6 +42,8 @@ export type GitOpsHistoryStage =
   | 'blueprint_deploy_started'
   | 'blueprint_drifted'
   | 'blueprint_evict_blocked'
+  | 'blueprint_drift_cleared'
+  | 'blueprint_repair_held'
   | 'blueprint_state_review'
   | 'blueprint_withdraw_failed'
   | 'blueprint_withdraw_started'
@@ -62,8 +64,10 @@ export type GitOpsHistoryStage =
   | 'fetched'
   | 'fetched_invalid'
   | 'health_finalized'
+  | 'health_run_released'
   | 'inline_revision_frozen'
   | 'intent_revised'
+  | 'invocation_observed'
   | 'legacy_combined_appended'
   | 'operation_interrupted'
   | 'partial_cleared'
@@ -77,6 +81,7 @@ export type GitOpsHistoryStage =
   | 'rollback_completed'
   | 'rollback_in_progress'
   | 'rollback_partial_failed'
+  | 'rollback_refusal_settled'
   | 'rollout_authorized'
   | 'rollout_candidate_opened'
   | 'rollout_generation_opened'
@@ -87,6 +92,9 @@ export type GitOpsHistoryStage =
   | 'source_conflict_blocker'
   | 'source_poll_scheduled'
   | 'source_policy_changed'
+  | 'health_rollout_policy_set'
+  | 'placement_policy_changed'
+  | 'rollout_authorization_policy_changed'
   | 'source_reconcile_started'
   | 'source_reconcile_settled'
   | 'source_retry_scheduled'
@@ -159,6 +167,13 @@ export type HistoryInsert = {
   rolloutAuthorizationRef?: string | null;
   legacyCombinedApprovalRef?: string | null;
   requiredTargetsJson?: string | null;
+  /**
+   * The observation this row records, when the stage is one that carries
+   * evidence. The column predates its writer; the audit row is where a
+   * reader looking at *why* the target row moved finds the value itself,
+   * rather than only the fact that something moved.
+   */
+  invocationObservedJson?: string | null;
   recoveryRef?: string | null;
   redactedReasonClass?: string | null;
   at: number;
@@ -229,12 +244,12 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     null,
     null,
     null,
-    null,
+    row.invocationObservedJson ?? null,
     row.recoveryRef ?? null,
     row.redactedReasonClass ?? null,
   );
   if (result.changes !== 1) return null;
-  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode);
+  const outboxPlan = gitOpsOutboxPlan(row.stage, row.application.target_mode, row.after);
   if (outboxPlan?.kind === 'settled') {
     insertSettledOutbox(db, {
       version: SETTLED_ATTEMPT_PAYLOAD_VERSION,
@@ -249,6 +264,8 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
       trigger: row.trigger,
       actor: row.actor,
       at: row.at,
+      candidateGenerationId: row.generationId ?? row.application.candidate_generation_id ?? null,
+      candidateState: gitOpsCandidateState(row.application),
     });
   } else if (outboxPlan?.kind === 'event') {
     insertGitOpsEventOutbox(db, {
@@ -269,6 +286,11 @@ export function insertHistory(db: Database.Database, row: HistoryInsert): string
     id,
     stage: row.stage,
     outcome: row.outcome,
+    // Carried so the drain can re-derive the same outbox decision the insert
+    // made. Without it the drain would fall back to the stage alone, and a
+    // stage whose notification depends on what the transition recorded would
+    // insert a row nothing drains.
+    after: row.after,
     applicationId: row.application.id,
     targetMode: row.application.target_mode,
     stackName: row.application.stack_name,

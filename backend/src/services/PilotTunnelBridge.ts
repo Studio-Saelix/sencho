@@ -19,9 +19,11 @@ import {
 } from '../pilot/protocol';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { FORWARDING_HEADER_NAMES } from '../helpers/trustedProxyCidrs';
 import { PilotMetrics } from './PilotMetrics';
+import { startWsHeartbeat } from '../utils/wsHeartbeat';
+import { TUNNEL_SEND_BUFFER_HIGH_WATER_MARK } from '../mesh/tcpStreamSwitchboard';
 
-const BUFFER_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
 /**
  * Poll cadence for the backpressure drain check. The `ws` WebSocket does not
@@ -31,6 +33,29 @@ const PING_INTERVAL_MS = 30_000;
  * paused, so steady-state cost is zero.
  */
 const DRAIN_CHECK_INTERVAL_MS = 100;
+
+const FORWARDING_HEADER_SET = new Set<string>([...FORWARDING_HEADER_NAMES, 'forwarded']);
+
+/**
+ * Copy request headers into a tunnel frame, dropping forwarding headers.
+ *
+ * Forwarding headers have no trust context across the tunnel: the agent's
+ * loopback listener sees the replayed request from its own loopback peer, so
+ * relaying `X-Forwarded-*` would ask the agent to trust a client address it
+ * cannot verify. The hub's own request pipeline has already applied its
+ * trusted-proxy policy to the original request. `Forwarded` (RFC 7239) is
+ * stripped defensively: no reader honors it today, and it must not become a
+ * spoofable client address if one ever does.
+ */
+function tunnelFrameHeaders(req: IncomingMessage): Record<string, string> {
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+        if (FORWARDING_HEADER_SET.has(k)) continue;
+        if (typeof v === 'string') headers[k] = v;
+        else if (Array.isArray(v)) headers[k] = v.join(', ');
+    }
+    return headers;
+}
 
 interface StreamMeta {
     idleTimer?: NodeJS.Timeout;
@@ -179,7 +204,9 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     private readonly pausedReqs = new Map<number, IncomingMessage>();
     private readonly tcpAwaitingDrain = new Set<number>();
     private loopbackUrl = '';
-    private pingTimer?: NodeJS.Timeout;
+    private stopHeartbeat?: () => void;
+    /** Local TCP sockets paused because the tunnel's send buffer is full. */
+    private readonly pausedTcpSockets = new Set<net.Socket>();
     private drainTimer?: NodeJS.Timeout;
     private closed = false;
 
@@ -216,10 +243,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 resolve();
             });
         });
-        this.pingTimer = setInterval(() => {
-            if (this.tunnelWs.readyState !== WebSocket.OPEN) return;
-            try { this.tunnelWs.ping(); } catch { /* surfaced via 'error' */ }
-        }, PING_INTERVAL_MS);
+        // The WS can die while the loopback listener is still coming up, in
+        // which case close() already ran and there is no heartbeat to stop.
+        if (this.closed) return;
+        this.stopHeartbeat = startWsHeartbeat(this.tunnelWs, PING_INTERVAL_MS);
     }
 
     public getLoopbackUrl(): string { return this.loopbackUrl; }
@@ -271,7 +298,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         this.sendBinary(BinaryFrameType.TcpData, streamId, payload);
         s.bytesOut += payload.length;
         this.refreshIdleTimer(streamId, s);
-        const ok = this.tunnelWs.bufferedAmount <= BUFFER_HIGH_WATER_MARK;
+        const ok = this.tunnelWs.bufferedAmount <= TUNNEL_SEND_BUFFER_HIGH_WATER_MARK;
         if (!ok) {
             // Backpressure: caller will pause until 'drain'. Track this TCP
             // stream so checkDrain knows to fire 'drain' on it (and so the
@@ -292,7 +319,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
     public close(code = 1000, reason = 'closed by primary'): void {
         if (this.closed) return;
         this.closed = true;
-        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = undefined; }
+        if (this.stopHeartbeat) { this.stopHeartbeat(); this.stopHeartbeat = undefined; }
         this.stopDrainTimer();
         // Resume any paused IncomingMessage so its end event can fire and
         // its parser unwinds; the loopback close below will tear down the
@@ -302,6 +329,10 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             try { req.resume(); } catch { /* ignore */ }
         }
         this.pausedReqs.clear();
+        for (const socket of this.pausedTcpSockets) {
+            try { socket.resume(); } catch { /* ignore */ }
+        }
+        this.pausedTcpSockets.clear();
         this.tcpAwaitingDrain.clear();
 
         for (const [, state] of this.streams) {
@@ -336,11 +367,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         this.streams.set(streamId, state);
         this.refreshIdleTimer(streamId, state);
 
-        const headers: Record<string, string> = {};
-        for (const [k, v] of Object.entries(req.headers)) {
-            if (typeof v === 'string') headers[k] = v;
-            else if (Array.isArray(v)) headers[k] = v.join(', ');
-        }
+        const headers = tunnelFrameHeaders(req);
 
         this.sendJson({
             t: 'http_req',
@@ -355,7 +382,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             if (!s) return;
             this.sendBinary(BinaryFrameType.HttpReqBody, streamId, chunk);
             this.refreshIdleTimer(streamId, s);
-            if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) {
+            if (this.tunnelWs.bufferedAmount > TUNNEL_SEND_BUFFER_HIGH_WATER_MARK) {
                 this.pauseRequest(streamId, req);
             }
         });
@@ -412,11 +439,7 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
         this.streams.set(streamId, state);
         this.refreshIdleTimer(streamId, state);
 
-        const headers: Record<string, string> = {};
-        for (const [k, v] of Object.entries(req.headers)) {
-            if (typeof v === 'string') headers[k] = v;
-            else if (Array.isArray(v)) headers[k] = v.join(', ');
-        }
+        const headers = tunnelFrameHeaders(req);
 
         this.sendJson({
             t: 'ws_open',
@@ -710,11 +733,15 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             this.stopDrainTimer();
             return;
         }
-        if (this.tunnelWs.bufferedAmount > BUFFER_HIGH_WATER_MARK) return;
+        if (this.tunnelWs.bufferedAmount > TUNNEL_SEND_BUFFER_HIGH_WATER_MARK) return;
         for (const [, req] of this.pausedReqs) {
             try { req.resume(); } catch { /* ignore */ }
         }
         this.pausedReqs.clear();
+        for (const socket of this.pausedTcpSockets) {
+            try { socket.resume(); } catch { /* ignore */ }
+        }
+        this.pausedTcpSockets.clear();
         // Fire 'drain' only on TCP streams that signaled backpressure; do not
         // wake every accepted TCP stream because that violates the documented
         // event contract on TcpStream.
@@ -980,8 +1007,15 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 this.sendBinary(BinaryFrameType.TcpData, s, chunk);
                 cur.bytesOut += chunk.length;
                 this.refreshIdleTimer(s, cur);
+                // Backpressure: stop reading the local container while the
+                // tunnel is saturated; checkDrain resumes it.
+                if (this.tunnelWs.bufferedAmount > TUNNEL_SEND_BUFFER_HIGH_WATER_MARK) {
+                    socket.pause();
+                    this.pausedTcpSockets.add(socket);
+                    this.ensureDrainTimer();
+                }
             });
-            socket.on('close', () => teardown(true));
+            socket.on('close', () => { this.pausedTcpSockets.delete(socket); teardown(true); });
         });
     }
 

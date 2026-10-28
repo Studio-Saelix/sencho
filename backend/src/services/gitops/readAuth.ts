@@ -165,14 +165,14 @@ export function classifyHistoryRow(input: HistoryRowEvidence): GitOpsReadRequire
  * Exhaustive on purpose: a requirement this function does not recognize is
  * denied rather than falling through to the narrower stack check.
  */
-export function satisfiesGitOpsRead(req: Request, requirement: GitOpsReadRequirement): boolean {
+export function satisfiesGitOpsRead(req: Request, requirement: GitOpsReadRequirement, resourceNodeId?: number | null): boolean {
   switch (requirement.kind) {
     case 'admin':
       return req.user?.role === 'admin';
     case 'audit':
       return checkPermission(req, 'system:audit');
     case 'stack_read':
-      return checkPermission(req, 'stack:read', 'stack', requirement.stackName);
+      return checkPermission(req, 'stack:read', 'stack', requirement.stackName, resourceNodeId);
     default: {
       const unrecognized: never = requirement;
       void unrecognized;

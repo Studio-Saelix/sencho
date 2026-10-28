@@ -9,6 +9,7 @@ import type { RowState } from './classifyRow';
 import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
+import { SOURCE_STATE_LOOKUP } from '@/lib/gitopsState';
 import type { StackHealthCoverage, StackHealthNavTarget, StackHealthRow, StackHealthScopeMode, StackHealthViewKind } from './stackHealthTypes';
 import { STACK_HEALTH_COLLAPSE_SIZE } from './useStackHealthScope';
 import { DashboardPanel, PanelMeta } from './DashboardPanel';
@@ -29,8 +30,22 @@ interface StackHealthTableProps {
 
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
 
-const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[840px]';
-const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[940px]';
+// Full class names so Tailwind sees them. The GitOps column is only in the template
+// while some stack has a state to show in it; it adds 148px plus one 16px gap. Each
+// floor covers the fixed tracks, the gaps, the grid's own horizontal padding
+// (--density-row-x, 40px at comfortable density, which border-box folds into min-width)
+// and a 160px stack-name floor, so the name stays readable when the table hits its
+// minimum and scrolls. This node: 998 plain, 1162 with GitOps. All nodes: 1102 plain,
+// 1266 with GitOps.
+const THIS_NODE_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[998px]';
+const THIS_NODE_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1162px]';
+const ALL_NODES_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_168px_56px_52px_52px_72px_110px_16px] min-w-[1102px]';
+const ALL_NODES_GITOPS_GRID = 'grid-cols-[minmax(0,1fr)_88px_64px_64px_148px_168px_56px_52px_52px_72px_110px_16px] min-w-[1266px]';
+
+/** Whether a stack's GitOps state is one this build can render as a badge (a newer node's may not be). */
+function hasGitOpsBadge(state: StackHealthRow['gitopsSourceState']): state is NonNullable<StackHealthRow['gitopsSourceState']> {
+  return state !== undefined && state in SOURCE_STATE_LOOKUP;
+}
 
 function formatMemory(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -134,7 +149,11 @@ export function StackHealthTable({
     setExpanded(false);
   }, [scope]);
 
-  const grid = scope === 'all-nodes' ? ALL_NODES_GRID : THIS_NODE_GRID;
+  // Judged on every row, not the visible ones, so expanding the list never adds a column.
+  const showGitOps = rows.some(row => hasGitOpsBadge(row.gitopsSourceState));
+  const grid = scope === 'all-nodes'
+    ? (showGitOps ? ALL_NODES_GITOPS_GRID : ALL_NODES_GRID)
+    : (showGitOps ? THIS_NODE_GITOPS_GRID : THIS_NODE_GRID);
 
   const sortedRows = useMemo(() => {
     const list = [...rows];
@@ -246,6 +265,7 @@ export function StackHealthTable({
         {scope === 'all-nodes' ? <span>NODE</span> : null}
         <span>STATE</span>
         <span>SOURCE</span>
+        {showGitOps ? <span>GITOPS</span> : null}
         <span>NETWORKS</span>
         <span>PORT</span>
         <SortHeader label="UP" k="up" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
@@ -286,19 +306,6 @@ export function StackHealthTable({
                     />
                   </span>
                 )}
-                {row.gitopsSourceState && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openGitOpsWorkplace({ nodeId: row.node.id, stack: row.name });
-                    }}
-                    aria-label="Open this stack in the GitOps portfolio"
-                    className="shrink-0 cursor-pointer"
-                  >
-                    <GitOpsBadge facet="source" status={row.gitopsSourceState} />
-                  </button>
-                )}
               </span>
               {scope === 'all-nodes' ? (
                 <span className="truncate font-mono text-[11px] text-stat-subtitle">{row.node.name}</span>
@@ -309,6 +316,25 @@ export function StackHealthTable({
               <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
                 {row.source === 'git' ? 'Git' : 'Local'}
               </span>
+              {showGitOps ? (
+                <span className="flex min-w-0 items-center">
+                  {hasGitOpsBadge(row.gitopsSourceState) ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openGitOpsWorkplace({ nodeId: row.node.id, stack: row.name });
+                      }}
+                      aria-label="Open this stack in the GitOps portfolio"
+                      className="min-w-0 cursor-pointer"
+                    >
+                      <GitOpsBadge facet="source" status={row.gitopsSourceState} />
+                    </button>
+                  ) : (
+                    <span className="font-mono text-xs text-stat-subtitle">--</span>
+                  )}
+                </span>
+              ) : null}
               <span className="min-w-0 overflow-hidden font-mono text-xs text-stat-subtitle">
                 <NetworksCell networks={row.networks} />
               </span>

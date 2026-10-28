@@ -11,13 +11,14 @@ import type { EffectiveServiceModelResult, EffectiveServiceSpec } from '../servi
 const { state } = vi.hoisted(() => ({
   state: {
     updateStack: vi.fn(),
+    evaluateDockerEndpoint: vi.fn(),
     model: null as EffectiveServiceModelResult | null,
   },
 }));
 
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
-    getInstance: () => ({ updateStack: state.updateStack }),
+    getInstance: () => ({ updateStack: state.updateStack, evaluateDockerEndpoint: state.evaluateDockerEndpoint }),
   },
 }));
 
@@ -36,6 +37,8 @@ function spec(name: string): EffectiveServiceSpec {
 beforeEach(() => {
   state.updateStack.mockReset();
   state.updateStack.mockResolvedValue({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+  state.evaluateDockerEndpoint.mockReset();
+  state.evaluateDockerEndpoint.mockResolvedValue(null);
   state.model = null;
 });
 
@@ -110,6 +113,19 @@ describe('StackUpdateOrchestrator service branch guards', () => {
     );
     expect(result).toMatchObject({ kind: 'service_failed', code: 'service_update_single_service' });
     expect(state.updateStack).not.toHaveBeenCalled();
+  });
+
+  it('refuses a service-scoped update the Docker endpoint guard refuses, before any gate, recovery row, or compose call', async () => {
+    state.model = { renderable: true, services: [spec('app'), spec('socket-proxy')] };
+    state.evaluateDockerEndpoint.mockResolvedValue({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' });
+
+    const result = await orch().execute(
+      { nodeId: 0, stackName: 'web', target: { scope: 'service', serviceName: 'socket-proxy' }, trigger: 'manual', actor: 'tester' },
+      { policyOptions: { bypass: false, actor: 'tester' } },
+    );
+
+    expect(result).toMatchObject({ kind: 'service_failed', code: 'docker_endpoint_protected', error: 'carries the Docker connection' });
+    expect(state.evaluateDockerEndpoint).toHaveBeenCalledWith('web', { kind: 'service', service: 'socket-proxy' });
   });
 
   it('fails closed when the effective model cannot render', async () => {

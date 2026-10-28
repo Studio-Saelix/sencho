@@ -5,12 +5,14 @@ description: Create, deploy, control, and remove Docker Compose stacks.
 
 A **stack** in Sencho is a Docker Compose project: a directory inside your `COMPOSE_DIR` that contains at least a `compose.yaml` (or `docker-compose.yml`) file. Sencho discovers every subdirectory as a stack and surfaces them in the left sidebar.
 
+A stack's compose file lives in its own directory. A link inside that directory is followed when the stack opens and deploys, as long as it points at a file inside the same compose root, so several stacks can point at one shared main compose file or override. Sencho never writes through such a link: saving the stack is refused with a note to edit the shared file where it lives, and a recovery generation records the shared file as an input it does not hold, so Rollback readiness lists it and a rollback reads its current content. A link that points outside the compose root is refused when you open or deploy the stack. To share configuration between stacks, put the file where each stack can reach it and `include:` or `extends:` it from each stack's own compose file.
+
 <Frame>
   <img src="/images/stack-management/sidebar-grouped.png" alt="Sencho sidebar showing the stack list grouped by label, with filter chips at the top" />
 </Frame>
 
 <Note>
-  Stack deploy, update, and down run `docker compose` through the same Docker endpoint as the rest of Sencho. When Sencho runs behind a Docker socket proxy, the proxy must allow POST and the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups for Compose operations to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy).
+  Stack deploy, update, and down run `docker compose` through the same Docker endpoint as the rest of Sencho. When Sencho runs behind a Docker socket proxy, the proxy must allow POST and the CONTAINERS, IMAGES, NETWORKS, and VOLUMES groups for Compose operations to work. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#docker-socket-proxy). Sencho refuses a stack operation that would stop or recreate the proxy it is using, because the connection would drop in the middle of the operation; see [Updating the proxy](/operations/self-hosting#updating-the-proxy).
 </Note>
 
 ## Creating a stack
@@ -63,7 +65,7 @@ Fill in:
 - **Branch**: defaults to `main`.
 - **Compose files**: one or more paths inside the repository, merged in the listed order. Defaults to `compose.yaml`. Browse the repository tree to pick them, or type a path. An optional **Project directory** sets the base for relative paths.
 - **Also sync sibling .env file**: when checked, a `.env` next to the primary compose file is pulled along with it.
-- **Authentication**: pick **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **SSH deploy key** for private SSH repos (with host-key fingerprint verification).
+- **Authentication**: pick **Public (no auth)** for public repos, **Personal Access Token** for private HTTPS repos, or **Deploy key (SSH)** for private SSH repos (with host-key fingerprint verification).
 - **Apply behavior**: controls what happens on future webhook pulls:
   - **Review only**: diffs surface in the sidebar; you apply manually.
   - **Auto-write files**: pulls write to disk; you redeploy manually.
@@ -225,7 +227,7 @@ Each row includes:
 - **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for `healthy`, `✗` red for `unhealthy`, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
 - **Container name** in mono.
 - **Meta line.** Uptime (`up 12 hours`), the Docker health status when defined (`healthy`, `unhealthy`, or `starting`), and the primary port mapping (`8989 → 8989/tcp`).
-- **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
+- **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The service's `sencho.service.url` label is used when set, and that address's host is shown on the link; otherwise the generated address uses the active node's host and switches to `https` for port 443. A long host truncates so the port mapping, the copy button, and the pencil stay on the card. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
 - **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, **Inspect image**, open a bash shell, and the **Service actions** kebab on single-service stacks and single-container multi-service rows (multi-replica services keep the kebab on the shared header; see below). **Inspect image** opens the same image detail sheet as [Resources](/features/resources#inspect-image). Used by shows the current stack only from this entry point.
 
@@ -290,7 +292,7 @@ Each row maps one compose concept to the value it resolves to right now:
 - **Network**: Derived network name and driver (default `{stack}_default · bridge`).
 - **Source**: `git · {host}/{repo}#{branch}` when Git Source is configured, else `local`. The whole row is clickable and opens the Git Source dialog. A pulsing dot appears when upstream has moved ahead of the working copy.
 
-A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
+A footer under the rows links the first published port. When that service has a `sencho.service.url` label, the link opens that address. Otherwise it opens the generated host and port. A refresh that fails keeps the last address. When the list has never loaded, the footer uses the generated host and port.
 
 If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows.
 
@@ -302,7 +304,7 @@ For actionable registry updates, the detail line also reads `patch · safe to ap
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. When a recovery generation captured the prior image ID, supported local-build recovery restores that exact image identity. Without a held prior ID, restore falls back to the authored files alone and does not reconstruct previously built layers.
 
-A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. See [Vulnerability Scanning](/features/vulnerability-scanning).
+A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. **Rescan** on the banner runs the scan again. See [Vulnerability Scanning](/features/vulnerability-scanning).
 
 ### Activity
 
@@ -361,7 +363,7 @@ Each mount row shows its type (bind, named, anonymous, tmpfs, socket), permissio
 
 ### Editing compose.yaml
 
-Click **Edit compose** in the panel header to open an editable Monaco workspace. Tabs at the top switch between `compose.yaml`, `.env` (when one exists), and **Files** (the stack directory tree). The save split-button reads **Save & Deploy** by default; its dropdown also offers **Save Only** and **Discard Changes**. Close the editor to return to the anatomy view; closing discards any unsaved compose and env edits. See [Compose Editor](/features/editor) for autocomplete, schema validation, and Git Source workflow.
+Click **Edit compose** in the panel header to open an editable Monaco workspace. Tabs at the top switch between `compose.yaml`, `.env` (when one exists), and **Files** (the stack directory tree). The save split-button reads **Save & Deploy** by default; its dropdown also offers **Save Only**, **Save & Pull Images**, and **Discard Changes**. Close the editor to return to the anatomy view; closing discards any unsaved compose and env edits. See [Compose Editor](/features/editor) for autocomplete, schema validation, and Git Source workflow.
 
 ## Deploying a stack
 
@@ -447,6 +449,32 @@ For services running multiple replicas, the action applies to every replica simu
   The service name in the action must match the `services:` key in your `compose.yaml`. If no containers exist yet for that service, the action will fail with a "service not found" error. Make sure the service is defined in the compose file and has been deployed at least once.
 </Note>
 
+### Service URL
+
+A published port on a container card is a link. It opens the service's `sencho.service.url` label when that label is set, and the generated host and port otherwise. A port Docker assigns automatically uses the label on the container card, and **Open App** uses it when only one service publishes a port that way. A service defined only in another compose file keeps the link; set the label in the file that defines it.
+
+Editors see a pencil labeled **Edit service URL** on a port row to set or clear the URL when the service is defined in the compose file that is open and the list of URLs has loaded. When the list cannot be loaded, the generated link stays, the pencil explains that the list is unavailable, and **Retry** loads it again. A later refresh that fails keeps the last address and the pencil, says the refresh failed, and offers **Retry**.
+
+The pencil changes only that label, and Sencho checks the source again right before the save. A service that shares the edited block through a YAML anchor gets its own copy, so it keeps its current values. The address is saved in the compose file and is visible to anyone who can read the stack, so it must not contain a password.
+
+Setting the URL is refused when:
+
+- a compose file merged after the open one sets `sencho.service.url` for the service, whether or not that value is a valid URL;
+- those later files cannot be traced (they use `include`, a service uses `extends`, a label list interpolates the key, a file uses a custom YAML tag, or the stack sets `COMPOSE_FILE`);
+- a label list in the open file interpolates the key, because the effective label could not be predicted.
+
+Clearing the URL is refused when:
+
+- another file still declares the label;
+- the chain cannot be traced (`include`, a label list that interpolates the key, a custom YAML tag, or `COMPOSE_FILE`);
+- the service inherits the label through `extends` or `label_file`, because removing it here would not fall back to the generated address.
+
+When setting or clearing is refused, the pencil explains the source and leaves the open file unchanged.
+
+The stack is refused outright when its compose file is a symlink pointing outside the stack directory (including into another stack) or a dangling symlink, or when the stack directory is itself a symlink. The URL list is then unavailable and the generated link stays.
+
+When the label cannot be added or removed without changing anything else, the pencil leaves the file as it is and asks you to edit the label in the editor. That happens for a shared block of labels reused inside a one-line `{ }` service, a comment inside a bracketed `[ ]` or `{ }` label list that removing the URL would take with it, or a file that uses `!reset`, `!override`, or another custom YAML tag anywhere.
+
 ## Stack context menu
 
 Click the kebab on a stack row in the sidebar to open its context menu. The menu adapts to the stack's current state; items are grouped by purpose.
@@ -460,7 +488,7 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 - **Alerts** (`A`): open the alert rule editor for this stack. See [Alerts and Notifications](/features/alerts-notifications).
 - **Auto-Heal** (`H`): configure auto-recovery for this stack. See [Auto-Heal Policies](/features/auto-heal-policies).
 - **Check updates** (`U`): force an image update check now.
-- **Open App** (`↗`): open the stack's web interface in a new tab. Shown only when the stack is running and exposes a web port.
+- **Open App** (`↗`): open the stack's web interface in a new tab. Shown when the stack is running and exposes a web port, or when the open stack has exactly one service URL configured.
 - **Mute** (`›`): quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications).
 
 **organize**

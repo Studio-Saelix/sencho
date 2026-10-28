@@ -28,7 +28,7 @@ The top card on the left holds the stack's identity and primary controls.
 The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 <Note>
-  If a stack is the Sencho instance you are currently signed into, stop, take down, delete, update, and rollback stay protected: clicking them opens a **Sencho instance protected** dialog. Eligible admins can apply on-disk Compose changes with **Save &amp; Reapply** in this editor (same recreate procedure as Fleet Node Updates), or open **Fleet → Node Updates**. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
+  If a stack is the Sencho instance you are currently signed into, deploy, update, stop, take down, delete, and rollback stay protected: the stack-level **Start**, **Stop**, **Take down**, **Update**, **Rollback**, and **Delete** controls are disabled, and the API refuses the same actions. Choosing **Stop service** on one of its services opens a dialog instead of acting. For eligible admins it is the **Reapply Sencho** confirmation: **Reapply &amp; restart** recreates Sencho from its current Compose configuration (the same procedure as **Save &amp; Reapply** in this editor and Fleet Node Updates), and Compose may recreate a service it lists in `depends_on` (a Docker socket proxy, for example) with it. Other users get a **Sencho instance protected** dialog that links to **Fleet → Node Updates** where it applies. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
 </Note>
 
 | Button | Behavior |
@@ -110,7 +110,7 @@ The Anatomy tab lists:
 
 When an image update is available, or the stack declares services with a local `build:` section, an inline banner appears at the top of the panel. Registry updates follow version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button. The banner runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
 
-If the most recent post-deploy vulnerability scan for this stack failed, partially failed, or was skipped, a dismissible amber banner appears below the update banner (`Last post-deploy scan failed.`, `...partially failed.`, or `Post-deploy scan did not run.`). See [Vulnerability Scanning](/features/vulnerability-scanning) for what triggers a post-deploy scan.
+If the most recent post-deploy vulnerability scan for this stack failed, partially failed, or was skipped, a dismissible amber banner appears below the update banner (`Last post-deploy scan failed.`, `...partially failed.`, or `Post-deploy scan did not run.`). **Rescan** on the banner runs the scan again on the node that owns the stack and follows it to the new result. Dismiss stays separate: it hides the current result, and a new scan attempt brings the banner back. If the rescan finishes cleanly the banner goes away and a toast says so. Images scanned recently are reused, so a rescan mainly retries images whose scan failed or never ran. See [Vulnerability Scanning](/features/vulnerability-scanning) for what triggers a post-deploy scan.
 
 <Frame>
   <img src="/images/editor/scan-status-banner.png" alt="Anatomy panel showing a post-deploy scan failed banner below the compose facts" />
@@ -129,7 +129,7 @@ The editor card has three tabs:
 | Tab | Purpose |
 |-----|---------|
 | `compose.yaml` | YAML editor with syntax highlighting. Always available. |
-| `.env` | Environment file editor with syntax highlighting. Disabled when the stack has no env file. |
+| `.env` | Environment file editor with syntax highlighting. When the stack has no env file yet, the first save creates the file Compose will read: a configured project env file, or the default `.env`. |
 | **Files** | Browseable directory tree for the stack folder. See the dedicated [Stack File Explorer](/features/stack-file-explorer) page for permissions, upload caps, and protected-file behavior. A full-screen toggle appears next to **Close editor** while this tab is active, collapsing the left column so the file tree and editor use the full width. |
 
 Above the editor area, the toolbar carries:
@@ -140,24 +140,31 @@ Above the editor area, the toolbar carries:
 
 When you switch to the `.env` tab and the stack defines more than one env file, a dropdown appears next to the tab strip so you can pick which file to edit. The dropdown locks while you have unsaved edits so switching files cannot drop them. Sencho discovers env files from the `env_file:` entries in `compose.yaml`; if none are declared, it falls back to a `.env` in the stack directory.
 
-The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service.
+The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service. When the stack has no env file yet, the same banner adds that saving creates the environment file in the stack directory. Creation never overwrites: if the file appears between opening the tab and saving, Sencho asks before replacing it, and declining reloads the file that is on disk.
 
 ### Save options
 
-As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy** for ordinary stacks. On Sencho's own Compose-managed stack, eligible admins see **Save & Reapply** instead. The dropdown chevron reveals two more actions.
+As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy** for ordinary stacks. On Sencho's own Compose-managed stack, eligible admins see **Save & Reapply** instead. The dropdown chevron reveals three more actions.
 
 | Action | Effect |
 |--------|--------|
 | **Save & Deploy** | Writes the file to disk, then runs `docker compose up -d` to apply changes. |
 | **Save & Reapply** | Shown only for admins on the Compose-managed Sencho self-stack when reapply is available. Writes the file, then confirms and recreates Sencho from the current on-disk Compose project without selecting a newer image. Same procedure as Fleet **Reapply configuration**. |
 | **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy or reapply. |
+| **Save & Pull Images** | Writes the file to disk, then downloads the stack's registry images to the node. Running containers are left exactly as they are. Services that build from source are skipped and listed in the confirmation; nothing is built. Use it to warm the image cache ahead of a maintenance window, or to stage an update and apply it later. Changes take effect on the next deploy. |
 | **Discard Changes** | Reverts the active file (compose or env) to the last saved version. Unsaved edits in that file are lost. |
+
+Downloading images is distinct from the **Pull now** action in the Git source dialog, which fetches the latest commit from the configured repository. **Save & Pull Images** never fetches source and never rebuilds; it only brings registry images onto the node. It is also hidden on Sencho's own Compose-managed stack, whose images update through **Fleet → Node Updates**.
+
+The action runs the same checks every other Compose operation runs before it touches the stack, so it refuses rather than half-applies in two cases. If the stack's repository secrets are SOPS-encrypted, the editor's mutating actions are refused and the stack has to be applied through Git so the secrets are decrypted in a controlled overlay. If **Block deploy on missing required env vars** is on in **Settings → Infrastructure → Stacks** and a required variable is unset, the pull is refused with the same message **Save & Deploy** and **Update** give, and no images are downloaded.
+
+Against a node whose Sencho instance does not include this action, only the download half fails. The file is written before the download is attempted, so your edit is on disk, no image is downloaded, and no running container is touched. The toast reports the image pull as failed and names the refusal rather than its cause. Update that node, then run **Save & Pull Images** again: the second run reads the file already on disk and downloads the images from it. See [Node Compatibility](/features/node-compatibility) for how Sencho handles version differences across a fleet.
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
 
-When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
+When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, **Save Only**, or **Save & Pull Images** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
 
 <Frame>
   <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with the unsaved version on the right and an ON DISK to UNSAVED legend in the footer" />
@@ -165,7 +172,7 @@ When **Diff preview before save** is enabled in **Settings → Infrastructure �
 
 Review the diff, then:
 
-- Click the primary button (**Save & deploy** or **Save & reapply** when triggered from that primary action, or **Save** when triggered from **Save Only**) to confirm and write the changes.
+- Click the primary button (**Save & deploy** or **Save & reapply** when triggered from that primary action, **Save** when triggered from **Save Only**, or **Save & pull images** when triggered from **Save & Pull Images**) to confirm and write the changes.
 - Click **Cancel** to return to the editor without saving.
 
 If there are no unsaved changes the modal is skipped and the save proceeds directly. The toggle is off by default and stored per browser, so each device remembers its own setting.
@@ -175,10 +182,10 @@ If there are no unsaved changes the modal is skipped and the save proceeds direc
 On a narrow screen the stack opens as a full-screen detail with **Health**, **Logs**, and **Compose** segments instead of the two-column cockpit. The **Compose** segment shows the read-only Anatomy summary; tap **Edit compose** to open a full-screen editor for small, safe changes.
 
 <Frame>
-  <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
+  <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose/.env toggle with compose selected, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
 </Frame>
 
-The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
+The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The file picker is locked while you have unsaved edits so switching files cannot drop them. When the stack has no env file yet, the `.env` view explains that saving creates the environment file. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and a chevron attached to the primary action holds **Save & Pull Images** so the action row never crowds the primary label. Every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
 
 A note at the bottom of the editor is a reminder that mobile editing is meant for small corrections such as bumping an image tag or fixing a value. For large compose rewrites, open the stack on a desktop. Editing requires the `stack:edit` permission.
 
@@ -230,9 +237,6 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   <Accordion title="Save & Deploy is disabled">
     A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
   </Accordion>
-  <Accordion title="The .env tab is greyed out">
-    The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
-  </Accordion>
   <Accordion title='Log viewer shows "Request forbidden by administrative rules"'>
     The container list can still load while log viewing fails. The **View logs** stream can show `[Sencho] Error fetching logs:` followed by an HTTP 403 and `Request forbidden by administrative rules`. A Docker socket proxy is blocking `/containers/{id}/logs`. On `linuxserver/socket-proxy`, set `ALLOW_LOGS=1` in addition to `CONTAINERS=1`. Tecnativa-style profiles include logs under `CONTAINERS`. See [Self-Hosting: Docker socket proxy](/operations/self-hosting#linuxserver-socket-proxy-extras).
   </Accordion>
@@ -254,11 +258,17 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   <Accordion title='"Failed to save file" toast appears when I click Save & Deploy'>
     The PUT to write the compose file failed (most often a permission or disk-space issue on the node). Save & Deploy stops at the save step in this case, so no deploy is attempted and your editor still holds the unsaved version. Resolve the underlying error on the node, then retry.
   </Accordion>
+  <Accordion title='"Image pull failed" toast appears when I click Save & Pull Images'>
+    Both halves are reported separately, so this toast means the file **was** written and your edits are safe on disk; the download of its registry images is what failed, usually because a registry is unreachable or a credential was rejected. No running container was touched. The toast quotes the error lines Compose reported, which usually name the service whose image failed. To see which images did arrive, open the progress panel: it streams the full output image by image, and the toast does not carry that per-image detail. Fix the registry problem and run **Save & Pull Images** again.
+  </Accordion>
+  <Accordion title='"Image pull failed" toast names a missing API endpoint on a remote node'>
+    The node does not implement the download itself, which is what a fleet with nodes on different Sencho versions looks like when the node has no copy of this action. The compose file was still written before the refusal, so your edit is on disk, no image was downloaded, and no running container changed. Update that node from the Fleet view, then run **Save & Pull Images** again on it; the second run reads the file already on disk and downloads the images from it. The version a node runs appears next to its name in the node switcher once you have visited that node, and **Settings · Nodes** shows it directly in the connection details.
+  </Accordion>
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
   </Accordion>
-  <Accordion title='"Sencho instance protected" dialog when I try to stop, update, or delete a stack'>
-    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
+  <Accordion title='"Sencho instance protected" dialog, or disabled Stop, Update, and Delete buttons'>
+    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked: their buttons are disabled, and **Stop service** on one of its services opens the dialog. **Restart** stays available. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

@@ -86,7 +86,7 @@ describe('GET /api/stacks/:stackName/scan-status', () => {
       .get(`/api/stacks/${STACK}/scan-status`)
       .set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: null });
+    expect(res.body).toEqual({ status: null, scanning: false });
   });
 
   it('returns the recorded attempt shape', async () => {

@@ -13,6 +13,9 @@ function finding(overrides: Partial<NetworkingFinding> = {}): NetworkingFinding 
     recommendedActions: [],
     sources: ['live'],
     doctorFindings: [],
+    fingerprint: 'fp',
+    count: 1,
+    dismissPolicy: 'any',
     ...overrides,
   };
 }

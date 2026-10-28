@@ -266,6 +266,48 @@ describe('GET /api/fleet/update-status (pilot-agent)', () => {
     const pilotRow = nodes.find(n => n.nodeId === pilotNodeId);
     expect(pilotRow!.version).toBeNull();
   });
+
+  it('does not claim an update for an unreachable node and flags it offline', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue({
+      version: null,
+      capabilities: [],
+      startedAt: null,
+      updateError: null,
+      online: false,
+      imagePinKind: null,
+      updateBlocked: false, imageChannel: null,
+    });
+
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    const nodes = (res.body as { nodes: Array<Record<string, unknown>> }).nodes;
+    const pilotRow = nodes.find(n => n.nodeId === pilotNodeId);
+    expect(pilotRow!.online).toBe(false);
+    expect(pilotRow!.updateAvailable).toBe(false);
+    const localRow = nodes.find(n => n.type === 'local');
+    expect(localRow!.online).toBe(true);
+  });
+
+  it('still assumes an update for a reachable node that reports no parseable version', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue({
+      version: null,
+      capabilities: [],
+      startedAt: 1700000000,
+      updateError: null,
+      online: true,
+      imagePinKind: null,
+      updateBlocked: false, imageChannel: null,
+    });
+
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    const nodes = (res.body as { nodes: Array<Record<string, unknown>> }).nodes;
+    const pilotRow = nodes.find(n => n.nodeId === pilotNodeId);
+    expect(pilotRow!.online).toBe(true);
+    expect(pilotRow!.updateAvailable).toBe(true);
+  });
 });
 
 describe('GET /api/fleet/readiness (pilot-agent)', () => {

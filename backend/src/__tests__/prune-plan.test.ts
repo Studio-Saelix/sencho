@@ -25,6 +25,7 @@ const { mockDocker } = vi.hoisted(() => {
     pruneImages: vi.fn(),
     pruneNetworks: vi.fn(),
     pruneVolumes: vi.fn(),
+    modem: { dial: vi.fn() },
   };
   return { mockDocker };
 });
@@ -70,6 +71,16 @@ beforeEach(() => {
   mockDocker.listContainers.mockResolvedValue([]);
   // Real Docker listVolumes returns UsageData: null; RefCount lives on df.
   mockDocker.df.mockResolvedValue({ Volumes: [], Images: [], LayersSize: 0 });
+  // The typed `df?type=volume|container` sections answer from the same
+  // snapshot each test sets on `df`, as a real daemon's would.
+  mockDocker.modem.dial.mockImplementation(
+    (_opts: unknown, cb: (err: Error | null, data?: unknown) => void) => {
+      // Read the configured snapshot without registering a call on `df`, so a
+      // test can assert the slow full snapshot was never requested.
+      const configured = mockDocker.df.getMockImplementation();
+      Promise.resolve(configured ? configured() : {}).then((snapshot: unknown) => cb(null, snapshot), (err: Error) => cb(err));
+    },
+  );
 });
 
 describe('fingerprintPrunePlan', () => {
@@ -895,6 +906,86 @@ describe('DockerController.executePrunePlan', () => {
     await dc.executePrunePlan(plan, ['my-stack']);
 
     expect(remove).toHaveBeenCalledWith({ force: false });
+  });
+
+  it('reads only the volume section of df while executing a volume prune', async () => {
+    mockDocker.listVolumes.mockResolvedValue({
+      Volumes: [
+        { Name: 'v1', Labels: { 'com.docker.compose.project': 'my-stack' }, UsageData: null },
+        { Name: 'v2', Labels: { 'com.docker.compose.project': 'my-stack' }, UsageData: null },
+      ],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [
+        { Name: 'v1', UsageData: { RefCount: 0, Size: 5 } },
+        { Name: 'v2', UsageData: { RefCount: 0, Size: 5 } },
+      ],
+      Images: [],
+      LayersSize: 0,
+    });
+    mockDocker.getVolume.mockReturnValue({ remove: vi.fn().mockResolvedValue(undefined) });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['volumes'], 'managed', ['my-stack'], 1);
+    mockDocker.modem.dial.mockClear();
+    await dc.executePrunePlan(plan, ['my-stack']);
+
+    // Each volume used to cost a full df (tens of seconds on a containerd store).
+    expect(mockDocker.df).not.toHaveBeenCalled();
+    const types = mockDocker.modem.dial.mock.calls.map((c) => (c[0] as { options: { type: string } }).options.type);
+    expect(types.length).toBeGreaterThan(0);
+    expect(new Set(types)).toEqual(new Set(['volume']));
+  });
+
+  it('refuses to build a volume plan, and logs why, when the volume usage cannot be read', async () => {
+    mockDocker.listVolumes.mockResolvedValue({
+      Volumes: [{ Name: 'v1', Labels: { 'com.docker.compose.project': 'my-stack' }, UsageData: null }],
+    });
+    mockDocker.modem.dial.mockImplementation((_o: unknown, cb: (err: Error | null) => void) => cb(new Error('daemon busy')));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const dc = DockerController.getInstance(1);
+    // An unreadable usage state must not read as "nothing to prune".
+    await expect(dc.buildPrunePlan(['volumes'], 'managed', ['my-stack'], 1)).rejects.toThrow(/Volume usage is unavailable/);
+    expect(warn).toHaveBeenCalledWith('[DockerController] Volume usage unavailable:', 'daemon busy');
+    warn.mockRestore();
+  });
+
+  it('rejects a non-object df response instead of reading it as empty usage', async () => {
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: 'v1', UsageData: null }] });
+    mockDocker.modem.dial.mockImplementation((_o: unknown, cb: (err: Error | null, data?: unknown) => void) => cb(null, '<html>Not Docker</html>'));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.buildPrunePlan(['volumes'], 'managed', [], 1)).rejects.toThrow(/Volume usage is unavailable/);
+  });
+
+  it('does not remove a volume whose usage cannot be read at execute time', async () => {
+    mockDocker.listVolumes.mockResolvedValue({
+      Volumes: [{ Name: 'v1', Labels: { 'com.docker.compose.project': 'my-stack' }, UsageData: null }],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'v1', UsageData: { RefCount: 0, Size: 5 } }],
+      Images: [],
+      LayersSize: 0,
+    });
+    const remove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getVolume.mockReturnValue({ remove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['volumes'], 'managed', ['my-stack'], 1);
+    expect(plan.items.map((i) => i.id)).toEqual(['v1']);
+
+    // The daemon stops answering between planning and execution.
+    mockDocker.modem.dial.mockImplementation((_o: unknown, cb: (err: Error | null) => void) => cb(new Error('daemon busy')));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, ['my-stack']);
+
+    expect(remove).not.toHaveBeenCalled();
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ id: 'v1', target: 'volumes', status: 'skipped', reason: 'Volume usage unavailable' }),
+    ]);
   });
 
   it('re-checks isImageHeld immediately before deleting, skipping a hold that started after the plan was built', async () => {

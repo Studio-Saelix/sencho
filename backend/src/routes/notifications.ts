@@ -315,6 +315,22 @@ notificationsRouter.post('/read', authMiddleware, async (req: Request, res: Resp
   }
 });
 
+notificationsRouter.post('/:id/read', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = parseIntParam(req, res, 'id', 'notification ID');
+    if (id === null) return;
+    const nodeId = req.nodeId ?? 0;
+    if (!DatabaseService.getInstance().markNotificationRead(nodeId, id)) {
+      res.status(404).json({ error: 'Notification not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to mark notification read:', error);
+    res.status(500).json({ error: 'Failed to mark notification read' });
+  }
+});
+
 notificationsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const id = parseIntParam(req, res, 'id', 'notification ID');

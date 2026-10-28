@@ -32,12 +32,11 @@ function SectionSkeleton() {
     );
 }
 
-type DockerStorageFields = Pick<PatchableSettings, 'docker_janitor_gb' | 'prune_on_update' | 'reclaim_hero'>;
+type DockerStorageFields = Pick<PatchableSettings, 'docker_janitor_gb' | 'prune_on_update'>;
 
 const DEFAULT_DOCKER_STORAGE: DockerStorageFields = {
     docker_janitor_gb: DEFAULT_SETTINGS.docker_janitor_gb,
     prune_on_update: DEFAULT_SETTINGS.prune_on_update,
-    reclaim_hero: DEFAULT_SETTINGS.reclaim_hero,
 };
 
 export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProps) {
@@ -75,7 +74,6 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
             const safe: DockerStorageFields = {
                 docker_janitor_gb: nodeData.docker_janitor_gb ?? DEFAULT_SETTINGS.docker_janitor_gb,
                 prune_on_update: (nodeData.prune_on_update as '0' | '1') ?? DEFAULT_SETTINGS.prune_on_update,
-                reclaim_hero: (nodeData.reclaim_hero as '0' | '1') ?? DEFAULT_SETTINGS.reclaim_hero,
             };
             reset(safe);
         })();
@@ -129,15 +127,6 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
                         min={0}
                         step={0.5}
                         warnOver={10}
-                    />
-                </SettingsField>
-                <SettingsField
-                    label="Show reclaimable-space banner"
-                    helper="Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. Off by default."
-                >
-                    <TogglePill
-                        checked={settings.reclaim_hero === '1'}
-                        onChange={(next) => onSettingChange('reclaim_hero', next ? '1' : '0')}
                     />
                 </SettingsField>
             </SettingsSection>

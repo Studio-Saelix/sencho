@@ -25,7 +25,11 @@ import {
     throwRegistryDeliveryRefusal,
 } from '../helpers/registryDeliveryOutbound';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
+import { probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
+import { BLUEPRINT_DIGEST_PINS_V1_CAPABILITY } from './CapabilityRegistry';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
+import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase } from '../utils/validation';
@@ -40,10 +44,18 @@ import {
     commitBlueprintDeploymentCause,
     commitBlueprintDeploymentRemoved,
     freezeInlineRevisionAfterDeploy,
+    retryInlineArtifactFreeze,
     type BlueprintDeploymentCause,
 } from './gitops/blueprintDeploymentProducers';
-import { observeStackRuntimeArtifact, resolvePlatformLabelForNode } from './gitops/artifactResolve';
-import { stackManagedRoot } from './gitops/directApplication';
+import {
+    fetchRemoteRuntimeArtifactIdentity,
+    observeStackRuntimeArtifact,
+    resolvePlatformLabelForNode,
+} from './gitops/artifactResolve';
+import {
+    materializeAndFreezeGitManagedArtifactSet,
+    readAppliedComposeContent,
+} from './gitops/gitManagedMaterialization';
 import {
     buildDigestPinsFromArtifactSet,
     DigestPinsMismatchError,
@@ -54,25 +66,89 @@ import { buildEffectiveServiceModel } from './effectiveServiceModel';
 import { comparableObservationMatches } from './gitops/artifactIdentity';
 import {
     decodeArtifactEvidenceJson,
-    decodeObservedArtifactIdentity,
     type ObservedArtifactIdentity,
     type ServiceArtifactEvidence,
 } from './gitops/json';
 import { GitOpsStore } from './gitops/store';
+import {
+    describeRuntimeRepairHold,
+    resolveRuntimeRepairBinding,
+    type RuntimeRepairBinding,
+    type RuntimeRepairHoldReason,
+} from './gitops/runtimeRepairBinding';
 import { GitOpsTransitions } from './gitops/transitions';
 import { envelopeFor, recordableApplication } from './gitops/blueprintProducers';
-import type { GitOpsApplicationRow, GitOpsGenerationRow } from './gitops/types';
+import type {
+    GitOpsApplicationRow,
+    GitOpsArtifactSetRow,
+} from './gitops/types';
 
 /** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
 const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
 
+/**
+ * Artifact qualifications a drift check re-resolves.
+ *
+ * `stale` is absent on purpose: it means a tag moved after the generation was
+ * accepted, and resolving toward that is the acceptance this path is not allowed
+ * to make. `local_build_unverified` is absent because a locally built service
+ * never resolves to a published digest, so a retry could not succeed; that
+ * absence is also what ends the loop for a build-only stack, whose expected
+ * pointer stays `unresolved` for the generation's whole life.
+ */
+const RETRYABLE_ARTIFACT_QUALIFICATIONS: ReadonlySet<GitOpsArtifactSetRow['qualification']> = new Set([
+    'unresolved',
+    'unavailable',
+]);
+
+/**
+ * Per-service failure classes a retry can actually clear.
+ *
+ * The qualification alone is too coarse to gate on: `unsupported_registry` and
+ * `platform_ambiguity` are properties of the authored reference, not of the
+ * registry's mood, so a set carrying either will resolve to the same answer
+ * forever. Retrying them burns registry traffic and appends an evidence row per
+ * attempt to a table nothing prunes, while the caveat promises a clearing that
+ * cannot arrive. `unresolved` is included because a service with no declared
+ * image genuinely may gain one when the Blueprint is edited, and `unresolved`
+ * on the whole set is also what a not-yet-attempted freeze produces.
+ *
+ * `platform_unavailable` is the one that matters for remote nodes: it means the
+ * node could not answer when asked, which is transient, and it is deliberately
+ * distinct from `platform_ambiguity`, which means the leaf is too old to be asked
+ * at all. Collapsing them permanently disabled the retry for a remote target
+ * after a single timeout.
+ */
+const RETRYABLE_SERVICE_FAILURES: ReadonlySet<ServiceArtifactEvidence['failureClass']> = new Set([
+    'registry_unavailable',
+    'credential_failure',
+    'digest_unavailable',
+    'stale_resolution',
+    'platform_unavailable',
+    'unresolved',
+]);
+
 export type DriftCause = 'revision' | 'container' | 'digest';
+
+/**
+ * Why this target's drift cannot be repaired, discovered while detecting it.
+ *
+ * Detection and repair are separate decisions. A target whose repair authority
+ * is unprovable can still be *seen* to be drifted, and hiding that behind the
+ * hold is how a stopped container or a replaced image went unreported across a
+ * whole fleet. So detection always completes and carries the block with it, and
+ * the reconciler decides what the block means for the mode it is in.
+ */
+export type RepairBlock = {
+    reason: RuntimeRepairHoldReason;
+    detail: string;
+};
 
 export type DriftCheckResult =
     | { kind: 'matched' }
-    | { kind: 'drifted'; reason: string; cause: DriftCause }
-    | { kind: 'unverified'; reason: string };
+    | { kind: 'drifted'; reason: string; cause: DriftCause; repairBlock?: RepairBlock }
+    | { kind: 'unverified'; reason: string; repairBlock?: RepairBlock };
 
 function isDeveloperModeEnabled(): boolean {
     try {
@@ -123,9 +199,26 @@ export interface DeployOutcome {
     error?: string;
     /** Machine-readable registry delivery refusal code, when the deploy failed on one. */
     code?: string;
+    /**
+     * Why a drift repair was held instead of attempted. Present only on a
+     * `repair_held` outcome, so a caller can distinguish "the policy declined
+     * this repair" from "the repair was attempted and failed".
+     */
+    holdReason?: RuntimeRepairHoldReason;
 }
 
-type LocalMarkerRead =
+/**
+ * The outcome of reading a node's `.blueprint.json`, separating a marker that
+ * is not there from a marker this instance could not read.
+ *
+ * `missing` and `failed` are both "no marker object came back", and they are not
+ * the same answer. `missing` is a fact about the node; `failed` is an absence of
+ * evidence about it, and must never authorize a write to that node.
+ *
+ * Both the local disk read and the remote HTTP read produce these same three
+ * arms, so a caller does not have to know which transport answered it.
+ */
+export type MarkerRead =
     | { kind: 'missing' }
     | { kind: 'present'; marker: BlueprintMarker }
     | { kind: 'failed'; error: string };
@@ -179,18 +272,33 @@ export class BlueprintService {
         this.releaseLock(blueprintId, nodeId);
     }
 
-    private buildMarker(blueprint: Blueprint): BlueprintMarker {
-        return {
+    /**
+     * The on-node record of what was deployed. For Git-managed content it also
+     * names the generation and artifact set the deploy came from, so a later
+     * drift check can prove what a repair would overwrite instead of assuming.
+     */
+    private buildMarker(blueprint: Blueprint, binding?: RuntimeRepairBinding): BlueprintMarker {
+        const marker: BlueprintMarker = {
             blueprintId: blueprint.id,
             revision: blueprint.revision,
             lastApplied: Date.now(),
         };
+        if (binding?.kind === 'binding') {
+            marker.generationId = binding.acceptedGenerationId;
+            marker.artifactSetId = binding.artifactSetId;
+            if (binding.rolloutGenerationId) marker.rolloutGenerationId = binding.rolloutGenerationId;
+        }
+        return marker;
     }
 
     /**
      * Digest-pinned Enforce repair: restore the frozen expected identity without
      * rewriting authored compose tags on disk. Fails closed when the approved
      * digest cannot be retrieved; LKG/expected pointers stay untouched.
+     *
+     * The pinned set is the one the target acknowledged. The application's
+     * current artifact set is deliberately not consulted: a newer accepted
+     * generation must not be able to change what an older target repairs.
      */
     async enforceDigestRepair(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
         const store = GitOpsStore.getInstance();
@@ -198,13 +306,12 @@ export class BlueprintService {
         if (!recordableApplication(app)) {
             return { status: 'failed', error: 'no recordable GitOps application for digest repair' };
         }
-        const target = store.getTarget(app.id, node.id);
-        const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
-        if (!expectedSetId) {
-            return { status: 'failed', error: 'no expected artifact set for digest repair' };
+        const binding = resolveRuntimeRepairBinding(store, app, store.getTarget(app.id, node.id));
+        if (binding.kind === 'hold') {
+            return BlueprintService.heldRepair(binding.reason);
         }
         const platformLabel = await resolvePlatformLabelForNode(node.id, blueprint.name);
-        const digestPins = buildDigestPinsFromArtifactSet(expectedSetId, platformLabel);
+        const digestPins = buildDigestPinsFromArtifactSet(binding.artifactSetId, platformLabel);
         if (!digestPins) {
             return { status: 'failed', error: 'approved digest unavailable for digest repair' };
         }
@@ -215,6 +322,11 @@ export class BlueprintService {
      * Re-apply already-authorized compose without rewriting authored tags.
      * Used by Enforce for git-managed container/revision drift, where
      * deployToNode would refuse Git-managed content.
+     *
+     * The compose bytes come from the generation the target acknowledged, not
+     * from the application's newest accepted generation. Reading the newest one
+     * turns a repair into an unauthorized content upgrade: the target would
+     * receive a generation no rollout ever authorized for it.
      */
     async reapplyAuthorizedMaterialization(
         blueprint: Blueprint,
@@ -226,14 +338,18 @@ export class BlueprintService {
         if (!recordableApplication(app)) {
             return { status: 'failed', error: 'no recordable GitOps application for authorized reapply' };
         }
+        const binding = resolveRuntimeRepairBinding(store, app, store.getTarget(app.id, node.id));
+        if (binding.kind === 'hold') {
+            return BlueprintService.heldRepair(binding.reason);
+        }
         let composeContent = blueprint.compose_content;
-        if (app.target_mode === 'blueprint' && app.accepted_generation_id) {
-            const generation = store.getGeneration(app.accepted_generation_id);
+        if (app.target_mode === 'blueprint') {
+            const generation = store.getGeneration(binding.acceptedGenerationId);
             if (!generation) {
-                return { status: 'failed', error: 'accepted generation missing for authorized reapply' };
+                return { status: 'failed', error: 'acknowledged generation missing for authorized reapply' };
             }
             try {
-                composeContent = await this.readGitManagedAppliedCompose(app, generation);
+                composeContent = await readAppliedComposeContent(app, generation);
             } catch (err) {
                 return { status: 'failed', error: BlueprintService.formatError(err) };
             }
@@ -242,33 +358,10 @@ export class BlueprintService {
             blueprint,
             node,
             composeContent,
-            marker: this.buildMarker(blueprint),
+            marker: this.buildMarker(blueprint, binding),
             auditPath: `/api/blueprints/${blueprint.id}/enforce-reapply`,
             digestPins,
         });
-    }
-
-    private async readGitManagedAppliedCompose(
-        app: GitOpsApplicationRow,
-        generation: GitOpsGenerationRow,
-    ): Promise<string> {
-        const stackName = app.configured_source_stack_name;
-        if (!stackName) {
-            throw new Error('bound application has no retained source stack identity');
-        }
-        if (!generation.applied_dir || generation.applied_dir.trim() === '') {
-            throw new Error('accepted generation has no applied materialization directory');
-        }
-        const managedRoot = stackManagedRoot(stackName);
-        const appliedAbs = path.resolve(managedRoot, generation.applied_dir);
-        if (!appliedAbs.startsWith(managedRoot + path.sep)) {
-            throw new Error('applied materialization path escapes the managed root');
-        }
-        const composePath = path.resolve(appliedAbs, 'compose.yaml');
-        if (!composePath.startsWith(appliedAbs + path.sep)) {
-            throw new Error('compose path escapes the applied materialization directory');
-        }
-        return fsPromises.readFile(composePath, 'utf8');
     }
 
     /**
@@ -373,6 +466,36 @@ export class BlueprintService {
         }
     }
 
+    /**
+     * Refuses a digest-pinned remote apply unless the leaf advertises digestPins
+     * support. A leaf that predates the field drops it and redeploys by tag,
+     * which re-pulls the drifted image the pin exists to keep out, so the
+     * repair must fail rather than quietly lose its pin. An unreachable probe
+     * fails closed for the same reason.
+     */
+    private async assertRemoteSupportsDigestPins(node: Node): Promise<void> {
+        const probe = await probeRemoteCapability(node.id, BLUEPRINT_DIGEST_PINS_V1_CAPABILITY);
+        if (probe.kind === 'supported') return;
+        if (probe.kind === 'unsupported') {
+            console.warn(
+                '[BlueprintService] Refusing digest-pinned apply on node %s: it does not advertise %s',
+                sanitizeForLog(node.name),
+                BLUEPRINT_DIGEST_PINS_V1_CAPABILITY,
+            );
+            throw new BlueprintRemoteUpgradeRequiredError(
+                `Remote node "${node.name}" does not support digest-pinned blueprint apply. Upgrade that Sencho instance, then retry.`,
+            );
+        }
+        console.warn(
+            '[BlueprintService] Could not verify digest-pinned apply support on node %s (probe: %s); refusing to redeploy by tag',
+            sanitizeForLog(node.name),
+            sanitizeForLog(probe.detail),
+        );
+        throw new Error(
+            `Could not confirm that remote node "${node.name}" supports digest-pinned blueprint apply, so the repair was not sent. Check that node is online, then retry.`,
+        );
+    }
+
     private async deployRemoteMaterialization(
         blueprint: Blueprint,
         node: Node,
@@ -393,6 +516,7 @@ export class BlueprintService {
             allowGitManagedContent: true,
         };
         if (digestPins) {
+            await this.assertRemoteSupportsDigestPins(node);
             applyBody.digestPins = digestPins;
         }
         if (captureRecovery) {
@@ -471,32 +595,104 @@ export class BlueprintService {
     }
 
     /**
-     * Read the marker file from a target node. Returns null when missing,
-     * malformed, or unreadable. The reconciler treats null as "we do not
-     * own this directory" and refuses to touch it.
+     * Re-run the name-conflict check for a deployment parked in `name_conflict`,
+     * and release the row to `pending` only when the check finds the name free.
+     * It never deploys: a `pending` row is picked up by the next reconcile tick,
+     * which applies its own approval and state-review rules.
+     *
+     * A probe that cannot tell throws BlueprintOwnershipProbeError and leaves the
+     * row untouched, because "could not check" is not "clear". A row that moved
+     * while the probe ran (a tick, another operator) is not overwritten.
      */
-    async readMarker(blueprintName: string, node: Node): Promise<BlueprintMarker | null> {
+    async recheckNameConflict(blueprint: Blueprint, node: Node): Promise<{ cleared: boolean; deployment: BlueprintDeployment }> {
+        const db = DatabaseService.getInstance();
+        const conflicting = await this.hasNameConflict(blueprint.name, node, blueprint.id);
+        const current = db.getDeployment(blueprint.id, node.id);
+        if (!current) throw new Error(`No deployment for blueprint ${blueprint.id} on node ${node.id}`);
+        if (conflicting || current.status !== 'name_conflict') return { cleared: false, deployment: current };
+        const deployment = this.setStatus(blueprint.id, node.id, 'pending', 'name_conflict_cleared', { last_error: null });
+        return { cleared: true, deployment };
+    }
+
+    /**
+     * Read the marker file from a target node, as a discriminated result.
+     *
+     * The three arms are load-bearing. `missing` is a fact about the node and
+     * may be acted on; `failed` is an absence of evidence about it and may not,
+     * because a node that could not be read cannot be assumed to be in any
+     * particular state. Collapsing the two is what once let a network blip be
+     * reported as drift, so the remote arm discriminates the same way the local
+     * one already did.
+     */
+    async readMarker(blueprintName: string, node: Node): Promise<MarkerRead> {
+        if (node.type === 'local') {
+            return this.readLocalMarkerFromDisk(node.id, blueprintName);
+        }
+        return this.readRemoteMarker(blueprintName, node);
+    }
+
+    /**
+     * Read a remote node's marker over HTTP, discriminating the same way the
+     * local read does. A 404 is the leaf reporting the file is not there; every
+     * other way of not getting a marker is `failed`, because a response Sencho
+     * could not read says nothing about what is on the node.
+     */
+    private async readRemoteMarker(blueprintName: string, node: Node): Promise<MarkerRead> {
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+            return {
+                kind: 'failed',
+                error: `no proxy target is configured for node "${node.name}"`,
+            };
+        }
+        const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/files/content?path=${encodeURIComponent(BLUEPRINT_MARKER_FILENAME)}`;
         try {
-            if (node.type === 'local') {
-                const markerRead = await this.readLocalMarkerFromDisk(node.id, blueprintName);
-                return markerRead.kind === 'present' ? markerRead.marker : null;
-            }
-            const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-            if (!target) return null;
-            const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/files/content?path=${encodeURIComponent(BLUEPRINT_MARKER_FILENAME)}`;
             const res = await axios.get(url, {
                 ...safeAxiosTransport(target.trustedLoopback),
                 headers: this.remoteHeaders(target.apiToken),
                 timeout: REMOTE_HTTP_TIMEOUT_MS,
                 validateStatus: () => true,
             });
-            if (res.status !== 200) return null;
+            // A 404 status alone does not mean the marker is absent. A leaf
+            // predating this route, an apiUrl pointing at the wrong base path, or
+            // any middlebox in between all answer 404 too, and each of those is a
+            // node that could not be read, which is the case this discrimination
+            // exists for. The leaf's own not-found answer is the one that carries
+            // the code: this URL sends no rootId, so the read always resolves the
+            // stack-source root, whose only absent path is sendFsError's ENOENT
+            // branch. That body is ours and changes under our control; an
+            // infrastructure 404 is not, so a bare 404 fails closed.
+            if (res.status !== 200) {
+                if (res.status === 404 && BlueprintService.extractApiCode(res.data) === 'NOT_FOUND') {
+                    return { kind: 'missing' };
+                }
+                // The leaf's own message is the most useful part of a 4xx here: a
+                // 403 from the leaf's permission check is a permission deny, not
+                // a node that happened to be down.
+                const detail = BlueprintService.extractApiError(res.data);
+                return {
+                    kind: 'failed',
+                    error: `the node answered HTTP ${res.status}${detail ? `: ${detail}` : ''}`,
+                };
+            }
             const body = res.data;
             const content = typeof body === 'string' ? body : (typeof body?.content === 'string' ? body.content : null);
-            if (content == null) return null;
-            return parseBlueprintMarker(content);
-        } catch {
-            return null;
+            if (content == null) {
+                return { kind: 'failed', error: 'the node answered with no file content' };
+            }
+            const marker = parseBlueprintMarker(content);
+            // A 200 whose body does not parse is not treated the way an unparseable
+            // marker on disk is. Locally those bytes were read from the file, so a
+            // parse failure is provably a corrupt marker and reads as repairable
+            // drift. Remotely the same signal is confounded with a body that some
+            // intermediary rewrote, and a marker Sencho cannot read cannot prove
+            // what a repair would overwrite. Marker writes are atomic, so the
+            // corrupt-file case is close to unreachable anyway; the ambiguous one
+            // is the response, and it is the response that must not authorize a
+            // write.
+            return marker ? { kind: 'present', marker } : { kind: 'failed', error: 'the marker file could not be parsed' };
+        } catch (err) {
+            return { kind: 'failed', error: BlueprintService.formatError(err) };
         }
     }
 
@@ -504,7 +700,14 @@ export class BlueprintService {
      * Returns true when a stack directory by this name exists on the target
      * node and the on-disk marker is missing, malformed, or references a
      * different blueprint ID. Throws BlueprintOwnershipProbeError when the
-     * directory or marker cannot be probed (non-ENOENT I/O or remote list failure).
+     * directory or marker cannot be probed (non-ENOENT I/O, a remote list
+     * failure, a remote list this version cannot read, or a marker read that
+     * failed).
+     *
+     * "Malformed" is local-only. A corrupt marker read off local disk is a fact
+     * about the node and reports a conflict, while a remote marker that could
+     * not be read is a failure to find out and throws, because calling it a
+     * conflict would tell the operator an unowned stack is sitting there.
      */
     async hasNameConflict(blueprintName: string, node: Node, blueprintId: number): Promise<boolean> {
         if (node.type === 'local') {
@@ -550,15 +753,48 @@ export class BlueprintService {
                 `Cannot verify stack ownership on remote node "${node.name}" (HTTP ${listRes.status})`,
             );
         }
-        const stacks = Array.isArray(listRes.data) ? listRes.data as Array<{ name?: string }> : [];
-        const exists = stacks.some(s => s?.name === blueprintName);
-        if (!exists) return false;
-        const marker = await this.readMarker(blueprintName, node);
-        return marker == null || marker.blueprintId !== blueprintId;
+        const raw: unknown = listRes.data;
+        const listed: unknown[] = Array.isArray(raw) ? raw : [];
+        // GET /api/stacks answers with the stack names themselves, so the
+        // entries are the names and not objects carrying one. The list is
+        // load-bearing rather than a fast path: the marker read below cannot
+        // tell "stack is here with no marker" from "there is no such stack",
+        // because both answer not-found. Reading the entries as objects made
+        // the match below silently match nothing, so every remote name read as
+        // clear from the day this arm was written.
+        const names = listed.filter((entry): entry is string => typeof entry === 'string');
+        // The array check is load-bearing: without it a non-array body yields two
+        // empty lists, whose lengths match, and the body would read as a fully
+        // readable empty node.
+        const fullyReadable = Array.isArray(raw) && names.length === listed.length;
+        if (!names.includes(blueprintName)) {
+            // A name absent from a list this probe could read end to end is a
+            // real answer. A name absent from a list that also held entries this
+            // version cannot read is not: the entry that was dropped could be
+            // the one being asked about, so refuse rather than report the name
+            // free. Reading it as free is the failure this reader exists to
+            // stop repeating.
+            if (!fullyReadable) {
+                throw new BlueprintOwnershipProbeError(
+                    `Cannot verify stack ownership on remote node "${node.name}": the node answered with a stack list this version cannot read`,
+                );
+            }
+            return false;
+        }
+        // A marker this node could not be asked about is not a marker that is
+        // absent, and reporting it as a conflict would tell the operator a stack
+        // they do not own is sitting there. The local arm above throws in the
+        // same situation; the remote arm does too, which is what the function's
+        // own contract already promised.
+        const markerRead = await this.readMarker(blueprintName, node);
+        if (markerRead.kind === 'failed') {
+            throw BlueprintService.ownershipProbeError(blueprintName, markerRead.error);
+        }
+        return markerRead.kind === 'missing' || markerRead.marker.blueprintId !== blueprintId;
     }
 
     /** Read and parse a local on-disk marker without going through the remote HTTP path. */
-    private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<LocalMarkerRead> {
+    private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<MarkerRead> {
         try {
             // Canonical js/path-injection barrier inline with the read sink.
             const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
@@ -610,7 +846,18 @@ export class BlueprintService {
                     sanitizeForLog(blueprint.name), node.id, Date.now() - started);
                 return { status: 'name_conflict', error: 'name_conflict' };
             }
-            const marker = this.buildMarker(blueprint);
+            // Best-effort stamping: a fresh Inline deploy is not a repair, so an
+            // unresolvable binding must not block it. When it does resolve, the
+            // marker records what was installed so later drift checks have
+            // on-node evidence to compare against.
+            const store = GitOpsStore.getInstance();
+            const liveApp = store.getLiveBlueprintApplication(blueprint.id);
+            const marker = this.buildMarker(
+                blueprint,
+                recordableApplication(liveApp)
+                    ? resolveRuntimeRepairBinding(store, liveApp, store.getTarget(liveApp.id, node.id))
+                    : undefined,
+            );
             if (node.type === 'local') {
                 diagnosticLog('deploy branch', { blueprintId: blueprint.id, nodeId: node.id, target: 'local' });
                 await this.deployLocal(blueprint, node, marker);
@@ -704,15 +951,51 @@ export class BlueprintService {
 
     /**
      * Inspect deployment state on a node and classify drift for the reconciler.
-     *
      * `matched` means marker + running containers + a comparable exact/qualified
      * expected set whose identity matches the observation. `drifted` means a
-     * restorable divergence (marker/revision/not-running/digest mismatch).
-     * `unverified` means the check could not prove either side (no application
-     * row, unreachable node, missing expected set, or non-comparable observation)
-     * and must never trigger Enforce.
+     * divergence (marker/revision/not-running/digest mismatch), optionally
+     * carrying a `repairBlock` saying Enforce may not act on it. `unverified`
+     * means the check could not prove either side (no application row,
+     * unreachable node, missing expected set, or non-comparable observation).
+     * It carries a block only when a repair is barred outright; a marker that
+     * merely fails to prove the repair authority is not one, because nothing
+     * would have attempted a repair anyway.
+     *
+     * Drift is detected even when the repair is blocked. A legacy marker or a
+     * superseded rollout says Sencho may not overwrite what is running; it does
+     * not say the workload is fine.
      */
     async checkForDrift(blueprint: Blueprint, node: Node): Promise<DriftCheckResult> {
+        // Two blocks, named apart, because they reach different surfaces.
+        //
+        // A binding hold is a standing decision that Sencho must not write to this
+        // target, whatever the check can or cannot classify. A marker that names
+        // no generation, or a different one, says only that a repair could not
+        // prove what it would overwrite, and nothing about whether the workload
+        // is drifted.
+        //
+        // A drifted result carries whichever applies, because a repair is about to
+        // be attempted and the mutation sites trust this result: `deployToNode` and
+        // `reapplyAuthorizedMaterialization` will write to the node on its strength.
+        // An unverified result attempts no repair, and the reconciler's only use of
+        // its block is recording a hold and an alert, so it carries the binding
+        // hold alone. Carrying the marker case there would report every target
+        // whose marker predates the generation fields as held on any tick the check
+        // could not classify, and announce a declined auto-fix that was never due.
+        //
+        // Declared out here rather than inside the try so the catch can reach them:
+        // a transport failure is exactly the case where a hold must survive.
+        let bindingBlock: RepairBlock | undefined;
+        let markerBlock: RepairBlock | undefined;
+        const drifted = (reason: string, cause: DriftCause): DriftCheckResult => {
+            const block = bindingBlock ?? markerBlock;
+            return { kind: 'drifted', reason, cause, ...(block ? { repairBlock: block } : {}) };
+        };
+        const unverified = (reason: string): DriftCheckResult => ({
+            kind: 'unverified',
+            reason,
+            ...(bindingBlock ? { repairBlock: bindingBlock } : {}),
+        });
         try {
             const store = GitOpsStore.getInstance();
             const app = store.getLiveBlueprintApplication(blueprint.id);
@@ -720,63 +1003,125 @@ export class BlueprintService {
                 return { kind: 'unverified', reason: 'no recordable GitOps application' };
             }
 
-            const marker = await this.readMarker(blueprint.name, node);
-            if (!marker) {
-                return { kind: 'drifted', reason: 'marker file missing on node', cause: 'revision' };
+            const target = store.getTarget(app.id, node.id);
+            // A Blueprint with no target row has no runtime to speak about, so
+            // this check cannot classify anything. That is missing evidence, not
+            // a decision to decline a repair.
+            if (!target) return { kind: 'unverified', reason: 'no GitOps target for this node' };
+
+            // Resolved first so the rest of the check can carry the block, not
+            // stop on it.
+            const binding = resolveRuntimeRepairBinding(store, app, target);
+            if (binding.kind === 'hold') {
+                bindingBlock = { reason: binding.reason, detail: describeRuntimeRepairHold(binding.reason) };
             }
+
+            const markerRead = await this.readMarker(blueprint.name, node);
+            // A marker that could not be read is not a marker that is gone. This
+            // is the same transport failure the catch at the end of this function
+            // already refuses to answer with drift for, so it has to be refused
+            // here too: returning `drifted` would send Enforce to write to a node
+            // that has just demonstrated it cannot be read.
+            if (markerRead.kind === 'failed') {
+                return unverified(`marker file could not be read: ${markerRead.error}`);
+            }
+            if (markerRead.kind === 'missing') {
+                return drifted('marker file missing on node', 'revision');
+            }
+            const marker = markerRead.marker;
             if (marker.blueprintId !== blueprint.id) {
-                return { kind: 'drifted', reason: 'marker references a different blueprint', cause: 'revision' };
+                return drifted('marker references a different blueprint', 'revision');
+            }
+            // A marker that names no generation, or a different one than the
+            // target acknowledged, means a repair could not prove what it would
+            // overwrite. It says nothing about whether the workload is drifted,
+            // so it blocks the repair and the container and digest checks below
+            // still run. Returning here instead is what let an upgrade hide a
+            // stopped container on every Git-managed target in the fleet.
+            if (app.target_mode === 'blueprint' && !bindingBlock && binding.kind === 'binding') {
+                if (!marker.generationId) {
+                    markerBlock = {
+                        reason: 'evidence_incomplete',
+                        detail: 'the marker on this node names no generation, so a repair could not prove what it would overwrite',
+                    };
+                } else if (marker.generationId !== binding.acceptedGenerationId) {
+                    markerBlock = {
+                        reason: 'binding_incoherent',
+                        detail: `the node runs generation ${marker.generationId} but this target acknowledged ${binding.acceptedGenerationId}`,
+                    };
+                }
             }
             if (marker.revision !== blueprint.revision) {
-                return {
-                    kind: 'drifted',
-                    reason: `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
-                    cause: 'revision',
-                };
+                return drifted(
+                    `revision drift (node has ${marker.revision}, blueprint is ${blueprint.revision})`,
+                    'revision',
+                );
             }
 
             const containerState = await this.containerHealth(blueprint.name, node);
             if (containerState.kind === 'unreachable') {
-                return { kind: 'unverified', reason: containerState.detail };
+                return unverified(containerState.detail);
             }
             if (containerState.kind === 'not_running') {
-                return { kind: 'drifted', reason: containerState.detail, cause: 'container' };
+                return drifted(containerState.detail, 'container');
             }
 
             const observed = await this.observeRuntimeIdentity(blueprint.name, node);
             if (!observed) {
-                return { kind: 'unverified', reason: 'runtime identity could not be collected' };
+                return unverified('runtime identity could not be collected');
+            }
+            // Recorded on every path that reaches here, including a blocked one.
+            // A hold says Sencho may not overwrite the workload; it is not a
+            // reason to stop recording what the workload is.
+            this.recordRuntimeObservation(blueprint.name, node, app.id, observed);
+
+            // With no resolved binding there is no authority to compare against,
+            // so the artifact question cannot be answered either way. The block
+            // travels with the answer so the hold is still visible.
+            if (binding.kind === 'hold') {
+                return unverified('no authoritative artifact set to compare the observation against');
             }
 
-            const target = store.getTarget(app.id, node.id);
-            if (target) {
-                try {
-                    GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
-                        applicationId: app.id,
-                        nodeId: node.id,
-                        observed,
-                        envelope: envelopeFor(null, 'blueprint_drift_observe'),
-                    });
-                } catch (error) {
-                    console.error(
-                        '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
-                        sanitizeForLog(blueprint.name),
-                        node.id,
-                        error instanceof Error ? error.message : String(error),
-                    );
-                }
-            }
-
-            const expectedSetId = target?.expected_artifact_set_id ?? app.artifact_set_id;
-            if (!expectedSetId) {
-                return { kind: 'unverified', reason: 'no expected artifact set' };
-            }
+            // The expected set is the one this target acknowledged. Reading the
+            // application's current set here would let a newer accepted
+            // generation redefine what an older target is compared against, and
+            // a target matching a generation it never acknowledged is not
+            // converged.
+            const expectedSetId = binding.artifactSetId;
             const expectedRow = store.getArtifactSet(expectedSetId);
             if (
                 !expectedRow
                 || (expectedRow.qualification !== 'exact' && expectedRow.qualification !== 'qualified')
             ) {
-                return { kind: 'unverified', reason: 'expected artifact set is not comparable' };
+                // The freeze could not resolve an identity when it ran, so this
+                // target has nothing approved to compare against until a resolve
+                // succeeds. Today only the next deploy of this revision produces
+                // one, which makes an unrelated redeploy the price of proving what
+                // is running. The freeze cannot simply be re-run to fix that: it
+                // is keyed to the revision and short-circuits once a generation
+                // exists, so retrying means re-resolving the generation that is
+                // already frozen.
+                const retried = await this.retryArtifactFreeze(
+                    blueprint, node, app.id, binding, expectedRow,
+                );
+                if (!retried) {
+                    return unverified('expected artifact set is not comparable');
+                }
+                // The expectation the retry just produced has not been reviewed
+                // by anyone, and Enforce would act on it this same tick. A
+                // resolve that resolves a tag which moved while the identity was
+                // unproven would otherwise let Enforce redeploy the node onto a
+                // digest no approval ever saw, which is precisely the automatic
+                // advancement a retry must not cause.
+                //
+                // So the tick that produces the expectation declines to judge by
+                // it. What that buys is exactly one reconciler interval and no
+                // more: the next tick compares against the new expectation and,
+                // if the tag moved, reports drift that Enforce will repair. It is
+                // a delay, not an approval gate, and it does not hand an operator
+                // a review window. Claiming otherwise here would be the kind of
+                // comment that makes a reader believe a hold exists.
+                return unverified('expected artifact set resolved on this pass, awaiting a settled comparison');
             }
             let expectedIdentity: string | null = null;
             let expectedServices: ServiceArtifactEvidence[] | undefined;
@@ -785,40 +1130,283 @@ export class BlueprintService {
                 expectedIdentity = 'identity' in decoded ? decoded.identity : null;
                 expectedServices = 'services' in decoded ? decoded.services : undefined;
             } catch {
-                return { kind: 'unverified', reason: 'expected artifact evidence is invalid' };
+                return unverified('expected artifact evidence is invalid');
             }
             if (!expectedIdentity) {
-                return { kind: 'unverified', reason: 'expected artifact identity missing' };
+                return unverified('expected artifact identity missing');
             }
 
             if (observed.kind !== 'exact' && observed.kind !== 'qualified') {
-                return { kind: 'unverified', reason: `observation is ${observed.kind}` };
+                return unverified(`observation is ${observed.kind}`);
             }
             if (expectedServices && expectedServices.length > 0) {
                 if (!observed.services || observed.services.length === 0) {
-                    return { kind: 'unverified', reason: 'observation has no per-service digest evidence' };
+                    return unverified('observation has no per-service digest evidence');
                 }
                 if (comparableObservationMatches(expectedServices, observed)) {
                     return { kind: 'matched' };
                 }
-                return {
-                    kind: 'drifted',
-                    reason: 'runtime artifact identity differs from the expected artifact set',
-                    cause: 'digest',
-                };
+                return drifted('runtime artifact identity differs from the expected artifact set', 'digest');
             }
             if (observed.identity !== expectedIdentity) {
-                return {
-                    kind: 'drifted',
-                    reason: 'runtime artifact identity differs from the expected artifact set',
-                    cause: 'digest',
-                };
+                return drifted('runtime artifact identity differs from the expected artifact set', 'digest');
             }
             return { kind: 'matched' };
         } catch (err) {
             // Prefer unverified over drifted so a transport failure cannot
             // trigger Enforce against an unreachable or half-observed node.
-            return { kind: 'unverified', reason: BlueprintService.formatError(err) };
+            return unverified(BlueprintService.formatError(err));
+        }
+    }
+
+    /**
+     * Generations whose retry has been refused, keyed `applicationId:nodeId`.
+     *
+     * A refusal is a statement about the authored content, so it stays true for
+     * that generation no matter how many times it is asked. Without this the
+     * refusal is re-derived on every reconcile tick: a refusal writes no evidence
+     * row, so the latest row's stamp never moves, the throttle never closes, and
+     * an unmodellable Blueprint would be re-parsed and re-logged every minute
+     * forever. Remembering the generation is enough because anything that could
+     * change the answer (an edit, a redeploy) mints a new one, and the deploy path
+     * resolves from the rendered model without consulting this.
+     *
+     * In memory on purpose: the worst case after a restart is one redundant
+     * refusal per affected target, which is not worth a persisted contract.
+     */
+    private readonly refusedFreezeRetries = new Map<string, string>();
+
+    /**
+     * Whether the recorded failure is one a retry can clear.
+     *
+     * Read from the evidence of the row that was actually recorded last, not from
+     * the expected set. The distinction is the whole reason this gate works: a
+     * resolve that fails records a fresh row that does **not** advance the
+     * expected pointer (`allowedExpectedAdvance` refuses anything but
+     * exact/qualified), so a gate keyed to the expected set reads the original
+     * freeze placeholder forever and re-tries a permanently failed resolve every
+     * interval. A build-only stack is the sharpest case: its expected set stays
+     * `unresolved` for the generation's whole life, while every recorded row says
+     * `local_build_unverified`, which no retry can ever change.
+     *
+     * Decoded from per-service evidence rather than inferred from the
+     * qualification alone, because the qualification collapses distinct causes.
+     * A set whose services all failed permanently is skipped: retrying it would
+     * re-derive the same answer on every interval, spend registry traffic, and
+     * append an evidence row each time to a table nothing prunes, while telling
+     * the operator it will clear.
+     *
+     * A set with no per-service evidence at all is retried. That is what the
+     * freeze placeholder looks like before any resolve has run, and it is exactly
+     * the case this path exists for. Genuine damage to the evidence blob is
+     * reported as its own limitation by the projection rather than being retried
+     * silently here.
+     */
+    private artifactRetryCanSucceed(latestRow: GitOpsArtifactSetRow): boolean {
+        let services: ServiceArtifactEvidence[] | undefined;
+        try {
+            const decoded = decodeArtifactEvidenceJson(latestRow.evidence_json);
+            services = 'services' in decoded ? decoded.services : undefined;
+        } catch {
+            // Unreadable evidence is a projection-level defect. Retrying cannot
+            // repair the blob, and the drift check reports it either way.
+            return false;
+        }
+        if (!services || services.length === 0) return true;
+        // Every service must have a clearable cause. One permanent failure is
+        // enough to hold the set back, because the resolve reduces to the
+        // weakest qualification across services.
+        return services.every((service) => {
+            // A resolved service (null failureClass) inside an otherwise
+            // unresolved set is the mixed case the freeze can still complete.
+            if (service.failureClass === null) return true;
+            return RETRYABLE_SERVICE_FAILURES.has(service.failureClass);
+        });
+    }
+
+    /**
+     * Whether a Git-managed application's accepted generation still needs a
+     * preparation retry.
+     *
+     * Same durable gate as the per-target artifact retry: a set whose recorded
+     * evidence says every service failed permanently is not retried, because
+     * each attempt appends an evidence row to a table nothing prunes. The clock
+     * is the latest recorded evidence row, not an in-memory timestamp, so a
+     * restart does not bypass the interval.
+     */
+    gitManagedPreparationRetryDue(app: GitOpsApplicationRow): boolean {
+        if (app.target_mode !== 'blueprint' || !app.accepted_generation_id) return false;
+        const store = GitOpsStore.getInstance();
+        const expected = app.artifact_set_id ? store.getArtifactSet(app.artifact_set_id) : undefined;
+        if (expected && (expected.qualification === 'exact' || expected.qualification === 'qualified')) {
+            return false;
+        }
+        const latest = app.latest_artifact_set_id
+            ? store.getArtifactSet(app.latest_artifact_set_id)
+            : expected;
+        if (latest) {
+            if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(latest.qualification)) return false;
+            if (!this.artifactRetryCanSucceed(latest)) return false;
+            const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+            if (Date.now() - latest.created_at < intervalMs) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Re-resolve a freeze whose registry resolve could not complete.
+     *
+     * Answers whether a *new* expectation was produced, so the caller can hold
+     * this tick's comparison back and let the next one judge evidence nobody has
+     * seen yet.
+     *
+     * Gated on how recently the unresolved expectation was recorded, because the
+     * reconciler runs this whole check every 60 seconds and a registry that is
+     * down would otherwise be asked once per target per tick forever.
+     *
+     * The gate reads the *latest* evidence for the generation, not the expected
+     * set. The distinction is load-bearing: a failed resolve records a fresh
+     * `unavailable` row that does **not** advance the expected pointer
+     * (`allowedExpectedAdvance` refuses it), so dating the window from the
+     * expected set would pin it to the original freeze forever and the second
+     * tick onwards would retry every 60 seconds. The latest pointer advances on
+     * every recorded resolve, successful or not, so it moves with each attempt.
+     *
+     * Reading a row rather than keeping a timer means there is no schedule to
+     * manage and no state to reconcile across restarts: the next attempt happens
+     * once the current window has elapsed. The interval is the operator's to set.
+     *
+     * Failure is logged and dropped rather than raised, and answers false. A
+     * retry that cannot resolve leaves exactly the state it found, and the caller
+     * is about to report `unverified`, which is the honest answer for a target
+     * with no provable approved identity. Letting the rejection escape would fail
+     * the whole drift check, including the parts that had already answered.
+     */
+    private async retryArtifactFreeze(
+        blueprint: Blueprint,
+        node: Node,
+        applicationId: string,
+        binding: Extract<ReturnType<typeof resolveRuntimeRepairBinding>, { kind: 'binding' }>,
+        expectedRow: GitOpsArtifactSetRow | undefined,
+    ): Promise<boolean> {
+        if (!expectedRow) {
+            // No set to date the window from, so there is nothing to throttle
+            // against. A missing pointer is a different defect from a failed
+            // resolve, and re-resolving on every tick would paper over it.
+            return false;
+        }
+        // A generation whose retry was already refused is not asked again. See
+        // `refusedFreezeRetries` for why this cannot be a time-based gate.
+        if (this.refusedFreezeRetries.get(`${applicationId}:${node.id}`) === binding.acceptedGenerationId) {
+            return false;
+        }
+
+        // Everything below judges the *latest* recorded evidence, which is the one
+        // row a failed resolve can actually move. Reading the expected set here
+        // was the bug in this gate: a failed resolve writes a new row without
+        // advancing the expected pointer, so the expected set keeps describing the
+        // original freeze and a permanent failure looked clearable forever.
+        const store = GitOpsStore.getInstance();
+        const target = store.getTarget(applicationId, node.id);
+        const latestRow = (target?.latest_artifact_set_id
+            ? store.getArtifactSet(target.latest_artifact_set_id)
+            : undefined) ?? expectedRow;
+
+        if (!RETRYABLE_ARTIFACT_QUALIFICATIONS.has(latestRow.qualification)) return false;
+        if (!this.artifactRetryCanSucceed(latestRow)) return false;
+
+        // Falls back to the expected set's own age for a target that never
+        // recorded one, so a missing latest pointer throttles on the original
+        // freeze rather than retrying every tick.
+        const lastAttemptAt = latestRow.created_at;
+        const intervalMs = DatabaseService.getInstance().getGitOpsArtifactRetryIntervalMins() * 60_000;
+        // No clamp on the age, and deliberately: a stamp dated in the future (a
+        // clock step backwards, or a database restored from a host whose clock
+        // ran ahead) makes the age negative, which fails the same comparison and
+        // therefore waits out a full interval rather than retrying at once. That
+        // is the direction to be wrong in: a wrong-in-the-past stamp delays a
+        // retry by one interval, a wrong-in-the-future one would hammer a
+        // registry that is already struggling.
+        if (Date.now() - lastAttemptAt < intervalMs) return false;
+
+        // Skipped, not blocked, when a deploy holds this target's lock. A
+        // deploy resolves the freeze itself, so a concurrent retry would only
+        // contend for the same artifact rows.
+        if (!this.acquireLock(blueprint.id, node.id)) return false;
+        try {
+            // Whether the expectation actually moved is what separates "resolved,
+            // so hold this tick's comparison" from "tried, and there was nothing
+            // to resolve". The producer reports it from the target's pointer,
+            // because it is the pointer the next tick compares against and the one
+            // Enforce would pin to. A Git-managed Blueprint resolves from the
+            // accepted generation's own materialization through the same
+            // approved-content parser the Inline retry uses; its accepted
+            // generation is the binding's, and the application-level set it
+            // advances is what rollout authorization reads.
+            const liveApp = store.getLiveBlueprintApplication(blueprint.id);
+            const outcome = liveApp?.target_mode === 'blueprint'
+                ? (await materializeAndFreezeGitManagedArtifactSet({
+                    applicationId,
+                    generationId: binding.acceptedGenerationId,
+                    actor: null,
+                    trigger: 'git_managed_artifact_freeze_retried',
+                    nodeId: node.id,
+                })).status
+                : await retryInlineArtifactFreeze({
+                    blueprintId: blueprint.id,
+                    nodeId: node.id,
+                    generationId: binding.acceptedGenerationId,
+                });
+            if (outcome === 'refused') {
+                this.refusedFreezeRetries.set(
+                    `${applicationId}:${node.id}`,
+                    binding.acceptedGenerationId,
+                );
+            }
+            return outcome === 'resolved';
+        } catch (err) {
+            // Nothing was resolved, so the caller keeps the expectation it had.
+            // Answering false rather than falling through matters: this return is
+            // the only thing that stops a second attempt running outside the lock
+            // that the `finally` just released.
+            console.error(
+                '[BlueprintService] artifact freeze retry failed blueprint=%s node=%s error=%s',
+                sanitizeForLog(blueprint.name),
+                node.id,
+                sanitizeForLog(BlueprintService.formatError(err)),
+            );
+            return false;
+        } finally {
+            this.releaseLock(blueprint.id, node.id);
+        }
+    }
+
+    /**
+     * Record the identity a target is actually running, so the drift surfaces
+     * and the projection can report it. A failure to record is logged and
+     * swallowed: the observation is evidence, not authority, and losing it must
+     * not turn into a crash on the reconciler tick.
+     */
+    private recordRuntimeObservation(
+        blueprintName: string,
+        node: Node,
+        applicationId: string,
+        observed: ObservedArtifactIdentity,
+    ): void {
+        try {
+            GitOpsTransitions.getInstance().recordObservedRuntimeArtifact({
+                applicationId,
+                nodeId: node.id,
+                observed,
+                envelope: envelopeFor(null, 'blueprint_drift_observe'),
+            });
+        } catch (error) {
+            console.error(
+                '[BlueprintService] Failed to record runtime observation for blueprint %s node %d:',
+                sanitizeForLog(blueprintName),
+                node.id,
+                error instanceof Error ? error.message : String(error),
+            );
         }
     }
 
@@ -829,26 +1417,7 @@ export class BlueprintService {
         if (node.type === 'local') {
             return observeStackRuntimeArtifact({ stackName: blueprintName, nodeId: node.id });
         }
-        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-        if (!target) return null;
-        const url = `${target.apiUrl.replace(/\/$/, '')}/api/stacks/${encodeURIComponent(blueprintName)}/runtime-artifact-identity`;
-        try {
-            const res = await axios.get(url, {
-                ...safeAxiosTransport(target.trustedLoopback),
-                headers: this.remoteHeaders(target.apiToken),
-                timeout: REMOTE_HTTP_TIMEOUT_MS,
-                validateStatus: () => true,
-            });
-            if (res.status !== 200) return null;
-            return decodeObservedArtifactIdentity(JSON.stringify(res.data));
-        } catch (error) {
-            console.error(
-                '[BlueprintService] Remote runtime identity observation failed for %s:',
-                sanitizeForLog(blueprintName),
-                error instanceof Error ? error.message : String(error),
-            );
-            return null;
-        }
+        return fetchRemoteRuntimeArtifactIdentity(node.id, blueprintName);
     }
 
     private async containerHealth(
@@ -940,9 +1509,14 @@ export class BlueprintService {
             actor: 'blueprint-reconciler',
             auditMethod: 'POST',
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
+            // The apply below runs the gate again against the stack as written to
+            // disk and audits that decision. This earlier one evaluates the
+            // blueprint's authored content for the same operation, so a row from
+            // each would count one apply twice.
+            recordAllowedEvidence: false,
         }, undefined, true);
         if (!gate.ok) {
-            throw new Error(describePolicyBlock(gate.policy, gate.violations));
+            throw new Error(describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence));
         }
 
         const outcome = await this.applyLocalUnderLock(
@@ -985,7 +1559,7 @@ export class BlueprintService {
             /** GitOps binding to record on that recovery generation, when known. */
             recoveryBinding?: GitOpsRecoveryCapture;
         } = {},
-    ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
+    ): Promise<{ ran: true; policyEvidence?: AllowedPolicyEvidence } | { ran: false; existingAction: StackOpAction }> {
         const expected = parseBlueprintMarker(markerContent);
         if (!expected) {
             throw new Error('Invalid blueprint marker');
@@ -994,6 +1568,7 @@ export class BlueprintService {
             throwIfGitManagedDeploy(DatabaseService.getInstance().getBlueprint(expected.blueprintId));
         }
         const fs = FileSystemService.getInstance(nodeId);
+        let policyEvidence: AllowedPolicyEvidence | undefined;
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',
             async () => {
@@ -1077,11 +1652,11 @@ export class BlueprintService {
                             throw new DigestPinsMismatchError();
                         }
                     }
-                    await assertPolicyGateAllows(
+                    ({ policyEvidence } = await assertPolicyGateAllows(
                         stackName,
                         nodeId,
                         buildSystemPolicyGateOptions('blueprint', { auditPath }),
-                    );
+                    ));
                     await ComposeService.getInstance(nodeId).deployStack(
                         stackName,
                         undefined,
@@ -1156,7 +1731,7 @@ export class BlueprintService {
             },
             getRegistryDeliveryLockContext(),
         );
-        return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };
+        return lock.ran ? { ran: true, ...(policyEvidence ? { policyEvidence } : {}) } : { ran: false, existingAction: lock.existing.action };
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<DeployOutcome> {
@@ -1288,6 +1863,7 @@ export class BlueprintService {
         }
         if (res.status === 200) {
             DatabaseService.getInstance().deleteRoleAssignmentsByStack(node.id, blueprint.name);
+            removeStackMuteRules(node.id, blueprint.name);
             return { status: 'withdrawn' };
         }
         if (res.status === 409) {
@@ -1319,6 +1895,15 @@ export class BlueprintService {
         if (!body || typeof body !== 'object') return '';
         const code = (body as Record<string, unknown>).code;
         return typeof code === 'string' ? code : '';
+    }
+
+    /**
+     * A repair that must not be attempted. Carries the reason so the caller can
+     * record an explicit hold instead of an opaque failure, and keeps the
+     * human-readable explanation in one place.
+     */
+    private static heldRepair(reason: RuntimeRepairHoldReason): DeployOutcome {
+        return { status: 'repair_held', error: describeRuntimeRepairHold(reason), holdReason: reason };
     }
 
     static formatError(err: unknown): string {

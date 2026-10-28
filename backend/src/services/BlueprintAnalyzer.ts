@@ -220,6 +220,19 @@ export class BlueprintAnalyzer {
      * to guard them, not to ignore them. Null when the content does not parse,
      * so callers can hold rather than read a parse failure as "nothing
      * stateful here".
+     *
+     * Best effort by design, and that is the correct reading for the only
+     * historical caller. This reports what it can see: content using a YAML
+     * merge key, an `include`, an `extends`, or a `volumes_from` yields the
+     * services whose own blocks declare a mount, and a document with no services
+     * yields nothing. A caller asking "is a stateful service being withdrawn?"
+     * gets a partial answer rather than no answer, and that is what the
+     * withdrawal guard needs in order to keep behaving as it did before the
+     * policy model existed.
+     *
+     * Returning null for the constructs it cannot resolve instead is right for a
+     * different question, and is what `statefulServiceNamesStrict` is for. See
+     * that method for why the two must not be merged.
      */
     static statefulServiceNames(composeContent: string): Set<string> | null {
         let parsed: unknown;
@@ -248,6 +261,85 @@ export class BlueprintAnalyzer {
             }
         }
         return out;
+    }
+
+    /**
+     * Stateful services, refusing any content it cannot fully resolve.
+     *
+     * A YAML merge key, an `include`, an `extends`, or a `volumes_from` can each
+     * attach a mount to a service whose own block mentions none, and a merge key
+     * is the sharpest case: the anchored service is found while the service
+     * merging it is not, so a partial answer attributes the volume to the wrong
+     * service and reports the other as clean. A document with no services is
+     * unproven too, since nothing to place is not the same as proven stateless.
+     *
+     * All of these answer null, with no partial set. A set naming only the
+     * services the detector could see reads as permission for the ones it could
+     * not, which is the one answer a caller must never be handed.
+     *
+     * Separate from `statefulServiceNames` because the two consumers need
+     * opposite answers to the same document. This is for a caller about to act on
+     * the result, where "cannot prove" has to be a refusal. The withdrawal guard
+     * is not deciding whether to place anything: it is comparing two generations
+     * to see whether a stateful service is being withdrawn, and returning null
+     * there holds the update for ever on a compose file that was working
+     * yesterday. Sharing one method between them broke automatic source
+     * acceptance for every file using a merge key or an extends, which is a
+     * common idiom and not a defect worth refusing.
+     */
+    static statefulServiceNamesStrict(composeContent: string): Set<string> | null {
+        let parsed: unknown;
+        try {
+            parsed = parseYaml(composeContent);
+        } catch {
+            return null;
+        }
+        if (parsed == null || typeof parsed !== 'object') return null;
+        const doc = parsed as ComposeShape;
+        if (BlueprintAnalyzer.hasUnresolvableComposeConstruct(doc)) return null;
+        const services = doc.services ?? {};
+        if (!services || Object.keys(services).length === 0) return null;
+        return BlueprintAnalyzer.statefulServiceNames(composeContent);
+    }
+
+    /**
+     * Whether the document uses a construct whose volumes cannot be resolved from
+     * this text alone.
+     *
+     * `include` and `extends` name another file, and a merge key and
+     * `volumes_from` borrow another service's definition, so in every case the
+     * mounts of the real workload are somewhere this function cannot see. There
+     * is no partial answer worth returning: a set naming only the services it
+     * could see reads as permission for the ones it could not, which is how a
+     * data-bearing service ends up classified stateless.
+     */
+    private static hasUnresolvableComposeConstruct(doc: ComposeShape): boolean {
+        if ('include' in doc) return true;
+        // A merge key can appear at any depth, not only directly under a service:
+        // `services: { <<: *shared }` merges whole services in, and
+        // `volumes: [{ <<: *vol }]` merges a mount into a service whose own block
+        // never mentions one. Checking only the service level left both shapes
+        // visible to the volume walk below, which then reported the workload as
+        // stateless and let it be placed automatically.
+        if (BlueprintAnalyzer.containsMergeKey(doc)) return true;
+        const services = doc.services;
+        if (!services || typeof services !== 'object') return false;
+        for (const serviceDef of Object.values(services)) {
+            if (!serviceDef || typeof serviceDef !== 'object') continue;
+            if ('extends' in serviceDef || 'volumes_from' in serviceDef) return true;
+        }
+        return false;
+    }
+
+    /** Whether a YAML merge key appears anywhere in the parsed document. */
+    private static containsMergeKey(node: unknown): boolean {
+        if (Array.isArray(node)) return node.some((entry) => BlueprintAnalyzer.containsMergeKey(entry));
+        if (!node || typeof node !== 'object') return false;
+        for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+            if (key === '<<') return true;
+            if (BlueprintAnalyzer.containsMergeKey(value)) return true;
+        }
+        return false;
     }
 
     static extractImageRefs(composeContent: string): string[] {

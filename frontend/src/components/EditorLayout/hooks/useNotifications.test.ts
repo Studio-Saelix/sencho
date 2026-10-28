@@ -11,6 +11,7 @@ vi.mock('@/lib/api', () => ({
 vi.mock('@/components/ui/toast-store', () => ({ toast: { error: vi.fn() } }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 const localNode: Node = { id: 1, name: 'Local', type: 'local', api_url: '', compose_dir: '', is_default: true, status: 'online', created_at: 0 };
 
@@ -303,6 +304,73 @@ describe('useNotifications', () => {
     expect(onGitOpsChange).toHaveBeenCalledTimes(1);
   });
 
+  describe('remote socket reopening', () => {
+    const openEvents = () => {
+      const seen: unknown[] = [];
+      const onOpen = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener('sencho:node-notifications-open', onOpen);
+      return { seen, stop: () => window.removeEventListener('sencho:node-notifications-open', onOpen) };
+    };
+    const connectionEvents = () => {
+      const seen: unknown[] = [];
+      const onConnection = (e: Event) => seen.push((e as CustomEvent).detail);
+      window.addEventListener('sencho:notifications-connection', onConnection);
+      return { seen, stop: () => window.removeEventListener('sencho:notifications-connection', onConnection) };
+    };
+
+    it('announces the hub node id each time a remote socket opens, and nothing when it drops', () => {
+      vi.useFakeTimers();
+      const opens = openEvents();
+      const connections = connectionEvents();
+      try {
+        // The remote's numbering is not the hub's, so the id comes from the roster.
+        const remote = makeRemoteNode('online', { id: 7 });
+        renderHook(() =>
+          useNotifications({
+            nodes: [localNode, remote],
+            onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn(),
+          }),
+        );
+        expect(MockWS.instances).toHaveLength(2);
+        act(() => { MockWS.instances[0]?.onopen?.(); });
+        act(() => { MockWS.instances[1]?.onopen?.(); });
+        expect(opens.seen).toEqual([{ nodeId: 7 }]);
+
+        act(() => { MockWS.instances[1]?.onclose?.({ code: 1006 }); });
+        expect(opens.seen).toHaveLength(1);
+        act(() => { vi.advanceTimersByTime(1000); });
+        expect(MockWS.instances).toHaveLength(3);
+        act(() => { MockWS.instances[2]?.onopen?.(); });
+
+        expect(opens.seen).toEqual([{ nodeId: 7 }, { nodeId: 7 }]);
+        // The local feed never went down, so its connection event is untouched.
+        expect(connections.seen).toEqual([{ connected: true }]);
+      } finally {
+        opens.stop();
+        connections.stop();
+        vi.useRealTimers();
+      }
+    });
+
+    it('stays silent for a socket the roster has already dropped', async () => {
+      const opens = openEvents();
+      try {
+        const remote = makeRemoteNode('online', { id: 7 });
+        const { rerender } = renderHook(({ nodes }) =>
+          useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+        { initialProps: { nodes: [localNode, remote] } });
+        await waitFor(() => expect(MockWS.instances).toHaveLength(2));
+        rerender({ nodes: [localNode] });
+
+        act(() => { MockWS.instances[1]?.onopen?.(); });
+
+        expect(opens.seen).toEqual([]);
+      } finally {
+        opens.stop();
+      }
+    });
+  });
+
   it('deleteNotification removes the matching item', async () => {
     const { result } = renderHook(() =>
       useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
@@ -316,6 +384,98 @@ describe('useNotifications', () => {
     });
     act(() => { result.current.deleteNotification({ ...notif, nodeId: localNode.id }); });
     await waitFor(() => expect(result.current.notifications).toHaveLength(0));
+  });
+
+  describe('markRead', () => {
+    const seedRows = (rows: { socket: 0 | 1; payload: NotificationItem }[]) => {
+      // A stable array: a fresh one per render would re-run the node effect forever.
+      const nodes = [localNode, makeRemoteNode('online')];
+      const { result } = renderHook(() =>
+        useNotifications({ nodes, onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn(), onGitOpsChange: vi.fn() }),
+      );
+      act(() => { MockWS.instances.forEach((ws) => ws.onopen?.()); });
+      for (const { socket, payload } of rows) {
+        act(() => {
+          MockWS.instances[socket]?.onmessage?.({ data: JSON.stringify({ type: 'notification', payload }) });
+        });
+      }
+      return result;
+    };
+    const readFlags = (items: NotificationItem[]) => items.map((n) => `${n.nodeId}:${n.id}:${n.is_read}`).sort();
+
+    it('posts a local row to the local node and flips only that row', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 7, message: 'a' }) }, { socket: 0, payload: makeNotif({ id: 8, message: 'b' }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+      const target = result.current.notifications.find((n) => n.id === 7)!;
+
+      await act(async () => { await result.current.markRead(target); });
+
+      expect(apiFetch).toHaveBeenCalledWith('/notifications/7/read', { method: 'POST', localOnly: true });
+      expect(fetchForNode).not.toHaveBeenCalledWith('/notifications/7/read', expect.anything(), expect.anything());
+      expect(readFlags(result.current.notifications)).toEqual([`${localNode.id}:7:1`, `${localNode.id}:8:0`]);
+    });
+
+    it('addresses a remote row to its own node, not the row that shares its id', async () => {
+      // Each node numbers its own rows, so both feeds carry an id 7.
+      const result = seedRows([
+        { socket: 0, payload: makeNotif({ id: 7, message: 'local' }) },
+        { socket: 1, payload: makeNotif({ id: 7, message: 'remote' }) },
+      ]);
+      (fetchForNode as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+      const remoteRow = result.current.notifications.find((n) => n.nodeId === 2 && n.id === 7)!;
+
+      await act(async () => { await result.current.markRead(remoteRow); });
+
+      expect(fetchForNode).toHaveBeenCalledWith('/notifications/7/read', 2, { method: 'POST' });
+      expect(apiFetch).not.toHaveBeenCalledWith('/notifications/7/read', expect.anything());
+      expect(readFlags(result.current.notifications)).toEqual([`${localNode.id}:7:0`, '2:7:1']);
+    });
+
+    it('refetches the feed after a confirmed write so an older response cannot restore the row', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 11 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+      const target = result.current.notifications.find((n) => n.id === 11)!;
+      (apiFetch as ReturnType<typeof vi.fn>).mockClear();
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+
+      await act(async () => { await result.current.markRead(target); });
+
+      await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/notifications', { localOnly: true }));
+    });
+
+    it('does nothing for a row with no node', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 12 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockClear();
+      (fetchForNode as ReturnType<typeof vi.fn>).mockClear();
+
+      await act(async () => { await result.current.markRead({ ...result.current.notifications[0], nodeId: undefined }); });
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(fetchForNode).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('leaves the row unread and tells the operator when the write is refused', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 9 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false, status: 404 });
+      const target = result.current.notifications.find((n) => n.id === 9)!;
+
+      await act(async () => { await result.current.markRead(target); });
+
+      expect(readFlags(result.current.notifications)).toEqual([`${localNode.id}:9:0`]);
+      expect(toast.error).toHaveBeenCalled();
+    });
+
+    it('leaves the row unread and tells the operator when the request throws', async () => {
+      const result = seedRows([{ socket: 0, payload: makeNotif({ id: 10 }) }]);
+      (apiFetch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('offline'));
+      const target = result.current.notifications.find((n) => n.id === 10)!;
+
+      await act(async () => { await result.current.markRead(target); });
+
+      expect(readFlags(result.current.notifications)).toEqual([`${localNode.id}:10:0`]);
+      expect(toast.error).toHaveBeenCalled();
+    });
   });
 
   it('does not open a WS or poll an offline remote node', async () => {

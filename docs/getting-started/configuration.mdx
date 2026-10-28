@@ -134,6 +134,8 @@ services:
       - ./sencho-data:/app/data
 ```
 
+Sencho writes a stack file (a compose file, an `.env` file, an edit or upload in the file explorer, or a restore) by replacing it with a new file instead of rewriting it in place. A non-root process cannot give a file to another user, so the replacement belongs to the user Sencho runs as and the previous owner no longer owns it. The file keeps its group when the process is a member of that group, or when the folder hands new files that group (a setgid folder), and then it keeps its permissions too, so a `0660` file shared with a group stays readable and writable for that group. Otherwise the file falls to the process's own group and loses its group permission bits, while the other bits stay. Running as root, the default, keeps the owner and group as they were. A restore from a rollback backup gives each file back to the owner and group it had when the backup was taken, as it does the permissions, even if the file was changed since, and judges the group against them, so a restore over a deleted file, or over a file an earlier save or restore already moved to the process's group, keeps the captured group bits only when the process can keep that group, and otherwise drops them as described above. A backup taken before Sencho recorded the owner uses the group of the file it replaces instead, and a restore of such a backup over a deleted file applies the captured permissions as they were.
+
 <Warning>
   Non-root mode can cause filesystem write failures for any stack whose compose folder is owned by a UID other than `sencho`. If you hit "Failed to save stack" or similar errors after opting in, either `chown` the affected stack folder to the sencho user inside the container, or unset `SENCHO_USER` to return to the default (root) mode.
 </Warning>
@@ -256,7 +258,7 @@ Both files must be set. Setting only one refuses to start rather than falling ba
 
 The certificate must include a Subject Alternative Name that matches how agents dial: a DNS name for a hostname, or an `iPAddress` SAN for a raw IP. A certificate with only a Common Name fails Node's verification.
 
-Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle and the image health check can trust the issuer. Publicly trusted certificates do not need a CA file.
+Set `SENCHO_PUBLIC_URL` to the matching `https://` URL. For a private or self-signed issuer, also set `SENCHO_TLS_CA_FILE` so enrollment can give agents the CA bundle and the image health check can trust the issuer. Publicly trusted certificates do not need a CA file. For a worked setup that ends with an enrolled agent and checks the connection from the agent's side, see [Serve Sencho Over HTTPS and Enroll a Pilot Agent](/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent).
 
 Existing Pilot agents keep their persisted `pilot.jwt` across a scheme change. Edit the agent compose file so `SENCHO_PRIMARY_URL` uses `https://` (and add the CA bind-mount if enrollment now includes one), then recreate the agent container.
 
@@ -283,7 +285,11 @@ services:
 
 ## Reverse proxy setup
 
-Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer.
+Sencho works behind any reverse proxy. Forward WebSocket upgrades, the original client address, and the original request scheme. Set `SENCHO_TRUSTED_PROXY_CIDRS` to the direct proxy as a CIDR (for example, `192.168.1.50/32` for one IPv4 address or `fd12:3456:789a::50/128` for one IPv6 address), or to the proxy network CIDR, so Sencho accepts those forwarding headers only from that peer. For a worked Caddy setup that checks the audit log, the session cookie, and the sign-in limiter, see [Put Sencho Behind Caddy and Keep Real Client Addresses](/tutorials/run-sencho-behind-a-reverse-proxy).
+
+Until the direct peer is listed, Sencho ignores the forwarding headers: requests appear to come from the proxy, the sign-in cookie is not marked `Secure`, SSO callbacks are built on the scheme Sencho sees, and the source limits on sign-in, SSO, and other unauthenticated requests are shared across every client behind the proxy, so repeated sign-in attempts from one person can lock sign-in for everyone behind it. Signed-in requests keep their per-user or per-token rate-limit bucket. Sencho logs its trusted-proxy policy at startup and warns once per unlisted peer when an HTTP request carries forwarding headers, naming the value to set.
+
+Every instance keeps its own list. On a remote node reached over the proxy transport, the instance forwarding a request is its direct peer, so add the forwarding instance's address there as well if you want that node's audit trail to name the operator's address rather than the forwarding one. Pilot agents receive tunneled requests without forwarding headers: their local audit trail records the tunnel ingress, and the hub's audit log names the operator. A console session opened through another instance records that instance's operator in `acting_as`. Trust the narrowest range that works. A node that trusts a forwarding instance also accepts the client address that instance forwards, so a shared or over-broad range makes the audit trail easy to misreport.
 
 ### Nginx
 

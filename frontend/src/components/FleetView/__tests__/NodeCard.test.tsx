@@ -39,9 +39,11 @@ beforeEach(() => {
 afterEach(() => vi.clearAllMocks());
 
 describe('NodeCard', () => {
-  it('renders stats and the online badge for an online node', () => {
+  it('renders stats and no status or type badge for an online node', () => {
     render(<NodeCard {...baseProps(onlineNode())} />);
-    expect(screen.getByText('Online')).toBeInTheDocument();
+    expect(screen.queryByText('Online')).not.toBeInTheDocument();
+    expect(screen.queryByText('Offline')).not.toBeInTheDocument();
+    expect(screen.queryByText('remote')).not.toBeInTheDocument();
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.queryByText('Node unreachable')).not.toBeInTheDocument();
   });
@@ -141,6 +143,7 @@ describe('NodeCard', () => {
 
   const updateAvailableStatus = {
     nodeId: 2, name: 'Edge', type: 'remote' as const, version: '1.0.0', latestVersion: '1.1.0',
+    online: true,
     updateAvailable: true, updateStatus: null,
   };
 
@@ -148,6 +151,41 @@ describe('NodeCard', () => {
     useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
     render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
     expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
+  });
+
+  it('shows no Update available pill on an unreachable node', () => {
+    render(<NodeCard {...baseProps(offlineNode())} updateStatus={{ ...updateAvailableStatus, online: false }} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+  });
+
+  it('shows no Pinned pill on an unreachable node', () => {
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Skipped pill beside Offline on an unreachable node with a skipped version', () => {
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateAvailable: false, skipActive: true, skippedVersion: '1.1.0' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.getByText('Skipped')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+  });
+
+  it('keeps Update available on a reachable node', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Update available')).toBeInTheDocument();
   });
 
   it('hides the update button and shows Pinned when updateBlocked', () => {
@@ -236,30 +274,48 @@ describe('NodeCard', () => {
     expect(screen.queryByRole('button', { name: /Update to/ })).not.toBeInTheDocument();
   });
 
-  it('shows the networking signal badge and switches to the node on click', async () => {
-    const onOpenNetworking = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <NodeCard
-        {...baseProps(onlineNode())}
-        onOpenNetworking={onOpenNetworking}
-        networkingSignal={{ exposed: false, unknown: false, drift: true }}
-      />,
-    );
-    const badge = screen.getByText(/Networking/);
-    expect(badge).toBeInTheDocument();
-    await user.click(badge);
-    expect(onOpenNetworking).toHaveBeenCalledWith(2);
+  it('pins a Proxy marker on a proxy remote node', () => {
+    render(<NodeCard {...baseProps(onlineNode())} />);
+    expect(screen.getByText('Proxy')).toBeInTheDocument();
+    expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
+    expect(screen.queryByText('★ Local')).not.toBeInTheDocument();
   });
 
-  it('hides the networking signal badge when there is nothing to flag', () => {
-    render(
-      <NodeCard
-        {...baseProps(onlineNode())}
-        onOpenNetworking={vi.fn()}
-        networkingSignal={{ exposed: false, unknown: false, drift: false }}
-      />,
-    );
-    expect(screen.queryByText(/Networking/)).not.toBeInTheDocument();
+  it('pins a Pilot marker on a pilot agent node', () => {
+    render(<NodeCard {...baseProps({ ...onlineNode(), mode: 'pilot_agent' })} />);
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+    expect(screen.queryByText('Proxy')).not.toBeInTheDocument();
+  });
+
+  it('prefers the registry connection mode over the fleet payload', () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'proxy' }],
+      hasCapability: vi.fn(() => false),
+    });
+    render(<NodeCard {...baseProps({ ...onlineNode(), mode: 'pilot_agent' })} />);
+    expect(screen.getByText('Proxy')).toBeInTheDocument();
+    expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
+  });
+
+  it('uses the registry mode when the fleet payload carries none', () => {
+    useNodesMock.mockReturnValue({
+      nodes: [{ id: 2, name: 'Edge', type: 'remote', mode: 'pilot_agent' }],
+      hasCapability: vi.fn(() => false),
+    });
+    render(<NodeCard {...baseProps(onlineNode())} />);
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('keeps the connection pin on an offline remote node', () => {
+    render(<NodeCard {...baseProps({ ...offlineNode(), mode: 'pilot_agent' })} />);
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.getByText('Pilot')).toBeInTheDocument();
+  });
+
+  it('pins only the Local marker on the local node', () => {
+    render(<NodeCard {...baseProps({ ...onlineNode(), type: 'local' })} />);
+    expect(screen.getByText('★ Local')).toBeInTheDocument();
+    expect(screen.queryByText('Proxy')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pilot')).not.toBeInTheDocument();
   });
 });

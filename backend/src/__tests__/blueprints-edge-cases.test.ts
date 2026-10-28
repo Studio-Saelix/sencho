@@ -7,8 +7,11 @@
  *   - withdrawFromNode refusing to act when the marker belongs to a different blueprint.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import axios from 'axios';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { newGitOpsId } from '../services/gitops/directApplication';
+import type { Node } from '../services/DatabaseService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -27,6 +30,40 @@ function seedNode(): { id: number; name: string } {
          VALUES (?, 'local', 'proxy', '/tmp/compose', 0, 'online', ?)`,
     ).run(name, Date.now());
     return { id: result.lastInsertRowid as number, name };
+}
+
+/**
+ * A real remote node row, so a test that exercises the remote marker read goes
+ * through the same lookup the drift check does. A node that only exists on the
+ * object literal the test passes in is not the same thing, and a marker
+ * classification that returns early for a missing node would pass against it.
+ */
+function seedRemoteNode(): Node {
+    counter += 1;
+    const db = DatabaseService.getInstance().getDb();
+    const id = db.prepare(
+        `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
+         VALUES (?, 'remote', 'proxy', '/tmp/compose', 0, 'online', ?)`,
+    ).run(`bp-edge-remote-${counter}`, Date.now()).lastInsertRowid as number;
+    return DatabaseService.getInstance().getNode(id)!;
+}
+
+/**
+ * The proxy target a remote node needs before the remote read is reachable.
+ *
+ * Must be awaited. NodeRegistry is imported dynamically because it pulls
+ * DatabaseService in at module scope, and this file loads DatabaseService only
+ * after the test database exists.
+ */
+async function stubProxyTarget(node: Node): Promise<void> {
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const registry = NodeRegistry.getInstance();
+    vi.spyOn(registry, 'getProxyTarget').mockReturnValue({
+        nodeId: node.id,
+        apiUrl: 'https://leaf.example.test:1852',
+        apiToken: 'test-token',
+        trustedLoopback: false,
+    } as unknown as ReturnType<typeof registry.getProxyTarget>);
 }
 
 function seedBlueprint(nodeIds: number[], classification: 'stateless' | 'stateful' = 'stateless') {
@@ -69,7 +106,117 @@ beforeEach(() => {
     db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
 });
 
+/**
+ * Acknowledge a generation and its artifact set for one target.
+ *
+ * A drift check can only classify a target it can name an expected identity
+ * for, so a test that exercises marker or digest semantics needs a target that
+ * has actually been deployed. Without this the check has nothing to compare and
+ * reports missing evidence, which is a different test.
+ */
+async function acknowledgeInlineTarget(
+    appId: string,
+    nodeId: number,
+    generationId: string,
+    artifactSetId: string,
+): Promise<void> {
+    const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+    GitOpsStore.getInstance().upsertTarget({
+        ...emptyTargetRow(appId, nodeId, Date.now()),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        deployed_generation_id: generationId,
+        expected_artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+    });
+}
+
+/**
+ * An application with one accepted generation, one exact artifact set, and an
+ * acknowledged target: the minimum a drift check needs before it can say
+ * anything about marker or digest state.
+ */
+async function seedAcknowledgedInlineApp(
+    appId: string,
+    blueprintId: number,
+    nodeId: number,
+): Promise<void> {
+    const { GitOpsStore } = await import('../services/gitops/store');
+    const store = GitOpsStore.getInstance();
+    const genId = newGitOpsId();
+    const artId = newGitOpsId();
+    store.insertGeneration({
+        id: genId,
+        application_id: appId,
+        commit_sha: 'a'.repeat(40),
+        repo_url: `inline://blueprint/${blueprintId}`,
+        configured_ref: 'inline',
+        resolved_ref_kind: null,
+        repo_identity_json: JSON.stringify({ host: 'inline', pathname: `/blueprint/${blueprintId}` }),
+        manifest_version: 1,
+        candidate_dir: `generations/inline-${genId}`,
+        applied_dir: `generations/inline-${genId}-applied`,
+        expected_invocation_json: '{}',
+        materialization_fingerprint: 'a'.repeat(64),
+        validation_ok: 1,
+        plan_blocked: 0,
+        change_plan_fingerprint: null,
+        operation_id: 'op-acknowledged',
+        trigger: 'test',
+        actor: null,
+        previous_generation_id: null,
+        redacted_limitations_json: '[]',
+        portable_manifest_json: null,
+        compose_inputs_json: null,
+        source_policy_evidence_json: null,
+        security_policy_evidence_json: null,
+        support_requirements_json: null,
+        compatibility_requirements_json: null,
+        secret_capability_json: null,
+        created_at: Date.now(),
+    });
+    store.insertArtifactSet({
+        id: artId,
+        generation_id: genId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: JSON.stringify({ kind: 'exact', identity: `exact:${'a'.repeat(64)}` }),
+        created_at: Date.now(),
+    });
+    const app = store.getApplication(appId)!;
+    app.accepted_generation_id = genId;
+    app.artifact_set_id = artId;
+    app.latest_artifact_set_id = artId;
+    store.writeApplicationPointers(app);
+    await acknowledgeInlineTarget(appId, nodeId, genId, artId);
+}
+
 describe('Blueprint route edge cases', () => {
+    it('refuses to disable a blueprint whose repair is held, because its workload still runs', async () => {
+        // A hold is a decision not to overwrite the workload, not a statement that
+        // the workload is gone. Leaving this status out of the disable guard let a
+        // Blueprint be disabled while its containers kept running unattended.
+        const node = seedNode();
+        const bp = seedBlueprint([node.id]);
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'repair_held',
+            applied_revision: bp.revision,
+            drift_summary: 'the rollout for this target was superseded',
+        });
+
+        const res = await request(app)
+            .put(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie)
+            .send({ enabled: false });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('has_active_deployments');
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)?.enabled).toBe(true);
+    });
+
     it('refuses to disable a blueprint that still has an active deployment', async () => {
         const node = seedNode();
         const bp = seedBlueprint([node.id]);
@@ -274,12 +421,13 @@ describe('BlueprintService marker edge cases', () => {
         const { newGitOpsId } = await import('../services/gitops/directApplication');
         const appId = newGitOpsId();
         GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        await seedAcknowledgedInlineApp(appId, bp.id, localNode.id);
 
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
             blueprintId: bp.id,
             revision: bpObj.revision + 5,
             lastApplied: 0,
-        });
+        } });
 
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
 
@@ -303,25 +451,172 @@ describe('BlueprintService marker edge cases', () => {
     });
 
     it('returns unverified when a remote node has no proxy target', async () => {
-        const localNode = DatabaseService.getInstance().getNodes()[0];
-        const bp = seedBlueprint([localNode.id]);
+        // Exercises the real read: the marker is not mocked, because the whole
+        // point is what readMarker does when it cannot reach the node at all. A
+        // mocked marker here made this pass through the earlier
+        // "no GitOps target for this node" return instead, so it asserted
+        // nothing about the path it is named for.
+        const remoteNode = seedRemoteNode();
+        const bp = seedBlueprint([remoteNode.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
         const { GitOpsStore } = await import('../services/gitops/store');
         const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
         const { newGitOpsId } = await import('../services/gitops/directApplication');
-        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newGitOpsId(), bp.id, Date.now()));
-
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
-            blueprintId: bp.id,
-            revision: bpObj.revision,
-            lastApplied: 0,
-        });
-        const remoteNode = { ...localNode, type: 'remote' as const };
+        const appId = newGitOpsId();
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        await seedAcknowledgedInlineApp(appId, bp.id, remoteNode.id);
         const { NodeRegistry } = await import('../services/NodeRegistry');
         vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
 
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, remoteNode);
+
         expect(result.kind).toBe('unverified');
+        if (result.kind === 'unverified') {
+            expect(result.reason).toContain('marker file could not be read');
+        }
+    });
+
+    it('reports a marker read that fails on a remote node as unverified, not drift', async () => {
+        // The regression this pins: a transport failure used to arrive as the
+        // same null as an absent marker, so the check answered `drifted` on the
+        // revision cause and Enforce went on to attempt a repair against a node
+        // that had just demonstrated it could not be read.
+        const remoteNode = seedRemoteNode();
+        const bp = seedBlueprint([remoteNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const appId = newGitOpsId();
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        await seedAcknowledgedInlineApp(appId, bp.id, remoteNode.id);
+        await stubProxyTarget(remoteNode);
+        vi.spyOn(axios, 'get').mockRejectedValue(new Error('socket hang up'));
+
+        const result = await BlueprintService.getInstance().checkForDrift(bpObj, remoteNode);
+
+        expect(result.kind).toBe('unverified');
+        if (result.kind === 'unverified') {
+            expect(result.reason, 'the reason must name the transport failure').toContain('socket hang up');
+        }
+    });
+
+    it('still reports an absent marker on a remote node as revision drift', async () => {
+        // The companion to the case above, and the one that protects the absent
+        // path. The leaf reports ENOENT as 404 with its not-found code, which is
+        // a fact about the node, and it has to keep being reported as drift.
+        const remoteNode = seedRemoteNode();
+        const bp = seedBlueprint([remoteNode.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        const { GitOpsStore } = await import('../services/gitops/store');
+        const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
+        const { newGitOpsId } = await import('../services/gitops/directApplication');
+        const appId = newGitOpsId();
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(appId, bp.id, Date.now()));
+        await seedAcknowledgedInlineApp(appId, bp.id, remoteNode.id);
+        await stubProxyTarget(remoteNode);
+        vi.spyOn(axios, 'get').mockResolvedValue({
+            status: 404,
+            data: { error: 'File not found', code: 'NOT_FOUND' },
+        });
+
+        const result = await BlueprintService.getInstance().checkForDrift(bpObj, remoteNode);
+
+        expect(result.kind).toBe('drifted');
+        if (result.kind === 'drifted') {
+            expect(result.reason).toBe('marker file missing on node');
+            expect(result.cause).toBe('revision');
+        }
+    });
+
+    it.each([
+        ['a non-200 answer', { status: 500, data: { error: 'boom' } }, 'HTTP 500: boom'],
+        ['a body with no content', { status: 200, data: { content: 42 } }, 'no file content'],
+        ['a body that does not parse', { status: 200, data: { content: 'not json' } }, 'could not be parsed'],
+        // A 404 the leaf did not shape. A leaf predating the files route, an
+        // apiUrl pointing at the wrong base path, and a middlebox all answer
+        // 404, and treating one as an absent marker would report a node nobody
+        // could read as drifted, which is the error this discrimination removes.
+        ['a bare 404 with no body', { status: 404, data: '<!doctype html><title>404</title>' }, 'HTTP 404'],
+        ['a 404 from another API', { status: 404, data: { error: 'Unknown endpoint', code: 'ROUTE_NOT_FOUND' } }, 'HTTP 404: Unknown endpoint'],
+    ])('reads a remote marker as failed on %s', async (_label, answer, expected) => {
+        // The result type, not the verdict: an unreadable marker and an absent
+        // one must never collapse back into the same value.
+        const remoteNode = seedRemoteNode();
+        await stubProxyTarget(remoteNode);
+        vi.spyOn(axios, 'get').mockResolvedValue(answer);
+
+        const read = await BlueprintService.getInstance().readMarker('bp-edge-marker', remoteNode);
+
+        expect(read.kind).toBe('failed');
+        if (read.kind === 'failed') {
+            expect(read.error).toContain(expected);
+        }
+    });
+
+    it('reads a remote marker the leaf reported absent as missing, and a parseable one as present', async () => {
+        const { buildBlueprintMarker } = await import('../helpers/blueprintMarker');
+        const remoteNode = seedRemoteNode();
+        await stubProxyTarget(remoteNode);
+
+        // The leaf's own not-found answer, which is the only thing that means the
+        // marker is absent rather than that this node could not be read.
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } });
+        expect(await BlueprintService.getInstance().readMarker('bp-edge-marker', remoteNode)).toEqual({ kind: 'missing' });
+
+        vi.spyOn(axios, 'get').mockResolvedValue({
+            status: 200,
+            data: { content: JSON.stringify(buildBlueprintMarker({ blueprintId: 7, revision: 3, lastApplied: 0 })) },
+        });
+        const present = await BlueprintService.getInstance().readMarker('bp-edge-marker', remoteNode);
+        expect(present.kind).toBe('present');
+        if (present.kind === 'present') expect(present.marker.blueprintId).toBe(7);
+    });
+
+    it('refuses a remote create whose marker could not be read, as unverifiable rather than as a conflict', async () => {
+        // hasNameConflict answers "may I write here", and a node that could not be
+        // read does not answer that. It previously reported an unreadable marker
+        // as a conflict, which told the operator a stack they do not own was
+        // sitting on the node. The refusal is unchanged in both cases; what the
+        // operator is told is not.
+        const { BlueprintOwnershipProbeError } = await import('../services/BlueprintService');
+        const remoteNode = seedRemoteNode();
+        await stubProxyTarget(remoteNode);
+        // Only the marker read fails. The stack listing has to succeed, or the
+        // probe throws from its own list-failure catch and this asserts nothing
+        // about the marker. The listing URL is `${baseUrl}/api/stacks` with no
+        // query string, and the marker URL is the one carrying files/content.
+        const listUrl = 'https://leaf.example.test:1852/api/stacks';
+        vi.spyOn(axios, 'get').mockImplementation((url: string) => {
+            if (String(url) === listUrl) {
+                return Promise.resolve({ status: 200, data: ['bp-edge-conflict'] });
+            }
+            expect(String(url), 'only the marker read may fail here').toContain('files/content');
+            return Promise.reject(new Error('socket hang up'));
+        });
+
+        // Both the listing failure and the marker failure throw this same type, so
+        // the type alone cannot tell them apart. The message is what does: the
+        // listing failure names the node, the marker failure names the stack and
+        // carries the underlying read error.
+        const error = await BlueprintService.getInstance()
+            .hasNameConflict('bp-edge-conflict', remoteNode, 1)
+            .then(() => null, (err: unknown) => err);
+
+        expect(error, 'an unreadable marker must refuse the create').toBeInstanceOf(BlueprintOwnershipProbeError);
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message, 'the refusal must name the marker read that failed').toContain('socket hang up');
+        expect(message, 'not the stack listing, which answered').toContain('bp-edge-conflict');
+        expect(message).not.toMatch(/verify stack ownership on remote node/i);
+    });
+
+    it('reads a local marker that is genuinely absent as missing, not failed', async () => {
+        // Only a real ENOENT may produce `missing` on the local arm.
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+
+        const read = await BlueprintService.getInstance().readMarker('no-such-stack-anywhere', localNode);
+
+        expect(read).toEqual({ kind: 'missing' });
     });
 
     it('detects digest drift when marker and containers match but observation identity differs', async () => {
@@ -381,12 +676,13 @@ describe('BlueprintService marker edge cases', () => {
         app.artifact_set_id = artId;
         app.latest_artifact_set_id = artId;
         store.writeApplicationPointers(app);
+        await acknowledgeInlineTarget(appId, localNode.id, genId, artId);
 
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
             blueprintId: bp.id,
             revision: bpObj.revision,
             lastApplied: 0,
-        });
+        } });
         const svc = BlueprintService.getInstance() as unknown as {
             containerHealth: () => Promise<{ kind: 'running' }>;
             observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
@@ -505,12 +801,13 @@ describe('BlueprintService marker edge cases', () => {
         app.artifact_set_id = artId;
         app.latest_artifact_set_id = artId;
         store.writeApplicationPointers(app);
+        await acknowledgeInlineTarget(appId, localNode.id, genId, artId);
 
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
             blueprintId: bp.id,
             revision: bpObj.revision,
             lastApplied: 0,
-        });
+        } });
         const svc = BlueprintService.getInstance() as unknown as {
             containerHealth: () => Promise<{ kind: 'running' }>;
             observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
@@ -533,19 +830,24 @@ describe('BlueprintService marker edge cases', () => {
         expect(matched.kind).toBe('matched');
     });
 
-    it('returns unverified for a Blueprint with no frozen digest record', async () => {
+    it('holds for a target that never acknowledged an artifact record', async () => {
         const localNode = DatabaseService.getInstance().getNodes()[0];
         const bp = seedBlueprint([localNode.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
-        const { GitOpsStore } = await import('../services/gitops/store');
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
         const { blankInlineApplication } = await import('../services/gitops/blueprintProducers');
-        const { newGitOpsId } = await import('../services/gitops/directApplication');
-        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newGitOpsId(), bp.id, Date.now()));
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+        const { newGitOpsId: newId } = await import('../services/gitops/directApplication');
+        GitOpsStore.getInstance().insertApplication(blankInlineApplication(newId(), bp.id, Date.now()));
+        // The target exists but has acknowledged nothing: the state a node is in
+        // between being asked to hold a Blueprint and the first rollout landing.
+        GitOpsStore.getInstance().upsertTarget(
+            emptyTargetRow(GitOpsStore.getInstance().getLiveBlueprintApplication(bp.id)!.id, localNode.id, Date.now()),
+        );
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({ kind: 'present', marker: {
             blueprintId: bp.id,
             revision: bpObj.revision,
             lastApplied: 0,
-        });
+        } });
         const svc = BlueprintService.getInstance() as unknown as {
             containerHealth: () => Promise<{ kind: 'running' }>;
             observeRuntimeIdentity: () => Promise<import('../services/gitops/json').ObservedArtifactIdentity>;
@@ -557,10 +859,14 @@ describe('BlueprintService marker edge cases', () => {
             observedAt: Date.now(),
         });
 
+        // A target that was never acknowledged has no expected identity to
+        // compare against, so the check cannot classify it either way. That is
+        // unverified, carrying the block that says Enforce may not act, so the
+        // reconciler can still put the decision on the row.
         const result = await BlueprintService.getInstance().checkForDrift(bpObj, localNode);
         expect(result.kind).toBe('unverified');
         if (result.kind === 'unverified') {
-            expect(result.reason).toMatch(/no expected artifact set/i);
+            expect(result.repairBlock?.reason).toBe('evidence_incomplete');
         }
     });
 

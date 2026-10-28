@@ -9,13 +9,13 @@ import * as tar from 'tar-stream';
 import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
-import { FileSystemService } from '../services/FileSystemService';
+import { FileSystemService, isComposeBasename } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController from '../services/DockerController';
-import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type ScanPolicy, type StackDossierFields } from '../services/DatabaseService';
 import { type CacheFetchOutcome } from '../services/CacheService';
 import { buildStackStatusesEvidence } from '../services/stackStatusesEvidence';
 import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
@@ -27,14 +27,28 @@ import {
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost, type SourcePolicy } from '../services/GitSourceService';
 import { repoUrlRejectionMessage } from '../services/gitops/repoIdentity';
 import { observeStackRuntimeArtifact } from '../services/gitops/artifactResolve';
-import { loadEffectiveArtifactContext } from '../services/gitops/effectiveArtifactContext';
+import {
+  readStackDeclaredRestartIntent,
+  readStackHealthFacts,
+} from '../services/health/stackHealthFacts';
+import { loadEffectiveArtifactContext, readNodePlatform } from '../services/gitops/effectiveArtifactContext';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
+import { parseRestoreFailureClass } from '../services/gitops/rolloutRecovery';
 import { REF_MAX_LEN } from '../services/git/nativeGitTransport';
 import { validateCaBundlePem } from '../services/git/caBundle';
-import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
+import { enforcePolicyPreDeploy, type PolicyViolation } from '../services/PolicyEnforcement';
+import type { EvidenceGateDecision } from '../services/securityEvidence';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
+import {
+  driftDismissPolicy,
+  driftFindingFacts,
+  parseDriftKey,
+  type DriftDismissal,
+  type DriftFindingFacts,
+} from '../services/driftDismissals';
+import { MAX_TARGET_COUNT, readDismissalMode } from '../helpers/dismissalMode';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
 import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
@@ -58,17 +72,18 @@ import { NotificationService, type NotificationCategory } from '../services/Noti
 import { StackOpLockService, type StackOpAction } from '../services/StackOpLockService';
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
-import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
+import { isPathWithinBase, isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
 import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, type AllowedPolicyEvidence, policyBlockPayload, policyEvidenceFor, runPolicyGate, triggerPostDeployScan, describePolicyBlock, isPostDeployScanRunning } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { invalidateNodeNetworkingAggregate } from '../services/network/networkingAggregateCache';
 import { auditActorUsername } from '../helpers/auditActor';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import {
@@ -89,6 +104,8 @@ import {
   refuseIfSelfStack,
   selfStackProtectedBulkResult,
 } from '../helpers/selfStackGuard';
+import { refuseIfDockerEndpoint, sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, isDockerEndpointProtectedError } from '../helpers/dockerEndpointGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
@@ -133,6 +150,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   backup: 'backing up',
   delete: 'deleting',
   git_apply: 'applying Git changes',
+  image_pull: 'pulling images',
 };
 
 function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {
@@ -209,6 +227,15 @@ function rejectIfStackOpBlocksRootTrustFileWrite(
   return true;
 }
 
+const COMPOSE_OUTSIDE_STACK_ERROR =
+  'The compose file links outside the stack directory. Use include: to share a file between stacks.';
+
+// A compose file that links into the shared compose directory opens and
+// deploys, but the save is refused: writing through the link would overwrite the
+// shared target, which this stack does not own.
+const COMPOSE_LINK_SAVE_ERROR =
+  'This stack\'s compose file is a link to a file outside the stack directory, so Sencho cannot save it here. Edit the linked file at its own location, or use include: to share a file between stacks.';
+
 function stackFileEtag(mtimeMs: number): string {
   return `W/"${Math.floor(mtimeMs)}"`;
 }
@@ -221,31 +248,48 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-async function requireStackExists(nodeId: number, stackName: string, res: Response): Promise<boolean> {
+async function requireStackExists(
+  nodeId: number,
+  stackName: string,
+  res: Response,
+  notFoundCode?: string,
+): Promise<boolean> {
   if (!isValidStackName(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' });
     return false;
   }
+  const notFound = () => {
+    res.status(404).json({ error: 'Stack not found', ...(notFoundCode ? { code: notFoundCode } : {}) });
+  };
   const fsSvc = FileSystemService.getInstance(nodeId);
   const stackDir = path.join(fsSvc.getBaseDir(), stackName);
   try {
     if (!(await fsSvc.hasComposeFile(stackDir))) {
-      res.status(404).json({ error: 'Stack not found' });
+      notFound();
       return false;
     }
   } catch {
-    res.status(404).json({ error: 'Stack not found' });
+    notFound();
     return false;
   }
   return true;
 }
 
-// Thin wrapper over the shared env-source resolver. Returns the absolute paths of
-// the env files Compose would consult for this stack: existing declared `env_file:`
-// paths (injection sources) plus the project interpolation source(s). Configured
-// project env files are included as interpolation sources. The multi-file Git case
-// and path validation live in resolveStackEnvSources so every consumer agrees.
-export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+export interface StackEnvFileState {
+  /** Present env files the editor can edit: injection sources first, deduped. */
+  existing: string[];
+  /**
+   * The interpolation source Compose reads: the first configured project env
+   * file that resolves inside the stack directory, else the default `.env`.
+   * Present or missing; null only when none qualifies.
+   */
+  createTarget: string | null;
+}
+
+// Shared state for the env routes: the present env files the editor lists, plus
+// the file a first save would create. The multi-file Git case and path
+// validation live in resolveStackEnvSources so every consumer agrees.
+export async function resolveStackEnvFileState(nodeId: number, stackName: string): Promise<StackEnvFileState> {
   const sources = await resolveStackEnvSources(nodeId, stackName);
   const present = sources.envFiles.filter(f => f.existence === 'present' && f.resolvedPath);
   const injection = present.filter(f => f.isInjectionSource).map(f => f.resolvedPath as string);
@@ -258,7 +302,21 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
       injection.push(p);
     }
   }
-  return injection;
+  const createTarget = sources.envFiles.find(
+    f =>
+      f.isInterpolationSource
+      && f.existence !== 'unverifiable'
+      && f.resolvedPath
+      && isPathWithinBase(f.resolvedPath, sources.stackDir),
+  )?.resolvedPath ?? null;
+  return { existing: injection, createTarget };
+}
+
+// Thin wrapper for callers that only need the present env file list (GET /envs,
+// SecretsService): existing declared `env_file:` paths (injection sources) plus
+// the present project interpolation source(s), deduped.
+export async function resolveAllEnvFilePaths(nodeId: number, stackName: string): Promise<string[]> {
+  return (await resolveStackEnvFileState(nodeId, stackName)).existing;
 }
 
 // Uploads spool to disk (not memory) so a 25 MB upload is never held in RAM.
@@ -500,6 +558,8 @@ interface BulkResultItem {
   code?: string;
   /** Health gate run started for a successful update, when gating is enabled. */
   healthGateId?: string | null;
+  /** Set when an update proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 async function runStackBulkOp(
@@ -529,6 +589,19 @@ async function runStackBulkOp(
       return selfStackProtectedBulkResult(stackName);
     }
   }
+  if (action !== 'start') {
+    try {
+      const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(
+        stackName,
+        action === 'update' ? { kind: 'update' } : { kind: action },
+      );
+      if (refusal) return { stackName, ok: false, error: refusal.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    } catch (error) {
+      // An error here is not a pass: the stack is reported as failed and the batch carries on.
+      console.error('[DockerEndpointGuard] Check failed for %s; refusing it:', sanitizeForLog(stackName), error);
+      return { stackName, ok: false, error: 'Could not verify that this operation keeps the Docker connection safe.', code: 'op_failed' };
+    }
+  }
 
   const user = req.user?.username ?? 'system';
   const lockAction: StackOpAction = action;
@@ -549,7 +622,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
+          error: describePolicyBlock(gate.policy, gate.violations, 'update', gate.evidence),
           code: 'policy_blocked',
         };
       }
@@ -574,11 +647,14 @@ async function runStackBulkOp(
       const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null, { deployedGenerationId: orchResult.kind === 'stack_compose_done' ? orchResult.deployedGenerationId : null });
       const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
       linkStackUpdateRecoveryGate(recoveryId, healthGateId);
-      return { stackName, ok: true, healthGateId };
+      return { stackName, ok: true, healthGateId, ...allowedPolicyEvidence(gate) };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
       if (outcome.kind === 'no-containers') {
         return { stackName, ok: false, error: 'No containers found for this stack', code: 'no_containers' };
+      }
+      if (outcome.kind === 'endpoint-protected') {
+        return { stackName, ok: false, error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
       }
       if (outcome.kind === 'error') {
         if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), user);
@@ -589,6 +665,10 @@ async function runStackBulkOp(
     }
     return { stackName, ok: true };
   } catch (err) {
+    // Raised inside the lock after the pre-check passed: still a refusal, not a failed operation.
+    if (isDockerEndpointProtectedError(err)) {
+      return { stackName, ok: false, error: err.message, code: DOCKER_ENDPOINT_PROTECTED_CODE };
+    }
     if (action !== 'start') notifyActionFailure(action, stackName, err, user);
     return { stackName, ok: false, error: getErrorMessage(err, `${action} failed`), code: 'op_failed' };
   } finally {
@@ -687,10 +767,15 @@ stacksRouter.get('/discovery', async (req: Request, res: Response) => {
 stacksRouter.get('/:stackName', async (req: Request, res: Response) => {
   try {
     const stackName = req.params.stackName as string;
-    const { content, mtimeMs } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
+    const { content, mtimeMs, filename } = await FileSystemService.getInstance(req.nodeId).getStackContentWithMtime(stackName);
     res.setHeader('ETag', stackFileEtag(mtimeMs));
+    res.setHeader('X-Compose-File', filename);
     res.send(content);
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
+    }
     res.status(500).json({ error: 'Failed to read stack' });
   }
 });
@@ -705,24 +790,41 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Content must be a string' });
     }
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Save starting`, { stackName: sanitizeForLog(stackName), bytes: content.length, nodeId: req.nodeId });
+    const rawFilename = req.header('x-compose-file');
+    if (rawFilename !== undefined && !isComposeBasename(rawFilename)) {
+      return res.status(400).json({ error: 'Unknown compose file' });
+    }
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
     const result = await FileSystemService.getInstance(req.nodeId)
-      .saveStackContentIfUnchanged(stackName, content, expectedMtimeMs);
+      .saveStackContentIfUnchanged(stackName, content, expectedMtimeMs, rawFilename ?? null);
     if (!result.ok) {
-      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      if (result.currentMtimeMs > 0) res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      if (result.filename) res.setHeader('X-Compose-File', result.filename);
+      const sourceChanged = result.reason === 'source';
       return res.status(412).json({
-        error: `${stackName}'s compose file changed since you opened it.`,
-        code: 'stack_file_changed',
+        error: sourceChanged
+          ? `${stackName}'s compose file is no longer the file that was opened.`
+          : `${stackName}'s compose file changed since you opened it.`,
+        code: sourceChanged ? 'compose_source_changed' : 'stack_file_changed',
         currentMtimeMs: result.currentMtimeMs,
         currentContent: result.currentContent,
+        filename: result.filename,
       });
     }
     invalidateNodeCaches(req.nodeId);
     StackFileRootsService.invalidate(req.nodeId, stackName);
     dlog(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
-    res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs });
+    res.setHeader('X-Compose-File', result.filename);
+    res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs, filename: result.filename });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE') {
+      return res.status(409).json({ error: COMPOSE_LINK_SAVE_ERROR });
+    }
+    if (code === 'INVALID_PATH') {
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
+    }
     console.error('Failed to save stack:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to save stack' });
   }
@@ -815,29 +917,76 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     }
 
     const requestedFile = req.query.file as string | undefined;
-    const envPaths = await resolveAllEnvFilePaths(req.nodeId, stackName);
+    const createRequested = req.query.create === '1';
+    const forceRequested = req.query.force === '1';
+    const { existing: envPaths, createTarget } = await resolveStackEnvFileState(req.nodeId, stackName);
 
     let envPath = envPaths[0];
 
     if (requestedFile) {
       if (envPaths.includes(requestedFile)) {
         envPath = requestedFile;
+      } else if (createRequested && requestedFile === createTarget) {
+        // The editor's confirmed create retry pins the file the conflict named.
+        // That file can vanish before the retry (deleted while the dialog was
+        // open); it is still the file the resolver would create, so allow the
+        // retry to recreate it instead of stranding the editor on a 400. Any
+        // other pinned path keeps the scoped rejection.
+        envPath = requestedFile;
       } else {
         return res.status(400).json({ error: 'Requested env file not allowed' });
       }
     }
 
-    // No env file resolved: the stack has no .env yet and the editor only edits
-    // an existing env file. GET treats this same case as an empty 200; PUT cannot,
-    // since there is no resolved path to write. Reply with a clean, handled response
-    // instead of writing to an undefined path, which would otherwise surface as an opaque 500.
+    const fsService = FileSystemService.getInstance(req.nodeId);
+
+    // The editor's first save on a stack with no env file (?create=1).
+    // Creation is exclusive: an existing target is a conflict, never an
+    // overwrite, so a stale editor that still believes no file exists cannot
+    // destroy one. The editor's confirmed overwrite retry adds ?force=1 and
+    // pins the file it confirmed with ?file=<path>, re-validated above. Every
+    // other caller keeps the handled 404 below.
+    if (createRequested) {
+      if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+      const target = envPath ?? createTarget;
+      if (!target) {
+        return res.status(409).json({ error: 'No env file target is available for this stack' });
+      }
+      const result = forceRequested
+        ? await fsService.writeFileIfUnchanged(stackName, target, content, null)
+        : await fsService.createFileExclusive(target, content);
+      if (!result.ok) {
+        res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+        return res.status(412).json({
+          error: `${stackName}'s env file already exists.`,
+          code: 'stack_file_changed',
+          currentMtimeMs: result.currentMtimeMs,
+          currentContent: result.currentContent,
+          envPath: target,
+        });
+      }
+      invalidateNodeCaches(req.nodeId);
+      StackFileRootsService.invalidate(req.nodeId, stackName);
+      dlog(`[Stacks] Env file saved: ${sanitizeForLog(stackName)}/${sanitizeForLog(path.basename(target))}${forceRequested ? '' : ' (created)'}`);
+      res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+      return res.json({
+        message: 'Env file saved successfully',
+        mtimeMs: result.mtimeMs,
+        // The client selects the resolved path for its next read/save.
+        envPath: target,
+        ...(forceRequested ? {} : { created: true }),
+      });
+    }
+
+    // No env file resolved and no create intent: the stack has no env file
+    // yet. Keep the handled 404 so pushing a secret bundle to a stack with no
+    // env file never creates one as a side effect.
     if (!envPath) {
       return res.status(404).json({ error: 'No env file exists for this stack' });
     }
 
-    const fsService = FileSystemService.getInstance(req.nodeId);
     const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
-    const result = await fsService.writeFileIfUnchanged(envPath, content, expectedMtimeMs);
+    const result = await fsService.writeFileIfUnchanged(stackName, envPath, content, expectedMtimeMs);
     if (!result.ok) {
       res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
       return res.status(412).json({
@@ -854,6 +1003,21 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Env file saved successfully', mtimeMs: result.mtimeMs });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EISDIR') {
+      return res.status(409).json({ error: `${stackName}'s env file path is a directory` });
+    }
+    if (code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+      // The target became unusable between resolution and write (symlink,
+      // moved path). That is a recoverable conflict, not a server fault.
+      return res.status(409).json({ error: `${stackName}'s env file path is not usable` });
+    }
+    if (code === 'ENOENT') {
+      // The stack directory vanished between the existence check and the
+      // write (a concurrent delete). Report the stack as gone; never recreate
+      // it, or the deleted stack would come back hidden with the env content.
+      return res.status(404).json({ error: 'Stack not found' });
+    }
     console.error('[Stacks] Failed to save env file:', error);
     res.status(500).json({ error: 'Failed to save env file' });
   }
@@ -1172,6 +1336,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 
     let deployed = false;
     let deployError: string | undefined;
+    let allowedEvidence: { policyEvidence?: AllowedPolicyEvidence } = {};
     if (deploy_now === true) {
       const gate = await enforcePolicyPreDeploy(
         stack_name,
@@ -1179,8 +1344,9 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = describePolicyBlock(gate.policy, gate.violations);
+        deployError = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
       } else {
+        allowedEvidence = allowedPolicyEvidence(gate);
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(
             stack_name,
@@ -1211,6 +1377,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
       warnings: result.warnings,
       deployed,
       deployError,
+      ...allowedEvidence,
     });
     if (deployed && skip_scan !== true) {
       triggerPostDeployScan(stack_name, req.nodeId).catch(err =>
@@ -1232,6 +1399,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:delete', 'stack', stackName)) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   const pruneVolumes = req.query.pruneVolumes === 'true';
   const debug = isDebugEnabled();
   const sanitizedName = sanitizeForLog(stackName);
@@ -1255,6 +1423,10 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     }
     if (result.code === 'source_claimed_by_blueprint') {
       res.status(409).json({ error: result.error, code: result.code });
+      return;
+    }
+    if (result.code === 'docker_endpoint_protected') {
+      res.status(409).json({ error: result.error, code: DOCKER_ENDPOINT_PROTECTED_CODE });
       return;
     }
     if (result.code === 'fs_failed') {
@@ -1326,6 +1498,55 @@ stacksRouter.get('/:stackName/runtime-artifact-identity', async (req: Request, r
   }
 });
 
+/**
+ * This node's own runtime facts for a stack: the evidence a hub-driven health
+ * gate reads for a rollout target on it.
+ *
+ * Served by the instance that hosts the containers, because a remote node's
+ * Docker daemon is not reachable from the instance running the rollout. The
+ * route exists so a rollout to a remote target gets a real verdict instead of
+ * an observation that can only end unknown.
+ *
+ * `?declaredRestart=1` adds the declared Compose restart intent, which the
+ * caller reads once per observation to tell a completed one-shot apart from a
+ * container that died. It renders the stack, so it is opt-in rather than part
+ * of every poll.
+ */
+stacksRouter.get('/:stackName/health-observation', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const facts = await readStackHealthFacts({ nodeId: req.nodeId, stackName });
+    if (facts.kind !== 'ok') {
+      // A node that cannot read its own containers is answering about itself,
+      // and the answer may be different in a moment: reported as unavailable
+      // rather than as a failure of the request.
+      console.warn(
+        '[Stacks] Health observation unavailable for %s on node %d:',
+        sanitizeForLog(stackName), req.nodeId,
+        facts.kind === 'unavailable' ? facts.detail : facts.kind,
+      );
+      res.status(503).json({ error: 'Could not read this node\'s containers for the stack' });
+      return;
+    }
+    const declared = req.query.declaredRestart === '1'
+      ? await readStackDeclaredRestartIntent({ nodeId: req.nodeId, stackName })
+      : null;
+    res.json({
+      containers: facts.containers,
+      declaredRestartByService: declared ? Object.fromEntries(declared) : null,
+    });
+  } catch (error) {
+    console.error(
+      '[Stacks] Failed to observe runtime facts for %s:',
+      sanitizeForLog(stackName),
+      error,
+    );
+    res.status(500).json({ error: 'Failed to observe stack runtime facts' });
+  }
+});
+
 stacksRouter.get('/:stackName/effective-artifact-context', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
@@ -1339,6 +1560,25 @@ stacksRouter.get('/:stackName/effective-artifact-context', async (req: Request, 
       error,
     );
     res.status(500).json({ error: 'Failed to load effective artifact context' });
+  }
+});
+
+/**
+ * This node's Docker platform alone.
+ *
+ * Separate from the effective-artifact-context route because that one renders
+ * the stack, and a caller that only needs to know which manifest child this
+ * machine runs must not have to read a compose file to ask. `read` rather than
+ * `manage`: naming the platform exposes nothing an operator cannot already
+ * learn from the node, and a background reconciler on the hub needs it.
+ */
+stacksRouter.get('/platform/docker-context', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    res.json({ platform: await readNodePlatform(req.nodeId) });
+  } catch (error) {
+    console.error('[Stacks] Failed to read node platform:', error);
+    res.status(500).json({ error: 'Failed to read node platform' });
   }
 });
 
@@ -1384,7 +1624,10 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & {
+): Promise<Omit<StackDriftReport, 'findings'> & {
+  findings: Array<StackDriftReport['findings'][number] & DriftFindingFacts>;
+  /** Team dismissals on this stack's open findings; the client decides which still cover a finding. */
+  dismissals: DriftDismissal[];
   temporal: DriftTemporal;
   ledger: DriftLedgerEntry[];
   lastCheckedAt: number | null;
@@ -1431,7 +1674,16 @@ async function buildDriftPayload(
   // less state than exists. Mutation routes take the opposite side, because
   // there the write has already committed and a decoration must not be able to
   // report it as failed.
-  return { ...report, temporal, ledger, lastCheckedAt, gitopsRevision: projectManagedStackRevision(stackName, nodeId) };
+  return {
+    ...report,
+    // Facts only: the report's status and finding count still read every finding.
+    findings: report.findings.map(f => ({ ...f, ...driftFindingFacts(f) })),
+    dismissals: DriftLedgerService.getInstance().getOpenDismissals(nodeId, stackName),
+    temporal,
+    ledger,
+    lastCheckedAt,
+    gitopsRevision: projectManagedStackRevision(stackName, nodeId),
+  };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
@@ -1460,6 +1712,83 @@ stacksRouter.post('/:stackName/drift/recheck', async (req: Request, res: Respons
     console.error('[Stacks] Failed to re-check drift for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to re-check drift' });
+  }
+});
+
+/**
+ * Dismiss one drift finding for the team, until it changes (or for a set time,
+ * or permanently). The finding id names the kind and service; the fingerprint
+ * comes from a fresh read of this stack and the policy from the kind's fixed
+ * table, never from the request, which only says which state of the finding the
+ * operator saw.
+ * Stack-scoped deploy authority, the same as the actions drift offers next to it.
+ */
+stacksRouter.post('/:stackName/drift/dismissals', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  const body: unknown = req.body;
+  const record: Record<string, unknown> = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {};
+  const key = parseDriftKey(typeof record.findingId === 'string' ? record.findingId : '');
+  if (key === null) {
+    res.status(400).json({ error: 'findingId is not a drift finding id' });
+    return;
+  }
+  const { fingerprint, count } = record;
+  if (typeof fingerprint !== 'string' || fingerprint === '' || fingerprint.length > 64
+    || typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > MAX_TARGET_COUNT) {
+    res.status(400).json({ error: 'fingerprint and count must say which state of the finding was seen' });
+    return;
+  }
+  const requested = readDismissalMode(record, res);
+  if (requested === null) return;
+  if (driftDismissPolicy(key.kind) === 'none') {
+    res.status(400).json({ error: 'This finding is resolved from its Git source and cannot be dismissed here.' });
+    return;
+  }
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const report = await buildStackDriftReport(req.nodeId, stackName);
+    const outcome = DriftLedgerService.getInstance().dismissFinding(
+      req.nodeId, stackName, report, key, { fingerprint, count },
+      { ...requested, createdBy: auditActorUsername(req), now: Date.now() },
+    );
+    if (!outcome.ok) {
+      const refusal = {
+        FINDING_GONE: { status: 409, error: 'That finding is no longer present.' },
+        FINDING_CHANGED: { status: 409, error: 'That finding changed. Review it again.' },
+        EVIDENCE_UNAVAILABLE: { status: 503, error: 'Drift could not be assessed right now, so nothing was dismissed.' },
+      }[outcome.code];
+      res.status(refusal.status).json({ error: refusal.error, code: outcome.code });
+      return;
+    }
+    res.status(outcome.kept ? 200 : 201).json({ dismissal: outcome.dismissal, kept: outcome.kept });
+  } catch (error) {
+    console.error('[Stacks] Failed to dismiss drift finding for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to dismiss the finding' });
+  }
+});
+
+/** Restore a dismissed drift finding. The same stack-scoped deploy authority that dismissing it took. */
+stacksRouter.delete('/:stackName/drift/dismissals/:id', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) {
+    res.status(400).json({ error: 'Invalid dismissal id' });
+    return;
+  }
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    if (!DriftLedgerService.getInstance().restoreDismissal(req.nodeId, stackName, id)) {
+      res.status(404).json({ error: 'Dismissal not found' });
+      return;
+    }
+    res.status(204).end();
+  } catch (error) {
+    console.error('[Stacks] Failed to restore drift finding for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to restore the finding' });
   }
 });
 
@@ -1619,6 +1948,8 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
       created_by: req.user?.username ?? 'unknown',
       created_at: Date.now(),
     });
+    // Networking lists Doctor findings under "dismissed" once acknowledged; drop its memo so that shows now.
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.status(201).json(ack);
   } catch (error) {
     console.error('[Stacks] Failed to create preflight acknowledgement for %s:', sanitizeForLog(stackName),
@@ -1643,6 +1974,7 @@ stacksRouter.delete('/:stackName/preflight/acknowledgements/:id', async (req: Re
   }
   try {
     DatabaseService.getInstance().deletePreflightAcknowledgement(id);
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.status(204).end();
   } catch (error) {
     console.error('[Stacks] Failed to delete preflight acknowledgement for %s:', sanitizeForLog(stackName),
@@ -1691,8 +2023,9 @@ stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
 // Read-only and advisory; auto-proxies to the active node. The response carries
-// only structural fields; resolved env, label, and command values are never
-// extracted. A secret interpolated INTO a structural field still resolves into
+// structural fields plus a validated `sencho.service.url` per service. Other
+// resolved env, label, and command values are never extracted. A secret
+// interpolated INTO a structural field or that allowlisted label still resolves into
 // the payload, but is already readable at the same stack:read scope via the
 // stack's files (see docs/features/environment-guardrails).
 stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Response) => {
@@ -1702,6 +2035,10 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   try {
     res.json(await buildEffectiveAnatomy(req.nodeId, stackName));
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'SYMLINK_ESCAPE' || code === 'INVALID_PATH') {
+      return res.status(409).json({ error: COMPOSE_OUTSIDE_STACK_ERROR });
+    }
     console.error('[Stacks] Failed to build effective anatomy for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to build effective anatomy' });
@@ -1810,6 +2147,8 @@ stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => 
     } else {
       DatabaseService.getInstance().setStackExposureIntent(req.nodeId, stackName, service, intent, req.user?.username ?? null);
     }
+    // Networking findings depend on intent; drop its memo so the finding is re-checked at once.
+    invalidateNodeNetworkingAggregate(req.nodeId);
     res.json(exposurePayload(req.nodeId, stackName));
   } catch (error) {
     console.error('[Stacks] Failed to save exposure intent for %s:', sanitizeForLog(stackName),
@@ -1877,6 +2216,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'up' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
   const t0 = Date.now();
@@ -1899,7 +2239,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null, { deployedGenerationId: deployResult.deployedGenerationId });
     linkStackUpdateRecoveryGate(deployResult.recoveryId, healthGateId);
-    res.json({ message: 'Deployed successfully', healthGateId });
+    res.json({ message: 'Deployed successfully', healthGateId, ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
@@ -1908,6 +2248,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
@@ -1947,11 +2288,63 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Acquire registry-backed images for a stack and stop. This never reconciles
+ * the runtime: no `up`, no restart, no recreate, no build. It therefore opens
+ * no rollback generation, starts no health gate, records no lifecycle metric,
+ * and dispatches no activity notification, because no deployment happened.
+ * Only the local image store changes.
+ *
+ * Deliberately absent, each for a reason: the policy gate guards runtime
+ * mutations; the post-deploy scan and drift re-baseline describe a reconciled
+ * runtime; and the `deploy_success` / `image_update_applied` activity records
+ * are the marker the update guard reads as "last successful apply", so emitting
+ * one from a pull would corrupt rollback readiness.
+ */
+stacksRouter.post('/:stackName/pull-images', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  // Pulling stages images for a deploy, so it needs both the edit authority for
+  // the authored state it resolves against and the deploy authority that later
+  // consumes the images. Both are unconditional here, unlike Git source apply,
+  // which asks for deploy authority only when that apply will itself deploy: a
+  // pull always fetches, so there is no mode in which the second gate is moot.
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
+  // Lock held below. All early-returns must stay inside the try so finally fires.
+  if (!tryAcquireStackOpLock(req, res, stackName, 'image_pull')) return;
+  try {
+    const result = await ComposeService.getInstance(req.nodeId)
+      .pullStackImages(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
+    invalidateNodeCaches(req.nodeId);
+    dlog(`[Stacks] Image pull completed: ${sanitizeForLog(stackName)}`);
+    res.json({
+      message: 'Pulled registry images',
+      skippedBuildBacked: result.skippedBuildBacked,
+    });
+  } catch (error: unknown) {
+    // A failed compose step reports the output it accumulated, so collapse the
+    // line breaks into a visible separator before the sanitizer deletes them
+    // outright: this entry is the only durable record of the failure, and
+    // welded lines cannot be read. The fallback stays neutral so a throw the
+    // log cannot render does not read back as the operation's name.
+    const detail = getErrorMessage(error, 'unknown').replace(/\s*[\r\n]+\s*/g, ' | ');
+    console.error('[Stacks] Image pull failed: %s', sanitizeForLog(stackName), sanitizeForLog(detail));
+    if (!res.headersSent) {
+      res.status(500).json({ error: getErrorMessage(error, 'Image pull failed') });
+    }
+  } finally {
+    releaseStackOpLock(req, stackName);
+  }
+});
+
 stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'stop' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   const t0 = Date.now();
@@ -1965,6 +2358,8 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId, removeVolumes });
     await ComposeService.getInstance(req.nodeId).runDown(stackName, { removeVolumes }, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
+    // runDown ends the gates it invalidated, so a gate on a stack the operator
+    // just took down cannot report the removal as a failed update.
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
     notifyActionSuccess(
       'stack_taken_down',
@@ -1976,6 +2371,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     res.json({ status: 'Command started' });
   } catch (error: unknown) {
     console.error('[Stacks] Down failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure('down', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       if (isDockerUnavailableError(error)) {
@@ -1990,6 +2386,18 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Retire the stack's per-service recovery snapshots after a generation rollback
+ * replaced its runtime through its own compose up. The gates are ended before the
+ * restore runs, not here: the restore arms its own recovery observation, and
+ * ending the gates afterwards would end that one too. The backup-based rollback
+ * path gets both from `deployStack`.
+ */
+async function retireRollbackServiceRecoveries(nodeId: number, stackName: string): Promise<void> {
+  const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
+  ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(nodeId, stackName);
+}
+
 export type StackContainerAction = 'restart' | 'stop' | 'start';
 
 const CONTAINER_ACTION_META: Record<StackContainerAction, { category: NotificationCategory; pastTense: string }> = {
@@ -2002,6 +2410,8 @@ export type ContainerActionOutcome =
   | { kind: 'ok'; count: number }
   | { kind: 'no-containers' }
   | { kind: 'docker-unavailable'; message: string }
+  /** The Docker endpoint guard refused the batch before any container was touched. */
+  | { kind: 'endpoint-protected'; message: string; reason: string }
   | { kind: 'error'; message: string };
 
 /**
@@ -2035,13 +2445,31 @@ export async function containerActionForStack(
     const dockerController = DockerController.getInstance(nodeId);
     const containers = await dockerController.getContainersByStack(stackName);
     if (!containers || containers.length === 0) return { kind: 'no-containers' };
+    // Before the op, and here rather than in each caller, because this is the one
+    // function every stack-scoped container op runs through (the single-stack
+    // route, the bulk route, and the fleet label stop). A stop runs containers
+    // concurrently against a 10s Docker timeout, and a gate poll landing in that
+    // window would record the deliberate stop as a failed update.
+    if (action !== 'start') {
+      // Refuse the whole batch before anything is touched or any gate ends.
+      await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
+      HealthGateService.getInstance().supersedeForContainerOp(
+        nodeId,
+        stackName,
+        `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+      );
+    }
+    // The batch was just checked as a whole, so each container skips its own check.
     const op =
-      action === 'restart' ? (id: string) => dockerController.restartContainer(id)
-        : action === 'stop' ? (id: string) => dockerController.stopContainer(id)
+      action === 'restart' ? (id: string) => dockerController.restartContainer(id, { endpointGuard: 'batch-checked' })
+        : action === 'stop' ? (id: string) => dockerController.stopContainer(id, { endpointGuard: 'batch-checked' })
           : (id: string) => dockerController.startContainer(id);
     await Promise.all(containers.map(c => op(c.Id)));
     return { kind: 'ok', count: containers.length };
   } catch (error: unknown) {
+    if (isDockerEndpointProtectedError(error)) {
+      return { kind: 'endpoint-protected', message: error.message, reason: error.reason };
+    }
     if (isDockerUnavailableError(error)) {
       return { kind: 'docker-unavailable', message: getErrorMessage(error, 'Docker daemon is unreachable') };
     }
@@ -2058,6 +2486,7 @@ async function bulkContainerOp(
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (action === 'stop' && (await refuseIfSelfStack(req, res, stackName))) return;
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: action === 'stop' ? 'stop' : 'restart' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   const t0 = Date.now();
@@ -2075,6 +2504,10 @@ async function bulkContainerOp(
       console.error('[Stacks] %s failed: docker unavailable for %s', sanitizeForLog(titleCase), sanitizeForLog(stackName));
       if (action !== 'start') notifyActionFailure(action, stackName, new Error(outcome.message), req.user?.username ?? 'system');
       res.status(503).json({ error: outcome.message, code: 'docker_unavailable' });
+      return;
+    }
+    if (outcome.kind === 'endpoint-protected') {
+      res.status(409).json({ error: outcome.message, code: DOCKER_ENDPOINT_PROTECTED_CODE, reason: outcome.reason });
       return;
     }
     if (outcome.kind === 'error') {
@@ -2120,6 +2553,7 @@ async function handleServiceAction(
     res.status(400).json({ error: 'Invalid service name' });
     return;
   }
+  if (action !== 'start' && await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName, restart: action === 'restart', engineOnly: true })) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const all = await dockerController.getContainersByStack(stackName);
@@ -2131,6 +2565,20 @@ async function handleServiceAction(
     if (matching.length === 0) {
       res.status(404).json({ error: `Service '${serviceName}' not found in stack '${stackName}'.` });
       return;
+    }
+    // Before the op, for the same reason as the stack-level op: a stop runs
+    // containers against a 10s Docker timeout, and a gate poll landing in that
+    // window would record the deliberate stop as a failed update. Scoped to
+    // this service: its own gate and the stack gate end, while a sibling's gate
+    // keeps observing its own runtime with this service detached from the
+    // collateral set it would otherwise fail on.
+    if (action !== 'start') {
+      HealthGateService.getInstance().supersedeForContainerOp(
+        req.nodeId,
+        stackName,
+        `the service ${serviceName} was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
+        [serviceName],
+      );
     }
     const op =
       action === 'start'
@@ -2150,6 +2598,7 @@ async function handleServiceAction(
     });
   } catch (error: unknown) {
     console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(action), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     res.status(500).json({ error: getErrorMessage(error, `Failed to ${action} service`) });
   }
 }
@@ -2175,6 +2624,7 @@ function serviceFailureStatus(code: string): number {
     case 'policy_blocked':
     case 'recovery_not_restorable':
     case 'recovery_claim_failed':
+    case DOCKER_ENDPOINT_PROTECTED_CODE:
       return 409;
     default:
       // Compose, retag, inspect, and replica-divergence failures are server-side.
@@ -2194,6 +2644,7 @@ function sendServiceResult(res: Response, result: OrchestratorResult, serviceNam
       ...(result.previousImageId ? { previousImageId: result.previousImageId } : {}),
       ...(result.newImageId ? { newImageId: result.newImageId } : {}),
       ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
+      ...policyEvidenceFor(res),
     });
     return true;
   }
@@ -2241,6 +2692,7 @@ async function handleServiceScopedMutation(
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
   if (!requireServiceScopedUpdateCapability(res)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'service', service: serviceName })) return;
   if (!tryAcquireStackOpLock(req, res, stackName, options.lockAction)) return;
 
   const t0 = Date.now();
@@ -2291,6 +2743,7 @@ async function handleServiceScopedMutation(
       sanitizeForLog(serviceName),
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
+    if (sendIfDockerEndpointProtected(res, error)) return;
     notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
@@ -2356,6 +2809,48 @@ stacksRouter.get('/:stackName/services/:serviceName/recovery', async (req: Reque
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
     res.status(500).json({ error: 'Failed to load service recovery', code: 'service_recovery_lookup_failed' });
+  }
+});
+
+/** Active stack recoveries with health-gate status, for overlapping service-update Restore resurfacing. */
+stacksRouter.get('/:stackName/recoveries', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (!requireServiceScopedUpdateCapability(res)) return;
+  try {
+    const rows = ServiceUpdateRecoveryService.getInstance().listAllActiveForStack(req.nodeId, stackName);
+    const recoveries = rows.map(row => {
+      if (!row.health_gate_id) {
+        return {
+          serviceName: row.service_name,
+          recoveryId: row.id,
+          healthGateId: null,
+          healthGateStatus: 'unknown' as const,
+          healthGateReason: 'no health gate linked',
+          healthGateFailureSource: null,
+          expiresAt: row.expires_at,
+        };
+      }
+      const report = HealthGateService.getInstance().getReport(req.nodeId, stackName, row.health_gate_id);
+      return {
+        serviceName: row.service_name,
+        recoveryId: row.id,
+        healthGateId: row.health_gate_id,
+        healthGateStatus: (report.status === 'never-run' || !report.id) ? 'unknown' : report.status,
+        healthGateReason: report.reason ?? null,
+        healthGateFailureSource: report.failureSource,
+        expiresAt: row.expires_at,
+      };
+    });
+    res.json(recoveries);
+  } catch (error: unknown) {
+    console.error(
+      '[Stacks] Failed to list stack recoveries for %s: %s',
+      sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
+    res.status(500).json({ error: 'Failed to load stack recoveries', code: 'stack_recovery_lookup_failed' });
   }
 });
 
@@ -2453,6 +2948,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   const t0 = Date.now();
@@ -2502,6 +2998,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     res.json({
       status: 'Update completed',
       healthGateId,
+      ...policyEvidenceFor(res),
       ...(recheckWarning ? { recheckWarning } : {}),
     });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
@@ -2512,6 +3009,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Update failed: %s', sanitizeForLog(stackName), error);
+    if (sendIfDockerEndpointProtected(res, error)) return;
     const rollbackInfo = getComposeRollbackInfo(error);
     const rolledBack = rollbackInfo?.rolledBack ?? false;
     if (rolledBack) {
@@ -2536,11 +3034,22 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   }
 });
 
+/** The node's own pre/post classification of a restore failure, when the service attached one. */
+function restoreFailureClassOf(error: unknown): { failureClass?: 'pre_mutation' | 'post_mutation' } {
+  const failureClass = parseRestoreFailureClass(
+    (error as { failureClass?: unknown } | null)?.failureClass,
+  );
+  return failureClass ? { failureClass } : {};
+}
+
 stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
-  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  // Coded so a rollback caller can tell "the stack is gone, nothing to
+  // restore" from an anonymous failure it has to fail closed on.
+  if (!(await requireStackExists(req.nodeId, stackName, res, 'STACK_NOT_FOUND'))) return;
   if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (await refuseIfDockerEndpoint(req, res, stackName, { kind: 'update' })) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
@@ -2581,30 +3090,56 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     if (currentGen) {
       dlog(`[Stacks] Rollback initiated via recovery generation: ${sanitizeForLog(stackName)}`);
       try {
-        const rolledBack = await recoverySvc.compensateWithCandidate(
+        const compensation = await recoverySvc.compensateWithCandidateOutcome(
           currentGen.id,
-          // Returns the Compose result rather than swallowing it, so a proven
-          // restore can bind its deployed pointer and open a health run.
-          (overridePath, invocation, overlay) => ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
-            stackName,
-            overridePath,
-            getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
-            invocation,
-            overlay,
-          ),
+          // Ends the gates the restore is about to invalidate, and returns the
+          // Compose result rather than swallowing it, so a proven restore can
+          // bind its deployed pointer and open a health run.
+          //
+          // The supersede is in here rather than around the call for two reasons.
+          // The restore can refuse first, on integrity, policy or missing held
+          // references, and a refusal changes nothing, so it must not cost a live
+          // gate. And once the restore lands it arms its own recovery
+          // observation, so ending the gates after it would end that one too and
+          // the rollback could never be verified healthy.
+          (overridePath, invocation, overlay) => {
+            HealthGateService.getInstance().supersedeForContainerOp(
+              req.nodeId,
+              stackName,
+              'the stack was rolled back during the observation',
+            );
+            return ComposeService.getInstance(req.nodeId).composeUpWithRecoveryOverride(
+              stackName,
+              overridePath,
+              getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+              invocation,
+              overlay,
+            );
+          },
           buildPolicyGateOptions(req, { actor: req.user?.username ?? 'system' }),
         );
-        if (!rolledBack) {
-          res.status(500).json({ error: 'Rollback restore did not complete.' });
+        if (!compensation.rolledBack) {
+          res.status(500).json({
+            error: 'Rollback restore did not complete.',
+            // The service classified how far the restore got; the hub
+            // restoring through this node needs it and cannot guess it.
+            failureClass: compensation.failureClass,
+          });
           notifyActionFailure('rollback', stackName, new Error('rollback restore did not complete'), req.user?.username ?? 'system');
           return;
         }
       } catch (compError: unknown) {
         const compCode = (compError as { code?: string }).code;
+        const compFailureClass = restoreFailureClassOf(compError);
         if (compCode === 'ROLLBACK_PROHIBITED') {
+          // A policy refusal carries the decision the block dialog renders; an
+          // integrity or held-image refusal does not, and stays a plain 409.
+          const block = compError as { violations?: PolicyViolation[]; policy?: ScanPolicy; evidence?: EvidenceGateDecision };
           res.status(409).json({
             error: (compError as Error).message || 'Rollback is prohibited for this generation',
             code: 'ROLLBACK_PROHIBITED',
+            ...(block.violations ? policyBlockPayload(block.policy, block.violations, block.evidence) : {}),
+            ...compFailureClass,
           });
           return;
         }
@@ -2612,14 +3147,22 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
           res.status(500).json({
             error: (compError as Error).message || 'Held recovery image is missing.',
             code: 'HELD_IMAGE_MISSING',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, compError, req.user?.username ?? 'system');
           return;
         }
         if (compCode === 'RECOVERY_PROBE_FAILED') {
+          // The restore itself completed; only the probe after it failed, so the
+          // runtime really was replaced and this stack is settled like the
+          // success path below. The gates were already ended by the restore
+          // itself. ROLLBACK_PROHIBITED and HELD_IMAGE_MISSING do not reach this
+          // point with a replaced runtime, so they skip it.
+          await retireRollbackServiceRecoveries(req.nodeId, stackName);
           res.status(500).json({
             error: 'Rollback restore completed but recovery probe failed.',
             code: 'RECOVERY_PROBE_FAILED',
+            ...compFailureClass,
           });
           notifyActionFailure('rollback', stackName, new Error('recovery probe failed'), req.user?.username ?? 'system');
           return;
@@ -2627,6 +3170,12 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         throw compError;
       }
       invalidateNodeCaches(req.nodeId);
+      // The restore replaced every service's runtime, so the per-service snapshots
+      // taken before it are not rollback targets any more. The gates were already
+      // ended by the restore itself, just before its compose up. The backup-based
+      // rollback below gets both from `deployStack`.
+      const { ServiceUpdateRecoveryService } = await import('../services/ServiceUpdateRecoveryService');
+      ServiceUpdateRecoveryService.getInstance().invalidateActiveForStack(req.nodeId, stackName);
       dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
       // Echo the generation the point was bound to. A hub-driven rollout
       // rollback requires this to equal the generation it asked for, so a
@@ -2635,6 +3184,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
         message: 'Stack rolled back from recovery generation.',
         recoveryId: currentGen.id,
         gitopsGenerationId: currentGen.gitops_generation_id ?? null,
+        ...policyEvidenceFor(res),
       });
       notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
       return;
@@ -2679,10 +3229,27 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
-    res.json({ message: 'Stack rolled back: compose and env files restored.' });
+    res.json({ message: 'Stack rolled back: compose and env files restored.', ...policyEvidenceFor(res) });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    if (isDockerEndpointProtectedError(error)) {
+      // Refused before compose ran, so the restored files are put back.
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a refused rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+          // The files are a mix of the restore and what was there: say so, and
+          // let the hub treat the refusal as having moved something.
+          error.failureClass = 'post_mutation';
+          error.message += ' The restored files could not be put back; check the stack files before deploying again.';
+        }
+      }
+      sendIfDockerEndpointProtected(res, error);
+      return;
+    }
     const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
     if (isMissingExternalNetworksError(error)) {
       if (revertRestore) {
@@ -2707,7 +3274,11 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     const message = getErrorMessage(error, 'Rollback failed.');
     notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // A compensation failure classified by the service rides out even on
+      // this generic path: the hub restoring through this node must get the
+      // node's own pre/post verdict instead of guessing one back from an
+      // error code it has to default to "may have mutated".
+      res.status(500).json({ error: message, ...restoreFailureClassOf(error) });
     }
   } finally {
     releaseStackOpLock(req, stackName);
@@ -2756,6 +3327,9 @@ stacksRouter.post('/:stackName/backup', async (req: Request, res: Response) => {
       stackName,
       createdBy: req.user?.username ?? null,
     });
+    // A fresh recovery point changes the rollback verdict the readiness
+    // rollup caches, so drop it or the finding this clears keeps showing.
+    invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Backup completed: ${sanitizeForLog(stackName)}`);
     res.json({ success: true });
   } catch (error: unknown) {
@@ -2812,23 +3386,47 @@ stacksRouter.post('/:stackName/fleet-snapshot-apply', async (req: Request, res: 
 });
 
 /**
- * Returns the latest post-deploy scan attempt for this stack, or null if
- * no scan has been attempted yet. Used by the editor UI to flag stacks
- * whose latest deploy did not trigger a successful scan (Trivy missing,
- * registry rejection, etc).
+ * Returns the latest post-deploy scan attempt for this stack (status is null
+ * if none has been attempted) plus `scanning`, true while a scan for this
+ * stack is running on this node. Used by the editor UI to flag stacks whose
+ * latest deploy did not trigger a successful scan (Trivy missing, registry
+ * rejection, etc) and to follow a rescan to its result.
  */
 stacksRouter.get('/:stackName/scan-status', (req: Request, res: Response): void => {
   const stackName = req.params.stackName as string;
   const row = DatabaseService.getInstance().getStackScanAttempt(req.nodeId, stackName);
+  const scanning = isPostDeployScanRunning(req.nodeId, stackName);
   if (!row) {
-    res.json({ status: null });
+    res.json({ status: null, scanning });
     return;
   }
   res.json({
     status: row.status,
     attemptedAt: row.attempted_at,
     errorMessage: row.error_message,
+    scanning,
   });
+});
+
+/**
+ * Scan this stack's running images again, on the node that owns the stack.
+ * Answers as soon as the scan has started: a scan walks every image and can
+ * outlast a proxy hop, so the caller reads `scanning` and the new attempt from
+ * GET scan-status. A second call while one is running starts nothing.
+ * Same authority as the deploys that start this scan after each deploy.
+ */
+stacksRouter.post('/:stackName/scan-status/rescan', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (isPostDeployScanRunning(req.nodeId, stackName)) {
+    res.status(202).json({ started: false, scanning: true });
+    return;
+  }
+  triggerPostDeployScan(stackName, req.nodeId).catch(err =>
+    console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
+  );
+  res.status(202).json({ started: true, scanning: true });
 });
 
 // ── File explorer endpoints ──

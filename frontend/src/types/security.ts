@@ -1,3 +1,4 @@
+import type { DismissPolicy } from '@/types/findingDismissal';
 import type { SecurityTab } from '@/lib/events';
 
 export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
@@ -343,6 +344,12 @@ export interface PostureReason {
   driverCount?: number;
   /** True when driverCount exceeds the attached drivers array length. */
   driversTruncated?: boolean;
+  /** Stable identity on one node (`kind:variant`). Older remotes omit it, and then the reason cannot be dismissed. */
+  key?: string;
+  /** Hash of the reason's structured targets, never its text. */
+  fingerprint?: string;
+  /** What a team may do with this reason; absent means no Dismiss. */
+  dismissPolicy?: DismissPolicy;
 }
 
 /** Highest-priority action for the masthead CTA. */

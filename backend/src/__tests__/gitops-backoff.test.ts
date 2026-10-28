@@ -27,6 +27,11 @@ describe('classifyFailure', () => {
       .toEqual({ class: 'transient', retryCeiling: DEFAULT_TRANSIENT_CEILING });
   });
 
+  it('classifies a SOPS decrypt failure as operator action', () => {
+    expect(classifyFailure(gitSourceError('SOPS_DECRYPT_FAILED')))
+      .toEqual({ class: 'operator_action_required' });
+  });
+
   it('classifies DNS resolution failure (target-unresolved) as transient', () => {
     expect(classifyFailure(gitSourceError('NETWORK_TIMEOUT', 'target-unresolved')))
       .toEqual({ class: 'transient', retryCeiling: DEFAULT_TRANSIENT_CEILING });

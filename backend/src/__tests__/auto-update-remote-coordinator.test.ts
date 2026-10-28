@@ -74,6 +74,24 @@ describe('remote automatic update coordinator', () => {
     expect(result.handled ? result.result : null).toBe('Stack "web": updated (nginx:1).');
   });
 
+  it('reports a Docker endpoint refusal from the target as a failed stack with its reason', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'rejected', applied: false, healthGateId: null,
+      endpointRefusal: 'Service "socket-proxy" carries the\nDocker connection.',
+    }), { status: 200 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web" failed: Service "socket-proxy" carries the Docker connection.' });
+    expect(mocks.recheck).not.toHaveBeenCalled();
+  });
+
+  it('ignores a refusal text on a result that is not a rejection', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      contractVersion: 1, stack: 'web', result: 'policy_blocked', applied: false, healthGateId: null, endpointRefusal: 'spoofed',
+    }), { status: 200 }));
+    const result = await new AutoUpdateRemoteCoordinator().execute(input());
+    expect(result).toEqual({ handled: true, result: 'Stack "web": policy_blocked; skipped auto-update.' });
+  });
+
   it('stops after the bounded second stale response without further mutation', async () => {
     mocks.fetch.mockImplementation(async () => new Response(JSON.stringify({ contractVersion: 1, stack: 'web', result: 'stale_observation', applied: false, healthGateId: null }), { status: 409 }));
     const result = await new AutoUpdateRemoteCoordinator().execute(input());

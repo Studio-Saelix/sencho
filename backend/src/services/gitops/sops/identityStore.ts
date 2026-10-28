@@ -180,11 +180,26 @@ export class SopsIdentityStore {
        ORDER BY g.created_at DESC`,
     ).all(stackName, applicationId) as Array<{ id: string; commit_sha: string; secret_capability_json: string | null }>;
 
+    // A generation is impacted only when removing this identity makes an input
+    // that was decryptable before the removal undecryptable. A sibling
+    // recipient on the same file keeps it decryptable, so it is not an impact.
+    const all = new Set(this.listPublic(applicationId, stackName).map((identity) => identity.recipient));
+    const after = new Set([...all].filter((candidate) => candidate !== recipient));
+
     const impacts: SopsIdentityImpact[] = [];
     for (const row of rows) {
       const cap = parseSecretCapabilityFromJson(row.secret_capability_json);
       if (!cap) continue;
-      if (!cap.requiredRecipients.includes(recipient)) continue;
+      const affected = cap.inputs.length === 0
+        ? cap.requiredRecipients.includes(recipient)
+        : cap.inputs.some((input) => {
+          const recipients = input.recipientIds ?? [];
+          if (input.encryption !== 'sops-age' || recipients.length === 0) return false;
+          const decryptableBefore = recipients.some((candidate) => all.has(candidate));
+          const decryptableAfter = recipients.some((candidate) => after.has(candidate));
+          return decryptableBefore && !decryptableAfter;
+        });
+      if (!affected) continue;
       impacts.push({
         generationId: row.id,
         commitSha: row.commit_sha,
@@ -199,17 +214,28 @@ export class SopsIdentityStore {
     applicationId: string;
     stackName: string;
     policy: EncryptedSourcePolicy;
-    requiredRecipients: string[];
+    inputs: Array<{ recipientIds?: string[]; encryption?: string }>;
   }): SopsIdentityReadiness {
     const identities = this.listPublic(args.applicationId, args.stackName);
     const known = new Set(identities.map((i) => i.recipient));
-    const missing = args.requiredRecipients.filter((r) => !known.has(r));
-    const ready = missing.length === 0;
+    const required = new Set<string>();
+    const missing = new Set<string>();
+    for (const input of args.inputs) {
+      if (input.encryption !== 'sops-age') continue;
+      const recipients = input.recipientIds ?? [];
+      for (const recipient of recipients) required.add(recipient);
+      // A file encrypted to several recipients is decryptable by any one of
+      // them, so it counts as missing only when none is available.
+      if (recipients.length > 0 && !recipients.some((recipient) => known.has(recipient))) {
+        for (const recipient of recipients) missing.add(recipient);
+      }
+    }
+    const missingRecipients = [...missing];
     return {
       identities,
-      requiredRecipients: args.requiredRecipients,
-      ready,
-      failureClass: missing.length > 0 ? 'missing_key' : undefined,
+      requiredRecipients: [...required],
+      ready: missingRecipients.length === 0,
+      failureClass: missingRecipients.length > 0 ? 'missing_key' : undefined,
       policy: args.policy,
     };
   }

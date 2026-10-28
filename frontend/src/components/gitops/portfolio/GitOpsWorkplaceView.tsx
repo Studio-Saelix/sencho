@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AttentionQueue } from './AttentionQueue';
 import { ApplicationsTable } from './ApplicationsTable';
@@ -7,7 +7,9 @@ import { PortfolioMasthead } from './PortfolioMasthead';
 import { useGitOpsPortfolio } from './useGitOpsPortfolio';
 import { useWorkplaceCapabilities } from './useWorkplaceCapabilities';
 import { WorkplaceActions } from './WorkplaceActions';
-import { GitOpsApplicationView } from '../application/GitOpsApplicationView';
+import { GitOpsBlueprintHost } from './GitOpsBlueprintHost';
+import { GitOpsGitSourceHost } from './GitOpsGitSourceHost';
+import { GitOpsApplicationSheet } from '../application/GitOpsApplicationSheet';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicationSelection';
 
@@ -20,22 +22,36 @@ import { useGitOpsApplicationSelection } from '../application/useGitOpsApplicati
  * parallel status engine. Refresh is event-driven (gitops invalidate channel),
  * never a per-node browser poll.
  *
- * A row drills into its application view in place (the `application` query
- * parameter). The portfolio hook keeps running while the application view
- * replaces the list, so returning keeps its filters and page (both held in
- * hook state) without a reload.
+ * A row opens its sheet over the list (a Direct application's Git source, a
+ * Blueprint application's own sheet keyed by the `application` query parameter,
+ * or the Blueprint's detail sheet itself), so nothing about the list is lost and
+ * a decision is made where the state is read.
  *
  * Desktop only by itself; the phone treatment is the bespoke screen in
  * components/mobile/MobileGitOps.tsx (mobile-treatments entry: bespoke).
  */
 export function GitOpsWorkplaceView() {
   const portfolio = useGitOpsPortfolio();
-  const { data, loading, error, staleSince, refreshing } = portfolio;
   const selectedApplication = useGitOpsApplicationSelection();
   const { canOpenFleet } = useWorkplaceCapabilities();
 
-  if (selectedApplication !== null) return <GitOpsApplicationView key={selectedApplication} id={selectedApplication} />;
+  // The list stays mounted under the sheets, so closing one lands back on the
+  // same filters, page, and scroll without a reload.
+  return (
+    <>
+      <GitOpsGitSourceHost />
+      <GitOpsBlueprintHost />
+      <PortfolioList portfolio={portfolio} canOpenFleet={canOpenFleet} />
+      {selectedApplication !== null && <GitOpsApplicationSheet key={selectedApplication} id={selectedApplication} />}
+    </>
+  );
+}
 
+function PortfolioList({ portfolio, canOpenFleet }: {
+  portfolio: ReturnType<typeof useGitOpsPortfolio>;
+  canOpenFleet: boolean;
+}) {
+  const { data, loading, error, staleSince, refreshing } = portfolio;
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden p-6">
       {loading && !data ? (
@@ -48,7 +64,7 @@ export function GitOpsWorkplaceView() {
         <PortfolioLoadError message={error} onRetry={portfolio.refresh} />
       ) : data ? (
         <>
-          <PortfolioMasthead data={data} staleSince={staleSince} />
+          <PortfolioMasthead data={data} staleSince={staleSince} refreshing={refreshing} />
 
           <div className="flex min-h-0 flex-1 flex-col gap-4">
             <CoverageNotices data={data} />
@@ -93,13 +109,6 @@ export function GitOpsWorkplaceView() {
           </div>
         </>
       ) : null}
-
-      {refreshing && data && (
-        <div className="pointer-events-none fixed right-4 top-4 flex items-center gap-2 rounded-md border border-card-border bg-popover/95 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-stat-subtitle shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
-          <RefreshCw className="h-3 w-3 animate-spin" strokeWidth={1.5} />
-          Refreshing
-        </div>
-      )}
     </div>
   );
 }
@@ -115,13 +124,7 @@ function PortfolioLoadError({ message, onRetry }: { message: string; onRetry: ()
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
       <p className="font-heading text-xl text-stat-value">The portfolio could not be read</p>
       <p className="max-w-md font-mono text-xs text-stat-subtitle">{message}</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="rounded-md border border-card-border bg-card px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-value shadow-btn-glow transition-colors hover:border-card-border-hover"
-      >
-        Retry
-      </button>
+      <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
     </div>
   );
 }

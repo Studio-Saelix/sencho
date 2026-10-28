@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import axios from 'axios';
+import type { RemoteMetaProbe } from '../services/CapabilityRegistry';
 
 vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../helpers/registryDeliveryOutbound')>();
@@ -24,6 +25,7 @@ vi.mock('../helpers/registryDeliveryOutbound', async (importOriginal) => {
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let BlueprintService: typeof import('../services/BlueprintService').BlueprintService;
+let BlueprintOwnershipProbeError: typeof import('../services/BlueprintService').BlueprintOwnershipProbeError;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let setupTestDb: typeof import('./helpers/setupTestDb').setupTestDb;
 let cleanupTestDb: typeof import('./helpers/setupTestDb').cleanupTestDb;
@@ -63,7 +65,7 @@ beforeAll(async () => {
     ({ setupTestDb, cleanupTestDb } = await import('./helpers/setupTestDb'));
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
-    ({ BlueprintService } = await import('../services/BlueprintService'));
+    ({ BlueprintService, BlueprintOwnershipProbeError } = await import('../services/BlueprintService'));
     ({ NodeRegistry } = await import('../services/NodeRegistry'));
 });
 
@@ -283,11 +285,15 @@ describe('BlueprintService remote deploy', () => {
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
 
-        // hasNameConflict lists /api/stacks first, then reads the marker. A 404 marker on an
-        // existing stack means it is unmanaged, so the deploy must refuse.
+        // hasNameConflict lists /api/stacks first, then reads the marker. The leaf reporting the
+        // marker absent on an existing stack means it is unmanaged, so the deploy must refuse.
+        // The listing body is the leaf's own shape: the stack names themselves, not objects
+        // carrying a name. The marker body carries the leaf's not-found code because that is what
+        // the leaf sends for an absent file, and a bare 404 is a node that could not be read
+        // rather than an empty one.
         vi.spyOn(axios, 'get')
-            .mockResolvedValueOnce({ status: 200, data: [{ name: bpObj.name }] })
-            .mockResolvedValueOnce({ status: 404, data: {} });
+            .mockResolvedValueOnce({ status: 200, data: [bpObj.name] })
+            .mockResolvedValueOnce({ status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } });
         const postSpy = vi.spyOn(axios, 'post');
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
@@ -323,6 +329,81 @@ describe('BlueprintService remote deploy', () => {
         expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/withdraw-local$/);
         expect(delSpy).not.toHaveBeenCalled();
         expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
+    });
+
+    it('removes the hub mute rule for the withdrawn stack on that node only', async () => {
+        const db = DatabaseService.getInstance();
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+        const now = Date.now();
+        const seed = (name: string, nodeId: number | null) => db.createNotificationSuppressionRule({
+            name,
+            node_id: nodeId,
+            stack_patterns: [bp.name],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            applies_to: 'both',
+            enabled: true,
+            expires_at: null,
+            schedule: null,
+            created_at: now,
+            updated_at: now,
+        });
+        const onNode = seed(`Mute ${bp.name} on node`, node.id);
+        const allNodes = seed(`Mute ${bp.name} everywhere`, null);
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { status: 'withdrawn' } });
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('withdrawn');
+        expect(db.getNotificationSuppressionRule(onNode.id)).toBeUndefined();
+        expect(db.getNotificationSuppressionRule(allNodes.id)).toBeDefined();
+        db.deleteNotificationSuppressionRule(allNodes.id);
+    });
+
+    it('keeps the hub mute rule when the remote refuses the withdraw', async () => {
+        const db = DatabaseService.getInstance();
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+        const now = Date.now();
+        const rule = db.createNotificationSuppressionRule({
+            name: `Mute ${bp.name}`,
+            node_id: node.id,
+            stack_patterns: [bp.name],
+            label_ids: null,
+            categories: null,
+            levels: null,
+            applies_to: 'both',
+            enabled: true,
+            expires_at: null,
+            schedule: null,
+            created_at: now,
+            updated_at: now,
+        });
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 409, data: { code: 'stack_op_in_progress', error: 'busy' } });
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(db.getNotificationSuppressionRule(rule.id)).toBeDefined();
+        db.deleteNotificationSuppressionRule(rule.id);
     });
 
     it('maps remote withdraw-local lock conflict to failed without fallback delete', async () => {
@@ -444,5 +525,267 @@ describe('BlueprintService remote deploy', () => {
 
         const dep = db.getDeployment(bp.id, node.id);
         expect(dep?.last_error).toContain('[REGISTRY_DELIVERY_CREDENTIAL_UNAVAILABLE]');
+    });
+});
+
+/**
+ * A digest-pinned apply is only honored by a leaf that advertises
+ * blueprint-digest-pins-v1. A leaf that predates the field drops it and
+ * redeploys by tag, so the hub has to refuse rather than send the request and
+ * assume the pin landed.
+ */
+describe('BlueprintService remote digest-pinned apply capability gate', () => {
+    const pins = { app: 'nginx@sha256:' + 'a'.repeat(64) };
+
+    /** Null capabilities means the /api/meta probe itself failed. */
+    async function setup(capabilities: string[] | null) {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const db = DatabaseService.getInstance();
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        const { OFFLINE_META } = await import('../services/CapabilityRegistry');
+        const probe: RemoteMetaProbe = capabilities === null
+            ? { kind: 'transport_failure', detail: 'timeout' }
+            : { kind: 'ok', meta: { ...OFFLINE_META, online: true, capabilities } };
+        vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta').mockResolvedValue(probe);
+        // hasNameConflict lists the remote stacks before the apply.
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { deployed: true } });
+        const deploy = (digestPins?: Record<string, string>) =>
+            BlueprintService.getInstance().deployAuthorizedMaterialization({
+                blueprint: bpObj,
+                node: nodeObj,
+                composeContent: 'services: {}\n',
+                marker: { blueprintId: bp.id, revision: bpObj.revision, lastApplied: Date.now() },
+                auditPath: `/api/blueprints/${bp.id}/enforce-reapply`,
+                digestPins,
+            });
+        return { db, bp, node, postSpy, deploy };
+    }
+
+    it('sends digestPins when the leaf advertises blueprint-digest-pins-v1', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup(['blueprint-digest-pins-v1']);
+        const result = await deploy(pins);
+        expect(result.status).toBe('active');
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toEqual(pins);
+        expect(db.getDeployment(bp.id, node.id)?.status).toBe('active');
+    });
+
+    it('fails with an upgrade-required error and never posts when the leaf lacks the capability', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup([]);
+        const outbound = await import('../helpers/registryDeliveryOutbound');
+        const result = await deploy(pins);
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/does not support digest-pinned blueprint apply/);
+        // The refusal happens before the delivery contract is even negotiated, so
+        // nothing about this apply reaches the node.
+        expect(vi.mocked(outbound.prepareOutboundRegistryDeliveryBody)).not.toHaveBeenCalled();
+        expect(postSpy).not.toHaveBeenCalled();
+        const dep = db.getDeployment(bp.id, node.id);
+        expect(dep?.status).toBe('failed');
+        expect(dep?.last_error).toMatch(/Upgrade that Sencho instance/);
+    });
+
+    it('fails closed and never posts when the leaf capability probe is unreachable', async () => {
+        const { db, bp, node, postSpy, deploy } = await setup(null);
+        const result = await deploy(pins);
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/Could not confirm that remote node/);
+        expect(postSpy).not.toHaveBeenCalled();
+        expect(db.getDeployment(bp.id, node.id)?.status).toBe('failed');
+    });
+
+    it('does not gate plain (non-digest) applies on the capability', async () => {
+        const { postSpy, deploy } = await setup([]);
+        const result = await deploy(undefined);
+        expect(result.status).toBe('active');
+        expect(postSpy).toHaveBeenCalledTimes(1);
+        expect((postSpy.mock.calls[0][1] as { digestPins?: unknown }).digestPins).toBeUndefined();
+    });
+});
+
+/**
+ * The ownership probe's remote arm reads the leaf's stack list to learn whether
+ * a directory by this name exists at all. The leaf answers with the stack names
+ * themselves, so the entries are the names. Reading them as objects carrying a
+ * name made the match silently match nothing, which reported every remote name
+ * as clear from the day this arm was written: Check again released the row while
+ * the conflicting stack was still there, the preview never flagged the
+ * collision, and only the leaf's own apply-local check held.
+ */
+describe('BlueprintService hasNameConflict remote arm', () => {
+    const LIST_URL = 'https://remote.example.com:1852/api/stacks';
+    const LEAF_NOT_FOUND = { status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } };
+
+    /**
+     * Answer the list URL with `listBody` and every other URL (the marker read)
+     * with `markerBody`. Without this split, a test mocking both calls the same
+     * way proves nothing about which one the probe actually made.
+     */
+    function stubLeaf(listBody: unknown, markerBody?: unknown) {
+        return vi.spyOn(axios, 'get').mockImplementation((url: string) => {
+            if (String(url) === LIST_URL) {
+                return Promise.resolve({ status: 200, data: listBody });
+            }
+            return Promise.resolve(markerBody);
+        });
+    }
+
+    it('sees a remote collision in the leaf stack list, which answers with the names', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        // The listing is the leaf's own shape, a string array of stack names. The
+        // marker read reports the file absent, which means an unmanaged stack.
+        stubLeaf([bpObj.name], LEAF_NOT_FOUND);
+
+        expect(await BlueprintService.getInstance().hasNameConflict(bpObj.name, nodeObj, bpObj.id)).toBe(true);
+    });
+
+    it('reports no collision when the leaf list has no such stack, and does not read the marker', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        const getSpy = stubLeaf(['someone-elses-stack']);
+
+        expect(await BlueprintService.getInstance().hasNameConflict(bpObj.name, nodeObj, bpObj.id)).toBe(false);
+        // Only the list was asked. A leaf that lists no such stack has nothing
+        // more to say about it, and a marker read would be a request made for a
+        // fact the answer already settled.
+        expect(getSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports no collision on a leaf with no stacks at all', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        stubLeaf([]);
+
+        expect(await BlueprintService.getInstance().hasNameConflict(bpObj.name, nodeObj, bpObj.id)).toBe(false);
+    });
+
+    it('refuses rather than reporting a clear name when the stack list is not readable', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        for (const listBody of [
+            { stacks: [bpObj.name] },
+            [{ name: bpObj.name }],
+            [7],
+            // The name is not among the readable entries, and something else in
+            // the list could have been it. "Not in what I could read" is not
+            // "not there".
+            ['some-other-stack', { name: bpObj.name }],
+        ]) {
+            stubLeaf(listBody);
+
+            // Both the listing refusal and the marker-failure refusal throw this
+            // one type, so the message is what tells them apart: the unreadable
+            // list names the node, a failed marker read names the stack.
+            const error = await BlueprintService.getInstance()
+                .hasNameConflict(bpObj.name, nodeObj, bpObj.id)
+                .then(() => null, (err: unknown) => err);
+
+            expect(error, `the list ${JSON.stringify(listBody)} must not read as a clear name`)
+                .toBeInstanceOf(BlueprintOwnershipProbeError);
+            expect(error instanceof Error ? error.message : String(error)).toContain('stack list');
+        }
+    });
+
+    it('still answers from the marker when an unreadable entry sits beside the readable name', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        // The name is present in the part of the list this version can read, so
+        // the presence question is settled whatever the other entry was. A guard
+        // that refused here would brick every remote deploy on a leaf that
+        // appended one metadata entry, over a question that was already answered.
+        stubLeaf(['some-other-stack', { serviceCount: 3 }, bpObj.name], LEAF_NOT_FOUND);
+
+        expect(await BlueprintService.getInstance().hasNameConflict(bpObj.name, nodeObj, bpObj.id)).toBe(true);
+    });
+
+    it('keeps a rechecked remote row in conflict while the conflicting stack is still there', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'name_conflict',
+            last_error: 'a stack named this already exists',
+        });
+
+        stubLeaf([bpObj.name], LEAF_NOT_FOUND);
+
+        const result = await BlueprintService.getInstance().recheckNameConflict(bpObj, nodeObj);
+
+        expect(result.cleared).toBe(false);
+        const row = DatabaseService.getInstance().getDeployment(bp.id, node.id);
+        expect(row?.status).toBe('name_conflict');
+        // The original reason survives, so the row still tells the operator why
+        // it is parked rather than looking like a conflict nothing explained.
+        expect(row?.last_error).toContain('already exists');
+    });
+
+    it('releases a rechecked remote row once the name is free on the leaf', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'name_conflict',
+            last_error: 'a stack named this already exists',
+        });
+
+        stubLeaf([]);
+
+        const result = await BlueprintService.getInstance().recheckNameConflict(bpObj, nodeObj);
+
+        expect(result.cleared).toBe(true);
+        expect(result.deployment.status).toBe('pending');
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)?.status).toBe('pending');
+    });
+
+    it('records a deploy as failed, not as a conflict, when ownership cannot be verified', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+
+        // The deploy's own gate is "may I write here", and a probe that could not
+        // find out does not answer it. It is recorded as `failed` rather than
+        // `name_conflict` because a conflict is a claim about what is on the
+        // node, and telling the operator an unowned stack is sitting there on
+        // the strength of a transport failure is the error the probe's whole
+        // discrimination exists to avoid. Pinned here so a future change to the
+        // unreadable-list guard does not quietly move this row's meaning.
+        stubLeaf({ stacks: [bpObj.name] });
+        // A rejected mock rather than a bare spy: if the guard ever regresses to
+        // reporting the name free, the deploy would otherwise reach for the real
+        // network and turn a fast failure into a slow, unreachable one.
+        const postSpy = vi.spyOn(axios, 'post').mockRejectedValue(new Error('must not deploy with ownership unverified'));
+
+        const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(result.error).toContain('stack list');
+        expect(postSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)?.status).toBe('failed');
     });
 });

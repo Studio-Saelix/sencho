@@ -18,14 +18,13 @@ import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import { SENCHO_SETTINGS_CHANGED, type SecurityTab, type SenchoSettingsChangedDetail } from '@/lib/events';
 import type { ImageFilterValue } from '@/lib/severityStyles';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole, PostureReasonKind } from '@/types/security';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
-import { reasonImageFilter } from './security/postureNavigation';
+import { useSecurityReasons } from './security/useSecurityReasons';
 import {
-  targetingFromTargets,
   type ImagesTargetingInput,
   type ImagesTargetingState,
 } from './security/imagesTargeting';
@@ -74,6 +73,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const isRemote = activeNode?.type === 'remote';
 
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
+  // The node the overview was read for. Verbs and dismissals act on a node, so they never see another node's overview.
+  const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
   const [overviewLoadError, setOverviewLoadError] = useState<'unsupported' | 'failed' | null>(null);
@@ -155,6 +156,15 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     setInspectScanId(scanId);
   }, []);
 
+  const nodeOverview = overviewNodeId === activeNode?.id ? overview : null;
+  const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
+  const reasons = useSecurityReasons({
+    overview: nodeOverview,
+    isReplica,
+    onNavigate: handleNavigate,
+    reload: reloadOverview,
+  });
+
   // Scanner readiness gates the Images Actions column; an admin on a node whose
   // scanner is available can trigger scans inline.
   const canScanImages = can('stack:deploy') && !!overview?.scanner.available;
@@ -173,6 +183,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // remote node that lacks the endpoint).
   useEffect(() => {
     let cancelled = false;
+    const fetchedNodeId = activeNode?.id;
     (async () => {
       setSummariesLoading(true);
       setOverviewLoadError(null);
@@ -201,7 +212,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         ]);
         if (cancelled) return;
         if (overviewRes.ok) {
-          setOverview(await overviewRes.json());
+          const body = await overviewRes.json();
+          if (cancelled) return;
+          setOverview(body);
+          setOverviewNodeId(fetchedNodeId);
         } else {
           setOverview(null);
           setOverviewLoadError(overviewRes.status === 404 ? 'unsupported' : 'failed');
@@ -338,7 +352,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     <>
         <TabsContent value="overview">
           <OverviewTab
-            overview={overview}
+            overview={nodeOverview}
             loadError={overviewLoadError}
             trend={trend}
             exploitIntel={exploitIntel}
@@ -346,8 +360,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             onNavigate={handleNavigate}
             onInspect={onInspect}
             canScan={canScanNode}
-            canManageNode={!!activeNode?.id && can('node:manage', 'node', String(activeNode.id))}
-            onScanComplete={() => setReloadToken((t) => t + 1)}
+            reasons={reasons}
+            onScanComplete={reloadOverview}
           />
         </TabsContent>
 
@@ -482,31 +496,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
-      >
-        {overview?.posture === 'Action needed' && overview.primaryAction ? (
-          <button
-            type="button"
-            onClick={() => {
-              const action = overview.primaryAction!;
-              const blockerLabel = overview.postureReasons?.find(
-                (r) => r.kind === action.kind && r.severity === 'blocker',
-              )?.label ?? action.label;
-              const targeting = targetingFromTargets(
-                action.kind as PostureReasonKind,
-                blockerLabel,
-                action.targets,
-                action.drivers,
-                { driverCount: action.driverCount, driversTruncated: action.driversTruncated },
-              );
-              const filter = targeting ? undefined : reasonImageFilter(action.kind);
-              handleNavigate(action.targetTab, filter, targeting);
-            }}
-            className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
-          >
-            {overview.primaryAction.label} →
-          </button>
-        ) : null}
-      </PageMasthead>
+      />
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
         {/* Standard full-width tab band (matches Fleet): the list's own pill band

@@ -1,13 +1,14 @@
 import { enforcePolicyPreDeploy, type PolicyEnforcementOptions } from './PolicyEnforcement';
+import { describePolicyBlock } from '../helpers/policyGate';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
+import { ComposeService } from './ComposeService';
 import { HealthGateService } from './HealthGateService';
 import { StackUpdateRecoveryService } from './StackUpdateRecoveryService';
 import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
 import { NotificationService } from './NotificationService';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
-import { summarizeBlockReasons } from '../utils/policy-risk';
 import { sanitizeForLog } from '../utils/safeLog';
 
 export interface AutomaticStackUpdateInput {
@@ -25,6 +26,8 @@ export interface AutomaticStackUpdateResult {
   healthGateId: string | null;
   message: string;
   recheckWarning?: string;
+  /** Why the Docker endpoint guard refused the update, so a remote caller can report it. */
+  endpointRefusal?: string;
 }
 
 /** Shared automatic mutation pipeline. Checked observations are validated under its exact stack lock. */
@@ -35,10 +38,29 @@ export async function applyAutomaticStackUpdate(input: AutomaticStackUpdateInput
       await input.observation?.verify();
       const policy = await enforcePolicyPreDeploy(stackName, nodeId, { ...input.policyOptions, bypass: false });
       if (!policy.ok) {
-        const images = policy.violations.map(v => v.imageRef).join(', ');
-        const message = `Policy "${policy.policy?.name}" blocked auto-update: ${policy.violations.length} image(s) matched ${summarizeBlockReasons(policy.violations)}${images ? ` (${images})` : ''}`;
-        NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', message, { stackName, actor: 'system:image-update' });
+        // Same wording as every other path, so a scanner outage is not reported
+        // as a matched finding on an unattended update.
+        const message = describePolicyBlock(policy.policy, policy.violations, 'update', policy.evidence);
+        // Prefixed with the action and stack, as the scheduler's copy of this
+        // same sentence is. Dispatching it bare made one operator-visible message
+        // have two shapes depending on which path blocked, so an alert filter
+        // written against the prefixed form silently missed these.
+        NotificationService.getInstance().dispatchAlert(
+            'warning',
+            'scan_finding',
+            `Auto-update blocked for "${stackName}": ${message}`,
+            { stackName, actor: 'system:image-update' },
+        );
         return { result: 'policy_blocked' as const, applied: false, healthGateId: null, message: `Stack "${stackName}": ${message}` };
+      }
+      // Before the observation is spent: a refused update leaves it usable for a
+      // later attempt, and the caller is told why instead of seeing a failure.
+      const endpointRefusal = await ComposeService.getInstance(nodeId).evaluateDockerEndpoint(stackName, { kind: 'update' });
+      if (endpointRefusal) {
+        return {
+          result: 'rejected' as const, applied: false, healthGateId: null,
+          message: `Stack "${stackName}": ${endpointRefusal.message}`, endpointRefusal: endpointRefusal.message,
+        };
       }
       await input.observation?.consume();
       const mutation = await StackUpdateOrchestrator.getInstance().execute(

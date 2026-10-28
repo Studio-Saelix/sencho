@@ -855,6 +855,28 @@ export class MonitorService {
         } catch (e) {
             console.error('MonitorService: failed to cleanup old data', e);
         }
+
+        // Separate from the metrics and notification cleanup above, so a failure
+        // there does not skip this prune. A throw from the global-settings
+        // evaluation earlier in this cycle does skip it until the next
+        // evaluation, because that cycle never reaches this pass. A hang in the
+        // Docker enumeration above holds this evaluation, so later ticks do not
+        // run the prune until that call returns. A failed read of the window
+        // throws out of the getter, and this catch logs it without deleting.
+        try {
+            const gitopsHistoryRetentionDays = db.getGitOpsHistoryRetentionDays();
+            const gitopsHistoryPruned = db.cleanupOldGitOpsHistory(gitopsHistoryRetentionDays);
+            if (isDebugEnabled()) {
+                // Null remainder means the counts were skipped (developer mode
+                // off), which is unknown rather than empty.
+                const remaining = gitopsHistoryPruned.historyRemaining === null
+                    ? 'not measured'
+                    : `${gitopsHistoryPruned.historyRemaining}+${gitopsHistoryPruned.outboxRemaining}`;
+                console.log(`[Monitor:diag] Cleanup: gitops history ${gitopsHistoryRetentionDays}d (history=${gitopsHistoryPruned.history} outbox=${gitopsHistoryPruned.outbox} left=${remaining})`);
+            }
+        } catch (e) {
+            console.error('MonitorService: failed to cleanup GitOps history', e);
+        }
     }
 
     /**

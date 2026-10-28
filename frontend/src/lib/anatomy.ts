@@ -123,8 +123,10 @@ export function parseAnatomy(yamlText: string): Anatomy | null {
     : {};
   const serviceNames = Object.keys(servicesObj);
 
-  const ports: Record<string, PortRow[]> = {};
-  const volumes: Record<string, VolumeRow[]> = {};
+  // Null prototypes: a legal service name like `constructor` or `__proto__` must
+  // not read an inherited value or lose its own facts to the prototype setter.
+  const ports: Record<string, PortRow[]> = Object.create(null) as Record<string, PortRow[]>;
+  const volumes: Record<string, VolumeRow[]> = Object.create(null) as Record<string, VolumeRow[]>;
   let restart: string | null = null;
   const envFilesSet = new Set<string>();
   const networksSet = new Set<string>();

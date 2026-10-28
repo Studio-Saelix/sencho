@@ -3,10 +3,7 @@ import { ShieldCheck, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { apiFetch, withDeploySession } from '@/lib/api';
-import { useDeployFeedback } from '@/context/DeployFeedbackContext';
-import { useNodes } from '@/context/NodeContext';
-import { toast } from '@/components/ui/toast-store';
+import { useNodeScan } from '@/hooks/useNodeScan';
 
 interface ScanNodeLauncherProps {
   /** Admin on a node with a ready scanner; the launcher hides otherwise. */
@@ -32,11 +29,9 @@ type TypeKey = (typeof TYPES)[number]['key'];
  * the active node changes mid-scan.
  */
 export function ScanNodeLauncher({ canScan, onComplete, fullWidth = false }: ScanNodeLauncherProps) {
-  const { runWithLog } = useDeployFeedback();
-  const { activeNode } = useNodes();
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<Record<TypeKey, boolean>>({ vulns: true, secrets: true, misconfig: true });
-  const [running, setRunning] = useState(false);
+  const { running, scan } = useNodeScan(onComplete);
 
   if (!canScan) return null;
 
@@ -45,37 +40,7 @@ export function ScanNodeLauncher({ canScan, onComplete, fullWidth = false }: Sca
   const start = async () => {
     if (!anySelected || running) return;
     setOpen(false);
-    setRunning(true);
-    const opNodeId = activeNode?.id ?? null;
-    const nodeLabel = activeNode?.name ?? 'this node';
-    try {
-      await runWithLog(
-        { stackName: nodeLabel, action: 'scan', nodeId: opNodeId },
-        async (started, sessionId) => {
-          if (started) await started;
-          const res = await apiFetch('/security/scan-node', withDeploySession(sessionId, {
-            method: 'POST',
-            nodeId: opNodeId,
-            body: JSON.stringify({ vulns: selected.vulns, secrets: selected.secrets, misconfig: selected.misconfig }),
-          }));
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            const message = err?.error || 'Node scan failed';
-            toast.error(message);
-            return { ok: false, errorMessage: message };
-          }
-          // A 200 can still carry per-image/stack failures (the batch is
-          // failure-tolerant); surface them so a partial scan does not read as clean.
-          const result = await res.json().catch(() => null);
-          const failed = (result?.images?.failed ?? 0) + (result?.stacks?.failed ?? 0);
-          if (failed > 0) toast.warning(`Scan completed with ${failed} failure${failed === 1 ? '' : 's'}.`);
-          return { ok: true };
-        },
-      );
-      onComplete?.();
-    } finally {
-      setRunning(false);
-    }
+    await scan(selected);
   };
 
   return (

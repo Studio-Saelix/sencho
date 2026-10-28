@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { statusText, statusColor, isDownStatus, classifyContainersStatus, isBulkStatusObjectFormat } from '../stack-status-utils';
+import {
+  statusText,
+  statusColor,
+  isDownStatus,
+  classifyContainersStatus,
+  isBulkStatusObjectFormat,
+  isValidBulkPayload,
+  parseBulkStatusPayload,
+} from '../stack-status-utils';
 
 describe('stack-status-utils', () => {
   describe('statusText', () => {
@@ -123,6 +131,27 @@ describe('stack-status-utils', () => {
 
     it('rejects null', () => {
       expect(isBulkStatusObjectFormat(null)).toBe(false);
+    });
+  });
+
+  describe('bulk payload parsing', () => {
+    it('accepts and carries the runtime main-port service', () => {
+      const payload = { 'web.yml': { status: 'running' as const, mainPort: 49152, mainPortService: 'app' } };
+      expect(isValidBulkPayload(payload)).toBe(true);
+      expect(parseBulkStatusPayload(payload, ['web.yml'])).toEqual({
+        statuses: { 'web.yml': 'running' },
+        ports: { 'web.yml': 49152 },
+        portServices: { 'web.yml': 'app' },
+        self: {},
+        counts: {},
+        coveredFileCount: 1,
+      });
+    });
+
+    it('rejects a mistyped main-port service and omits a missing one', () => {
+      expect(isValidBulkPayload({ 'web.yml': { status: 'running', mainPortService: 7 } })).toBe(false);
+      const parsed = parseBulkStatusPayload({ 'web.yml': { status: 'running', mainPort: 49152 } }, ['web.yml']);
+      expect(parsed.portServices).toEqual({});
     });
   });
 });

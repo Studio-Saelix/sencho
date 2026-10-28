@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react';
-import {
-    RefreshCw, Camera, FileDown,
-    Network, Activity,
-    Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Tag,
-} from 'lucide-react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { RefreshCw, FileDown } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { FleetMasthead } from './fleet/FleetMasthead';
+import { FleetTabStrip } from './fleet/FleetTabStrip';
+import { buildFleetTabs } from './fleet/fleetTabs';
+import { useFleetTabLayout } from '@/hooks/use-fleet-tab-layout';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
 import { NodeUpdatesSheet } from './FleetView/NodeUpdatesSheet';
 import { NodeDetailsSheet } from './FleetView/NodeDetailsSheet';
@@ -18,26 +17,31 @@ import { useFleetOverview } from './FleetView/hooks/useFleetOverview';
 import { useFleetDossierExport } from './FleetView/hooks/useFleetDossierExport';
 import { useTopologyPreferences } from '@/hooks/useTopologyPreferences';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
-import { springs } from '@/lib/motion';
-import { useLicense } from '@/context/LicenseContext';
+import { Tabs, TabsContent } from '@/components/ui/tabs';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useExperimental } from '@/hooks/useExperimental';
-import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetReadiness } from './fleet/FleetReadiness';
+import { useFleetReadiness } from './fleet/readiness/useFleetReadiness';
+import { canDismissFinding } from './fleet/readiness/canDismissFinding';
+import { canRunVerb, type ReadinessVerb } from './fleet/readiness/readinessVerbs';
+import type { ReadinessFinding } from '@/types/readiness';
 import { RoutingTab } from './fleet/RoutingTab';
 import { FederationTab } from './fleet/FederationTab';
 import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
+import { useFleetMap } from './fleet/useFleetMap';
 import { ContainerLabelsTab } from './fleet/ContainerLabelsTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
+
+/** A readiness result older than this is re-checked when the tab is reopened. */
+const READINESS_STALE_MS = 60_000;
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -71,15 +75,27 @@ export function FleetView({
     fleetActiveTab: controlledTab,
     onFleetActiveTabChange,
 }: FleetViewProps) {
-    const { isPaid, licenseStatus } = useLicense();
     const { isAdmin, can } = useAuth();
     const canManageFleet = can('node:manage');
+    const canDismissReadinessFinding = useCallback(
+        (finding: Pick<ReadinessFinding, 'domain' | 'stack' | 'nodeId'>) => canDismissFinding(can, isAdmin, finding),
+        [can, isAdmin],
+    );
+    const canRunReadinessVerb = useCallback(
+        (verb: ReadinessVerb, finding: ReadinessFinding) => canRunVerb(can, isAdmin, verb, finding),
+        [can, isAdmin],
+    );
     const canExportDossier = can('node:read') && can('stack:read');
     const { hasCapability, nodes: registryNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
-    // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
-    const canDiscoverRouting = experimentalReady && experimental && isPaid;
+    // Visual fail-closed while /meta loads; permission gates still apply when on.
+    const canDiscoverRouting = experimentalReady && experimental;
+    const [tabLayout] = useFleetTabLayout();
+    const fleetTabs = useMemo(
+        () => buildFleetTabs({ isAdmin, containerLabels: containerLabelsEnabled, routing: canDiscoverRouting }),
+        [isAdmin, containerLabelsEnabled, canDiscoverRouting],
+    );
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -105,30 +121,39 @@ export function FleetView({
     const [detailsNodeId, setDetailsNodeId] = useState<number | null>(null);
     // Bumped by the toolbar Refresh so the Readiness tab re-checks alongside the overview.
     const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
+    // Owned here, not by the tab, so the check runs while Fleet opens and a
+    // return to the tab shows the last result instead of a fresh skeleton.
+    const readiness = useFleetReadiness(readinessRefreshKey);
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
+    // Owned here so returning to Map shows the last result while it revalidates.
+    const mapNodes = useMemo(() => registryNodes.map(n => ({ id: n.id, name: n.name })), [registryNodes]);
+    const fleetMap = useFleetMap(activeTab === 'dependencies', mapNodes);
+
+    // Coming back to Readiness re-checks a failed or stale result. A ref keeps
+    // the live state out of the dependency array so only a tab change fires it.
+    const readinessRef = useRef(readiness);
+    useEffect(() => { readinessRef.current = readiness; });
+    useEffect(() => {
+        if (activeTab !== 'readiness') return;
+        const { data, error, checking, retry } = readinessRef.current;
+        if (checking) return;
+        const stale = data !== null && Date.now() - data.generatedAt > READINESS_STALE_MS;
+        if (error !== null || stale) retry();
+    }, [activeTab]);
     const setActiveTab = (tab: FleetTab) => {
         onFleetActiveTabChange?.(tab);
         if (controlledTab === undefined) setInternalTab(tab);
     };
 
-    // Fall back Routing deep links when experimental/license gates resolve false.
-    // Wait for license during cold load so a paid deep link is not rewritten to
-    // Overview while isPaid is still the cold-load false.
+    // Fall back Routing deep links when the experimental gate resolves false.
     useEffect(() => {
         if (!experimentalReady) return;
-        if (activeTab === 'routing') {
-            if (!experimental) {
-                setActiveTab('overview');
-                return;
-            }
-            if (licenseStatus !== 'ready') return;
-            if (!isPaid) setActiveTab('overview');
-        }
+        if (activeTab === 'routing' && !experimental) setActiveTab('overview');
     // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [experimentalReady, experimental, licenseStatus, isPaid, activeTab]);
+    }, [experimentalReady, experimental, activeTab]);
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -161,9 +186,7 @@ export function FleetView({
                 onlineCount={mastheadStats.onlineCount}
                 criticalCount={mastheadStats.criticalCount}
                 totalCpuPercent={mastheadStats.avgCpuNum}
-                worstCpu={mastheadStats.worstCpu}
                 totalMemUsed={mastheadStats.totalMemUsed}
-                totalMemTotal={mastheadStats.totalMemTotal}
                 activeContainers={mastheadStats.totalContainers}
                 totalContainers={mastheadStats.totalContainersAll}
                 lastSyncAt={lastSyncAt}
@@ -174,67 +197,7 @@ export function FleetView({
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
                     {/* Flatten the list's own pill band so the tabs sit directly in
                         the single full-width band, not a nested second band. */}
-                    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
-                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-                            <TabsHighlightItem value="overview">
-                                <TabsTrigger value="overview">Overview</TabsTrigger>
-                            </TabsHighlightItem>
-                            {isAdmin && (
-                                <TabsHighlightItem value="snapshots">
-                                    <TabsTrigger value="snapshots">
-                                        <Camera className="w-4 h-4 mr-1.5" />Snapshots
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <TabsHighlightItem value="readiness">
-                                <TabsTrigger value="readiness">
-                                    <Activity className="w-4 h-4 mr-1.5" />Readiness
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            <TabsHighlightItem value="dependencies">
-                                <TabsTrigger value="dependencies">
-                                    <Workflow className="w-4 h-4 mr-1.5" />Map
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            {containerLabelsEnabled && (
-                                <TabsHighlightItem value="container-labels">
-                                    <TabsTrigger value="container-labels">
-                                        <Tag className="w-4 h-4 mr-1.5" />Docker Labels
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                            <TabsHighlightItem value="deployments">
-                                    <TabsTrigger value="deployments">
-                                        <Send className="w-4 h-4 mr-1.5" />Deployments
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            {canDiscoverRouting && (
-                                <TabsHighlightItem value="routing">
-                                    <TabsTrigger value="routing">
-                                        <ArrowLeftRight className="w-4 h-4 mr-1.5" />Routing
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                            <TabsHighlightItem value="federation">
-                                    <TabsTrigger value="federation">
-                                        <Network className="w-4 h-4 mr-1.5" />Federation
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            <TabsHighlightItem value="actions">
-                                <TabsTrigger value="actions">
-                                    <Wrench className="w-4 h-4 mr-1.5" />Actions
-                                </TabsTrigger>
-                            </TabsHighlightItem>
-                            {isAdmin && (
-                                <TabsHighlightItem value="secrets">
-                                    <TabsTrigger value="secrets">
-                                        <KeyRound className="w-4 h-4 mr-1.5" />Secrets
-                                    </TabsTrigger>
-                                </TabsHighlightItem>
-                            )}
-                        </TabsHighlight>
-                    </TabsList>
+                    <FleetTabStrip layout={tabLayout} tabs={fleetTabs} active={activeTab} onChange={setActiveTab} />
                     <div className="flex items-center gap-2 shrink-0">
                         <TooltipProvider>
                             <Tooltip>
@@ -244,7 +207,9 @@ export function FleetView({
                                         size="sm"
                                         onClick={() => {
                                             void overview.fetchOverview(true);
-                                            setReadinessRefreshKey(key => key + 1);
+                                            // Overview refreshes skip the fleet-wide readiness fan-out;
+                                            // returning to the tab re-checks a stale result instead.
+                                            if (activeTab === 'readiness') setReadinessRefreshKey(key => key + 1);
                                         }}
                                         disabled={refreshing}
                                         className="h-9 w-9 p-0"
@@ -298,8 +263,6 @@ export function FleetView({
                         fleetStackLabelMap={overview.fleetStackLabelMap}
                         updateStatusMap={overview.updateStatusMap}
                         onNavigateToNode={onNavigateToNode}
-                        onOpenNodeNetworking={onOpenNodeNetworking}
-                        networkingByNode={overview.networkingByNode}
                         gitopsAttentionByNode={overview.gitopsAttentionByNode}
                         onUpdate={updateStatus.triggerNodeUpdate}
                         updatingNodeId={updateStatus.updatingNodeId}
@@ -327,15 +290,17 @@ export function FleetView({
                 )}
                 <TabsContent value="readiness">
                     <FleetReadiness
-                        refreshKey={readinessRefreshKey}
+                        readiness={readiness}
                         onOpenNodeDetails={setDetailsNodeId}
                         onOpenNodeSecurity={onOpenNodeSecurity}
                         onOpenSettingsSection={onOpenSettingsSection}
                         isAdmin={isAdmin}
+                        canDismiss={canDismissReadinessFinding}
+                        canRun={canRunReadinessVerb}
                     />
                 </TabsContent>
                 <TabsContent value="dependencies">
-                    <DependencyMapTab />
+                    <DependencyMapTab map={fleetMap} />
                 </TabsContent>
                 {containerLabelsEnabled && (
                     <TabsContent value="container-labels">
@@ -347,12 +312,10 @@ export function FleetView({
                     </TabsContent>
                 {canDiscoverRouting && (
                     <TabsContent value="routing">
-                        <PaidGate>
-                            <RoutingTab
-                                canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
-                                canManageMembership={isAdmin}
-                            />
-                        </PaidGate>
+                        <RoutingTab
+                            canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                            canManageMembership={isAdmin}
+                        />
                     </TabsContent>
                 )}
                 <TabsContent value="federation">
@@ -406,6 +369,8 @@ export function FleetView({
                 canManageNode={detailsNodeId !== null && can('node:manage', 'node', String(detailsNodeId))}
                 onOpenNetworking={onOpenNodeNetworking}
                 onEdit={openEdit}
+                onDelete={openDelete}
+                onCordonChange={() => { void overview.fetchOverview(true); }}
             />
 
             <LocalUpdateConfirmDialog

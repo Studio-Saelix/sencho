@@ -9,16 +9,17 @@
  * rather than vanishing, and rows carrying statuses this build does not know
  * are reported as unknown evidence instead of being reinterpreted.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import type { Request } from 'express';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { CacheService } from '../services/CacheService';
 import { DatabaseService } from '../services/DatabaseService';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { encodeObservedArtifactIdentity } from '../services/gitops/json';
-import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, rowFromProjection } from '../services/gitops/portfolioAggregator';
+import { aggregateGitOpsPortfolio, freshestFacetTimestamp, isUsableRevision, PORTFOLIO_MERGE_CAP, postureOf, probeSilentNodeIds, resetReachabilityProbesForTests, rowFromProjection } from '../services/gitops/portfolioAggregator';
 import { directApplicationFixture } from './helpers/gitopsFixtures';
 import type { GitOpsIdentityRef, GitOpsRevisionProjection, GitOpsTargetProjection } from '../services/gitops/types';
 import type { ArtifactFacet } from '../services/gitops/types';
@@ -30,6 +31,14 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   GitOpsStore.resetForTests();
   GitOpsTransitions.resetForTests();
+});
+
+// The reachability verdict and any leg still in flight are process state, so
+// one test would otherwise be read by the next: a verdict recorded by one test,
+// or a leg a failed test never released.
+beforeEach(() => {
+  CacheService.getInstance().flush();
+  resetReachabilityProbesForTests();
 });
 
 afterAll(() => {
@@ -86,7 +95,7 @@ function createBlueprintApplication(id: string, blueprintId: number): void {
 function remoteSourceRow(
   applicationId: string,
   stackName: string,
-  revision: GitOpsRevisionProjection,
+  revision: unknown,
   stackResourcePresent = true,
 ): unknown[] {
   return [{
@@ -124,6 +133,12 @@ function remoteSourceRow(
 type LiveProjection = Extract<GitOpsRevisionProjection, { applicationId: string }>;
 type LiveFacets = LiveProjection['facets'];
 
+/**
+ * A projection whose `targets` are unvalidated, so a test can push a target no
+ * live projection could carry and assert the row degrades instead of vanishing.
+ */
+type RemoteProjectionFixture = Omit<LiveProjection, 'targets'> & { targets: unknown[] };
+
 function liveProjectionFixture(input: {
   applicationId: string;
   targetMode: LiveProjection['targetMode'];
@@ -137,6 +152,7 @@ function liveProjectionFixture(input: {
     applicationId: input.applicationId,
     lifecycleStatus: 'active',
     stackName: input.stackName,
+    configuredSourceStackName: input.stackName,
     blueprintId: null,
     rolloutGenerationId: input.rolloutGenerationId,
     approvals: {
@@ -145,11 +161,13 @@ function liveProjectionFixture(input: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'unapproved' },
     facets: input.facets,
     targets: [],
     drift: [],
     limitations: [],
     availableActions: [],
+    authorityPolicies: [],
   };
 }
 
@@ -184,6 +202,11 @@ function bindBlueprintAuthority(projection: LiveProjection): void {
   projection.blueprintId = 1;
   projection.approvals.rolloutAuthorizationRef = 'auth-1';
   projection.facets.placement = { status: 'blueprint_bound', completion: 'unknown' };
+}
+
+/** `remoteProjection` with unvalidated `targets`, for the malformed-payload cases. */
+function rawRemoteProjection(applicationId: string, stackName: string): RemoteProjectionFixture {
+  return { ...remoteProjection(applicationId, stackName), targets: [] };
 }
 
 function targetProjection(
@@ -227,7 +250,16 @@ function targetProjection(
     legacyAppliedRevision: null,
     runtime: { status: 'synced_and_healthy' },
     health: { status: 'passed', runId: 'run-1', deployedGenerationId: 'gen-1' },
+    healthFailureSuperseded: false,
     lkg: { status: 'available', generationId: 'gen-1', artifactSetId: null },
+    healthGate: {
+      policy: null,
+      configuredPolicy: 'observe',
+      awaitingRunId: null,
+      attempts: 0,
+      stopReason: null,
+      recoveryAvailable: false,
+    },
     tombstoned: false,
   };
 }
@@ -417,6 +449,190 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(withdrawn?.evidence.partial).toBe(true);
   });
 
+  it('probes a node once for a list read and a detail read that overlap', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const sharedId = addRemoteNode('port-shared-leg', 29990);
+
+    // Opening a Blueprint panel over the workplace is the case this is for: the
+    // list read and the detail read ask about the same node in the same instant,
+    // and the detail read joins the leg the list already started rather than
+    // probing a second time.
+    const release: ((rows: unknown[] | null) => void)[] = [];
+    const asked: number[] = [];
+    const fetchRows = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(
+      (nodeId) => new Promise<unknown[] | null | 'unsupported'>((resolve) => {
+        asked.push(nodeId);
+        release.push(() => resolve(nodeId === sharedId ? null : []));
+      }),
+    );
+
+    const listing = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
+    // The aggregate reads stack state before it fans out, so the list leg only
+    // starts once that has resolved. Waiting for it is what makes the two reads
+    // overlap rather than run in sequence.
+    await vi.waitFor(() => expect(asked).toContain(sharedId));
+    const detail = probeSilentNodeIds([sharedId], fetchRows);
+    for (const releaseLeg of release) releaseLeg(null);
+
+    const { coverage } = await listing;
+    expect(coverage.find(candidate => candidate.nodeId === sharedId)?.state).toBe('unreachable');
+    expect([...(await detail)]).toEqual([sharedId]);
+    // One probe of this node across both readers, not one per reader.
+    expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
+  });
+
+  it('filters a shared leg per caller instead of letting one caller siphon it', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const sharedId = addRemoteNode('port-shared-filter', 29989);
+    // A second node of this test's own, used only to tell when a read has reached
+    // its fan-out. A joined read never asks the shared node again, so nothing else
+    // observable marks that it arrived.
+    const markerId = addRemoteNode('port-shared-marker', 29987);
+
+    // Two list reads, different callers, one leg. The payload carries an
+    // ordinary row and one with no usable stack name, which classifies as
+    // admin-only. If the shared array were filtered in place, whichever read went
+    // first would decide what the other saw.
+    const readable = remoteSourceRow('app-shared-readable', 'shared-readable-web', remoteProjection('app-shared-readable', 'shared-readable-web'));
+    const adminOnly = remoteSourceRow('app-shared-admin', '', remoteProjection('app-shared-admin', 'shared-admin-web'));
+    const payload = [...readable, ...adminOnly];
+
+    const release: (() => void)[] = [];
+    const asked: number[] = [];
+    const fetchRows = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(
+      (nodeId) => new Promise<unknown[] | null | 'unsupported'>((resolve) => {
+        asked.push(nodeId);
+        if (nodeId === sharedId) release.push(() => resolve(payload));
+        else resolve([]);
+      }),
+    );
+
+    // The restrictive read goes first on purpose. Its filter drops a row, so if
+    // it were splicing the shared array the admin's read would come back missing
+    // that row and this would fail.
+    const asViewer = aggregateGitOpsPortfolio(fakeReq({ userId: 2, username: 'viewer', role: 'viewer' }, localNodeId), { fetchRows });
+    await vi.waitFor(() => expect(asked.filter(nodeId => nodeId === markerId)).toHaveLength(1));
+    const asAdmin = aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows });
+    // Asked twice now, so both reads have reached their fan-out and the admin is
+    // inside the viewer's leg.
+    await vi.waitFor(() => expect(asked.filter(nodeId => nodeId === markerId)).toHaveLength(2));
+    for (const releaseLeg of release) releaseLeg();
+
+    const viewerRows = (await asViewer).rows.filter(candidate => candidate.nodeId === sharedId);
+    const adminRows = (await asAdmin).rows.filter(candidate => candidate.nodeId === sharedId);
+
+    // One probe between them, and each caller filtered the payload for itself.
+    expect(asked.filter(nodeId => nodeId === sharedId)).toHaveLength(1);
+    expect(viewerRows.map(candidate => candidate.id)).not.toContain(`${sharedId}:app-shared-admin`);
+    expect(viewerRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-readable`);
+    expect(adminRows.map(candidate => candidate.id)).toContain(`${sharedId}:app-shared-admin`);
+  });
+
+  it('retires a cached dark verdict before walking a payload it cannot walk', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const walkFailsId = addRemoteNode('port-walk-fails', 29988);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === walkFailsId ? null : []),
+    });
+
+    // The node answers, but a row that throws while the read rules are applied
+    // makes this build unable to walk the payload. The answer still retired the
+    // dark verdict first, because retirement happens when the payload arrives
+    // rather than after the walk.
+    const hostile = remoteSourceRow('app-walk-fails', 'walk-fails-web', remoteProjection('app-walk-fails', 'walk-fails-web'));
+    Object.defineProperty(hostile[0] as object, 'stack_name', { get() { throw new Error('row cannot be read'); } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === walkFailsId ? hostile : []),
+    });
+    expect(coverage.find(candidate => candidate.nodeId === walkFailsId)?.state).toBe('unsupported');
+
+    // So the detail probe is free to ask again rather than serve the dark verdict
+    // the walk failure left behind.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    expect([...(await probeSilentNodeIds([walkFailsId], detailProbe))]).toEqual([]);
+    expect(detailProbe).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('shares its reachability verdict with the application detail probe', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const darkId = addRemoteNode('port-detail-window', 29994);
+
+    // The list read pays the probe and records the verdict.
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === darkId ? null : []),
+    });
+
+    // The detail read that follows it reuses that verdict rather than paying a
+    // second timeout about a node this hub already found dark.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
+    expect([...(await probeSilentNodeIds([darkId], detailProbe))]).toEqual([darkId]);
+    expect(detailProbe).not.toHaveBeenCalled();
+  });
+
+  it('retires a cached dark verdict once the list read sees the node answer', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const recoveredId = addRemoteNode('port-detail-recovered', 29993);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === recoveredId ? null : []),
+    });
+
+    // The list read needs the rows themselves, so it never serves the cached
+    // verdict: it probes the node even while a dark entry is live, and that
+    // answer is what retires the entry.
+    const listProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), { fetchRows: listProbe });
+    expect(listProbe).toHaveBeenCalledWith(recoveredId);
+    expect(coverage.find(candidate => candidate.nodeId === recoveredId)?.state).toBe('ok');
+
+    // With the entry retired, the detail probe is free to ask again and reach
+    // the same answer the list already had.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => null);
+    expect([...(await probeSilentNodeIds([recoveredId], detailProbe))]).toEqual([recoveredId]);
+    expect(detailProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a thrown fan-out leg as evidence in neither direction', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const throwingId = addRemoteNode('port-throwing-after-dark', 29992);
+
+    await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => (nodeId === throwingId ? null : []),
+    });
+
+    // The leg throws this time. A throw says this build could not read the node,
+    // which is not proof it is down and not proof it is up, so the fan-out
+    // records no verdict and retires none. The default seam never rejects, so
+    // this is the injected path.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coverage } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => {
+        if (nodeId === throwingId) throw new Error('seam threw');
+        return [];
+      },
+    });
+    expect(coverage.find(candidate => candidate.nodeId === throwingId)?.state).toBe('unsupported');
+
+    // The earlier dark verdict therefore stands. That is the honest outcome:
+    // nothing since has proved the node came back. The list calls the node
+    // unreadable and the detail panel calls it unreachable, which is a gap in
+    // what each can say rather than a contradiction, and neither claims the node
+    // is up.
+    const detailProbe = vi.fn<(nodeId: number) => Promise<unknown[] | null | 'unsupported'>>(async () => []);
+    expect([...(await probeSilentNodeIds([throwingId], detailProbe))]).toEqual([throwingId]);
+    expect(detailProbe).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('merges remote rows with hub node ids applied', async () => {
     const db = DatabaseService.getInstance();
     const localNodeId = db.getNodes()[0]!.id;
@@ -434,6 +650,32 @@ describe('aggregateGitOpsPortfolio', () => {
     expect(remote!.nodeName).toBe('port-remote');
     expect(remote!.repository?.host).toBe('github.com');
     expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
+  });
+
+  it('keeps a malformed remote application addressable instead of relabeling it as legacy', async () => {
+    const db = DatabaseService.getInstance();
+    const localNodeId = db.getNodes()[0]!.id;
+    const remoteId = db.addNode({
+      name: 'port-remote-evidence-gap',
+      type: 'remote',
+      api_url: 'http://127.0.0.1:29995',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+
+    const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
+      fetchRows: async (nodeId: number) => nodeId === remoteId ? [{
+        stack_name: 'remote-gap',
+        stackResourcePresent: true,
+        gitopsRevision: { applicationId: 'app-evidence-gap', targetMode: 'direct' },
+      }] : null,
+    });
+
+    const row = rows.find(candidate => candidate.id === `${remoteId}:app-evidence-gap`);
+    expect(row).toBeDefined();
+    expect(row!.evidence).toEqual({ partial: true, unreachableNodes: [], unknown: true });
+    expect(row!.limitations).toContain('evidence_unavailable');
   });
 
   it('keeps failures inside the merge cap, dropping settled rows first', async () => {
@@ -492,13 +734,16 @@ describe('aggregateGitOpsPortfolio', () => {
     const localNodeId = db.getNodes()[0]!.id;
     const remoteId = addRemoteNode('port-remote-new', 29996);
 
-    const newer = remoteProjection('app-remote-new', 'new-stack');
+    const newer = rawRemoteProjection('app-remote-new', 'new-stack');
     newer.targetMode = 'blueprint';
     newer.rolloutGenerationId = 'rg-1';
-    bindBlueprintAuthority(newer);
+    bindBlueprintAuthority(newer as LiveProjection);
     newer.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' };
     const target = targetProjection('reachable', 'rg-1');
+    // Two vocabularies this build has never heard of, on the same target: the
+    // runtime status and the connectivity grade.
     Object.assign(target.runtime, { status: 'brand_new_status' });
+    Object.assign(target, { connectivity: 'from_a_newer_node' });
     newer.targets = [target];
     const { rows } = await aggregateGitOpsPortfolio(adminReq(localNodeId), {
       fetchRows: async (nodeId: number) =>
@@ -507,6 +752,7 @@ describe('aggregateGitOpsPortfolio', () => {
     const row = rows.find(candidate => candidate.id === `${remoteId}:app-remote-new`);
     expect(row).toBeDefined();
     expect(row!.runtimeStatus).toBe('brand_new_status');
+    expect(row!.targets[0].evidence).toBe('unknown');
     expect(row!.evidence.unknown).toBe(true);
     expect(row!.posture).toBe('unknown');
   });
@@ -996,10 +1242,14 @@ describe('aggregateGitOpsPortfolio', () => {
           : null,
       });
 
-      const row = rows.find(candidate => candidate.id === `${remoteId}:legacy:${stackName}`);
+      // The row names a real application, so it stays addressable under that
+      // name and says its evidence is unavailable. Relabelling it legacy would
+      // hide an application that exists from every surface that lists it.
+      const row = rows.find(candidate => candidate.id === `${remoteId}:app-${kind}`);
       expect(row).toBeDefined();
       expect(row!.posture).toBe('unknown');
       expect(row!.evidence).toEqual({ partial: true, unreachableNodes: [], unknown: true });
+      expect(row!.limitations).toContain('evidence_unavailable');
       expect(coverage.find(candidate => candidate.nodeId === remoteId)?.state).toBe('ok');
     },
   );
@@ -1557,6 +1807,41 @@ describe('aggregateGitOpsPortfolio', () => {
   });
 });
 
+describe('posture recognizes every runtime status it can be handed', () => {
+  // A status missing from the severity ladder does not fall back to anything
+  // sensible: it reads as unrecognized, and the whole row becomes `unknown`.
+  // That is how `repair_held` and `converged` would have reported a healthy
+  // application as unknown, so each is pinned here against a literal.
+
+  function rowWithRuntimeStatus(status: string): string {
+    const revision = remoteProjection(`app-runtime-${status}`, `stack-${status}`);
+    revision.facets.artifact = artifactFacet();
+    revision.targetMode = 'blueprint';
+    revision.rolloutGenerationId = 'rg-1';
+    bindBlueprintAuthority(revision);
+    revision.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' };
+    const target = targetProjection('reachable', 'rg-1');
+    target.stackName = revision.stackName;
+    Object.assign(target.runtime, { status });
+    revision.targets = [target];
+    return rowForProjection(revision, `evidence-${status}`).posture;
+  }
+
+  it('reads a settled target as converged rather than unknown', () => {
+    // This is the case that actually exercises the severity ladder: nothing
+    // earlier in postureOf claims it, so a status missing from the ladder
+    // reads as unrecognized and drops the row to `unknown`. The statuses the
+    // in-flight and attention checks claim first cannot test the ladder at all.
+    expect(rowWithRuntimeStatus('synced_and_healthy')).toBe('converged');
+  });
+
+  it('reads a held repair as attention rather than a settled row', () => {
+    // Its own attention reason decides this one, ahead of the ladder, so this
+    // asserts the operator-facing outcome rather than the ladder lookup.
+    expect(rowWithRuntimeStatus('repair_held')).toBe('attention');
+  });
+});
+
 describe('postureOf', () => {
   function baseFixture(overrides?: {
     source?: LiveFacets['source'];
@@ -1600,6 +1885,192 @@ describe('postureOf', () => {
     }
     return projection;
   }
+
+  /**
+   * A Blueprint application settled on one reachable target.
+   *
+   * The application facet and the target's artifact are the same object on
+   * purpose: a target reporting a different status than the application is
+   * exactly the disagreement this fixture must not be able to express.
+   */
+  function settledFixture(rollout: LiveFacets['rollout']): LiveProjection {
+    const exact = rollout.status === 'exactly_converged_healthy';
+    const projection = baseFixture({ rollout });
+    projection.targets = [targetProjection('reachable', 'rg-1', 1, 'p-web', exact ? 'exact' : 'qualified')];
+    projection.facets.artifact = projection.targets[0].artifact;
+    return projection;
+  }
+
+  /** The same settled target evidence, proven by a Direct application's own source facet. */
+  function directSettledFixture(artifactStatus: 'artifact_exact' | 'artifact_qualified'): LiveProjection {
+    const projection = baseFixture();
+    projection.targets = [targetProjection('reachable', null, 1, 'p-web', artifactStatus === 'artifact_exact' ? 'exact' : 'qualified')];
+    projection.facets.artifact = projection.targets[0].artifact;
+    return projection;
+  }
+
+  it('accepts an exact observation for a qualified artifact claim', () => {
+    const projection = settledFixture({ status: 'configuration_converged_artifact_qualified', rolloutGenerationId: 'rg-1' });
+    expect(projection.facets.artifact.status).toBe('artifact_qualified');
+    expect(projection.targets[0].observedArtifactIdentity.kind).toBe('qualified');
+    projection.targets[0].observedArtifactIdentity = {
+      kind: 'exact',
+      identity: 'sha256:abc',
+      observedAt: 1,
+    };
+    expect(postureOf(projection)).toBe('converged_qualified');
+  });
+
+  it('ignores retired targets when proving convergence', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets.push({ ...projection.targets[0], nodeId: 2, tombstoned: true });
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('allows a health-gate-disabled target to keep a stale healthy pointer', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.targets[0].health = { status: 'not_applicable' };
+    projection.targets[0].healthyGenerationId = 'gen-old';
+    expect(postureOf(projection)).toBe('converged');
+  });
+
+  it('never claims convergence from a blank rollout generation', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    projection.rolloutGenerationId = '';
+    projection.facets.rollout = { status: 'exactly_converged_healthy', rolloutGenerationId: '' } as typeof projection.facets.rollout;
+    projection.targets[0].rolloutGenerationId = '';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from an artifact status this build does not know', () => {
+    const projection = baseFixture({
+      artifact: { status: 'artifact_future_unknown' } as unknown as ArtifactFacet,
+    });
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('never claims convergence from a known artifact status carrying an unknown qualification', () => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    const artifact = projection.facets.artifact as unknown as Record<string, unknown>;
+    artifact.qualification = 'future_qualification';
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it.each([
+    ['the application expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.facets.artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:abc' };
+    }],
+    ['the target expected artifact', (projection: LiveProjection) => {
+      const artifact = projection.targets[0].artifact as unknown as { expected: Record<string, unknown> | null };
+      artifact.expected = { artifactSetId: 'artifact-1', evidenceVersion: 1, qualification: 'future_qualification', identity: 'sha256:abc' };
+    }],
+  ])('never claims convergence from a future qualification in %s', (_label, mutate) => {
+    const projection = settledFixture({ status: 'exactly_converged_healthy', rolloutGenerationId: 'rg-1' });
+    mutate(projection);
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('claims a settled Direct application converged from its own target evidence', () => {
+    expect(postureOf(directSettledFixture('artifact_exact'))).toBe('converged');
+    expect(postureOf(directSettledFixture('artifact_qualified'))).toBe('converged_qualified');
+  });
+
+  it('never reads a Direct application with an unreachable target as converged', () => {
+    const projection = directSettledFixture('artifact_exact');
+    projection.targets[0].connectivity = 'unreachable';
+    expect(postureOf(projection)).not.toBe('converged');
+    expect(postureOf(projection)).not.toBe('converged_qualified');
+  });
+
+  it.each([
+    ['an unknown target artifact status', (projection: LiveProjection) => {
+      projection.targets[0].artifact = { status: 'artifact_future_verdict' } as unknown as ArtifactFacet;
+    }],
+    ['an unknown LKG status', (projection: LiveProjection) => {
+      projection.targets[0].lkg = { status: 'future_lkg' } as unknown as LiveProjection['targets'][number]['lkg'];
+    }],
+    ['an unknown last-known-good reason', (projection: LiveProjection) => {
+      Object.assign(projection.targets[0], {
+        lkg: { status: 'unavailable' },
+        lkgGenerationId: null,
+        lkgArtifactSetId: null,
+        lkgUnavailableAt: 1,
+        lkgUnavailableReason: 'future_reason',
+      });
+    }],
+    ['an unknown observed artifact kind', (projection: LiveProjection) => {
+      projection.targets[0].observedArtifactIdentity = { kind: 'future_kind', identity: 'sha256:abc', observedAt: 1 } as unknown as LiveProjection['targets'][number]['observedArtifactIdentity'];
+    }],
+    ['an unknown connectivity', (projection: LiveProjection) => {
+      projection.targets[0].connectivity = 'future' as 'reachable';
+    }],
+  ])('reports %s as unknown evidence rather than convergence', (_label, mutate) => {
+    const projection = directSettledFixture('artifact_exact');
+    mutate(projection);
+    expect(postureOf(projection)).toBe('unknown');
+  });
+
+  it('keeps a projection readable when a target carries an unfamiliar last-known-good reason', () => {
+    // A reason from a newer node is unfamiliar, not unusable. The row stays
+    // addressable and says its evidence is unknown; rejecting the projection
+    // would report the evidence as unavailable, which is a different and
+    // stronger claim than the evidence supports.
+    const projection = remoteProjection('app-future-lkg-reason', 'future-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: 'future_reason',
+    });
+    projection.targets = [target];
+
+    expect(isUsableRevision(projection)).toBe(true);
+    const row = rowForProjection(projection, 'future-lkg-reason');
+    expect(row.posture).toBe('unknown');
+    expect(row.evidence.unknown).toBe(true);
+    expect(row.limitations).not.toContain('evidence_unavailable');
+  });
+
+  it('rejects a supersede flag that is not a boolean, and accepts it absent', () => {
+    // A truthy non-boolean from a peer must not be able to suppress a real
+    // health failure, so the row is refused rather than believed. Absent is the
+    // older-peer shape and has to keep working, which is why the field is
+    // optional at this boundary at all.
+    const projection = remoteProjection('app-bad-supersede-flag', 'bad-supersede-flag');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, { healthFailureSuperseded: 'yes' });
+    projection.targets = [target];
+    expect(isUsableRevision(projection)).toBe(false);
+
+    const absent = remoteProjection('app-absent-supersede-flag', 'absent-supersede-flag');
+    const absentTarget = remoteTarget(absent, 'reachable');
+    Object.assign(absentTarget, { healthFailureSuperseded: undefined });
+    absent.targets = [absentTarget];
+    expect(isUsableRevision(absent)).toBe(true);
+
+    const boolean = remoteProjection('app-boolean-supersede-flag', 'boolean-supersede-flag');
+    const booleanTarget = remoteTarget(boolean, 'reachable');
+    Object.assign(booleanTarget, { healthFailureSuperseded: true });
+    boolean.targets = [booleanTarget];
+    expect(isUsableRevision(boolean)).toBe(true);
+  });
+
+  it('rejects an empty last-known-good reason rather than reading it as one', () => {
+    const projection = remoteProjection('app-empty-lkg-reason', 'empty-lkg-reason');
+    const target = remoteTarget(projection, 'reachable');
+    Object.assign(target, {
+      lkg: { status: 'unavailable' },
+      lkgGenerationId: null,
+      lkgArtifactSetId: null,
+      lkgUnavailableAt: 1,
+      lkgUnavailableReason: '',
+    });
+    projection.targets = [target];
+    expect(isUsableRevision(projection)).toBe(false);
+  });
 
   it.each(['source', 'artifact', 'placement', 'rollout'] as const)(
     'does not accept a prototype key as a known %s status',

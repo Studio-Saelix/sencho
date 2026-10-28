@@ -15,7 +15,7 @@ import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeploy
 import type { DeployInvocationContext } from './network/missingExternalNetworksError';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
-import { sanitizeForLog } from '../utils/safeLog';
+import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidRelativeStackPath } from '../utils/validation';
 import { gitSourceLocalComposeFiles, PRIMARY_COMPOSE_FILENAME } from '../utils/gitComposeFiles';
 import { ComposeInputDiscoveryService, type ContextCopyPlan } from './ComposeInputDiscoveryService';
@@ -28,6 +28,7 @@ import { buildCandidateComposeInvocation } from '../utils/candidateComposeInvoca
 import type { ComposeInputEntry, GitProjectManifest, GitSourceManifestState, InventoryResult, ManifestSummary, RefusalInfo } from '../types/gitProjectManifest';
 import type { GitChangePlan, PublicGitChangePlan, GitChangePlanCounts, PublicGitChangePlanOperation } from '../types/gitChangePlan';
 import { GIT_CHANGE_PLAN_SCHEMA_VERSION } from '../types/gitChangePlan';
+import type { GitSourceErrorCode } from '../types/gitSourceErrorCode';
 import type { NotificationCategory } from './NotificationService';
 import { classifyGitFailure, isTransportFailure, type TransportFailureReason } from './git/errors';
 import type { RefKind, SshDeployKeyAuth } from './git/types';
@@ -48,6 +49,7 @@ import {
 } from './gitops/triggers';
 import { classifyFailure, effectivePollIntervalSecs } from './gitops/backoff';
 import { checkStatefulWithdrawal, holdForStatefulReview } from './gitops/statefulGuard';
+import { gitOpsAttemptNotificationKey, gitOpsCandidateState, type GitOpsCandidateIdentity } from './gitops/notifications';
 import { BlueprintTargetAdapter, buildAcceptedGeneration, type AcceptedGeneration, type DispatchContext, type DispatchResult } from './gitops/handoff';
 import {
     GitOpsTransitions,
@@ -58,6 +60,7 @@ import {
 import { decodeGitOpsJson, encodeGitOpsJson, isRecord, GitOpsJsonError } from './gitops/json';
 import { candidateContentFingerprint } from './gitops/fingerprint';
 import type { CandidatePolicyEvaluation } from './PolicyEnforcement';
+import type { AllowedPolicyEvidence } from './allowedPolicyEvidence';
 import {
     buildCreateCheckpointRow,
     buildDirectApplicationRow,
@@ -77,6 +80,7 @@ import {
     recordObservedRuntimeArtifactForDeploy,
     resolveAndRecordArtifactSet,
 } from './gitops/artifactResolve';
+import { recordObservedInvocationForDeploy } from './gitops/invocationObserve';
 import {
     encodePreflightEvidenceJson,
     isPreflightBlocked,
@@ -89,7 +93,13 @@ import { managedAreaBase } from './gitops/managedPaths';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { copyPreparedPayloadDirectory } from '../helpers/registryDeliveryMaterialize';
 import { runDockerCompose as spawnDockerCompose } from '../helpers/dockerComposeRunner';
-import { classifyInventoryEncryption, buildSecretCapability } from './gitops/sops/capability';
+import {
+    capabilityUnderstatesEncryption,
+    classifyInventoryEncryption,
+    buildSecretCapability,
+    parseSecretCapabilityFromJson,
+    syncEnvInputEntry,
+} from './gitops/sops/capability';
 import { getEncryptedSourcePolicy } from './gitops/sops/identityStore';
 import {
     buildGitOpsDecryptOverlay,
@@ -97,6 +107,7 @@ import {
     manifestInputsNeedOverlay,
 } from './gitops/sops/prepareOverlay';
 import { newOverlayOperationId } from './gitops/sops/overlay';
+import { SopsDecryptError } from './gitops/sops/decode';
 import type { SecretCapability } from './gitops/sops/types';
 
 /**
@@ -109,24 +120,11 @@ import type { SecretCapability } from './gitops/sops/types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type GitSourceErrorCode =
-    | 'REPO_NOT_FOUND'
-    | 'AUTH_FAILED'
-    | 'REF_NOT_FOUND'
-    | 'REF_DELETED'
-    | 'UNSUPPORTED_REF'
-    | 'SSH_HOST_KEY_FAILED'
-    | 'FILE_NOT_FOUND'
-    | 'RATE_LIMITED'
-    | 'NETWORK_TIMEOUT'
-    | 'GIT_ERROR'
-    | 'STALE_PLAN'
-    | 'PLAN_FINGERPRINT_REQUIRED'
-    | 'PLAN_BLOCKED'
-    | 'LEGACY_PENDING'
-    | 'PLAN_UNAVAILABLE'
-    | 'OPERATION_IN_FLIGHT'
-    | 'SOURCE_CLAIMED_BY_BLUEPRINT';
+// The runtime list and the type share one source in a leaf module, so a new
+// code cannot be added without reaching every runtime consumer (the status
+// map and the closed-set guard in utils/gitSourceHttp.ts), and the list is
+// never read through a module cycle.
+export { GIT_SOURCE_ERROR_CODE_VALUES, type GitSourceErrorCode } from '../types/gitSourceErrorCode';
 
 export type SourceRevalidationResult =
     | { status: 'reuse'; generation: GitOpsGenerationRow }
@@ -144,6 +142,74 @@ function storedCandidateContentSha256(raw: string | null): string | null {
     }
     if (!isRecord(decoded) || typeof decoded.candidateContentSha256 !== 'string') return null;
     return decoded.candidateContentSha256;
+}
+
+/**
+ * The decision half of a stored security-policy evidence column, for the reuse
+ * comparison.
+ *
+ * Compared as a projection rather than as raw text, so the comparison is about
+ * the decision rather than its encoding. The applications are part of it, which
+ * is the point: an acceptance on unproven evidence and a clean one share a
+ * status and a policy id, so a verdict-only comparison would reuse the
+ * generation recorded for one of them when the other is re-polled, leaving the
+ * attribution column describing a decision this poll did not reach.
+ *
+ * The records are part of it too, because the applications alone cannot tell a
+ * clean acceptance from one made on partial evidence: partial evidence has no
+ * application (no setting governs it), so a partial-only allow and a clean allow
+ * would otherwise compare equal and the older clean record would be reused for
+ * a candidate it no longer describes. Only the records that are not `current`
+ * are compared, and only by source, state and target. Collection time, digest
+ * and reason text are left out on purpose: a re-run that rescans an unchanged
+ * candidate changes them, and treating that as a different decision would mint
+ * a generation per poll.
+ *
+ * The application and record lists are sorted before they are compared, because
+ * the order the evaluator happens to produce is not part of the decision. Two
+ * polls that reach the same set of rules in a different order describe the same
+ * outcome, and treating them as different would mint a replacement generation
+ * for it.
+ *
+ * The evidence fields are normalized for a column written before they existed,
+ * so the first poll after an upgrade reuses its generation rather than minting a
+ * replacement for every existing source on an unchanged verdict. An absent list
+ * normalizes to empty and an absent outcome to `allow`, which is what
+ * `mostRestrictiveOutcome` returns for no applications at all, so a legacy clean
+ * acceptance and a freshly recorded one compare equal. That cannot hide a change:
+ * any outcome other than `allow`, any rule that acted, or any record that is not
+ * `current` differs from the defaults and replaces the row. An unparseable or absent column yields null,
+ * which never matches, so auto-accept re-evaluates and writes a fresh row instead
+ * of reusing an unreadable one.
+ */
+function securityPolicyDecision(raw: string | null): string | null {
+    if (!raw) return null;
+    let decoded: unknown;
+    try {
+        decoded = decodeGitOpsJson(raw);
+    } catch {
+        return null;
+    }
+    if (!isRecord(decoded)) return null;
+    const applications = Array.isArray(decoded.evidenceApplications) ? decoded.evidenceApplications : [];
+    const byContent = (a: unknown, b: unknown): number => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    const ordered = [...applications].sort(byContent);
+    // A present-but-malformed list is unreadable, not empty: it must never compare
+    // equal to a clean decision, so it takes the same null path as bad JSON.
+    if (decoded.evidenceRecords !== undefined && decoded.evidenceRecords !== null && !Array.isArray(decoded.evidenceRecords)) return null;
+    const records: unknown[] = Array.isArray(decoded.evidenceRecords) ? decoded.evidenceRecords : [];
+    if (!records.every(isRecord)) return null;
+    const unproven = records
+        .filter((r) => r.state !== 'current')
+        .map((r) => ({ source: r.source ?? null, state: r.state ?? null, target: r.target ?? null }))
+        .sort(byContent);
+    return JSON.stringify({
+        status: decoded.status ?? null,
+        policyId: decoded.policyId ?? null,
+        evidenceOutcome: decoded.evidenceOutcome ?? 'allow',
+        evidenceApplications: ordered,
+        evidenceRecords: unproven,
+    });
 }
 
 function candidateContentSha256FromDisk(
@@ -181,6 +247,46 @@ function composeInputsForCandidate(
         : { composeFileOrder };
 }
 
+/**
+ * A Blueprint fetch that still resolves to the generation this application
+ * already accepted. A Direct pull with no live candidate always stages a new
+ * generation, because an already-accepted generation cannot be accepted again.
+ *
+ * The candidate pointer must be null. A lookup that fails is not absence, and
+ * a generation owned by another application is not this acceptance. The stored
+ * compose-file digest has to equal the digest of the compose files this fetch
+ * just wrote. A missing digest does not match.
+ */
+function acceptedBlueprintGenerationMatches(args: {
+    app: GitOpsApplicationRow;
+    accepted: GitOpsGenerationRow | undefined;
+    commitSha: string;
+    fingerprint: string;
+    planBlocked: boolean;
+    freshDigest: string | null;
+}): boolean {
+    const accepted = args.accepted;
+    if (args.app.target_mode !== 'blueprint' || args.app.candidate_generation_id !== null) return false;
+    if (!accepted || accepted.application_id !== args.app.id) return false;
+    if (accepted.commit_sha !== args.commitSha) return false;
+    if (accepted.materialization_fingerprint !== args.fingerprint) return false;
+    if (accepted.materialization_fingerprint !== args.app.materialization_fingerprint) return false;
+    if (accepted.plan_blocked !== (args.planBlocked ? 1 : 0)) return false;
+    const stored = storedCandidateContentSha256(accepted.compose_inputs_json);
+    return stored !== null && stored === args.freshDigest;
+}
+
+/**
+ * Map a SOPS decrypt failure to its Git-source error code. Used by the fetch,
+ * apply, and reconcile failure paths so all three record and classify the same
+ * way: a decrypt failure is operator action, never a transient git fault.
+ */
+export function asGitSourceFailure(failure: unknown): unknown {
+    return failure instanceof SopsDecryptError
+        ? new GitSourceError('SOPS_DECRYPT_FAILED', failure.message)
+        : failure;
+}
+
 export class GitSourceError extends Error {
     constructor(
         public code: GitSourceErrorCode,
@@ -214,6 +320,9 @@ function mergeSyncEnvEntry(inputs: ComposeInputEntry[], syncEntry: ComposeInputE
     if (!syncEntry) return inputs;
     return [...inputs.filter((i) => i.materializedPath !== syncEntry.materializedPath), syncEntry];
 }
+
+const STALE_SECRET_CAPABILITY_MESSAGE =
+    'The staged candidate does not record the age recipients for its encrypted files. Pull the source again before applying.';
 
 /** A single compose file fetched from a repo, keyed by its repo-relative path. */
 export interface ComposeFile {
@@ -407,6 +516,12 @@ export interface GitApplyOpts {
     requirePlanFingerprint?: boolean;
     /** Drives configured_policy acceptance for automated webhook deliveries. */
     reconcileTrigger?: ReconcileTrigger;
+    /**
+     * Receives the policy decision when the deploy gate allows on evidence that
+     * was not a clean pass, so the manual-apply response can carry it. A call that
+     * joins another in-flight apply is not called; the audit row still records it.
+     */
+    onAllowed?: (allowed: AllowedPolicyEvidence) => void;
 }
 
 export type WebhookPullOptions = {
@@ -593,6 +708,18 @@ function publicComposeValidationError(
 }
 
 /**
+ * Returned instead of Compose stderr whenever validation ran against an
+ * overlay that holds decrypted inputs. The decrypted content is never
+ * interpreted: Compose reads several of those files itself (env and label
+ * files are parsed, not just passed through) and accepts representations a
+ * second parser here would only reimplement badly (dotenv assignments,
+ * quoted values, YAML-style colon assignments), while a value embedded in
+ * free-form stderr cannot be stripped safely. Withholding the whole
+ * diagnostic fails closed for every accepted format and every malformed one.
+ */
+export const WITHHELD_DECRYPTED_DIAGNOSTIC = 'Compose validation failed. The diagnostic was withheld because this candidate includes decrypted secret files.';
+
+/**
  * Extract just the hostname for log lines so we never echo a full
  * repo URL that could contain an inline credential. Falls back to
  * `unknown` for malformed URLs.
@@ -689,6 +816,18 @@ const SUBMODULE_WARNING =
 
 const REF_DELETED_MESSAGE =
     'The configured branch, tag, or commit no longer points at the same revision as before. It may have been deleted, force-pushed, or moved to a different commit (for example a retagged release).';
+
+/**
+ * The staged candidate this application's live row names, or null when it has
+ * none. Shared with the settled outbox so a live write and the settle that
+ * confirms it cannot disagree about which candidate they are announcing.
+ */
+function candidateIdentityFromApplication(app: GitOpsApplicationRow): GitOpsCandidateIdentity | null {
+    const state = gitOpsCandidateState(app);
+    return app.candidate_generation_id && state
+        ? { applicationId: app.id, generationId: app.candidate_generation_id, state }
+        : null;
+}
 
 function priorFetchIdentity(app: GitOpsApplicationRow | null | undefined): FetchParams['priorIdentity'] {
     if (!app?.fetched_commit_sha) return undefined;
@@ -1815,9 +1954,16 @@ export class GitSourceService {
         }
         inventory.inputs = classified.inputs;
 
+        // Discovery leaves the repo interpolation .env unmanaged, so policy and
+        // the validation overlay must judge the synced stack-root .env. Otherwise
+        // a plaintext .env is accepted and a SOPS .env is deployed as ciphertext.
+        const capabilityInputs = mergeSyncEnvEntry(
+            inventory.inputs,
+            src.sync_env ? this.syncEnvEntryFor(envContent) : null,
+        );
         const capabilityResult = buildSecretCapability({
             policy,
-            inputs: inventory.inputs,
+            inputs: capabilityInputs,
             applicationId,
             stackName,
         });
@@ -1863,36 +2009,18 @@ export class GitSourceService {
 
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
         const candidateAbs = path.join(dataDir, 'git-managed', String(nodeId), stackName, candidateRel);
-        let validation: { ok: boolean; error?: string };
-        if (manifestInputsNeedOverlay({ inputs: inventory.inputs })) {
-            const overlay = await buildGitOpsDecryptOverlay({
-                stackName,
-                nodeId,
-                applicationId,
-                generationId: `validate-${commitSha.slice(0, 12)}`,
-                commitSha,
-                sourceRoot: candidateAbs,
-                manifest: { inputs: inventory.inputs },
-            });
-            if (!overlay) {
-                validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
-            } else {
-                try {
-                    validation = await this.validateCandidate(
-                        stackName,
-                        candidateRel,
-                        src.compose_paths,
-                        src.context_dir,
-                        src.sync_env,
-                        overlay.overlayDir,
-                    );
-                } finally {
-                    await destroyGitOpsOverlay(overlay.binding);
-                }
-            }
-        } else {
-            validation = await this.validateCandidate(stackName, candidateRel, src.compose_paths, src.context_dir, src.sync_env);
-        }
+        const validation = await this.validateStagedCandidate({
+            stackName,
+            candidateRelPath: candidateRel,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            syncEnv: src.sync_env,
+            inputs: capabilityInputs,
+            applicationId,
+            commitSha,
+            generationId: `validate-${commitSha.slice(0, 12)}`,
+            sourceRoot: candidateAbs,
+        });
         return {
             inventory,
             contextCopyPlans: inventory.contextCopyPlans,
@@ -1961,6 +2089,86 @@ export class GitSourceService {
             ok: false,
             error: `${publicComposeValidationError(result.stderr, result.code, candidateAbs, dataDir)}${timeoutHint}`,
         };
+    }
+
+    /**
+     * Validate a staged candidate, decrypting SOPS inputs into an overlay
+     * first. The overlay is removed before this returns, including when
+     * compose config fails. Live and staged files stay ciphertext. A failure
+     * is reported as WITHHELD_DECRYPTED_DIAGNOSTIC rather than Compose's own
+     * message, because the overlay held decrypted content for this attempt.
+     */
+    private async validateStagedCandidate(args: {
+        stackName: string;
+        candidateRelPath: string;
+        composePaths: string[];
+        contextDir: string | null;
+        syncEnv: boolean;
+        inputs: ComposeInputEntry[];
+        applicationId: string;
+        commitSha: string;
+        generationId: string;
+        sourceRoot: string;
+    }): Promise<{ ok: boolean; error?: string }> {
+        const validate = (root?: string) => this.validateCandidate(
+            args.stackName,
+            args.candidateRelPath,
+            args.composePaths,
+            args.contextDir,
+            args.syncEnv,
+            root,
+        );
+        if (!manifestInputsNeedOverlay({ inputs: args.inputs })) return validate();
+        const overlay = await buildGitOpsDecryptOverlay({
+            stackName: args.stackName,
+            nodeId: NodeRegistry.getInstance().getDefaultNodeId(),
+            applicationId: args.applicationId,
+            generationId: args.generationId,
+            commitSha: args.commitSha,
+            sourceRoot: args.sourceRoot,
+            manifest: { inputs: args.inputs },
+        });
+        if (!overlay) return validate();
+        // Reaching this point means the overlay decrypted at least one managed
+        // input (buildGitOpsDecryptOverlay returns null when none qualifies and
+        // throws when one cannot be decrypted), so a failing validation is
+        // withheld wholesale rather than returned.
+        try {
+            const result = await validate(overlay.overlayDir);
+            if (result.ok || !result.error) return result;
+            return { ok: false, error: WITHHELD_DECRYPTED_DIAGNOSTIC };
+        } catch {
+            // A thrown validation error is withheld for the same reason: the
+            // overlay held decrypted content for this attempt, and an error
+            // wrapped around a Compose diagnostic would leak it.
+            throw new Error(WITHHELD_DECRYPTED_DIAGNOSTIC);
+        } finally {
+            await destroyGitOpsOverlay(overlay.binding);
+        }
+    }
+
+    /**
+     * Reason to refuse promotion when the generation's stored capability
+     * does not cover the encrypted inputs about to be published. Null when
+     * the stored evidence is sufficient.
+     */
+    private capabilityPromotionBlock(
+        stackName: string,
+        applicationId: string,
+        inputs: ComposeInputEntry[],
+        storedJson: string | null,
+    ): string | null {
+        const result = buildSecretCapability({
+            policy: getEncryptedSourcePolicy(stackName),
+            inputs,
+            applicationId,
+            stackName,
+        });
+        if (result.refusal) return result.refusal.reason;
+        if (capabilityUnderstatesEncryption(parseSecretCapabilityFromJson(storedJson), result.capability)) {
+            return STALE_SECRET_CAPABILITY_MESSAGE;
+        }
+        return null;
     }
 
     private runDockerCompose(args: string[], cwd: string, timeoutMs: number) {
@@ -2229,6 +2437,22 @@ export class GitSourceService {
         envContent: string | null,
         prevSpec: GitSourceAppliedSpec | null,
     ): Promise<GitSourceAppliedSpec | null> {
+        // The compose layers land one at a time. The bracket tells the mesh
+        // declaration reader that the set is mid-rewrite, so a service moving
+        // between layers does not read as removed.
+        return FileSystemService.getInstance().publishDeclarationSet(stackName, () => this.writeMaterializedFiles(
+            stackName, composeFiles, contextDir, syncEnv, envContent, prevSpec,
+        ));
+    }
+
+    private async writeMaterializedFiles(
+        stackName: string,
+        composeFiles: ComposeFile[],
+        contextDir: string | null,
+        syncEnv: boolean,
+        envContent: string | null,
+        prevSpec: GitSourceAppliedSpec | null,
+    ): Promise<GitSourceAppliedSpec | null> {
         const fsSvc = FileSystemService.getInstance();
         const localFiles = gitSourceLocalComposeFiles(composeFiles.map(f => f.path));
 
@@ -2344,7 +2568,14 @@ export class GitSourceService {
                 return await this.pullLocked(stackName, actor, operationId);
             } catch (e) {
                 console.error(`[GitSource] fetch failed for ${sanitizeForLog(stackName)}:`, e instanceof Error ? e.message : String(e));
-                this.recordGitActivity(stackName, 'git_pull_failed', `Git pull failed for ${stackName}`, actor, 'error');
+                this.recordGitActivity(
+                    stackName,
+                    'git_pull_failed',
+                    `Git pull failed for ${stackName}`,
+                    actor,
+                    'error',
+                    operationId ? { operationId } : undefined,
+                );
                 throw e;
             }
         });
@@ -2496,9 +2727,13 @@ export class GitSourceService {
                 abandon: closeFetch,
             });
         } catch (e) {
-            if (e instanceof GitSourceError) fetchFailureCode = e.code;
+            // A decrypt failure is a repository-content failure with its own
+            // class, not an unclassified fetch error: the operator must see it
+            // and the controller must not treat it as a transient git fault.
+            const failure = asGitSourceFailure(e);
+            if (failure instanceof GitSourceError) fetchFailureCode = failure.code;
             closeFetch();
-            throw e;
+            throw failure;
         }
     }
 
@@ -2580,6 +2815,7 @@ export class GitSourceService {
 
         // Record what this fetch resolved before the pending blob is written,
         // so the durable pointers and the operational pending store agree.
+        let stagingRecorded = true;
         if (gitopsApp) {
             const outcomeRecorded = this.recordGitOps(stackName, 'fetch outcome', () => {
                 const tx = GitOpsTransitions.getInstance();
@@ -2606,9 +2842,11 @@ export class GitSourceService {
                 // verdict, review requirement) must not mint a lookalike
                 // generation and rewrite the candidate pointers. The staged
                 // generation stands; only the fetch above is new. A candidate
-                // for a different commit, or no candidate at all, mints anew:
-                // staging after an apply is a new dispatch cycle and needs its
-                // own generation to accept.
+                // for a different commit, or no candidate at all, mints anew
+                // for a Direct source: staging after an apply is a new dispatch
+                // cycle and needs its own generation to accept. A Blueprint
+                // source keeps the accepted generation when this fetch still
+                // matches it.
                 //
                 // A safety-held candidate counts as the expected state for an
                 // automatic source even though its review flag reads 1: the
@@ -2626,14 +2864,43 @@ export class GitSourceService {
                     : reviewRequired
                         ? gitopsApp.review_required === 1
                         : gitopsApp.review_required === 0 || gitopsApp.review_block_reason !== null;
+                // Same commit is not enough when the stored capability still
+                // calls an encrypted input plaintext. Reuse would let apply
+                // publish ciphertext while the direct-mutation guard sees no
+                // recipients. The previous row stays; the new one carries the
+                // recipients. A safety hold on the stale row is not reused.
+                const capabilityCoversInputs = !capabilityUnderstatesEncryption(
+                    parseSecretCapabilityFromJson(staged?.secret_capability_json ?? null),
+                    materialization.value.secretCapability,
+                );
                 if (
                     staged &&
                     staged.commit_sha === fetched.commitSha &&
                     staged.materialization_fingerprint === identity.fingerprint &&
                     staged.plan_blocked === (plan?.blocked === true ? 1 : 0) &&
                     reviewStateMatches &&
+                    capabilityCoversInputs &&
                     storedCandidateContentSha256(staged.compose_inputs_json) !== null
                 ) {
+                    return;
+                }
+                const accepted = gitopsApp.target_mode === 'blueprint'
+                    && gitopsApp.candidate_generation_id === null
+                    && gitopsApp.accepted_generation_id
+                    ? GitOpsStore.getInstance().getGeneration(gitopsApp.accepted_generation_id)
+                    : undefined;
+                if (acceptedBlueprintGenerationMatches({
+                    app: gitopsApp,
+                    accepted,
+                    commitSha: fetched.commitSha,
+                    fingerprint: identity.fingerprint,
+                    planBlocked: plan?.blocked === true,
+                    freshDigest: candidateContentSha256FromDisk(
+                        stackName,
+                        materialization.value.candidateRelPath,
+                        src.compose_paths,
+                    ),
+                })) {
                     return;
                 }
                 const generationId = newGitOpsId();
@@ -2674,6 +2941,7 @@ export class GitSourceService {
             // The pull itself succeeded; the files and the pending blob are
             // real. Closing the operation is what stops the source reporting a
             // fetch in flight for ever and locking out every later pull.
+            stagingRecorded = outcomeRecorded;
             if (!outcomeRecorded) gitops.abandon();
         }
 
@@ -2708,21 +2976,48 @@ export class GitSourceService {
             this.upsertGitPlanDrift(stackName, plan);
             const shortSha = fetched.commitSha.slice(0, 7);
             const fpPrefix = plan.fingerprint.slice(0, 12);
-            if (plan.blocked) {
-                this.recordGitActivity(
-                    stackName,
-                    'git_plan_blocked',
-                    `Git plan blocked for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
-                    actor,
-                    'warning',
-                );
+            // Nothing is announced here when the attempt has no staged result to
+            // announce, because the settle that records it is the single entry
+            // and this write would take its key. That is the case when the
+            // staged project does not validate (no candidate was staged), and
+            // when the staging transition was rejected: the abandon above
+            // stamped the attempt failed, so announcing "ready" here would both
+            // misreport the attempt and suppress the failure the settle is
+            // about to write.
+            if (!validation.ok || !stagingRecorded) {
+                console.log(`[GitSource] Pull of ${sanitizeForLog(stackName)} at ${shortSha} announced no candidate: ${!stagingRecorded ? 'the staging transition was rejected' : validation.error ?? 'the project does not validate'}`);
             } else {
-                this.recordGitActivity(
-                    stackName,
-                    'git_pull_ready',
-                    `Git pull ready for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
-                    actor,
-                );
+                // Read after the staging transition committed, so this is the
+                // generation this fetch actually staged and the state it was
+                // staged in: that pair is what identifies the candidate to the
+                // bell. Looked up by application id, not by stack name:
+                // gitopsApp may be a converted Blueprint source rather than a
+                // Direct row, and reading it back the way it was found keeps the
+                // live write on the same candidate key the settle derives.
+                //
+                // A blocked candidate is keyed the same way a reviewable one is.
+                // It settles `blocked` on every poll for as long as the local
+                // conflict stands, so on the attempt key it announced once per
+                // poll, which is the repeat this key exists to stop.
+                const staged = gitopsApp
+                    ? GitOpsStore.getInstance().getApplication(gitopsApp.id) ?? null
+                    : null;
+                const candidate = staged
+                    ? candidateIdentityFromApplication(staged)
+                    : null;
+                // No staged candidate means this fetch did not open a review.
+                // The attempt key is new on every poll, so an accepted Blueprint
+                // generation left in place would announce again for the same commit.
+                if (candidate) {
+                    this.recordGitActivity(
+                        stackName,
+                        plan.blocked ? 'git_plan_blocked' : 'git_pull_ready',
+                        `Git ${plan.blocked ? 'plan blocked' : 'pull ready'} for ${stackName} (${shortSha}, op ${GitSourceService.shortOperationId(gitopsOperationId)}, plan ${fpPrefix})`,
+                        actor,
+                        plan.blocked ? 'warning' : undefined,
+                        { operationId: gitopsOperationId, candidate },
+                    );
+                }
             }
         }
 
@@ -3183,6 +3478,7 @@ export class GitSourceService {
             `Dispatch settlement failed for ${stackName}: ${result.reason}`,
             actor,
             'error',
+            { operationId: envelope.operationId },
         );
     }
 
@@ -3843,7 +4139,8 @@ export class GitSourceService {
      * failure is never reported with nextAction: 'retry'.
      */
     private reconcileFailureResult(failure: unknown): ReconcileResult {
-        if (!(failure instanceof GitSourceError)) {
+        const normalized = asGitSourceFailure(failure);
+        if (!(normalized instanceof GitSourceError)) {
             return {
                 outcome: 'failed_previous_intact',
                 reason: 'The reconcile attempt failed unexpectedly.',
@@ -3852,18 +4149,18 @@ export class GitSourceService {
         }
         const disposition = classifyFailure({
             kind: 'git_source_error',
-            code: failure.code,
-            transportReason: failure.extras?.transportReason,
+            code: normalized.code,
+            transportReason: normalized.extras?.transportReason,
         });
         switch (disposition.class) {
             case 'supersession':
-                return { outcome: 'superseded', reason: failure.message, nextAction: 'none' };
+                return { outcome: 'superseded', reason: normalized.message, nextAction: 'none' };
             case 'permanent':
-                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'configure_credentials' };
+                return { outcome: 'failed_previous_intact', reason: normalized.message, nextAction: 'configure_credentials' };
             case 'operator_action_required':
-                return { outcome: 'blocked', reason: failure.message, nextAction: 'resolve_conflict' };
+                return { outcome: 'blocked', reason: normalized.message, nextAction: 'resolve_conflict' };
             case 'reconcile':
-                return { outcome: 'unknown', reason: failure.message, nextAction: 'none' };
+                return { outcome: 'unknown', reason: normalized.message, nextAction: 'none' };
             // 'degraded'/'target_*'/'blocked' are not reachable from a
             // git_source_error classification today, but are grouped with
             // 'transient' so this switch stays exhaustive if that changes.
@@ -3873,7 +4170,7 @@ export class GitSourceService {
             case 'target_transient':
             case 'target_mutation_failed':
             case 'blocked':
-                return { outcome: 'failed_previous_intact', reason: failure.message, nextAction: 'retry' };
+                return { outcome: 'failed_previous_intact', reason: normalized.message, nextAction: 'retry' };
         }
     }
 
@@ -4120,7 +4417,14 @@ export class GitSourceService {
      * The 'retry' trigger is recorded on the durable attempt for audit and
      * recovery on all three arms.
      */
-    public async retry(stackName: string, opts: { actor: string }): Promise<ReconcileResult> {
+    public async retry(
+        stackName: string,
+        opts: {
+            actor: string;
+            /** Receives the policy decision when the deploy retry's gate allows on evidence that was not a clean pass. */
+            onAllowed?: (allowed: AllowedPolicyEvidence) => void;
+        },
+    ): Promise<ReconcileResult> {
         const app = this.liveSourceApplication(stackName);
         if (!app) return GitSourceService.noApplicationResult();
         // A source that is suspended, has an operation in flight, has an
@@ -4157,8 +4461,8 @@ export class GitSourceService {
             });
         }
         return dispatch.stage === 'promote'
-            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor)
-            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor);
+            ? this.retryDispatch(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed)
+            : this.retryDeploy(stackName, app.id, dispatch.generationId, opts.actor, opts.onAllowed);
     }
 
     /**
@@ -4174,6 +4478,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         let dispatch: DispatchResult;
         try {
@@ -4189,7 +4494,7 @@ export class GitSourceService {
             dispatch = await this.dispatchAcceptedGeneration(
                 buildAcceptedGeneration(generationRow),
                 GitSourceService.dispatchContextFor(application),
-                { trigger: 'retry', actor },
+                { trigger: 'retry', actor, onAllowed },
             );
         } catch (e) {
             // Nothing past this point throws once a reservation exists, so
@@ -4235,6 +4540,7 @@ export class GitSourceService {
         applicationId: string,
         generationId: string,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const app = GitOpsStore.getInstance().getApplication(applicationId);
         if (!app?.stack_name) {
@@ -4260,7 +4566,7 @@ export class GitSourceService {
             stackName,
             'git_apply',
             actor,
-            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor),
+            () => this.retryDeployLocked(stackName, applicationId, generationId, nodeId, actor, onAllowed),
             getRegistryDeliveryLockContext(),
         );
         if (!lock.ran) {
@@ -4290,6 +4596,7 @@ export class GitSourceService {
         generationId: string,
         nodeId: number,
         actor: string,
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void,
     ): Promise<ReconcileResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
@@ -4433,6 +4740,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(actor, {
                         bypass: false,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed,
                     }),
                 );
                 const autoDeploy = await (async () => {
@@ -4755,10 +5063,31 @@ export class GitSourceService {
         const securityEvidenceJson = encodeGitOpsJson({
             status: evaluation.status,
             policyId: evaluation.policy?.id ?? null,
+            // The rules that decided it, not just the verdict. A candidate held
+            // under the shipped defaults is recorded as `unavailable` either way,
+            // but an operator who sets the candidate rule to allow would
+            // otherwise leave a persisted row that reads exactly like a clean
+            // acceptance. Nothing downstream reads these applications, so this
+            // column is the only place an unattended acceptance on unproven
+            // evidence stays attributable.
+            //
+            // The records are stored too, since a partial-only acceptance has no
+            // application and would otherwise read as clean. They carry scan
+            // timestamps, so the reuse comparison below looks at a projection of
+            // them (see securityPolicyDecision), not at this text: a re-run that
+            // rescans the same candidate must not append a generation for an
+            // unchanged decision.
+            evidenceOutcome: evaluation.evidence?.outcome ?? null,
+            evidenceApplications: evaluation.evidence?.applications ?? null,
+            // Reason text is scanner output and can echo a registry credential, so
+            // it is redacted before it is stored; the comparison ignores it.
+            evidenceRecords: evaluation.evidence?.records.map((r) => (
+                r.reason === undefined ? r : { ...r, reason: redactSensitiveText(r.reason) }
+            )) ?? null,
         });
         if (
             generation.source_policy_evidence_json === sourceEvidenceJson
-            && generation.security_policy_evidence_json === securityEvidenceJson
+            && securityPolicyDecision(generation.security_policy_evidence_json) === securityPolicyDecision(securityEvidenceJson)
         ) {
             return { status: 'reuse', generation };
         }
@@ -4811,21 +5140,21 @@ export class GitSourceService {
     public async dispatchAcceptedGeneration(
         generation: AcceptedGeneration,
         context: DispatchContext,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const app = GitOpsStore.getInstance().getApplication(generation.applicationId);
         if (!app) {
-            return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.' };
+            return { status: 'blocked', reason: 'The application could not be read; dispatch is unavailable.', holdable: false };
         }
         if (app.target_mode !== 'direct') {
             return new BlueprintTargetAdapter().dispatch(generation, { ...context, targetMode: 'blueprint' });
         }
         if (!app.stack_name) {
-            return { status: 'blocked', reason: 'No Direct stack is bound to this application.' };
+            return { status: 'blocked', reason: 'No Direct stack is bound to this application.', holdable: false };
         }
         const stackName = app.stack_name;
         if (!DatabaseService.getInstance().getGitSource(stackName)) {
-            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.`, holdable: false };
         }
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
         // Nothing is reserved until the stack lock is held: a dispatch
@@ -4842,6 +5171,7 @@ export class GitSourceService {
         if (!lock.ran) {
             return {
                 status: 'blocked',
+                holdable: false,
                 reason: `Another operation (${lock.existing.action}) is already in progress for ${stackName}.`,
             };
         }
@@ -4860,12 +5190,12 @@ export class GitSourceService {
         generation: AcceptedGeneration,
         stackName: string,
         nodeId: number,
-        opts: { trigger: ReconcileTrigger; actor: string },
+        opts: { trigger: ReconcileTrigger; actor: string; onAllowed?: (allowed: AllowedPolicyEvidence) => void },
     ): Promise<DispatchResult> {
         const store = GitOpsStore.getInstance();
         const src = DatabaseService.getInstance().getGitSource(stackName);
         if (!src) {
-            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.` };
+            return { status: 'blocked', reason: `No Git source is configured for ${stackName}.`, holdable: false };
         }
         // One local feeds both the reservation's deploy-request fact and
         // the pipeline's deploy argument, so the durable fact the recovery
@@ -4902,6 +5232,7 @@ export class GitSourceService {
                 );
                 return {
                     status: 'blocked',
+                    holdable: false,
                     reason: 'A dispatch attempt for this stack is already recorded; check its outcome before dispatching again.',
                 };
             }
@@ -4913,6 +5244,7 @@ export class GitSourceService {
             );
             return {
                 status: 'blocked',
+                holdable: false,
                 reason: "This stack's GitOps tracking is unavailable; reconfigure the source before dispatching again.",
             };
         }
@@ -4930,7 +5262,7 @@ export class GitSourceService {
             // that way.
             const reason = scrubCredentials(raw);
             this.settleAttempt(generation.applicationId, envelope, { outcome, reason, nextAction });
-            return { status: 'blocked', reason };
+            return { status: 'blocked', reason, holdable: false };
         };
         // A refusal before the promotion boundary settles blocked with
         // resolve_conflict; the call sites past that boundary settle
@@ -5032,6 +5364,7 @@ export class GitSourceService {
                 legacyOwnedPaths: revalidation.legacyOwnedPaths,
                 deploy: deployRequested,
                 bypassPolicy: false,
+                onAllowed: opts.onAllowed,
                 started: { app: null, env: null, settled: true },
                 progress,
                 postPromote: () => this.recordGitOps(stackName, 'target binding', () => {
@@ -5103,7 +5436,7 @@ export class GitSourceService {
                     nextAction: 'view_target_results',
                     commitSha: generation.commitSha,
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             if (result.deployIntentUnavailable) {
                 // The promotion and the bind completed, but the deploy
@@ -5125,7 +5458,7 @@ export class GitSourceService {
                     nextAction: 'view_target_results',
                     commitSha: generation.commitSha,
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             if (!result.applied) {
                 // Defensive parity with the promotion boundary: a pipeline
@@ -5152,7 +5485,7 @@ export class GitSourceService {
                         ? { deployGitopsOperationId: result.deployGitopsOperationId }
                         : {}),
                 });
-                return { status: 'blocked', reason };
+                return { status: 'blocked', reason, holdable: false };
             }
             const settledResult = this.finalizeReconcileOutcome(stackName, undefined);
             // The successful tracked deploy's GitOps operation id rides on
@@ -5197,7 +5530,7 @@ export class GitSourceService {
                     reason: promotedReason,
                     nextAction: 'view_target_results',
                 });
-                return { status: 'blocked', reason: promotedReason };
+                return { status: 'blocked', reason: promotedReason, holdable: false };
             }
             return settleBlocked(reason);
         }
@@ -5277,17 +5610,6 @@ export class GitSourceService {
             return { ok: false, reason: 'The accepted candidate is no longer staged; pull the source again.' };
         }
 
-        const candValidation = await this.validateCandidate(
-            stackName,
-            candidateRelPath,
-            src.compose_paths,
-            src.context_dir,
-            src.sync_env,
-        );
-        if (!candValidation.ok) {
-            return { ok: false, reason: `Candidate validation failed: ${candValidation.error}` };
-        }
-
         // The synced env was staged into the candidate at pull; read it back
         // from there rather than from any pending row the pull wrote.
         let envContent: string | null = null;
@@ -5321,6 +5643,31 @@ export class GitSourceService {
             };
         }
         inventory.inputs = classified.inputs;
+        const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+        const capabilityInputs = mergeSyncEnvEntry(inventory.inputs, syncEnvEntry);
+        const capabilityBlock = this.capabilityPromotionBlock(
+            stackName,
+            generation.applicationId,
+            capabilityInputs,
+            genRow.secret_capability_json,
+        );
+        if (capabilityBlock) return { ok: false, reason: capabilityBlock };
+
+        const candValidation = await this.validateStagedCandidate({
+            stackName,
+            candidateRelPath,
+            composePaths: src.compose_paths,
+            contextDir: src.context_dir,
+            syncEnv: src.sync_env,
+            inputs: capabilityInputs,
+            applicationId: generation.applicationId,
+            commitSha: generation.commitSha,
+            generationId: generation.generationId,
+            sourceRoot: candidateAbs,
+        });
+        if (!candValidation.ok) {
+            return { ok: false, reason: `Candidate validation failed: ${candValidation.error}` };
+        }
         const plan = await this.computeChangePlan({
             stackName,
             commitSha: generation.commitSha,
@@ -5363,7 +5710,6 @@ export class GitSourceService {
             };
         }
 
-        const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
         const manifest = manifestSvc.buildManifest({
             stackName,
             repoUrl: src.repo_url,
@@ -5405,20 +5751,7 @@ export class GitSourceService {
     /** The sync-env manifest entry for staged env content, or null when there is none. */
     private syncEnvEntryFor(envContent: string | null): ComposeInputEntry | null {
         if (envContent === null) return null;
-        return {
-            sourcePath: null,
-            materializedPath: '.env',
-            role: 'env',
-            dependencyKind: 'sync-env',
-            ownership: 'managed',
-            provenance: 'fetch',
-            sensitivity: 'high',
-            contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
-            sizeBytes: Buffer.byteLength(envContent, 'utf8'),
-            state: 'present',
-            deletionAuthority: 'sencho',
-            note: null,
-        };
+        return syncEnvInputEntry(envContent);
     }
 
     /**
@@ -5473,18 +5806,19 @@ export class GitSourceService {
         try {
             return await this.applyLockedBody(stackName, commitSha, opts, started, operationId);
         } catch (e) {
+            const failure = asGitSourceFailure(e);
             if (started.app && started.env && !started.settled) {
                 const app = started.app;
                 const env = started.env;
                 this.recordGitOps(stackName, 'apply failure', () => {
                     GitOpsTransitions.getInstance().applyFailed(
                         app.id,
-                        e instanceof GitSourceError ? e.code : 'apply',
+                        failure instanceof GitSourceError ? failure.code : 'apply',
                         env,
                     );
                 });
             }
-            throw e;
+            throw failure;
         }
     }
 
@@ -5537,6 +5871,7 @@ export class GitSourceService {
         legacyOwnedPaths: string[] | undefined;
         deploy: boolean;
         bypassPolicy: boolean;
+        onAllowed?: (allowed: AllowedPolicyEvidence) => void;
         started: { app: GitOpsApplicationRow | null; env: ReturnType<GitSourceService['gitopsEnvelope']> | null; settled: boolean };
         /**
          * By-reference out-param, required so no caller can silently opt out of
@@ -5691,6 +6026,7 @@ export class GitSourceService {
                     `Git apply rolled back for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'warning',
+                    { operationId: applyOperationId },
                 );
             } else {
                 db.setGitSourceLastPlan(stackName, plan.fingerprint, 'failed');
@@ -5700,6 +6036,7 @@ export class GitSourceService {
                     `Git apply failed for ${stackName} (${commitSha.slice(0, 7)}, op ${GitSourceService.shortOperationId(applyOperationId)}, plan ${plan.fingerprint.slice(0, 12)})`,
                     actor,
                     'error',
+                    { operationId: applyOperationId },
                 );
             }
             throw new GitSourceError('GIT_ERROR', scrubCredentials(redacted));
@@ -5872,6 +6209,7 @@ export class GitSourceService {
                     buildSystemPolicyGateOptions(captureActor, {
                         bypass: args.bypassPolicy === true,
                         auditPath: `/api/stacks/${stackName}/git-source/apply`,
+                        onAllowed: args.onAllowed,
                     }),
                 );
                 if (recoveryId) {
@@ -5940,6 +6278,21 @@ export class GitSourceService {
                         envelope: gitopsEnv,
                     }).catch((err) =>
                         console.error(`[GitSource] Runtime artifact observation failed for ${sanitizeForLog(stackName)}:`, err),
+                    );
+                    // The invocation half of the same observation, recorded here
+                    // rather than in the deploy because this is the last point
+                    // where the freshly applied generation and the running
+                    // project are known to be the same thing. Reading it on a
+                    // later tick would compare a project that could since have
+                    // been recreated against a generation that has since been
+                    // superseded.
+                    recordObservedInvocationForDeploy({
+                        stackName,
+                        nodeId,
+                        applicationId: artifactApp.id,
+                        envelope: gitopsEnv,
+                    }).catch((err) =>
+                        console.error(`[GitSource] Invocation observation failed for ${sanitizeForLog(stackName)}:`, err),
                     );
                 }
                 return { applied: true, deployed: true, recoveryId, gitopsOperationId: autoDeploy.gitopsOperationId };
@@ -6139,13 +6492,21 @@ export class GitSourceService {
             }
 
             // Re-validate the exact candidate before touching the live project.
-            const candValidation = await this.validateCandidate(
+            // Encrypted inputs are decrypted in an overlay for this check only.
+            const syncEnvEntry = src.sync_env ? this.syncEnvEntryFor(envContent) : null;
+            const capabilityInputs = mergeSyncEnvEntry(pending.inventory.inputs, syncEnvEntry);
+            const candValidation = await this.validateStagedCandidate({
                 stackName,
-                pending.candidateRelPath,
-                src.compose_paths,
-                src.context_dir,
-                src.sync_env,
-            );
+                candidateRelPath: pending.candidateRelPath,
+                composePaths: src.compose_paths,
+                contextDir: src.context_dir,
+                syncEnv: src.sync_env,
+                inputs: capabilityInputs,
+                applicationId: gitopsApp?.id ?? stackName,
+                commitSha,
+                generationId: gitopsGenerationId ?? `validate-${commitSha.slice(0, 12)}`,
+                sourceRoot: candidateAbs,
+            });
             if (!candValidation.ok) {
                 if (diag) console.log(`[GitSource:diag] apply candidate validation fail stack=${stackName}`);
                 throw new GitSourceError('GIT_ERROR', `Candidate validation failed: ${candValidation.error}`);
@@ -6202,6 +6563,7 @@ export class GitSourceService {
                         blockedPlanActivity,
                         actor,
                         'warning',
+                        { operationId: applyOperationId },
                     );
                 }
                 throw new GitSourceError(
@@ -6219,6 +6581,7 @@ export class GitSourceService {
                     blockedPlanActivity,
                     actor,
                     'warning',
+                    { operationId: applyOperationId },
                 );
                 throw new GitSourceError(
                     'PLAN_BLOCKED',
@@ -6228,23 +6591,15 @@ export class GitSourceService {
             }
 
             // Assemble the new manifest from the pull-time inventory.
-            const syncEnvEntry: ComposeInputEntry | null =
-                src.sync_env && envContent !== null
-                    ? {
-                          sourcePath: null,
-                          materializedPath: '.env',
-                          role: 'env',
-                          dependencyKind: 'sync-env',
-                          ownership: 'managed',
-                          provenance: 'fetch',
-                          sensitivity: 'high',
-                          contentSha256: crypto.createHash('sha256').update(envContent).digest('hex'),
-                          sizeBytes: Buffer.byteLength(envContent, 'utf8'),
-                          state: 'present',
-                          deletionAuthority: 'sencho',
-                          note: null,
-                      }
-                    : null;
+            // Refuse before promotion when this generation's stored capability
+            // would still tell the direct-mutation guard the files are plaintext.
+            const capabilityBlock = this.capabilityPromotionBlock(
+                stackName,
+                gitopsApp?.id ?? stackName,
+                capabilityInputs,
+                gitopsGenerationId ? (candidateGeneration?.secret_capability_json ?? null) : null,
+            );
+            if (capabilityBlock) throw new GitSourceError('GIT_ERROR', capabilityBlock);
             const invocation = plan.candidateInvocation;
             const manifest = manifestSvc.buildManifest({
                 stackName,
@@ -6298,6 +6653,7 @@ export class GitSourceService {
                 legacyOwnedPaths,
                 deploy: opts.deploy ?? src.auto_deploy_on_apply,
                 bypassPolicy: opts.bypassPolicy === true,
+                onAllowed: opts.onAllowed,
                 started,
                 // applyLockedBody's wrapper tracks the operation via `started`;
                 // this flag exists only to keep the pipeline signature honest.
@@ -6483,7 +6839,6 @@ export class GitSourceService {
             //    does not exist yet), then create the stack and promote.
             //    createStack() throws if the directory already exists.
             let stackCreated = false;
-            let rowInserted = false;
             // Promotion persists the manifest cache columns BEFORE the row
             // exists (zero rows updated); the cache is written again after the
             // insert below so list and immediate projections report the real
@@ -6502,23 +6857,7 @@ export class GitSourceService {
                     const inputs = materialization.value.inventory.inputs.filter(
                         (i) => i.ownership === 'managed' && i.state === 'present' && i.materializedPath !== null,
                     );
-                    const syncEnvEntry: ComposeInputEntry | null =
-                        input.syncEnv && fetched.envContent !== null
-                            ? {
-                                  sourcePath: null,
-                                  materializedPath: '.env',
-                                  role: 'env',
-                                  dependencyKind: 'sync-env',
-                                  ownership: 'managed',
-                                  provenance: 'fetch',
-                                  sensitivity: 'high',
-                                  contentSha256: crypto.createHash('sha256').update(fetched.envContent).digest('hex'),
-                                  sizeBytes: Buffer.byteLength(fetched.envContent, 'utf8'),
-                                  state: 'present',
-                                  deletionAuthority: 'sencho',
-                                  note: null,
-                              }
-                            : null;
+                    const syncEnvEntry = input.syncEnv ? this.syncEnvEntryFor(fetched.envContent) : null;
                     const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
                     const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), input.stackName);
                     const invocation = buildCandidateComposeInvocation({
@@ -6805,7 +7144,6 @@ export class GitSourceService {
                     GitOpsStore.getInstance().deleteCreateCheckpoint(gitopsApplicationId);
                 }
 
-                rowInserted = true;
                 if (gitopsApplicationId && acceptedGenerationId && completeProjectManifest) {
                     await resolveAndRecordArtifactSet({
                         stackName: input.stackName,
@@ -6913,9 +7251,10 @@ export class GitSourceService {
                     );
                     await fsPromises.rm(stagedCandidate, { recursive: true, force: true });
                 }
-                if (rowInserted) {
-                    db.deleteGitSource(input.stackName);
-                }
+                // No git-source row delete here. commitCreate() is the success
+                // boundary, and the post-commit branch above owns every failure
+                // after it.
+
                 // Filesystem cleanup has to succeed before the tombstone, so a
                 // create whose files could not be removed keeps its checkpoint
                 // and is retried by the next boot rather than being recorded as
@@ -7513,7 +7852,7 @@ export class GitSourceService {
         try {
             return [
                 ...authoredComposeFileArgs(stackName, nodeId),
-                ...(await authoredComposeEnvFileArgs(stackName, nodeId)),
+                ...(await authoredComposeEnvFileArgs(stackName, nodeId, undefined, undefined, { missingMode: 'skip' })),
             ];
         } catch (e) {
             const detail = e instanceof Error ? e.message : String(e);
@@ -7558,23 +7897,7 @@ export class GitSourceService {
         reviewedLiveHashes?: ReadonlyMap<string, string | null>;
     }): Promise<GitChangePlan> {
         const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
-        const syncEnvEntry: ComposeInputEntry | null =
-            opts.src.sync_env && opts.envContent !== null
-                ? {
-                    sourcePath: null,
-                    materializedPath: '.env',
-                    role: 'env',
-                    dependencyKind: 'sync-env',
-                    ownership: 'managed',
-                    provenance: 'fetch',
-                    sensitivity: 'high',
-                    contentSha256: crypto.createHash('sha256').update(opts.envContent).digest('hex'),
-                    sizeBytes: Buffer.byteLength(opts.envContent, 'utf8'),
-                    state: 'present',
-                    deletionAuthority: 'sencho',
-                    note: null,
-                }
-                : null;
+        const syncEnvEntry = opts.src.sync_env ? this.syncEnvEntryFor(opts.envContent) : null;
         const inputs = mergeSyncEnvEntry(opts.inventory.inputs, syncEnvEntry);
         const liveInvocation = await this.liveInvocationArgs(opts.stackName, nodeId);
         const candidateInvocation = this.candidateInvocationArgs(opts.stackName, opts.src, opts.envContent !== null);
@@ -7623,6 +7946,11 @@ export class GitSourceService {
         message: string,
         actor: string,
         level: 'info' | 'warning' | 'error' = 'info',
+        attempt?: {
+            operationId: string;
+            /** A staged candidate this event announces, when it announces one. */
+            candidate?: GitOpsCandidateIdentity | null;
+        },
     ): void {
         try {
             DatabaseService.getInstance().addNotificationHistory(
@@ -7634,6 +7962,19 @@ export class GitSourceService {
                     timestamp: Date.now(),
                     stack_name: stackName,
                     actor_username: actor,
+                    // An event that belongs to a tracked attempt carries the
+                    // attempt's dedupe key and operation id, so the settled
+                    // notification for the same attempt collides with it
+                    // instead of repeating it in the bell.
+                    ...(attempt
+                        ? {
+                            gitops_operation_id: attempt.operationId,
+                            dedupe_key: gitOpsAttemptNotificationKey(
+                                attempt.operationId,
+                                attempt.candidate ?? undefined,
+                            ),
+                        }
+                        : {}),
                 },
             );
         } catch (error) {
@@ -7710,13 +8051,41 @@ export class GitSourceService {
         const materialization: { value: MaterializationResult | null } = { value: null };
         const encryptedCaBundle = this.resolveEncryptedCaBundle(input.caBundle, undefined);
         const caBundlePem = this.decryptCaBundlePem(encryptedCaBundle);
+        // Mirror createStackFromGit's fetch auth: discovery is a full fetch, so
+        // it needs the same transport credentials the create will later run
+        // with. Without this, SSH and private-CA repos fail as unauthenticated
+        // before the create can consume the prepared candidate.
+        const deployKeyTrust = input.authType === 'deploy_key'
+            ? (() => {
+                if (!input.deployKey?.trim() || !input.sshKnownHostsEntry?.trim()) {
+                    throw new GitSourceError(
+                        'GIT_ERROR',
+                        'Deploy key authentication requires a private key and a trusted SSH host key.',
+                    );
+                }
+                return this.resolveSshTrustFromKnownHostsEntry(
+                    input.sshKnownHostsEntry,
+                    input.sshHostKeyFingerprint,
+                );
+            })()
+            : null;
+        const fetchAuth = input.authType === 'token'
+            ? { token: input.token, caBundlePem }
+            : deployKeyTrust
+                ? {
+                    sshAuth: {
+                        privateKey: input.deployKey!.trim(),
+                        knownHostsEntry: deployKeyTrust.sshKnownHostsEntry,
+                    },
+                    caBundlePem,
+                }
+                : { token: null, caBundlePem };
         const fetched = await this.fetchFromGit({
             repoUrl: input.repoUrl,
             branch: input.branch,
             composePaths: input.composePaths,
             envPath: input.syncEnv ? input.envPath : null,
-            token: input.token,
-            caBundlePem,
+            ...fetchAuth,
             onClone: async (cloneDir, commitSha, envContent) => {
                 materialization.value = await this.buildMaterialization(
                     input.stackName,

@@ -14,6 +14,7 @@ import { resolveManagedMeshAttachment } from './network/managedMeshAttachment';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
+import { annotateImageAge } from './driftImageAge';
 
 const MAX_RENDER_ERROR = 600;
 
@@ -40,6 +41,12 @@ export type DriftFindingKind =
   | 'network-undeclared'
   | 'network-missing';
 
+/**
+ * Whether the image a service runs was built after the one compose names:
+ * `unknown` whenever that could not be proven.
+ */
+export type DriftImageAge = 'running-newer' | 'running-older' | 'unknown';
+
 export interface StackDriftFinding {
   kind: DriftFindingKind;
   /** Compose service (or runtime service identity) the finding applies to. */
@@ -50,6 +57,8 @@ export interface StackDriftFinding {
   expected?: string;
   /** Observed runtime value, when the finding compares two values. */
   actual?: string;
+  /** Set on image-mismatch findings by the report builder; the pure diff leaves it off. */
+  imageAge?: DriftImageAge;
 }
 
 export interface StackDriftReport {
@@ -404,11 +413,12 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
   }
 
   const managedNetworkAttachment = await resolveManagedMeshAttachment(nodeId, stackName);
-  return assembleStackDrift({
+  const report = assembleStackDrift({
     stack: stackName,
     declared: render.declared,
     containers,
     networks,
     managedNetworkAttachment,
   });
+  return annotateImageAge(() => DockerController.getInstance(nodeId).getDocker(), report);
 }

@@ -36,7 +36,7 @@ import type { GitOpsLimitation } from '@/types/gitops';
  * every miss as a `string` and make the fallback below look like dead code to
  * anything that trusts the types.
  */
-export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
+export const GITOPS_LIMITATION_COPY: Readonly<Record<string, string | undefined>> = {
   // --- derived while projecting -------------------------------------------
   repo_identity_invalid:
     'The stored repository identity could not be read, so this state cannot be tied back to a specific repository.',
@@ -62,10 +62,20 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
     'What is running on this node could not be read, so it is reported as unidentified rather than as matching.',
   placement_required_targets_invalid:
     'The nodes this rollout should cover could not be read, so Sencho cannot say whether the placement still matches what this Blueprint asks for.',
+  invocation_observation_missing:
+    'The compose invocation on this node has not been recorded, so Sencho cannot say whether the stack is still being brought up the way this generation was applied.',
+  invocation_observed_invalid:
+    'The recorded compose invocation could not be read, so it is not being compared against what this generation was applied with.',
+  invocation_expected_invalid:
+    'The compose invocation this generation was applied with could not be compared with what is on the node, so the two are not being checked against each other.',
+  withdrawal_residue:
+    'A node was withdrawn while a recovery on it had failed, so Sencho can no longer say what is still running there. Look at the host directly.',
 
   // --- recorded at write time, merged in later ------------------------------
   recovery_unproven:
     'A recovery ran but could not be tied to a specific generation, so the pointers were left where they were rather than moved on an unproven claim.',
+  artifact_expectation_unresolved:
+    'The image identity this target is meant to be running could not be resolved, so Sencho is not comparing what is running against what was intended on this node. It clears once the identity can be resolved.',
   lkg_artifact_unprovable:
     'The artifact captured with the last known good could not be proven during recovery, so the fallback is available but no longer qualified.',
   source_acceptance_unprovable:
@@ -88,7 +98,19 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
     'The stored approval does not cover what this Blueprint currently asks for, so it needs approving again before it can roll out.',
   git_managed_rollout_not_enabled:
     'This Blueprint\'s content is Git-managed, so it cannot deploy from the stored snapshot.',
+  git_managed_artifact_unmodellable:
+    'The accepted compose cannot be resolved to an image identity, so this generation cannot be authorized. The cause names the construct to change; push a new commit whose compose the resolver can read.',
 };
+
+/**
+ * Codes whose write-time evidence is operator-meaningful on its own.
+ *
+ * Most recorded details are log-shaped ("repo identity json is invalid") and the
+ * copy above deliberately replaces them. The unmodellable-compose refusal is the
+ * exception: its detail names the exact construct that has to change, so the
+ * caveat carries it.
+ */
+const EVIDENCE_BEARING_CODES: ReadonlySet<string> = new Set(['git_managed_artifact_unmodellable']);
 
 /**
  * Operator wording for one limitation, or a safe fallback.
@@ -98,8 +120,21 @@ export const GITOPS_LIMITATION_COPY: Record<string, string | undefined> = {
  * outcome this affordance exists to prevent.
  */
 export function limitationCaveat(limitation: GitOpsLimitation): string {
-  return GITOPS_LIMITATION_COPY[limitation.code]
-    ?? `Part of this state could not be proven (${limitation.code}).`;
+  const known = Object.hasOwn(GITOPS_LIMITATION_COPY, limitation.code)
+    ? GITOPS_LIMITATION_COPY[limitation.code]
+    : undefined;
+  const base = known ?? `Part of this state could not be proven (${limitation.code}).`;
+  if (EVIDENCE_BEARING_CODES.has(limitation.code)
+    && typeof limitation.evidence === 'string'
+    && limitation.evidence.length > 0) {
+    // The stored detail is unbounded and comes from a remote node's parser, so
+    // it is capped before it reaches the sentence.
+    const cause = limitation.evidence.length > 300
+      ? `${limitation.evidence.slice(0, 300)}...`
+      : limitation.evidence;
+    return `${base} Cause: ${cause}.`;
+  }
+  return base;
 }
 
 /**

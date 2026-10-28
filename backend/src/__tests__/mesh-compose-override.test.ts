@@ -25,7 +25,7 @@ describe('generateOverrideYaml', () => {
         }
     });
 
-    it('attaches every service to the sencho_mesh network', () => {
+    it('attaches every service to sencho_mesh while keeping the implicit default network', () => {
         const yaml = generateOverrideYaml({
             services: ['web', 'cache', 'worker'],
             aliases: [{ host: 'db.api.opsix.sencho' }],
@@ -34,7 +34,7 @@ describe('generateOverrideYaml', () => {
         const parsed = YAML.parse(yaml) as Record<string, unknown>;
         const services = parsed.services as Record<string, { networks: string[] }>;
         for (const svc of ['web', 'cache', 'worker']) {
-            expect(services[svc].networks).toEqual([SENCHO_MESH_NETWORK]);
+            expect(services[svc].networks).toEqual(['default', SENCHO_MESH_NETWORK]);
         }
     });
 
@@ -58,7 +58,7 @@ describe('generateOverrideYaml', () => {
         const parsed = YAML.parse(yaml) as Record<string, unknown>;
         const services = parsed.services as Record<string, { extra_hosts?: string[]; networks: string[] }>;
         expect(services.web.extra_hosts).toBeUndefined();
-        expect(services.web.networks).toEqual([SENCHO_MESH_NETWORK]);
+        expect(services.web.networks).toEqual(['default', SENCHO_MESH_NETWORK]);
     });
 
     it('produces stable output regardless of input ordering', () => {
@@ -101,4 +101,29 @@ describe('buildAliasHosts', () => {
         });
         expect(out).toEqual(['db.api.opsix.sencho', 'cache.api.opsix.sencho']);
     });
+
+    it('adds only sencho_mesh when the service declares its own networks (Compose merges the lists)', () => {
+        const yaml = generateOverrideYaml({
+            services: ['web'],
+            serviceShapes: { web: { declaresNetworks: true } },
+            aliases: [],
+            senchoIp: SENCHO_IP,
+        });
+        const services = (YAML.parse(yaml) as { services: Record<string, { networks: string[] }> }).services;
+        expect(services.web.networks).toEqual([SENCHO_MESH_NETWORK]);
+    });
+
+    it.each(['host', 'none', 'service:vpn', 'container:gluetun'])(
+        'leaves network_mode: %s services out of the override (Compose rejects networks/extra_hosts with it)',
+        (mode) => {
+            const yaml = generateOverrideYaml({
+                services: ['app', 'vpn'],
+                serviceShapes: { app: { networkMode: mode, declaresNetworks: false }, vpn: { declaresNetworks: false } },
+                aliases: [{ host: 'db.api.opsix.sencho' }],
+                senchoIp: SENCHO_IP,
+            });
+            const services = (YAML.parse(yaml) as { services: Record<string, unknown> }).services;
+            expect(Object.keys(services)).toEqual(['vpn']);
+        },
+    );
 });

@@ -35,6 +35,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       ...actual.ComposeService,
       getInstance: () => ({
+        evaluateDockerEndpoint: async () => null,
         updateStack: mockUpdateStack,
       }),
     },
@@ -53,6 +54,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        assertNoDockerEndpointContainers: vi.fn().mockResolvedValue(undefined),
         startContainer: mockStartContainer,
       }),
     },

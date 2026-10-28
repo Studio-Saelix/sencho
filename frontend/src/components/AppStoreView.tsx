@@ -10,6 +10,7 @@ import { Search, Rocket, Loader2, Info, ExternalLink, Star, ShieldCheck } from '
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { apiFetch, withDeploySession } from '@/lib/api';
+import { parsePortSpec, withHostPort, containerLabel } from '@/lib/portSpec';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
@@ -78,7 +79,15 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
             setTrivyAvailable(false);
             try {
                 const res = await apiFetch('/templates');
-                if (!res.ok) throw new Error('Failed to fetch templates');
+                if (!res.ok) {
+                    // The registry reports why it could not be read, for example
+                    // when the URL answers with a shape Sencho does not support.
+                    // Replacing that with a generic sentence leaves the operator
+                    // with an empty App Store and nothing to act on.
+                    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+                    const reason = typeof body?.error === 'string' && body.error.trim() !== '' ? body.error : null;
+                    throw new Error(reason ?? 'Failed to fetch templates');
+                }
                 const data = await res.json();
                 if (!cancelled) setTemplates(data || []);
             } catch (err) {
@@ -127,9 +136,9 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
 
         const initPorts: Record<string, string> = {};
         t.ports?.forEach(p => {
-            const parts = p.split(':');
-            if (parts.length > 1) {
-                initPorts[p] = parts[0];
+            const { hostPort } = parsePortSpec(p);
+            if (hostPort !== null) {
+                initPorts[p] = hostPort;
             }
         });
         setPortVars(initPorts);
@@ -180,11 +189,10 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
         const modifiedTemplate: Template = { ...selectedTemplate };
         if (modifiedTemplate.ports) {
             modifiedTemplate.ports = modifiedTemplate.ports.map(p => {
-                const parts = p.split(':');
-                if (parts.length > 1 && portVars[p]) {
-                    return `${portVars[p]}:${parts[1]}`;
-                }
-                return p;
+                // Only a single number the operator actually supplied replaces the
+                // host port. A cleared field keeps the registry's own spec.
+                const edited = portVars[p];
+                return edited ? withHostPort(p, edited) : p;
             });
         }
 
@@ -274,9 +282,11 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
         const seen = new Set<string>();
         const conflicts: Array<{ host: string; info: PortInUseInfo }> = [];
         for (const p of selectedTemplate.ports) {
-            const parts = p.split(':');
-            if (parts.length < 2) continue;
-            const host = portVars[p] || parts[0];
+            // Follow the operator's edit, since that is what will be deployed.
+            // Otherwise only a real single host port can collide with another
+            // binding: a bind address is not a port, and a range is not a number.
+            const { hostPort } = parsePortSpec(p);
+            const host = portVars[p] || hostPort;
             if (!host || seen.has(host)) continue;
             seen.add(host);
             const info = portsInUse[host];
@@ -546,21 +556,37 @@ export function AppStoreView({ onDeploySuccess, headerActions }: AppStoreViewPro
                                     <SheetSection title="Ports (Host : Container)">
                                         <div className="space-y-3">
                                             {selectedTemplate.ports.map((p, idx) => {
-                                                const parts = p.split(':');
-                                                if (parts.length < 2) return null;
+                                                const parsed = parsePortSpec(p);
+                                                const editable = parsed.hostPort !== null;
+                                                // A range is published but is not one number, so it gets
+                                                // no input. It stays visible rather than being dropped,
+                                                // because the port is still real.
+                                                if (!parsed.container) return null;
                                                 const hostPort = portVars[p] || '';
                                                 const conflict = hostPort ? portsInUse[hostPort] : undefined;
                                                 return (
                                                     <div key={idx} className="flex items-center space-x-2">
-                                                        <Input
-                                                            value={hostPort}
-                                                            onChange={(e) => {
-                                                                const val = e.target.value.replace(/[^0-9]/g, '');
-                                                                setPortVars(prev => ({ ...prev, [p]: val }));
-                                                            }}
-                                                            className={cn('w-24 text-center font-mono', hostPort && !isValidPort(hostPort) && 'border-destructive')}
-                                                        />
-                                                        <span className="text-muted-foreground font-mono">: {parts[1]}</span>
+                                                        {editable ? (
+                                                            <Input
+                                                                value={hostPort}
+                                                                onChange={(e) => {
+                                                                    const val = e.target.value.replace(/[^0-9]/g, '');
+                                                                    setPortVars(prev => ({ ...prev, [p]: val }));
+                                                                }}
+                                                                className={cn('w-24 text-center font-mono', hostPort && !isValidPort(hostPort) && 'border-destructive')}
+                                                            />
+                                                        ) : (
+                                                            <span className="w-24 text-center font-mono text-xs text-muted-foreground">
+                                                                {parsed.hostSegment ?? '\u00a0'}
+                                                            </span>
+                                                        )}
+                                                        {/* An unparseable spec is shown whole, so the
+                                                            separator that implies a host/container split
+                                                            would misrepresent it. */}
+                                                        <span className="text-muted-foreground font-mono">
+                                                            {parsed.ambiguous ? '' : ': '}
+                                                            {containerLabel(parsed)}
+                                                        </span>
                                                         {conflict && (
                                                             <>
                                                                 <span className="text-xs text-warning font-mono">

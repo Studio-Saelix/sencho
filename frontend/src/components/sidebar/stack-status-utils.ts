@@ -89,6 +89,8 @@ function isStatusValue(value: unknown): value is StackRowStatus {
 export interface BulkStatusPayloadEntry {
   status: StackRowStatus;
   mainPort?: number;
+  /** Compose service label of the running container that supplied `mainPort`. */
+  mainPortService?: string;
   running?: number;
   total?: number;
   isSelf?: boolean;
@@ -107,6 +109,7 @@ export function isValidBulkPayload(
     const entry = val as {
       status?: unknown;
       mainPort?: unknown;
+      mainPortService?: unknown;
       running?: unknown;
       total?: unknown;
       isSelf?: unknown;
@@ -114,6 +117,7 @@ export function isValidBulkPayload(
     return (
       isStatusValue(entry.status) &&
       (entry.mainPort === undefined || typeof entry.mainPort === 'number') &&
+      (entry.mainPortService === undefined || typeof entry.mainPortService === 'string') &&
       (entry.running === undefined || typeof entry.running === 'number') &&
       (entry.total === undefined || typeof entry.total === 'number') &&
       (entry.isSelf === undefined || typeof entry.isSelf === 'boolean')
@@ -130,18 +134,24 @@ export function parseBulkStatusPayload(
 ): {
   statuses: Record<string, StackRowStatus>;
   ports: Record<string, number | undefined>;
+  portServices: Record<string, string | undefined>;
   self: Record<string, boolean>;
   counts: Record<string, { running: number; total: number } | undefined>;
   coveredFileCount: number;
 } {
   const statuses: Record<string, StackRowStatus> = {};
   const ports: Record<string, number | undefined> = {};
+  const portServices: Record<string, string | undefined> = {};
   const self: Record<string, boolean> = {};
   const counts: Record<string, { running: number; total: number } | undefined> = {};
   let coveredFileCount = 0;
   for (const [key, val] of Object.entries(raw)) {
     statuses[key] = val.status;
-    if (val.mainPort) ports[key] = val.mainPort;
+    if (val.mainPort) {
+      ports[key] = val.mainPort;
+      // The owner is only meaningful beside the port it was read from.
+      if (val.mainPortService) portServices[key] = val.mainPortService;
+    }
     if (val.isSelf) self[key] = true;
     if (val.running !== undefined && val.total !== undefined) {
       counts[key] = { running: val.running, total: val.total };
@@ -150,7 +160,7 @@ export function parseBulkStatusPayload(
   for (const file of fileList) {
     if (raw[file] !== undefined) coveredFileCount += 1;
   }
-  return { statuses, ports, self, counts, coveredFileCount };
+  return { statuses, ports, portServices, self, counts, coveredFileCount };
 }
 
 /** Whether a payload is a legacy string-value map whose values are recognized

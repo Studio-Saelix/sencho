@@ -61,6 +61,7 @@ import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationS
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 
 export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
 export { parseServicesJsonStrict } from './recoveryServicesJson';
@@ -278,6 +279,25 @@ function opaqueRollbackTag(generationId: string, serviceName: string): string {
   return `sencho-rb/${shortGenerationId(generationId)}/${sanitizeServiceSlug(serviceName)}:hold`;
 }
 
+/**
+ * What a compensation attempt proves, for callers that must classify the
+ * failure. The boolean `compensateWithCandidate` stays for callers that only
+ * branch on completion.
+ */
+export type CompensationOutcome =
+  | { rolledBack: true }
+  | { rolledBack: false; failureClass: 'pre_mutation' | 'post_mutation' };
+
+/**
+ * The compose-up a compensation drives, passed through by the caller so the
+ * service never reaches for a node's runtime itself.
+ */
+export type CompensationComposeUp = (
+  overridePath: string,
+  invocation: RollbackInvocationRecord | null,
+  overlay?: { overlayDir: string; overlayBinding: import('./gitops/sops/types').OverlayBinding },
+) => Promise<ComposeMutationResult | void>;
+
 export class StackUpdateRecoveryService {
   private static instance: StackUpdateRecoveryService;
   private started = false;
@@ -326,6 +346,9 @@ export class StackUpdateRecoveryService {
     for (const node of db.getNodes()) {
       for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
         if (!row.content_path) continue;
+        // A restore this process is still driving (compose up, the probe) owns
+        // its intent; reverting under it would split the files from the Git side.
+        if (RollbackGenerationStore.isRestoreInFlight(row.node_id, row.stack_name, row.content_path)) continue;
         try {
           const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
             row.node_id,
@@ -1087,17 +1110,22 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  public async compensateWithCandidate(
+  /**
+   * Whether the restore completed, with the class the caller needs when it did
+   * not. `compensateWithCandidate` keeps the boolean shape for callers that
+   * only decide what to do next; rollback callers that must not guess the
+   * class from an error code use this one.
+   */
+  public async compensateWithCandidateOutcome(
     generationId: string,
-    composeUp: (
-      overridePath: string,
-      invocation: RollbackInvocationRecord | null,
-      overlay?: { overlayDir: string; overlayBinding: import('./gitops/sops/types').OverlayBinding },
-    ) => Promise<ComposeMutationResult | void>,
+    composeUp: CompensationComposeUp,
     policyOptions?: PolicyEnforcementOptions,
-  ): Promise<boolean> {
+  ): Promise<CompensationOutcome> {
     const row = this.get(generationId);
-    if (!row) return false;
+    // No row means there is nothing to restore here, so the failure moved
+    // nothing; the underlying error this used to collapse into a bare `false`
+    // cannot happen before the row exists.
+    if (!row) return { rolledBack: false, failureClass: 'pre_mutation' };
     // Finish any leftover restore transaction for this generation before a new
     // restore can overwrite pre-restore/ with an already-restored tree.
     if (row.content_path) {
@@ -1134,8 +1162,10 @@ export class StackUpdateRecoveryService {
 
     let filesRestored = false;
     try {
-      // Eligibility (integrity + held images + security posture) before mutation.
-      const integrityVerdict = await assessGenerationEligibility(row);
+      // Eligibility (integrity + held images) before mutation. The security
+      // posture is decided by the policy gate below, which carries the caller's
+      // bypass and reports the decision.
+      const integrityVerdict = await assessGenerationEligibility(row, { deferSecurityPosture: true });
       if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
@@ -1162,26 +1192,28 @@ export class StackUpdateRecoveryService {
         );
       }
 
-      const context = await resolveRestoreContext(row);
-      const restoredManifest = await context.restoreFromContext(transactionMeta);
-      filesRestored = true;
-
       // Evaluate current policy against the exact held images rollback will launch
-      // (opaque tags / image ids), not the restored authored moving tags.
-      const restoredInvocation = restoredManifest?.invocation ?? null;
+      // (opaque tags / image ids), not the restored authored moving tags. This runs
+      // before any file moves, so a refusal changes nothing.
       const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+        onAllowed: policyOptions?.onAllowed,
       });
       if (!gate.ok) {
         throw Object.assign(
-          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
-          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback', gate.evidence)),
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations, evidence: gate.evidence },
         );
       }
+
+      const context = await resolveRestoreContext(row);
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      filesRestored = true;
+      const restoredInvocation = restoredManifest?.invocation ?? null;
 
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
@@ -1261,12 +1293,26 @@ export class StackUpdateRecoveryService {
         composeResult?.mutatedByCompose ? 'bound' : 'unbound',
       ) ?? null;
       this.armReservedRecoveryRun(reservation, row);
-      return true;
+      return { rolledBack: true };
     } catch (error) {
       const code = (error as { code?: string }).code;
       // Classified by whether the files had already moved. Only a failure
-      // before that leaves the previous workload provably intact.
-      gitopsRecovery?.failed(filesRestored ? 'post_mutation' : 'pre_mutation');
+      // before that leaves the previous workload provably intact. The same
+      // classification rides the error to the rollback caller (this node's
+      // stack route, or the hub restoring through it): this catch is the only
+      // place that knows, and a code does not say it on its own
+      // (RECOVERY_PROBE_FAILED is thrown only after the files moved).
+      //
+      // A failed restore's own revert counts as movement even before this
+      // function saw a clean return: the live files may be a mix of the
+      // generation and the pre-restore snapshot, so the failure has to hold.
+      const revertFailed = (error as { restoreRevertFailed?: unknown }).restoreRevertFailed === true;
+      let failureClass: 'pre_mutation' | 'post_mutation' = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
+      // Whether the live files are back as they were before this restore began.
+      // With nothing restored there is nothing to revert; with files restored,
+      // only a completed revert counts, and a restore without a generation
+      // content path has none.
+      let filesRevertedClean = !filesRestored;
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
@@ -1274,6 +1320,7 @@ export class StackUpdateRecoveryService {
             row.stack_name,
             generationContentPath,
           );
+          filesRevertedClean = true;
         } catch (revertErr) {
           console.error(
             '[StackUpdateRecovery] Failed to revert files after compensation error: %s',
@@ -1281,7 +1328,20 @@ export class StackUpdateRecoveryService {
           );
         }
       }
+      // The Docker endpoint guard refused the restore's compose up before it ran,
+      // and the files are back where they were: nothing moved, and the recovery
+      // point is still intact for a restore from the host, so it is neither
+      // marked recovery_required nor flattened into a failed restore.
+      const refusedBeforeAnyMovement = isDockerEndpointProtectedError(error) && !revertFailed && filesRevertedClean;
+      if (refusedBeforeAnyMovement) failureClass = 'pre_mutation';
+      gitopsRecovery?.failed(failureClass);
+      if (typeof error === 'object' && error !== null) {
+        Object.assign(error, { failureClass });
+      }
       if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
+      if (refusedBeforeAnyMovement) {
         throw error;
       }
       console.error(
@@ -1302,11 +1362,27 @@ export class StackUpdateRecoveryService {
       if (isHeldRecoveryImageMissing(error)) {
         throw Object.assign(
           new Error('Held recovery image is missing'),
-          { code: 'HELD_IMAGE_MISSING' },
+          { code: 'HELD_IMAGE_MISSING', failureClass },
         );
       }
-      return false;
+      return { rolledBack: false, failureClass };
     }
+  }
+
+  /**
+   * The boolean shape, for callers that only decide what to do next.
+   *
+   * A caller that has to classify the failure uses
+   * `compensateWithCandidateOutcome` instead, so it never guesses from an
+   * error code what only this service could prove.
+   */
+  public async compensateWithCandidate(
+    generationId: string,
+    composeUp: CompensationComposeUp,
+    policyOptions?: PolicyEnforcementOptions,
+  ): Promise<boolean> {
+    const outcome = await this.compensateWithCandidateOutcome(generationId, composeUp, policyOptions);
+    return outcome.rolledBack;
   }
 
   /**

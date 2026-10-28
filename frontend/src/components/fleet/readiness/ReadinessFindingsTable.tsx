@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BusyButton } from '@/components/ui/busy-button';
+import type { FindingVerbControl } from './useReadinessVerbs';
 import { Combobox } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -16,10 +18,16 @@ import {
   type ReadinessTarget,
 } from '@/types/readiness';
 import { ALL, EMPTY_FINDINGS_FILTER, VERDICT_OPTIONS, filterFindings, type FindingsFilter } from './findingsFilter';
-import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, domainMeta, stateMeta } from '../readinessMeta';
+import { TONE_CHIP, TONE_DOT, TONE_ROW, codeCopy, codeRemediation, domainMeta, stateMeta } from '../readinessMeta';
+import { FindingRowActions } from '@/components/ui/finding-row-actions';
+import { DismissedSection, type DismissedItem } from '@/components/ui/dismissed-section';
+import type { DismissalMode, FindingDismissal } from '@/types/findingDismissal';
+import type { DismissedFinding } from '@/lib/findingDismissals';
+import { describeDismissal } from './describeDismissal';
 
 const HEAD = 'text-[10px] uppercase tracking-[0.18em]';
-const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
+const PRIMARY_ACTION = 'h-auto min-h-7 max-w-[min(8rem,100%)] whitespace-normal px-2 py-1 text-right text-xs leading-tight';
+const FILTER_CLASS = 'w-[200px] [&>button]:!bg-control';
 const PAGE_SIZE = 25;
 
 /** The canonical verdict a finding restates, in that verdict's own surface's words. */
@@ -141,6 +149,17 @@ interface ReadinessFindingsTableProps {
   /** Drill-down label, or null when the current user cannot reach that surface. */
   actionFor: (target: ReadinessTarget) => string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  /** The verb that resolves a finding in place, or null to keep its named navigation. */
+  verbFor: (finding: ReadinessFinding) => FindingVerbControl | null;
+  /** Whether this account may dismiss the finding; Dismiss is omitted rather than left to 403. */
+  canDismiss: (finding: ReadinessFinding) => boolean;
+  onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
+  isDismissing: (finding: ReadinessFinding) => boolean;
+  /** Findings a dismissal still covers, listed under the table with a Restore. They follow the filter. */
+  dismissed: DismissedFinding<ReadinessFinding>[];
+  onRestore: (dismissal: FindingDismissal) => void;
+  isRestoring: (dismissal: FindingDismissal) => boolean;
+  now: number;
 }
 
 /**
@@ -155,6 +174,14 @@ export function ReadinessFindingsTable({
   onFilterChange,
   actionFor,
   onOpen,
+  verbFor,
+  canDismiss,
+  onDismiss,
+  isDismissing,
+  dismissed,
+  onRestore,
+  isRestoring,
+  now,
 }: ReadinessFindingsTableProps) {
   // The page belongs to the filter it was chosen under, so any filter change,
   // including one made from the matrix, starts again at the first page.
@@ -167,9 +194,22 @@ export function ReadinessFindingsTable({
   const safePage = Math.min(page, totalPages - 1);
   const pageItems = visible.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
   const filtered = visible.length !== findings.length;
+  // The dismissed list answers to the same filter, so a node filter does not
+  // list the rest of the fleet's dismissals under one node's findings.
+  const visibleDismissedIds = new Set(filterFindings(dismissed.map(item => item.finding), filter, nodeNames).map(item => item.id));
+  const dismissedItems: DismissedItem[] = dismissed
+    .filter(item => visibleDismissedIds.has(item.finding.id))
+    .map(({ finding, dismissal }) => ({
+      id: dismissal.id,
+      title: `${codeCopy(finding.code)} · ${[nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`, finding.stack].filter(Boolean).join(' / ')}`,
+      meta: describeDismissal(dismissal, now),
+      onRestore: canDismiss(finding) ? () => onRestore(dismissal) : undefined,
+      restoring: isRestoring(dismissal),
+    }));
+  const onlyDismissedHere = visible.length === 0 && dismissedItems.length > 0;
 
   return (
-    <section aria-label="Readiness findings" className="space-y-2">
+    <section aria-label="Readiness findings" className="min-w-0 space-y-2">
       <div className="flex items-baseline justify-between gap-3">
         <h3 className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">findings</h3>
         <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">
@@ -178,16 +218,19 @@ export function ReadinessFindingsTable({
       </div>
       <FindingsFilterBar filter={filter} domains={domains} nodes={nodes} onChange={onFilterChange} />
       <div className="overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
-        <Table>
+        {/* Fixed layout from md up. Stack and domain leave the row below 2xl
+            and sit on the finding. Until then the other columns take a share
+            of the pane, so a narrow fleet pane cannot push the verb off-screen. */}
+        <Table className="md:table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className={cn(HEAD, 'w-8')} aria-label="Severity" />
+              <TableHead className={cn(HEAD, 'w-14')} aria-label="Severity" />
               <TableHead className={HEAD}>Finding</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Node</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Stack</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Domain</TableHead>
-              <TableHead className={HEAD}>State</TableHead>
-              <TableHead className={cn(HEAD, 'text-right')}>Action</TableHead>
+              <TableHead className={cn(HEAD, 'max-md:hidden md:w-[22%] 2xl:w-[11rem]')}>Node</TableHead>
+              <TableHead className={cn(HEAD, 'hidden 2xl:table-cell 2xl:w-[9rem]')}>Stack</TableHead>
+              <TableHead className={cn(HEAD, 'hidden 2xl:table-cell 2xl:w-[8.5rem]')}>Domain</TableHead>
+              <TableHead className={cn(HEAD, 'md:w-[14%] 2xl:w-[9.5rem]')}>State</TableHead>
+              <TableHead className={cn(HEAD, 'text-right md:w-[32%] 2xl:w-[17rem]')}>Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -198,13 +241,21 @@ export function ReadinessFindingsTable({
                 nodeName={nodeNames.get(finding.nodeId) ?? `node ${finding.nodeId}`}
                 action={actionFor(finding.target)}
                 onOpen={onOpen}
+                verb={verbFor(finding)}
+                canDismiss={canDismiss(finding)}
+                dismissing={isDismissing(finding)}
+                onDismiss={onDismiss}
               />
             ))}
           </TableBody>
         </Table>
         {pageItems.length === 0 && (
           <div className="py-12 text-center text-sm text-muted-foreground">
-            {findings.length === 0 ? 'Nothing needs attention across this fleet.' : 'No finding matches the current filters.'}
+            {onlyDismissedHere
+              ? 'Everything here is dismissed.'
+              : findings.length > 0 || dismissed.length > 0
+                ? 'No finding matches the current filters.'
+                : 'Nothing needs attention across this fleet.'}
           </div>
         )}
       </div>
@@ -217,6 +268,7 @@ export function ReadinessFindingsTable({
           Clear filters
         </button>
       )}
+      <DismissedSection items={dismissedItems} forceOpen={onlyDismissedHere} />
       {visible.length > PAGE_SIZE && (
         <div className="flex items-center justify-end gap-1">
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0} aria-label="Previous page">
@@ -237,66 +289,94 @@ interface FindingRowProps {
   nodeName: string;
   action: string | null;
   onOpen: (finding: ReadinessFinding) => void;
+  verb: FindingVerbControl | null;
+  canDismiss: boolean;
+  dismissing: boolean;
+  onDismiss: (finding: ReadinessFinding, mode: DismissalMode, days?: number) => void;
 }
 
-function FindingRow({ finding, nodeName, action, onOpen }: FindingRowProps) {
+function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismissing, onDismiss }: FindingRowProps) {
   const state = stateMeta(finding.severity);
   // A finding that restates a canonical verdict shows that verdict; any other shows its state.
   const chip = verdictChip(finding.verdict) ?? { label: state.label, tone: TONE_CHIP[state.tone] };
   const domain = domainMeta(finding.domain);
   const DomainIcon = domain.icon;
+  const remediation = codeRemediation(finding.code);
+  const stackAndDomain = [finding.stack, domain.label].filter(Boolean).join(' / ');
 
   return (
     <TableRow className={cn('transition-colors hover:bg-muted/30', TONE_ROW[state.tone])}>
       <TableCell className="align-top">
         <span aria-hidden className={cn('mt-1 inline-block h-2 w-2 rounded-full', TONE_DOT[state.tone])} />
       </TableCell>
-      <TableCell className="align-top">
-        <div className="min-w-[240px] max-w-[420px]">
+      <TableCell className="min-w-0 overflow-hidden align-top">
+        <div className="min-w-0 max-w-[420px] break-words max-md:min-w-[240px]">
           <span className="text-xs font-medium text-stat-value">
             {codeCopy(finding.code)}
             {finding.count > 1 && <span className="ml-1.5 font-mono text-[10px] tabular-nums text-stat-subtitle">×{finding.count}</span>}
           </span>
           {finding.detail && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{finding.detail}</span>}
-          {/* The scope columns are hidden on a phone, so the row names it inline. */}
+          {remediation && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{remediation}</span>}
+          {/* Scope columns that are hidden at this width are named here, once. */}
           <span className="mt-0.5 hidden font-mono text-[10px] text-stat-subtitle max-md:block">
-            {[nodeName, finding.stack].filter(Boolean).join(' / ')}
+            {[nodeName, stackAndDomain].filter(Boolean).join(' / ')}
+          </span>
+          <span className="mt-0.5 hidden font-mono text-[10px] text-stat-subtitle md:block 2xl:hidden">
+            {stackAndDomain}
           </span>
         </div>
       </TableCell>
-      <TableCell className="align-top font-mono text-xs max-md:hidden">
-        <span className="block max-w-[160px] truncate">{nodeName}</span>
+      <TableCell className="overflow-hidden align-top font-mono text-xs max-md:hidden">
+        <span className="block truncate" title={nodeName}>{nodeName}</span>
       </TableCell>
-      <TableCell className="align-top font-mono text-xs max-md:hidden">
+      <TableCell className="hidden overflow-hidden align-top font-mono text-xs 2xl:table-cell">
         {finding.stack
-          ? <span className="block max-w-[160px] truncate">{finding.stack}</span>
+          ? <span className="block truncate" title={finding.stack}>{finding.stack}</span>
           : <span className="text-[11px] text-stat-icon">--</span>}
       </TableCell>
-      <TableCell className="align-top max-md:hidden">
-        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] text-stat-subtitle">
-          <DomainIcon className="h-3.5 w-3.5" strokeWidth={1.5} />
-          {domain.label}
+      <TableCell className="hidden overflow-hidden align-top 2xl:table-cell">
+        <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-stat-subtitle">
+          <DomainIcon className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+          <span className="truncate">{domain.label}</span>
         </span>
       </TableCell>
-      <TableCell className="align-top">
-        <span className="flex flex-wrap gap-1">
-          <span className={cn('whitespace-nowrap rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4', chip.tone)}>
-            {chip.label}
-          </span>
+      <TableCell className="overflow-hidden align-top">
+        <span className={cn('inline-block max-w-full whitespace-normal rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4', chip.tone)}>
+          {chip.label}
         </span>
       </TableCell>
-      <TableCell className="text-right align-top">
-        {action && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 whitespace-nowrap px-2 text-xs text-stat-subtitle hover:text-stat-value"
-            onClick={() => onOpen(finding)}
-          >
-            {action}
-            <ArrowRight className="ml-1 h-3.5 w-3.5" strokeWidth={1.5} />
-          </Button>
-        )}
+      <TableCell className="min-w-0 overflow-hidden text-right align-top [&>div]:flex-wrap">
+        <FindingRowActions
+          dismissPolicy={finding.dismissPolicy ?? 'none'}
+          canDismiss={canDismiss}
+          pending={dismissing}
+          subject={codeCopy(finding.code)}
+          onDismiss={(mode, days) => onDismiss(finding, mode, days)}
+        >
+          {verb ? (
+            <BusyButton
+              variant="ghost"
+              size="sm"
+              className={cn(PRIMARY_ACTION, 'text-brand hover:text-brand')}
+              pending={verb.busy}
+              aria-label={`${verb.label}: ${codeCopy(finding.code)}`}
+              onClick={verb.run}
+            >
+              {verb.label}
+            </BusyButton>
+          ) : action && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(PRIMARY_ACTION, 'text-stat-subtitle hover:text-stat-value')}
+              aria-label={`${action}: ${codeCopy(finding.code)}`}
+              onClick={() => onOpen(finding)}
+            >
+              {action}
+              <ArrowRight className="ml-1 h-3.5 w-3.5" strokeWidth={1.5} />
+            </Button>
+          )}
+        </FindingRowActions>
       </TableCell>
     </TableRow>
   );

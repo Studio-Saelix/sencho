@@ -45,6 +45,11 @@ export interface ServiceUrlOptions {
   browserHost?: string;
   /** Explicit protocol override. Reserved for future use. */
   protocol?: 'http' | 'https';
+  /**
+   * A validated service URL. Returned as-is: no host rewrite, no published
+   * port, and no known-service path.
+   */
+  overrideUrl?: string | null;
 }
 
 /**
@@ -54,6 +59,7 @@ export interface ServiceUrlOptions {
  * link only when this is non-null.
  */
 export function buildServiceUrl(opts: ServiceUrlOptions): string | null {
+  if (opts.overrideUrl) return opts.overrideUrl;
   const { node, publicPort, privatePort, publicHost, browserHost, protocol } = opts;
   if (!isValidPort(publicPort)) return null;
 

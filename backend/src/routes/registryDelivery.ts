@@ -1,7 +1,9 @@
 import { Router, type Request, type Response } from 'express';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
+import { GitSourceError } from '../services/GitSourceService';
 import { PreparedSourceStore } from '../services/preparedSourceStore';
 import { listRegistryDeliveryEvidencePage } from '../helpers/registryDeliveryEvidence';
+import { gitSourceStatus } from '../utils/gitSourceHttp';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 
@@ -18,6 +20,16 @@ registryDeliveryRouter.post('/discover', async (req: Request, res: Response) => 
     const result = await service.discoverOnTarget(req.body);
     res.json(result);
   } catch (error) {
+    if (error instanceof GitSourceError) {
+      // A classified git failure is a client-actionable refusal, not an
+      // internal error: surface the same status/code/message the direct
+      // create-from-git route sends, so the hub echoes the real diagnosis
+      // instead of flattening every git error to a generic 500.
+      const status = gitSourceStatus(error.code);
+      console.error('[registry-delivery] discover git failed:', sanitizeForLog(error.message));
+      res.status(status).json({ error: error.message, code: error.code });
+      return;
+    }
     const status = Number((error as { status?: number }).status) || 500;
     console.error('[registry-delivery] discover failed:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(status).json({

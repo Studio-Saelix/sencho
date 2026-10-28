@@ -9,6 +9,7 @@ import { NotificationService } from './NotificationService';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 
 // Dockerode listContainers shape (subset used here)
@@ -496,7 +497,7 @@ export class AutoHealService {
         this.restartTimestamps.set(restartKey, timestamps);
 
         try {
-            await DockerController.getInstance(nodeId).restartContainer(containerId);
+            await DockerController.getInstance(nodeId).restartContainer(containerId, { endpointGuard: 'allow-provider-restart' });
             if (isDebugEnabled()) {
                 console.log(`[AutoHeal:diag] restart of ${containerName} on node ${nodeId} took ${Date.now() - now}ms`);
             }
@@ -533,10 +534,20 @@ export class AutoHealService {
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
 
-            db.incrementConsecutiveFailures(policy.id!);
+            // A restart the guard refused on purpose (the owner of a namespace the
+            // proxy or Sencho runs in, a labeled or mislabeled container) will be
+            // refused again, so it is not a failure toward auto-disable: that would
+            // switch off a stack-wide policy and stop healing its ordinary services.
+            // A refusal because the guard could not read Docker (`unresolved`) is
+            // transient and counts like any failed restart. Either way the attempt
+            // is recorded and notified as failed.
+            const refused = isDockerEndpointProtectedError(err) && err.reason !== 'unresolved';
+            if (!refused) db.incrementConsecutiveFailures(policy.id!);
             // Re-read to get updated consecutive_failures count
             const updated = db.getAutoHealPolicy(policy.id!);
-            const failures = updated?.consecutive_failures ?? policy.consecutive_failures + 1;
+            const failures = refused
+                ? policy.consecutive_failures
+                : updated?.consecutive_failures ?? policy.consecutive_failures + 1;
 
             db.recordAutoHealHistory({
                 ...baseEntry,
@@ -556,7 +567,7 @@ export class AutoHealService {
                 .catch(e => console.error('[AutoHeal] notification dispatch failed:', e));
 
             // Auto-disable if failure threshold reached
-            if (failures >= policy.auto_disable_after_failures) {
+            if (!refused && failures >= policy.auto_disable_after_failures) {
                 this.handleAutoDisable(policy.id!, policy, baseEntry, failures);
             }
 

@@ -6,6 +6,9 @@
  *     known process start time must NOT be reported as completed).
  *   - The failure-class terminal transitions emit an operator-visible WARN.
  *   - POST /api/fleet/nodes/:id/update concurrency guard (409).
+ *   - Unreachable nodes: a proxy node with no target or a failed poll reports
+ *     online=false and no update available, an in-flight update stays visible, and
+ *     a failed poll of the local row leaves it online with its version.
  *   - Authorization: both DELETE clear routes require admin.
  *   - The forced-recheck throttle on DELETE /update-status?recheck=true.
  */
@@ -15,6 +18,7 @@ import jwt from 'jsonwebtoken';
 import type { RemoteMeta } from '../services/CapabilityRegistry';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { CacheService } from '../services/CacheService';
+import * as versionCheck from '../utils/version-check';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -205,6 +209,102 @@ describe('GET /api/fleet/update-status terminal resolution', () => {
 
     expect(await getStatus(localNodeId)).toBe('failed');
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Node update failed'));
+  });
+});
+
+describe('GET /api/fleet/update-status unreachable nodes', () => {
+  async function getRows(): Promise<Array<Record<string, unknown>>> {
+    const res = await request(app).get('/api/fleet/update-status').set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    return res.body.nodes;
+  }
+
+  it('reports a proxy node with no reachable target as offline with no update claimed', async () => {
+    mockCompareTargetFetch();
+    // fetchMetaForNode stays real: with no proxy target it returns OFFLINE_META.
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue(null);
+
+    const rows = await getRows();
+    const row = rows.find(n => n.nodeId === proxyNodeId)!;
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
+    expect(row.version).toBeNull();
+    expect(rows.find(n => n.nodeId === localNodeId)!.online).toBe(true);
+  });
+
+  it('keeps a failed poll as an offline row with no update claimed, and still returns the other nodes', async () => {
+    mockCompareTargetFetch();
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockRejectedValue(new Error('probe blew up'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const rows = await getRows();
+    const row = rows.find(n => n.nodeId === proxyNodeId)!;
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
+    expect(row.updateStatus).toBeNull();
+    expect(rows.find(n => n.nodeId === localNodeId)!.online).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed'), expect.any(Error));
+  });
+
+  it('keeps the local row online with its version and update result when only its own poll fails', async () => {
+    // Pin the compare target above the gateway so the update result is a real
+    // comparison, not the gateway-versus-itself fallback.
+    vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('99.0.0');
+    mockMeta(ONLINE());
+    const baseline = (await getRows()).find(n => n.nodeId === localNodeId)!;
+    expect(baseline.online).toBe(true);
+    expect(baseline.updateAvailable).toBe(true);
+
+    // The gateway is serving this request, so a throw while reading its pin
+    // state must not turn the local row into a node that is offline or unread.
+    vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const rows = await getRows();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Update-status poll failed for node'), expect.any(Error));
+    const local = rows.find(n => n.nodeId === localNodeId)!;
+    expect(local.online).toBe(true);
+    expect(local.version).not.toBeNull();
+    expect(local.version).toBe(baseline.version);
+    expect(local.updateAvailable).toBe(true);
+    expect(rows.find(n => n.nodeId === proxyNodeId)!.online).toBe(true);
+  });
+
+  it('keeps a skipped version skipped on the local row when only its own poll fails', async () => {
+    vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('99.0.0');
+    mockMeta(ONLINE());
+    const db = DatabaseService.getInstance();
+    db.setNodeUpdateSkip(localNodeId, '99.0.0', TEST_USERNAME);
+    try {
+      const baseline = (await getRows()).find(n => n.nodeId === localNodeId)!;
+      expect(baseline.skipActive).toBe(true);
+      expect(baseline.updateAvailable).toBe(false);
+
+      vi.spyOn(SelfUpdateService.getInstance(), 'getPinInfo').mockRejectedValue(new Error('pin read failed'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const local = (await getRows()).find(n => n.nodeId === localNodeId)!;
+      expect(local.online).toBe(true);
+      expect(local.skipActive).toBe(true);
+      expect(local.skippedVersion).toBe('99.0.0');
+      expect(local.updateAvailable).toBe(false);
+    } finally {
+      db.deleteNodeUpdateSkip(localNodeId);
+    }
+  });
+
+  it('keeps an in-flight update visible while the node is unreachable', async () => {
+    mockTarget();
+    mockCompareTargetFetch();
+    // The node restarts mid-update, so its meta is unreachable: the tracker
+    // keeps reporting the update, and no update is claimed for the unreachable node.
+    mockMeta({ ...ONLINE(), version: null, startedAt: null, capabilities: [], online: false });
+    setTracker({ startedAt: Date.now() - RECENT_MS });
+
+    const row = (await getRows()).find(n => n.nodeId === proxyNodeId)!;
+    expect(row.updateStatus).toBe('updating');
+    expect(row.online).toBe(false);
+    expect(row.updateAvailable).toBe(false);
   });
 });
 
