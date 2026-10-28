@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS,
   FleetUpdateTrackerService,
   UPDATE_TIMEOUT_MS,
   TERMINAL_TTL_MS,
@@ -121,6 +122,32 @@ describe('FleetUpdateTrackerService', () => {
       expect(result.timedOut).toBe(1);
       expect(svc.get(1)?.status).toBe('timeout');
       expect(svc.get(2)?.status).toBe('updating');
+    });
+
+    it('does not time out a Docker endpoint replacement past the ceiling', () => {
+      svc.set(1, mk({
+        status: 'updating',
+        startedAt: Date.now() - (UPDATE_TIMEOUT_MS + 1_000),
+        endpointProviderPending: true,
+      }));
+
+      const result = svc.sweepStale();
+
+      expect(result.timedOut).toBe(0);
+      expect(svc.get(1)?.status).toBe('updating');
+    });
+
+    it('still times out a Docker endpoint replacement past its extended ceiling', () => {
+      svc.set(1, mk({
+        status: 'updating',
+        startedAt: Date.now() - (ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS + 1_000),
+        endpointProviderPending: true,
+      }));
+
+      const result = svc.sweepStale();
+
+      expect(result.timedOut).toBe(1);
+      expect(svc.get(1)?.status).toBe('timeout');
     });
 
     it('reaps a completed tracker past its TTL but keeps a recent one', () => {

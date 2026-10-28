@@ -21,6 +21,12 @@ export interface UpdateTracker {
    * this value (not the process start time) is its completion signal.
    */
   previousEndpointProviderCompletedAt?: number | null;
+  /**
+   * True while this operation also replaces the node's Docker endpoint. Such
+   * an operation can legitimately run past the five-minute tracker ceiling, so
+   * the safety-net sweep must not terminalize it into a timeout.
+   */
+  endpointProviderPending?: boolean;
 }
 
 export type TerminalStatus = 'completed' | 'failed' | 'timeout';
@@ -28,6 +34,13 @@ export type TerminalStatus = 'completed' | 'failed' | 'timeout';
 /** Hard ceiling for an in-flight update before it is declared timed out. */
 export const UPDATE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 export const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minutes.';
+/**
+ * Extended ceiling for a Docker endpoint replacement: its helper may stage for
+ * ten minutes and then replace and verify for about thirty more. Beyond this,
+ * the sweep may time the row out even if the node still claims it is pending,
+ * so a lost node cannot leave an updating badge forever.
+ */
+export const ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS = 40 * 60 * 1000;
 /** How long a resolved `completed` tracker lingers before it is reaped, so the
  *  badge stays briefly visible after the update lands. */
 export const TERMINAL_TTL_MS = 60 * 1000;
@@ -80,6 +93,7 @@ export class FleetUpdateTrackerService {
     error?: string,
     code?: string,
     operationKind: FleetOperationKind = 'update',
+    endpointProviderPending = false,
   ): UpdateTracker {
     const now = Date.now();
     return {
@@ -91,6 +105,7 @@ export class FleetUpdateTrackerService {
       error,
       code,
       operationKind,
+      endpointProviderPending,
       resolvedAt: status !== 'updating' ? now : undefined,
     };
   }
@@ -115,7 +130,14 @@ export class FleetUpdateTrackerService {
     let reaped = 0;
     for (const [nodeId, tracker] of this.trackers) {
       if (tracker.status === 'updating') {
-        if (now - tracker.startedAt > UPDATE_TIMEOUT_MS) {
+        // A Docker endpoint replacement is bounded by the node's own helper
+        // lifetime, so the five-minute update ceiling would otherwise authorize
+        // a second operation while the helper can still run. The extended
+        // ceiling keeps a lost node from holding the badge forever.
+        const ceiling = tracker.endpointProviderPending === true
+          ? ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS
+          : UPDATE_TIMEOUT_MS;
+        if (now - tracker.startedAt > ceiling) {
           this.trackers.set(nodeId, this.resolve(tracker, 'timeout', UPDATE_TIMEOUT_MSG));
           timedOut++;
         }

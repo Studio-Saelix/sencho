@@ -8,6 +8,8 @@ import { execFile } from 'child_process';
 import fs from 'fs/promises';
 import Docker from 'dockerode';
 import {
+  HELPER_COMPOSE_TIMEOUT_MS,
+  HELPER_DOCKER_TIMEOUT_MS,
   HELPER_SOCKET_PATH,
   errorText,
   type ContainerSnapshot,
@@ -16,16 +18,17 @@ import {
 } from './endpointProviderReplace';
 import { createHandoffWriter, handoffOwner, type HandoffFileSystem } from './handoffFile';
 
-/** Ceiling for one Docker API call made by the helper, so a hung socket cannot stall recovery. */
-export const HELPER_DOCKER_TIMEOUT_MS = 30_000;
+export { HELPER_DOCKER_TIMEOUT_MS };
 
 export function buildDeps(
   plan: ProviderReplacePlan,
   logFile: string | null,
   handoffFs: HandoffFileSystem = fs,
   helperUid: number | null = typeof process.getuid === 'function' ? process.getuid() : null,
+  options: { dataDir?: string; socketPath?: string } = {},
 ): HelperDeps {
-  const docker = new Docker({ socketPath: HELPER_SOCKET_PATH, timeout: HELPER_DOCKER_TIMEOUT_MS });
+  const socketPath = options.socketPath ?? HELPER_SOCKET_PATH;
+  const docker = new Docker({ socketPath, timeout: HELPER_DOCKER_TIMEOUT_MS });
   // The project name is passed explicitly: a project deployed under a name
   // other than its directory would otherwise be rendered as a new project and
   // get a second proxy instead of the replacement.
@@ -64,8 +67,8 @@ export function buildDeps(
     compose: (args) => new Promise(resolve => {
       execFile('docker', ['compose', ...projectFlags, ...args], {
         cwd: plan.workingDir,
-        env: { ...process.env, DOCKER_HOST: `unix://${HELPER_SOCKET_PATH}` },
-        timeout: 10 * 60_000,
+        env: { ...process.env, DOCKER_HOST: `unix://${socketPath}` },
+        timeout: HELPER_COMPOSE_TIMEOUT_MS,
         maxBuffer: 20 * 1024 * 1024,
       }, (error, stdout, stderr) => {
         resolve({ ok: !error, output: error ? `${stderr}`.trim() || errorText(error) : `${stdout}` });
@@ -83,6 +86,7 @@ export function buildDeps(
     copyFile: (from, to) => fs.copyFile(from, to),
     sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
     now: () => Date.now(),
+    dataDir: options.dataDir,
     log: (message) => {
       const line = `${new Date().toISOString()} ${message}\n`;
       process.stderr.write(line);

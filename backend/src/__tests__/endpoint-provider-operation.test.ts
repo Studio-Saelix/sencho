@@ -12,6 +12,7 @@ import { cleanupTestDb, setupTestDb } from './helpers/setupTestDb';
 let tmpDir: string;
 let ImageOperationService: typeof import('../services/ImageOperationService').ImageOperationService;
 let SelfUpdateService: typeof import('../services/SelfUpdateService').default;
+let selfUpdateModule: typeof import('../services/SelfUpdateService');
 let DockerController: typeof import('../services/DockerController').default;
 let FleetUpdateTrackerService: typeof import('../services/FleetUpdateTrackerService').FleetUpdateTrackerService;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
@@ -19,7 +20,8 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ ImageOperationService } = await import('../services/ImageOperationService'));
-  SelfUpdateService = (await import('../services/SelfUpdateService')).default;
+  selfUpdateModule = await import('../services/SelfUpdateService');
+  SelfUpdateService = selfUpdateModule.default;
   DockerController = (await import('../services/DockerController')).default;
   ({ FleetUpdateTrackerService } = await import('../services/FleetUpdateTrackerService'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
@@ -27,8 +29,19 @@ beforeAll(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  const service = ImageOperationService.getInstance() as unknown as { endpointProviderPending: boolean };
+  const service = ImageOperationService.getInstance() as unknown as {
+    endpointProviderPending: boolean;
+    endpointProviderTimings: Record<string, number>;
+  };
   service.endpointProviderPending = false;
+  service.endpointProviderTimings = {
+    pollMs: 2_000,
+    requestMs: 10_000,
+    verifyMs: 90_000,
+    outcomeMs: selfUpdateModule.ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS + selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
+    watchMs: selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+    recoveryMs: 15_000,
+  };
   SelfUpdateService.getInstance().clearLastError();
   for (const [nodeId] of [...FleetUpdateTrackerService.getInstance().entries()]) FleetUpdateTrackerService.getInstance().delete(nodeId);
   await fs.rm(path.join(tmpDir, 'image-operation-current.json'), { force: true });
@@ -65,16 +78,25 @@ async function writeOutcome(operationId: string, outcome: Record<string, unknown
 /** A Docker that answers through the new provider, with the provider running and the given health. */
 interface MockDockerOptions {
   ping?: (options?: { abortSignal?: AbortSignal }) => Promise<unknown>;
-  listContainers?: () => Promise<unknown>;
+  listContainers?: (options?: { filters?: { label?: string[] } }) => Promise<unknown>;
   inspect?: () => Promise<unknown>;
   running?: boolean;
   health?: string;
+  /** Whether the detached helper still appears in Docker's list. */
+  helperRunning?: boolean;
 }
 
 function mockDocker(options: MockDockerOptions = {}) {
+  const defaultList = async (listOptions?: { filters?: { label?: string[] } }) => {
+    const labels = listOptions?.filters?.label ?? [];
+    if (labels.some(label => label.startsWith('io.sencho.operation='))) {
+      return options.helperRunning ? [{ Id: 'helper-container', State: 'running' }] : [];
+    }
+    return options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }];
+  };
   const docker = {
     ping: options.ping ?? (async () => 'OK'),
-    listContainers: vi.fn(options.listContainers ?? (async () => (options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }]))),
+    listContainers: vi.fn(options.listContainers ?? defaultList),
     getContainer: () => ({
       inspect: options.inspect ?? (async () => ({ State: { Health: options.health ? { Status: options.health } : undefined } })),
     }),
@@ -302,7 +324,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
     service.endpointProviderTimings = { ...service.endpointProviderTimings, watchMs: 5_000 };
-    mockDocker({ health: 'healthy' });
+    mockDocker({ health: 'healthy', helperRunning: true });
     await service.claimComposeReapply({ replace: true, only: true });
     const operationId = (await service.getCurrentOperation())!.operationId;
     await service.executeClaimedComposeReapply();
@@ -329,7 +351,7 @@ describe('provider-only reapply (Sencho stays running)', () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
-    mockDocker({ ping: async () => { throw new Error('connect ECONNREFUSED'); } });
+    mockDocker({ ping: async () => { throw new Error('connect ECONNREFUSED'); }, helperRunning: true });
     await service.claimComposeReapply({ replace: true, only: true });
     const operationId = (await service.getCurrentOperation())!.operationId;
     await service.executeClaimedComposeReapply();
@@ -408,7 +430,7 @@ describe('bounded verification', () => {
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
     const service = fastTimings();
     service.endpointProviderTimings = { pollMs: 5, requestMs: 15, verifyMs: 50, outcomeMs: 200, watchMs: 200, recoveryMs: 30 };
-    const docker = mockDocker(dockerOptions);
+    const docker = mockDocker({ ...dockerOptions, helperRunning: true });
     await service.claimComposeReapply({ replace: true, only: true });
     const operationId = (await service.getCurrentOperation())!.operationId;
     await service.executeClaimedComposeReapply();
@@ -451,6 +473,7 @@ describe('bounded verification', () => {
     service.endpointProviderTimings = { pollMs: 5, requestMs: 15, verifyMs: 50, outcomeMs: 200, watchMs: 200, recoveryMs: 30 };
     let aborted = false;
     const docker = mockDocker({
+      helperRunning: true,
       ping: (options) => new Promise<unknown>((_resolve, reject) => {
         options?.abortSignal?.addEventListener('abort', () => {
           aborted = true;
@@ -470,6 +493,68 @@ describe('bounded verification', () => {
     await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
     expect(aborted).toBe(true);
     expect(docker.resetDockerConnection).toHaveBeenCalled();
+  });
+});
+
+describe('ownership lifetime', () => {
+  it('covers the helper\'s full permitted lifetime, not only its marker wait', () => {
+    const service = ImageOperationService.getInstance();
+    const { ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS } = selfUpdateModule;
+    expect(ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS).toBeGreaterThan(20 * 60_000);
+    expect(service.endpointProviderTimings.watchMs).toBeGreaterThanOrEqual(ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS);
+    expect(service.endpointProviderTimings.outcomeMs).toBeGreaterThanOrEqual(ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS);
+  });
+
+  it('keeps the claim while the helper can still mutate, then consumes a late marker and verdict', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = ImageOperationService.getInstance();
+    // Scaled lifecycle: the claim is held for the helper's whole window, not
+    // only for the first marker poll.
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 5_000, watchMs: 5_000, recoveryMs: 20 };
+    mockDocker({ helperRunning: true });
+    await service.claimComposeReapply({ replace: true, only: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+
+    // The old watcher terminalized after its marker deadline even though the
+    // helper was still inside Compose. While the helper runs, the claim must
+    // stay active and a second replacement must be refused.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'recreating' });
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({
+      ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT',
+    });
+    expect(service.isEndpointProviderPending()).toBe(true);
+
+    // A late marker is still verified and acknowledged; a late verdict decides.
+    await writeRecreatedMarker(operationId);
+    await vi.waitFor(async () => {
+      const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
+      expect(ack).toEqual({ operationId, ok: true, detail: null });
+    });
+    await writeOutcome(operationId, { ok: true });
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('succeeded'));
+  });
+
+  it('does not grant a restarted process a fresh helper lifetime', async () => {
+    mockAvailableProvider();
+    const service = ImageOperationService.getInstance();
+    await service.claimComposeReapply({ replace: true });
+    const operation = (await service.getCurrentOperation())!;
+    const raw = JSON.parse(await fs.readFile(path.join(tmpDir, 'image-operation-current.json'), 'utf8'));
+    raw.state = 'recreating';
+    raw.startedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    await fs.writeFile(path.join(tmpDir, 'image-operation-current.json'), JSON.stringify(raw));
+    mockDocker({ helperRunning: false });
+    const started = Date.now();
+    await service.reconcileOnStartup();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(await service.getCurrentOperation()).toMatchObject({
+      state: 'failed',
+      failureCode: 'endpoint_provider_recovery_required',
+    });
+    expect(operation.operationId).toBe((await service.getCurrentOperation())?.operationId);
   });
 });
 
@@ -501,7 +586,7 @@ describe('reconcileOnStartup (the new process)', () => {
 
   it('answers the helper after Docker works through the new provider, and succeeds on its verdict', async () => {
     const { service, operationId } = await claimRecreating();
-    mockDocker({ health: 'healthy' });
+    mockDocker({ health: 'healthy', helperRunning: true });
     await writeRecreatedMarker(operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
@@ -526,7 +611,7 @@ describe('reconcileOnStartup (the new process)', () => {
     const raw = JSON.parse(await fs.readFile(path.join(tmpDir, 'image-operation-current.json'), 'utf8'));
     raw.state = 'recreating';
     await fs.writeFile(path.join(tmpDir, 'image-operation-current.json'), JSON.stringify(raw));
-    mockDocker({ health: 'healthy' });
+    mockDocker({ health: 'healthy', helperRunning: true });
     await writeRecreatedMarker(operation.operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
@@ -541,7 +626,7 @@ describe('reconcileOnStartup (the new process)', () => {
   it('bounds startup verification when Docker never answers and still consumes a failed outcome', async () => {
     const { service, operationId } = await claimRecreating();
     service.endpointProviderTimings = { pollMs: 5, requestMs: 15, verifyMs: 40, outcomeMs: 200, watchMs: 200, recoveryMs: 20 };
-    mockDocker({ ping: () => new Promise<never>(() => {}) });
+    mockDocker({ ping: () => new Promise<never>(() => {}), helperRunning: true });
     await writeRecreatedMarker(operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
@@ -603,6 +688,7 @@ describe('reconcileOnStartup (the new process)', () => {
       let replaced = false;
       const docker = mockDocker({
         health: 'healthy',
+        helperRunning: true,
         ping: async () => {
           if (replaced) throw new Error('connect ECONNREFUSED');
           return 'OK';

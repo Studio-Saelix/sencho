@@ -1607,12 +1607,32 @@ function refuseUnsupportedEndpointProvider(res: Response, capabilities: string[]
   return true;
 }
 
-/** Clear a terminal tracker row, or time out a stale in-flight one. Returns a
- *  conflict message when another update/reapply is still actively running. */
-function beginTrackerOperation(nodeId: number, conflictError: string): string | null {
+/**
+ * Clear a terminal tracker row, or time out a stale in-flight one. Returns a
+ * conflict message when another update/reapply is still actively running.
+ * A Docker endpoint replacement may legitimately outlive the five-minute
+ * tracker bound, so `endpointProviderPending` keeps the row active instead of
+ * aging it into a timeout that would invite a second mutating operation.
+ */
+async function beginTrackerOperation(
+  nodeId: number,
+  conflictError: string,
+  endpointProviderPending?: () => Promise<boolean> | boolean,
+): Promise<string | null> {
   const existing = updateTracker.get(nodeId);
   if (existing?.status === 'updating') {
     if (Date.now() - existing.startedAt > UPDATE_TIMEOUT_MS) {
+      // The node's current answer is authoritative; the tracker field is only a
+      // fallback when that answer cannot be read.
+      let pending = existing.endpointProviderPending === true;
+      if (endpointProviderPending) {
+        try {
+          pending = await endpointProviderPending();
+        } catch {
+          // Keep the fallback.
+        }
+      }
+      if (pending) return conflictError;
       updateTracker.set(nodeId, updateTracker.resolve(existing, 'timeout', UPDATE_TIMEOUT_MSG));
     } else {
       return conflictError;
@@ -1622,6 +1642,14 @@ function beginTrackerOperation(nodeId: number, conflictError: string): string | 
     updateTracker.delete(nodeId);
   }
   return null;
+}
+
+/** Whether a node is still verifying a Docker endpoint replacement, the only reason a stale tracker stays active. */
+function endpointProviderStillPending(node: { id: number; type: string }): Promise<boolean> | boolean {
+  if (node.type === 'local') return ImageOperationService.getInstance().isEndpointProviderPending();
+  return NodeRegistry.getInstance().fetchMetaForNode(node.id)
+    .then(meta => meta.endpointProviderPending === true)
+    .catch(() => false);
 }
 
 function parseRemoteUpdateFailure(payload: unknown): { error: string; code?: string } {
@@ -1784,7 +1812,11 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     if (endpointProvider === null) return;
     const replaceEndpointProvider = endpointProvider.replace;
 
-    const conflict = beginTrackerOperation(nodeId, 'Update already in progress for this node.');
+    const conflict = await beginTrackerOperation(
+      nodeId,
+      'Update already in progress for this node.',
+      () => endpointProviderStillPending(node),
+    );
     if (conflict) {
       res.status(409).json({ error: conflict });
       return;
@@ -1830,7 +1862,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(resolvedTarget))) return;
       const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion: resolvedTarget, replaceEndpointProvider });
       if (respondClaimRefused(res, claim)) return;
-      updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
+      updateTracker.set(nodeId, updateTracker.create(
+        'updating', getSenchoVersion(), null, undefined, undefined, 'update', replaceEndpointProvider,
+      ));
       res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
       // Schedule unconditionally: client abort can fire only `close` without `finish`,
       // which would otherwise leave the claimed operation stuck in pending_pull.
@@ -1878,7 +1912,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
 
-    updateTracker.set(nodeId, updateTracker.create('updating', meta.version, meta.startedAt));
+    updateTracker.set(nodeId, updateTracker.create(
+      'updating', meta.version, meta.startedAt, undefined, undefined, 'update', replaceEndpointProvider,
+    ));
     res.status(202).json({ message: `Update initiated on ${node.name}.` });
   } catch (error) {
     console.error('[Fleet] Node update error:', error);
@@ -1907,7 +1943,11 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
     if (endpointProvider === null) return;
     const replaceEndpointProvider = endpointProvider.replace;
 
-    const conflict = beginTrackerOperation(nodeId, 'An update or reapply is already in progress for this node.');
+    const conflict = await beginTrackerOperation(
+      nodeId,
+      'An update or reapply is already in progress for this node.',
+      () => endpointProviderStillPending(node),
+    );
     if (conflict) {
       res.status(409).json({ error: conflict });
       return;
@@ -1925,7 +1965,9 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       if (respondClaimRefused(res, claim)) return;
       updateTracker.set(
         nodeId,
-        updateTracker.create('updating', getSenchoVersion(), null, undefined, undefined, 'reapply_configuration'),
+        updateTracker.create(
+          'updating', getSenchoVersion(), null, undefined, undefined, 'reapply_configuration', endpointProvider.replace,
+        ),
       );
       res.status(202).json({
         message: endpointProvider.only
@@ -1996,6 +2038,7 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         undefined,
         undefined,
         'reapply_configuration',
+        endpointProvider.replace,
       );
       // A Docker-endpoint-only reapply never restarts the remote Sencho, so the
       // process-start signal cannot complete the row. The node's own completion

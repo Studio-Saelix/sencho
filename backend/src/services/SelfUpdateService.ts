@@ -8,8 +8,12 @@ import { resolveDockerEndpointProvider, type DockerEndpointContainer } from './D
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import {
+  ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
   HELPER_DATA_DIR,
   HELPER_SOCKET_PATH,
+  PROVIDER_ACK_SECONDS,
+  PROVIDER_READY_SECONDS,
   type ProviderReplaceMode,
   type ProviderReplacePlan,
   type StageResult,
@@ -23,6 +27,13 @@ import {
   type ImagePinKind,
   type ResolvedComposeImage,
 } from '../helpers/selfUpdateCompose';
+
+export {
+  ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
+  PROVIDER_ACK_SECONDS,
+  PROVIDER_READY_SECONDS,
+};
 
 const execFileAsync = promisify(execFile);
 
@@ -237,6 +248,10 @@ export function buildEndpointProviderHelperArgs(input: {
     'run', ...(mode === 'replace' ? ['-d'] : []), '--rm',
     '--user', 'root',
     '--label', 'io.sencho.helper=endpoint-provider',
+    // The operation id lets a lost `docker run` answer be classified against a
+    // helper that really exists, so an ambiguous start never releases the claim
+    // while a helper can still mutate the endpoint.
+    '--label', `io.sencho.operation=${operationId}`,
     // The Sencho image's HEALTHCHECK probes a server the helper never starts;
     // over a run of minutes it would report the helper unhealthy and alert.
     '--no-healthcheck',
@@ -250,11 +265,6 @@ export function buildEndpointProviderHelperArgs(input: {
     '/app/dist/endpointProviderHelper.js', mode, operationId,
   ];
 }
-
-/** Seconds the helper waits for the new provider to run (and be healthy, when it has a healthcheck). */
-export const PROVIDER_READY_SECONDS = 60;
-/** Seconds the helper waits for the new Sencho to confirm Docker access through the new provider. */
-export const PROVIDER_ACK_SECONDS = 180;
 
 /**
  * This process's uid/gid, passed to the root helper so the marker and outcome
@@ -281,10 +291,14 @@ function processHandoffOwner(): { uid: number; gid: number } | null {
  * host. Limiting :rw to that case keeps the helper's host write scope minimal.
  */
 export function buildSelfUpdateRunArgs(
-  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'dataDirHost' | 'hostBindMounts'> & { repinWritable?: boolean },
+  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'dataDirHost' | 'hostBindMounts'> & {
+    repinWritable?: boolean;
+    /** Compose interpolation inputs copied from this process by key, never by value. */
+    envKeys?: ReadonlyArray<string>;
+  },
   composeCmd: string,
 ): string[] {
-  const { workingDir, imageName, dataDirHost, hostBindMounts, repinWritable } = ctx;
+  const { workingDir, imageName, dataDirHost, hostBindMounts, repinWritable, envKeys = [] } = ctx;
   const mountArgs: string[] = [
     '-v', '/var/run/docker.sock:/var/run/docker.sock',
     '-v', `${workingDir}:${workingDir}:${repinWritable ? 'rw' : 'ro'}`,
@@ -303,6 +317,7 @@ export function buildSelfUpdateRunArgs(
     'run', '--rm',
     '--user', 'root',
     '--entrypoint', 'sh',
+    ...envKeys.flatMap(key => ['-e', key]),
     ...mountArgs,
     '-w', workingDir,
     imageName,
@@ -317,16 +332,20 @@ export function buildSelfUpdateRunArgs(
  * validation is read-only. Pure and exported for unit testing.
  */
 export function buildComposeConfigValidateArgs(
-  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'hostBindMounts'> & { configFiles: string },
+  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'hostBindMounts'> & {
+    configFiles: string;
+    /** The same Compose interpolation inputs the staging and replacement helpers receive. */
+    envKeys?: ReadonlyArray<string>;
+  },
 ): string[] {
-  const { workingDir, imageName, hostBindMounts, configFiles } = ctx;
+  const { workingDir, imageName, hostBindMounts, configFiles, envKeys } = ctx;
   const fFlags = configFiles.split(',').flatMap(f => {
     const trimmed = f.trim();
     return trimmed ? ['-f', trimmed] : [];
   });
   const composeCmd = ['docker compose', ...fFlags.map(shQuote), 'config'].join(' ');
   return buildSelfUpdateRunArgs(
-    { workingDir, imageName, dataDirHost: null, hostBindMounts },
+    { workingDir, imageName, dataDirHost: null, hostBindMounts, envKeys },
     composeCmd,
   );
 }
@@ -713,7 +732,7 @@ class SelfUpdateService {
       await this.runEndpointProviderReplacement(env, options.endpointProvider, 'update', composeCopy ?? null);
       return;
     }
-    this.spawnHelper(env, composeCopy, options?.successMarkerFile, options?.successMarkerContent);
+    this.spawnHelper(env, this.helperEnvKeys(env), composeCopy, options?.successMarkerFile, options?.successMarkerContent);
   }
 
   /**
@@ -737,11 +756,16 @@ class SelfUpdateService {
     try { fs.unlinkSync(STAGED_PATCH_FILE); } catch { /* absent is the steady state */ }
 
     const { workingDir, configFiles, imageName, hostBindMounts } = this.composeContext;
+    // The validation helper must interpolate the authored project with the same
+    // process values the staging and replacement helpers receive. Otherwise a
+    // required variable is refused before anything runs, and a defaulted one is
+    // validated against a different effective configuration.
+    const envKeys = this.helperEnvKeys(env);
     console.log('[SelfUpdate] Validating compose configuration before reapply...');
     try {
       await execFileAsync(
         'docker',
-        buildComposeConfigValidateArgs({ workingDir, imageName, hostBindMounts, configFiles }),
+        buildComposeConfigValidateArgs({ workingDir, imageName, hostBindMounts, configFiles, envKeys }),
         { env, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
       );
     } catch (error) {
@@ -763,7 +787,7 @@ class SelfUpdateService {
       await this.runEndpointProviderReplacement(env, options.endpointProvider, 'reapply', null);
       return;
     }
-    this.spawnHelper(env, undefined, options?.successMarkerFile, options?.successMarkerContent, false);
+    this.spawnHelper(env, envKeys, undefined, options?.successMarkerFile, options?.successMarkerContent, false);
   }
 
   /** Whether Update and Reapply can also recreate the container carrying this node's Docker API. */
@@ -915,7 +939,7 @@ class SelfUpdateService {
     let staged: StageResult;
     try {
       const { stdout } = await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'stage', composeWritable: false }), {
-        env, timeout: 10 * 60_000, maxBuffer: 10 * 1024 * 1024,
+        env, timeout: ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024,
       });
       staged = parseStageResult(stdout);
     } catch (error) {
@@ -935,17 +959,60 @@ class SelfUpdateService {
     try {
       await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'replace' }), { env, timeout: 60_000 });
     } catch (error) {
-      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
-      if (!stderr) {
-        // The CLI may have created the detached helper before its answer was
-        // lost or its 60s bound expired. It is no longer true that nothing
-        // stopped: let the outcome watcher decide instead of failing the
-        // operation and releasing the claim under a helper that still runs.
-        console.warn('[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:', getErrorMessage(error, 'docker run failed'));
+      // A CLI error never proves the daemon did not create the detached helper:
+      // the start answer can be lost, and stderr can carry a diagnostic for a
+      // container that is nevertheless running. Only a reliable negative —
+      // no container with this operation's label — allows the claim to be
+      // released. The helper sleeps 3 seconds before its first mutation, so a
+      // helper that exists is still visible to this check.
+      const timedOut = (error as { killed?: boolean; signal?: string }).killed === true
+        || !!(error as { signal?: string }).signal;
+      if (timedOut) {
+        // A client deadline says nothing about whether the daemon accepted the
+        // request; the helper may still be created. Never release ownership on it.
+        console.warn('[SelfUpdate] The replacement helper start timed out; waiting for its outcome:', getErrorMessage(error, 'docker run failed'));
         return;
       }
-      this.refuseEndpointProviderReplacement(`Nothing was stopped. The replacement helper could not start: ${stderr}`);
+      const launched = await this.replacementHelperExists(request.operationId, env);
+      if (launched !== false) {
+        console.warn(
+          '[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:',
+          getErrorMessage(error, 'docker run failed'),
+        );
+        return;
+      }
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      this.refuseEndpointProviderReplacement(
+        `Nothing was stopped. The replacement helper could not start: ${stderr || getErrorMessage(error, 'docker run failed')}`,
+      );
     }
+  }
+
+  /**
+   * Whether a detached replacement helper exists for this operation. `null`
+   * means the answer could not be read, which is treated as ambiguous and
+   * never as "nothing stopped".
+   */
+  private async replacementHelperExists(operationId: string, env: NodeJS.ProcessEnv): Promise<boolean | null> {
+    // Two looks one second apart cover a daemon that is still finishing the
+    // create after the client abandoned it. The helper cannot mutate anything
+    // for its first three seconds, so this window is still before the cutover.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { stdout } = await execFileAsync('docker', [
+          'ps', '-a',
+          '--filter', 'label=io.sencho.helper=endpoint-provider',
+          '--filter', `label=io.sencho.operation=${operationId}`,
+          '--format', '{{.ID}}',
+        ], { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
+        if (stdout.trim().length > 0) return true;
+      } catch (error) {
+        console.warn('[SelfUpdate] Could not check whether the replacement helper started:', getErrorMessage(error, 'docker ps failed'));
+        return null;
+      }
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1_000));
+    }
+    return false;
   }
 
   /**
@@ -956,6 +1023,7 @@ class SelfUpdateService {
    */
   private spawnHelper(
     env: NodeJS.ProcessEnv,
+    envKeys: ReadonlyArray<string>,
     composeCopy?: ComposeCopy,
     successMarkerFile?: string,
     successMarkerContent?: string,
@@ -986,7 +1054,7 @@ class SelfUpdateService {
       successMarkerFile,
       successMarkerContent,
     );
-    const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts, repinWritable: !!composeCopy }, composeCmd);
+    const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts, repinWritable: !!composeCopy, envKeys }, composeCmd);
 
     // Callback may never fire on success (we die mid-call during recreate);
     // that is fine because the restart itself is the success signal.

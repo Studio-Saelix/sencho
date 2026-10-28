@@ -135,6 +135,12 @@ describe('buildEndpointProviderHelperArgs', () => {
     expect(buildEndpointProviderHelperArgs({ ...input, mode: 'replace' })).toContain('--no-healthcheck');
   });
 
+  it('labels the helper with its operation so a lost start answer can be classified', () => {
+    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'replace' });
+    expect(args).toContain('io.sencho.operation=' + OP);
+    expect(args[args.indexOf('io.sencho.operation=' + OP) - 1]).toBe('--label');
+  });
+
   it('runs the running image by ID with the helper entry point', () => {
     const args = buildEndpointProviderHelperArgs({ ...input, mode: 'stage' });
     expect(args.slice(-4)).toEqual(['sha256:running', '/app/dist/endpointProviderHelper.js', 'stage', OP]);
@@ -214,23 +220,28 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     });
   });
 
-  it('hands the process environment to both helper runs by key, never by value', async () => {
+  it('hands the process environment to validation, staging and replacement by key, never by value', async () => {
     process.env.SENCHO_ENDPOINT_TEST_TOKEN = 'compose-value';
-    const keys: string[] = [];
+    const keysByCall: string[][] = [];
     const envs: NodeJS.ProcessEnv[] = [];
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
-      if (args.includes('stage') || args.includes('replace')) {
-        for (let index = 0; index < args.length; index += 1) {
-          if (args[index] === '-e' && args[index + 1]) keys.push(args[index + 1]);
-        }
-        envs.push(options?.env ?? {});
+      const callKeys: string[] = [];
+      for (let index = 0; index < args.length; index += 1) {
+        if (args[index] === '-e' && args[index + 1]) callKeys.push(args[index + 1]);
       }
+      keysByCall.push(callKeys);
+      envs.push(options?.env ?? {});
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       return { stdout: '', stderr: '' };
     });
     try {
       await service().triggerComposeReapply({ endpointProvider: request });
+      const keys = keysByCall.flat();
       expect(keys).toContain('SENCHO_ENDPOINT_TEST_TOKEN');
+      // The preliminary validation render needs the same values as the helpers,
+      // or a required variable is refused before anything runs.
+      expect(keysByCall[0]).toContain('SENCHO_ENDPOINT_TEST_TOKEN');
+      expect(keysByCall[0].every(key => !key.includes('='))).toBe(true);
       expect(keys).not.toContain('DOCKER_HOST');
       expect(keys).not.toContain('PATH');
       expect(keys).not.toContain('SENCHO_HANDOFF_UID');
@@ -238,6 +249,28 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
       expect(keys.join(' ')).not.toContain('compose-value');
     } finally {
       delete process.env.SENCHO_ENDPOINT_TEST_TOKEN;
+    }
+  });
+
+  it('forwards the Compose environment to the Sencho-only Reapply validation and recreate helpers', async () => {
+    process.env.SENCHO_REAPPLY_TEST_TOKEN = 'compose-value';
+    const keysByCall: string[][] = [];
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      const callKeys: string[] = [];
+      for (let index = 0; index < args.length; index += 1) {
+        if (args[index] === '-e' && args[index + 1]) callKeys.push(args[index + 1]);
+      }
+      keysByCall.push(callKeys);
+      return { stdout: '', stderr: '' };
+    });
+    try {
+      await service().triggerComposeReapply();
+      expect(keysByCall[0]).toContain('SENCHO_REAPPLY_TEST_TOKEN');
+      const recreateArgs = mockExecFile.mock.calls[0][1] as string[];
+      expect(recreateArgs).toContain('SENCHO_REAPPLY_TEST_TOKEN');
+      expect(recreateArgs.join(' ')).not.toContain('compose-value');
+    } finally {
+      delete process.env.SENCHO_REAPPLY_TEST_TOKEN;
     }
   });
 
@@ -307,7 +340,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     expect(instance.getLastError()).toContain('does not bind-mount the host Docker socket');
   });
 
-  it('reports a helper that cannot start as nothing stopped', async () => {
+  it('reports a helper that cannot start as nothing stopped when no helper container exists', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'No such image: sha256:running' });
@@ -323,6 +356,8 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
+      // The operation's helper exists even though the start answer was lost.
+      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -331,6 +366,80 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     // watcher decides instead of a false "nothing was stopped" failure.
     expect(instance.getLastError()).toBeNull();
     expect(instance.getLastErrorCode()).toBeNull();
+  });
+
+  it('does not treat a losing start answer with stderr as a refusal when the helper exists', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) {
+        // What a dropped connection looks like: Docker started the helper, then
+        // the CLI reported EOF on stderr. Nonempty stderr is not proof of failure.
+        throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
+      }
+      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toBeNull();
+    expect(instance.getLastErrorCode()).toBeNull();
+  });
+
+  it('does not treat a losing start answer with a Buffer stderr as a refusal when the helper exists', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: Buffer.from('daemon said EOF') });
+      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toBeNull();
+  });
+
+  it.each([
+    ['provider-only reapply', (instance: SelfUpdateService, request: EndpointProviderRequest) =>
+      instance.triggerComposeReapply({ endpointProvider: { ...request, scope: 'provider' } })],
+    ['shared update', (instance: SelfUpdateService, request: EndpointProviderRequest) =>
+      instance.triggerUpdate({ endpointProvider: request })],
+  ])('keeps ownership for an ambiguous %s start with stderr and a live helper', async (_label, run) => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
+      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await run(instance, request);
+    expect(instance.getLastError()).toBeNull();
+    expect(instance.getLastErrorCode()).toBeNull();
+  });
+
+  it('refuses with the launch diagnostic when the helper really was not created', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
+      // No container carries this operation's label, so this is a definitive
+      // rejection even though stderr is nonempty.
+      if (args[0] === 'ps') return { stdout: '', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toContain('Nothing was stopped. The replacement helper could not start: Error response from daemon: EOF');
+    expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
+  });
+
+  it('keeps ownership when the helper existence check itself cannot answer', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'lost answer' });
+      if (args[0] === 'ps') throw new Error('docker ps unavailable');
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toBeNull();
   });
 
   it('keeps the Sencho-only Reapply on the attached helper with --no-deps', async () => {

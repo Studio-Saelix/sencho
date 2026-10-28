@@ -420,6 +420,42 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
   });
 });
 
+describe('Fleet tracker during an endpoint replacement', () => {
+  it('does not age an active endpoint replacement out of the tracker', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(localNodeId, {
+      ...tracker.create('updating', '0.83.0', null, undefined, undefined, 'reapply_configuration'),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    vi.spyOn(ImageOperationService.getInstance(), 'isEndpointProviderPending').mockReturnValue(true);
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${localNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('already in progress');
+    expect(claimReapply).not.toHaveBeenCalled();
+    expect(tracker.get(localNodeId)?.status).toBe('updating');
+  });
+
+  it('still reaps a stale tracker once the endpoint replacement is no longer pending', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(localNodeId, {
+      ...tracker.create('updating', '0.83.0', null, undefined, undefined, 'reapply_configuration'),
+      startedAt: Date.now() - 6 * 60_000,
+    });
+    vi.spyOn(ImageOperationService.getInstance(), 'isEndpointProviderPending').mockReturnValue(false);
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${localNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(202);
+    expect(claimReapply).toHaveBeenCalled();
+  });
+});
+
 describe('GET /api/meta', () => {
   it('exposes the bounded failure code and the pending flag, never the text', async () => {
     const svc = SelfUpdateService.getInstance();

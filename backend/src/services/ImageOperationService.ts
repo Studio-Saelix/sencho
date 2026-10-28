@@ -1,7 +1,10 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
-import SelfUpdateService, { PROVIDER_ACK_SECONDS, PROVIDER_READY_SECONDS } from './SelfUpdateService';
+import SelfUpdateService, {
+  ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
+} from './SelfUpdateService';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
@@ -67,6 +70,12 @@ export interface ImageOperation {
   preflightFingerprint?: string;
   /** Set when the operation also recreates the container carrying this node's Docker API. */
   endpointProvider?: OperationEndpointProvider;
+  /**
+   * Set when this version launched the helper with its operation label, so
+   * reconciliation may conclude the helper is gone from Docker's container
+   * list. Older records keep waiting out the full lifetime bound.
+   */
+  helperLabelVersion?: 1;
 }
 
 export type HardenedPreflight =
@@ -142,8 +151,17 @@ export class ImageOperationService {
     /** Ceiling for one Docker request (ping, list, inspect) inside a verification loop. */
     requestMs: 10_000,
     verifyMs: 90_000,
-    outcomeMs: 180_000,
-    watchMs: (PROVIDER_READY_SECONDS * 2 + PROVIDER_ACK_SECONDS + 120) * 1000,
+    /**
+     * How long a restarted process waits for the helper's phase marker and
+     * verdict. It covers the claim's staging plus the helper's whole permitted
+     * lifetime; the claim is never released while the helper can still mutate.
+     */
+    outcomeMs: ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
+    /**
+     * How long the process that spawned the helper waits. It must outlast the
+     * helper's compose commands, ack wait and rollback, not only its marker.
+     */
+    watchMs: ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
     /** How long a restored endpoint gets to answer, when this process is still alive to check it. */
     recoveryMs: 15_000,
   };
@@ -449,7 +467,8 @@ export class ImageOperationService {
    */
   private watchEndpointProviderOutcome(operation: ImageOperation): void {
     void (async () => {
-      const outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.watchMs);
+      const deadline = Date.now() + this.endpointProviderTimings.watchMs;
+      const outcome = await this.waitForProviderOutcome(operation, deadline);
       await this.finalizeEndpointProvider(operation, outcome);
     })().catch(async error => {
       // The watcher is a finalizer too: an unexpected throw must not leave the
@@ -481,15 +500,20 @@ export class ImageOperationService {
     this.endpointProviderPending = true;
     this.setLocalTracker(operation, 'updating');
     try {
+      // One lifecycle deadline covers the marker, the ack and the verdict. It is
+      // measured from the claim so a process that restarts late does not grant
+      // the helper a fresh lifetime, and never ends before the helper's own
+      // bounds have elapsed.
+      const deadline = this.endpointProviderDeadline(operation);
       let outcome = await this.readProviderOutcome(operation);
       if (!outcome) {
-        const phase = await this.waitForProviderPhase(operation, this.endpointProviderTimings.outcomeMs);
+        const phase = await this.waitForProviderPhase(operation, deadline);
         if (phase.kind === 'outcome') {
           outcome = phase.outcome;
         } else if (phase.kind === 'recreated') {
           const ack = await this.verifyDockerThroughProvider(operation, provider);
           await this.writeProviderAck(operation, ack);
-          outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.outcomeMs);
+          outcome = await this.waitForProviderOutcome(operation, deadline);
         }
         // `timeout`: neither marker nor verdict, so the old provider must not be
         // acknowledged as the replacement. The absent outcome below is terminal.
@@ -523,7 +547,8 @@ export class ImageOperationService {
     void (async () => {
       this.endpointProviderPending = true;
       this.setLocalTracker(operation, 'updating');
-      const phase = await this.waitForProviderPhase(operation, this.endpointProviderTimings.watchMs);
+      const deadline = Date.now() + this.endpointProviderTimings.watchMs;
+      const phase = await this.waitForProviderPhase(operation, deadline);
       if (phase.kind === 'outcome') {
         await this.finalizeEndpointProvider(operation, phase.outcome);
         return;
@@ -534,7 +559,7 @@ export class ImageOperationService {
       }
       // No marker: the replacement may not exist yet, so nothing is answered.
       // The helper's own deadline decides, and its outcome carries the verdict.
-      const outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.outcomeMs);
+      const outcome = await this.waitForProviderOutcome(operation, deadline);
       await this.finalizeEndpointProvider(operation, outcome);
     })().catch(async error => {
       // An unexpected throw must not leave the node "verifying" forever with the
@@ -564,19 +589,73 @@ export class ImageOperationService {
   }
 
   /**
+   * Absolute deadline for an operation's helper. A fresh claim grants the
+   * staging bound plus the helper's whole lifetime; a process that restarts
+   * only gets what remains of that window. Test timings may shorten it, never
+   * lengthen it past the helper's own bounds.
+   */
+  private endpointProviderDeadline(operation: ImageOperation): number {
+    const now = Date.now();
+    const configured = this.endpointProviderTimings.outcomeMs;
+    const started = Date.parse(operation.startedAt);
+    if (!Number.isFinite(started)) return now + configured;
+    const remaining = started + ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000 - now;
+    return now + Math.max(0, Math.min(configured, remaining));
+  }
+
+  /**
+   * True only when Docker conclusively shows no helper for this operation that
+   * can still run. An unreadable answer is never treated as terminated.
+   */
+  private async helperHasTerminated(operation: ImageOperation): Promise<boolean> {
+    if (operation.helperLabelVersion !== 1) return false;
+    try {
+      const docker = DockerController.getInstance().getDocker();
+      const containers = await this.boundedDockerCall(
+        'Docker helper list',
+        Date.now() + this.endpointProviderTimings.requestMs,
+        signal => docker.listContainers({
+          all: true,
+          abortSignal: signal,
+          filters: {
+            label: [
+              'io.sencho.helper=endpoint-provider',
+              `io.sencho.operation=${operation.operationId}`,
+            ],
+          },
+        }),
+      );
+      // `created` is about to run; exited/dead cannot mutate any more. `--rm`
+      // helpers disappear entirely once they exit.
+      return !containers.some(container => container.State !== 'exited' && container.State !== 'dead');
+    } catch {
+      // Docker may not be reachable through the replacement yet (the cached
+      // client still points at the container that was just replaced). Drop it
+      // and keep waiting; the next poll dials the current provider.
+      try {
+        DockerController.getInstance().resetDockerConnection();
+      } catch {
+        // DockerController itself may be unavailable in a torn-down process.
+      }
+      return false;
+    }
+  }
+
+  /**
    * Waits for either the helper's durable phase marker (the provider exists) or
    * its outcome. A timeout is kept distinct: without the marker there is nothing
    * to verify yet, and answering would let a stalled recreate pass as a success.
+   * The helper's disappearance without a verdict also ends the wait.
    */
   private async waitForProviderPhase(
     operation: ImageOperation,
-    timeoutMs: number,
+    deadline: number,
   ): Promise<{ kind: 'outcome'; outcome: ProviderOutcome } | { kind: 'recreated' } | { kind: 'timeout' }> {
-    const deadline = Date.now() + timeoutMs;
     for (;;) {
       const outcome = await this.readProviderOutcome(operation);
       if (outcome) return { kind: 'outcome', outcome };
       if (await this.providerWasRecreated(operation)) return { kind: 'recreated' };
+      if (await this.helperHasTerminated(operation)) return { kind: 'timeout' };
       if (Date.now() >= deadline) return { kind: 'timeout' };
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
     }
@@ -684,11 +763,12 @@ export class ImageOperationService {
     }
   }
 
-  private async waitForProviderOutcome(operation: ImageOperation, timeoutMs: number): Promise<ProviderOutcome | null> {
-    const deadline = Date.now() + timeoutMs;
+  private async waitForProviderOutcome(operation: ImageOperation, deadline: number): Promise<ProviderOutcome | null> {
     for (;;) {
       const outcome = await this.readProviderOutcome(operation);
-      if (outcome || Date.now() >= deadline) return outcome;
+      if (outcome) return outcome;
+      if (await this.helperHasTerminated(operation)) return null;
+      if (Date.now() >= deadline) return null;
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
     }
   }
@@ -832,7 +912,12 @@ export class ImageOperationService {
       resolved?.filePath ?? null,
       selfUpdate.getComposeServiceName(),
     );
-    if (endpointProvider) operation.endpointProvider = endpointProvider;
+    if (endpointProvider) {
+      operation.endpointProvider = endpointProvider;
+      // The helper is launched with `io.sencho.operation=<id>`, so reconciliation
+      // can distinguish "still running" from "gone without a verdict".
+      operation.helperLabelVersion = 1;
+    }
     if (!await this.tryClaim(operation)) {
       return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
     }

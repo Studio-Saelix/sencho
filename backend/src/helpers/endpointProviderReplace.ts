@@ -26,6 +26,29 @@ export const HELPER_DATA_DIR = '/app/data';
 /** Where the helper container mounts the provider's host socket. */
 export const HELPER_SOCKET_PATH = '/var/run/docker.sock';
 
+/** Seconds the helper waits for a recreated provider to run (and be healthy, when it has a healthcheck). */
+export const PROVIDER_READY_SECONDS = 60;
+/** Seconds the helper waits for Sencho to confirm Docker access through the new provider. */
+export const PROVIDER_ACK_SECONDS = 180;
+/** Ceiling for one Docker API call made by the helper, so a hung socket cannot stall recovery. */
+export const HELPER_DOCKER_TIMEOUT_MS = 30_000;
+/** Ceiling for one Compose command run by the helper. */
+export const HELPER_COMPOSE_TIMEOUT_MS = 10 * 60_000;
+/** Ceiling for the attached staging helper (it validates, pulls, and snapshots). */
+export const ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS = 10 * 60_000;
+/**
+ * How long the detached helper may still mutate the endpoint, from spawn to
+ * final exit. It bounds every Compose command, the ack wait and a rollback
+ * (Docker calls, restore, readiness), so a consumer must not release the
+ * operation claim before this has elapsed.
+ */
+export const ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS =
+  3_000 // the deliberate pause that lets the route answer first
+  + HELPER_COMPOSE_TIMEOUT_MS * 2 // provider and Sencho recreation
+  + PROVIDER_ACK_SECONDS * 1_000
+  + 10 * 60_000 // rollback: container calls, restore, readiness
+  + 60_000; // scheduling and handoff-write slack
+
 export type ProviderReplaceMode = 'update' | 'reapply';
 
 /**
@@ -124,6 +147,13 @@ export interface HelperDeps {
   sleep(ms: number): Promise<void>;
   now(): number;
   log(message: string): void;
+  /** Base directory for handoff files. Defaults to the helper's `/app/data` mount. */
+  dataDir?: string;
+}
+
+/** Where this helper writes its handoff files. */
+function handoffBase(deps: HelperDeps): string {
+  return deps.dataDir ?? HELPER_DATA_DIR;
 }
 
 export function operationDir(dataDir: string, operationId: string): string {
@@ -198,7 +228,7 @@ export async function stageProviderReplacement(plan: ProviderReplacePlan, deps: 
     return { ok: false, message: `Could not pull ${providerImage} for "${plan.providerService}": ${trimOutput(pulled.output)}` };
   }
 
-  await deps.writeJson(helperFiles.snapshot(HELPER_DATA_DIR, plan.operationId), current);
+  await deps.writeJson(helperFiles.snapshot(handoffBase(deps), plan.operationId), current);
   return { ok: true, providerImage, previousImageId: current.Image, previousImageRef: current.Config.Image ?? null };
 }
 
@@ -255,7 +285,7 @@ async function waitReady(deps: HelperDeps, containerId: string, seconds: number)
 /** Puts the snapshot back: removes whatever now holds the service, recreates the old container and waits for it. */
 export async function restoreProvider(plan: ProviderReplacePlan, deps: HelperDeps): Promise<string | null> {
   try {
-    const snapshot = await deps.readJson(helperFiles.snapshot(HELPER_DATA_DIR, plan.operationId)) as ContainerSnapshot | null;
+    const snapshot = await deps.readJson(helperFiles.snapshot(handoffBase(deps), plan.operationId)) as ContainerSnapshot | null;
     if (!snapshot) return 'the rollback snapshot is missing';
     for (const id of await deps.docker.serviceContainers(plan.project, plan.providerService)) {
       await deps.docker.remove(id);
@@ -272,7 +302,7 @@ export async function restoreProvider(plan: ProviderReplacePlan, deps: HelperDep
 }
 
 async function readAck(plan: ProviderReplacePlan, deps: HelperDeps): Promise<ProviderAck | null> {
-  const raw = await deps.readJson(helperFiles.ack(HELPER_DATA_DIR, plan.operationId));
+  const raw = await deps.readJson(helperFiles.ack(handoffBase(deps), plan.operationId));
   if (!raw || typeof raw !== 'object') return null;
   const ack = raw as Partial<ProviderAck>;
   if (ack.operationId !== plan.operationId || typeof ack.ok !== 'boolean') return null;
@@ -284,6 +314,7 @@ async function readAck(plan: ProviderReplacePlan, deps: HelperDeps): Promise<Pro
  * decides the outcome from Sencho's ack. Writes exactly one outcome file.
  */
 export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDeps): Promise<ProviderOutcome> {
+  const dataDir = handoffBase(deps);
   /** The helper log is diagnostic. A broken stderr stream must never skip recovery. */
   const log = (message: string): void => {
     try {
@@ -299,7 +330,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
    */
   const publishOutcome = async (outcome: ProviderOutcome): Promise<void> => {
     try {
-      await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+      await deps.writeJson(helperFiles.outcome(dataDir, plan.operationId), outcome);
     } catch (error) {
       log(`could not write the outcome file: ${errorText(error)}`);
     }
@@ -311,7 +342,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
     // The marker means "the replacement is installed". A restored (or unknown)
     // endpoint must not leave it behind for a later process to acknowledge.
     try {
-      await deps.removeFile(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId));
+      await deps.removeFile(helperFiles.recreated(dataDir, plan.operationId));
     } catch (removeError) {
       log(`could not remove the recreation marker: ${errorText(removeError)}`);
     }
@@ -360,7 +391,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
     // be written before the old container was ever replaced. A write failure is
     // itself a reason to recover: the helper cannot announce the new provider.
     try {
-      await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
+      await deps.writeJson(helperFiles.recreated(dataDir, plan.operationId), {
         operationId: plan.operationId,
         at: deps.now(),
       });
@@ -391,7 +422,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
 
     const outcome: ProviderOutcome = { operationId: plan.operationId, ok: true };
     try {
-      await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+      await deps.writeJson(helperFiles.outcome(dataDir, plan.operationId), outcome);
     } catch (error) {
       // Sencho would wait out its deadline with no verdict. Treat an
       // unpublishable success as a verification failure so recovery runs.
