@@ -308,6 +308,44 @@ describe('execute (the process that spawns the helper)', () => {
     expect(service.isEndpointProviderPending()).toBe(false);
   });
 
+  it('consumes a restored verdict published while settlement waits for the helper to exit', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    // The verdict poll gives up while the helper still runs. Settlement then
+    // waits for it, and that wait ends when the helper exits with its restored
+    // verdict.
+    service.endpointProviderTimings = { pollMs: 10_000, requestMs: 20, verifyMs: 60, outcomeMs: 200, watchMs: 0, recoveryMs: 20 };
+    let operationId = '';
+    let helperChecks = 0;
+    let published = false;
+    const dockerOptions: MockDockerOptions = { helperRunning: true };
+    dockerOptions.onHelperList = async () => {
+      helperChecks += 1;
+      if (helperChecks < 3) return;
+      dockerOptions.helperRunning = false;
+      if (published) return;
+      published = true;
+      await writeOutcome(operationId, {
+        ok: false,
+        phase: 'verify',
+        error: 'the new proxy is unhealthy',
+        rollback: { attempted: true, restored: true, error: null },
+      });
+    };
+    mockDocker(dockerOptions);
+    await service.claimComposeReapply({ replace: true });
+    operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+      failureDetail: expect.stringContaining('was restored and Sencho reaches Docker again'),
+    });
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
   it('marks recovery required when the helper never reports within the bound', async () => {
     const selfUpdate = mockAvailableProvider();
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);

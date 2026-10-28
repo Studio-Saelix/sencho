@@ -43,9 +43,14 @@ export function DockerEndpointProtectedDialog({
   const option = useEndpointProviderOption(nodeId, open);
   const nodeLabel = nodeName?.trim() || 'this node';
   const provider = option?.state === 'available' ? option.service : null;
+  const bare = (name: string | null | undefined) => name?.replace(/^\//, '') ?? null;
   // A labeled container in another stack is also reason `provider`, but only the
-  // endpoint provider itself can be replaced by this action.
-  const protectedProvider = service === null ? provider !== null : service === provider;
+  // endpoint provider itself can be replaced by this action. The guard may name
+  // the provider by its Compose service or by its container name.
+  const protectedProvider = option?.state === 'available'
+    && (service === null
+      || service === option.service
+      || bare(service) === bare(option.containerName));
   const providerOnly = option?.state === 'available' && option.providerOnly === true;
   const eligible = reason === 'provider' && canRecreate && provider !== null && protectedProvider && providerOnly && !!onRecreate;
 
@@ -69,10 +74,14 @@ export function DockerEndpointProtectedDialog({
     note = `${nodeLabel} runs a Sencho version that can only recreate its Docker endpoint together with Sencho. Update the node first to replace the endpoint on its own.`;
   } else if (option?.state === 'none') {
     note = `${nodeLabel} reaches Docker without a container, so there is no Docker endpoint to recreate.`;
-  } else if (reason === 'provider' && !protectedProvider) {
-    note = `The guard protected ${service ?? 'a container'} in this stack, and recreating the Docker endpoint would not change it. Recreate that service from the host (docker compose up -d) while Sencho is idle.`;
   } else if (!canRecreate) {
+    // Keep this before the unknown-option branch: a non-admin cannot read the
+    // endpoint option at all, so null there says nothing about the provider.
     note = `An admin who can reapply ${nodeLabel}'s Compose configuration can recreate the Docker endpoint safely.`;
+  } else if (option === null) {
+    note = `Sencho could not confirm ${nodeLabel}'s Docker endpoint, so it cannot say whether this operation protected it. Refresh and try again.`;
+  } else if (option.state === 'available' && !protectedProvider) {
+    note = `The guard protected ${service ?? 'a container'} in this stack, and recreating the Docker endpoint would not change it. Recreate that service from the host (docker compose up -d) while Sencho is idle.`;
   } else {
     note = `No safe replacement is available for ${nodeLabel}.`;
   }

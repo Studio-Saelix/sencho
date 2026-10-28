@@ -237,6 +237,7 @@ describe('the Docker socket proxy', () => {
 
     expect(refusal).toMatchObject({ reason: 'provider', service: 'socket-proxy' });
     expect(refusal?.message).toContain('same Compose project as Sencho');
+    expect(refusal?.message).toContain('if this node offers');
     expect(refusal?.message).toContain('Recreate Docker endpoint');
     expect(refusal?.message).toContain('docker compose up -d');
   });
@@ -1224,6 +1225,26 @@ describe('evaluateDockerEndpointContainer', () => {
     });
 
     expect(await evaluate(PROXY_ID, 'stop')).toMatchObject({ reason: 'provider' });
+  });
+
+  it('names the in-app replacement when the provider has no service label and is matched by container name', async () => {
+    mockResolveProvider.mockResolvedValue({
+      state: 'resolved',
+      provider: { containerId: PROXY_ID, containerName: 'sencho-socket-proxy-1', project: 'sencho', service: null, workingDir: null, socketBindSource: null },
+    });
+    const labels = specs[PROXY_ID].labels!;
+    const serviceLabel = labels['com.docker.compose.service']!;
+    delete labels['com.docker.compose.service'];
+    specs[PROXY_ID].Name = '/sencho-socket-proxy-1';
+    try {
+      const refusal = await evaluate(PROXY_ID, 'stop');
+
+      expect(refusal).toMatchObject({ reason: 'provider', service: 'sencho-socket-proxy-1' });
+      expect(refusal?.message).toContain('Recreate Docker endpoint');
+    } finally {
+      labels['com.docker.compose.service'] = serviceLabel;
+      specs[PROXY_ID].Name = '/socket-proxy';
+    }
   });
 
   it('refuses a container that carries the infrastructure label', async () => {

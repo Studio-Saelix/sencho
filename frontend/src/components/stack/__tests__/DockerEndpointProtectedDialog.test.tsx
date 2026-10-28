@@ -83,6 +83,22 @@ describe('DockerEndpointProtectedDialog', () => {
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
   });
 
+  it('says an admin can recreate a non-admin\'s protected provider even when the option cannot be read', async () => {
+    // The endpoint option route is admin-only, so a non-admin sees no option.
+    apiFetchMock.mockResolvedValue(new Response('', { status: 403 }));
+    renderDialog({ canRecreate: false, onRecreate: undefined });
+    expect(await screen.findByText(/An admin who can reapply edge-1/)).toBeInTheDocument();
+    expect(screen.queryByText(/would not change it/)).toBeNull();
+  });
+
+  it('matches the provider by its container name as well as its Compose service', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    const props = renderDialog({ service: 'edge-socket-proxy-1' });
+    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/ }));
+    expect(props.onRecreate).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the guard\'s own message', () => {
     option({ state: 'none' });
     renderDialog({ message: 'Deploy refused: the proxy would be recreated.' });

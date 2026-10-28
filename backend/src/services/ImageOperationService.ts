@@ -495,7 +495,7 @@ export class ImageOperationService {
       return;
     }
     if (await this.helperHasTerminated(operation)) {
-      // The helper writes its verdict with an atomic rename, then exits. A
+      // The helper writes its verdict with an atomic rename before it exits. A
       // failed read just before that write can be followed by the helper
       // disappearing, so a check that sees it gone reads once more. A verdict
       // that exists is used to settle the failure; otherwise the caller's
@@ -929,8 +929,8 @@ export class ImageOperationService {
     // second operation stays refused.
     if (!outcome) {
       if (await this.helperHasTerminated(operation)) {
-        // The helper writes its verdict with an atomic rename and then exits. A
-        // poll can read just before that write and then observe the helper
+        // The helper writes its verdict with an atomic rename before it exits.
+        // A poll can read just before that write and then observe the helper
         // gone, so the settlement looks once more before deciding there is no
         // verdict.
         outcome = await this.readProviderOutcome(operation);
