@@ -27,11 +27,18 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
+import { useServiceUrls } from './EditorLayout/hooks/useServiceUrls';
+import { ServiceUrlModal } from './EditorLayout/ServiceUrlModal';
+import { patchServiceUrlLabel } from '@/lib/composeServiceUrl';
+import { commitServiceUrlWrite } from '@/lib/serviceUrlWrite';
+import { serviceKeyGet, serviceUrlClearBlockedMessage, serviceUrlClearState, serviceUrlSaveBlockedMessage } from '@/lib/serviceUrlResolve';
+import { sameServiceUrlTarget, type ServiceUrlDialogTarget } from '@/lib/serviceUrlTarget';
+import { confirmComposeSourceReload } from '@/lib/composeSourceConflict';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
 import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
-import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
+import { useComposeReapplyAction, type ComposeReapplyTarget } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
     GlobalCommandPalette,
@@ -79,6 +86,9 @@ import { MobileGitOps } from './mobile/MobileGitOps';
 import { MobileSchedules } from './mobile/MobileSchedules';
 import { MobileSettings } from './mobile/MobileSettings';
 import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surface';
+import { useNavigateEventSurface } from './EditorLayout/hooks/useNavigateEventSurface';
+import { openPolicySettings } from './EditorLayout/openPolicySettings';
+import { useNodeViewQueue } from './EditorLayout/hooks/useNodeViewQueue';
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
 import { HubOnlyGate } from './HubOnlyGate';
@@ -142,6 +152,7 @@ export default function EditorLayout() {
     content, setContent,
     envContent, setEnvContent,
     envExists,
+    envInventoryFailed,
     envFiles,
     selectedEnvFile,
     containers,
@@ -239,6 +250,10 @@ export default function EditorLayout() {
   // Save Only stays available regardless.
   const canSaveAndReapply =
     actionsReady && resolveCanSaveAndReapply(isAdmin, canReapplyCompose, isSelfStackSelected);
+  const reapplySelfTarget: ComposeReapplyTarget | null =
+    isAdmin && canReapplyCompose && activeNode
+      ? { nodeId: activeNode.id, type: activeNode.type === 'local' ? 'local' : 'remote', name: activeNode.name }
+      : null;
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -287,10 +302,14 @@ export default function EditorLayout() {
   const onDeletedOpenStackRef = useRef<() => void>(() => {});
   // openViewOnNode is declared further down; assigned once it exists.
   const hubOnlyFromRemoteRef = useRef<(apply: () => void) => void>(() => {});
+  // A navigate event from any dispatcher brings a phone to its content surface
+  // before the view changes; connected once the mobile surface helpers exist.
+  const navigateEventSurface = useNavigateEventSurface();
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
     onHubOnlyFromRemote: (apply) => hubOnlyFromRemoteRef.current(apply),
+    onNavigateEvent: navigateEventSurface.onNavigateEvent,
     hasFleetCapability: hasCapability('fleet'),
     containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
@@ -353,6 +372,7 @@ export default function EditorLayout() {
     unreportedNodeIds,
     tickerConnected,
     markAllRead,
+    markRead,
     deleteNotification,
     clearAllNotifications,
     removeNotificationsForStack,
@@ -369,6 +389,10 @@ export default function EditorLayout() {
   );
 
   const serviceUpdateStatuses = useServiceUpdateStatus(stackUpdates, selectedFile);
+  const serviceUrlsRef = useRef<import('@/lib/serviceUrlResolve').ServiceUrlEntry | null>(null);
+  const onStackFilesChangedRef = useRef<() => void>(() => {});
+  const selectedFileRef = useRef(selectedFile);
+  const canRef = useRef(can);
 
   const stackActions = useStackActions({
     editorState,
@@ -388,6 +412,8 @@ export default function EditorLayout() {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
       return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
+    serviceUrlsRef,
+    onStackFilesChanged: () => onStackFilesChangedRef.current(),
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
     removeNotificationsForStack,
@@ -401,6 +427,43 @@ export default function EditorLayout() {
 
   // Wire the ref now that stackActions is available
   resetEditorStateRef.current = stackActions.resetEditorState;
+
+  const { entry: serviceUrlEntry, refresh: refreshServiceUrls } = useServiceUrls(activeNode?.id ?? null, selectedFile);
+  useEffect(() => {
+    selectedFileRef.current = selectedFile;
+    activeNodeIdRef.current = activeNode?.id ?? null;
+    canRef.current = can;
+    serviceUrlsRef.current = serviceUrlEntry;
+    onStackFilesChangedRef.current = () => { void refreshServiceUrls(); };
+  }, [selectedFile, activeNode?.id, can, serviceUrlEntry, refreshServiceUrls]);
+
+  const [serviceUrlTarget, setServiceUrlTarget] = useState<ServiceUrlDialogTarget | null>(null);
+  const [serviceUrlDirty, setServiceUrlDirty] = useState(false);
+  const [serviceUrlSaving, setServiceUrlSaving] = useState(false);
+  const [serviceUrlVerify, setServiceUrlVerify] = useState<string | null>(null);
+  const [serviceUrlEditBlock, setServiceUrlEditBlock] = useState<string | null>(null);
+  const [serviceUrlEditBlockId, setServiceUrlEditBlockId] = useState(0);
+  // An edit to the open compose buffer can make a refused save possible again.
+  const serviceUrlContentSeen = useRef(content);
+  if (serviceUrlContentSeen.current !== content) {
+    serviceUrlContentSeen.current = content;
+    if (serviceUrlEditBlock !== null) setServiceUrlEditBlock(null);
+  }
+  if (serviceUrlTarget && !sameServiceUrlTarget(serviceUrlTarget, {
+    nodeId: activeNode?.id ?? null,
+    stackName: selectedFile,
+  })) {
+    setServiceUrlTarget(null);
+    setServiceUrlVerify(null);
+    setServiceUrlEditBlock(null);
+  }
+
+  const serviceUrlVerifyTarget = useRef<{
+    nodeId: number | null;
+    stackName: string;
+    service: string;
+    url: string | null;
+  } | null>(null);
 
   const { syncStale: containersSyncStale, retrySync: retryContainersSync } = useSelectedStackLiveRefresh({
     selectedFile,
@@ -456,18 +519,21 @@ export default function EditorLayout() {
     activeNode,
     isAdmin,
     can,
+    serviceUrlEntry,
   });
 
   const {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
-  // Pending-intent target for a cross-node "open this node's <view>" request
-  // (a Fleet networking signal, a Readiness security finding). Mirrors
-  // pendingStackLoadRef: setActiveNode first, then the node-settled effect below
-  // opens the view once activeNode actually reflects the target, so the view
-  // never briefly mounts and fetches against the previous node.
-  const pendingNodeViewRef = useRef<{ nodeId: number; open: () => void } | null>(null);
+  // Cross-node "open this node's <view>" requests (a Fleet networking signal, a
+  // Readiness security finding). Mirrors pendingStackLoadRef: setActiveNode
+  // first, then the node-settled effect below opens the view once activeNode
+  // actually reflects the target, so the view never briefly mounts and fetches
+  // against the previous node.
+  const {
+    openViewOnNode, takeQueuedView, dropQueuedView, parkForConfirmation,
+  } = useNodeViewQueue({ nodes, activeNode, setActiveNode });
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -609,6 +675,8 @@ export default function EditorLayout() {
     });
   };
 
+  navigateEventSurface.connect(isMobile, (then) => leaveToMobileSurface('content', then));
+
   const goToMobileList = () => leaveToMobileSurface('list');
   const navigateMobileAware = (view: string) => leaveToMobileSurface('content', () => handleNavigate(view));
   const openSettingsMobileAware = (section?: SectionId) =>
@@ -682,21 +750,6 @@ export default function EditorLayout() {
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
 
-  // Open a node-scoped view (Networking from a Fleet card's networking signal,
-  // Security from a Readiness finding). Pending-intent gated (see
-  // pendingNodeViewRef above): if the node is already active, navigate
-  // immediately; otherwise switch nodes first and let the node-settled effect
-  // complete the navigation once activeNode reflects the switch.
-  const openViewOnNode = (nodeId: number, open: () => void) => {
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
-    if (activeNode?.id === nodeId) {
-      open();
-      return;
-    }
-    pendingNodeViewRef.current = { nodeId, open };
-    setActiveNode(node);
-  };
   // A hub-only destination (GitOps, Fleet, ...) asked for from a remote node,
   // e.g. a stack's Git indicator: switch to the hub, then open it there, the
   // same way Home reaches Fleet from a remote node.
@@ -717,6 +770,12 @@ export default function EditorLayout() {
   const handleOpenNodeNetworking = (nodeId: number) => {
     openViewOnNode(nodeId, () => setActiveView('networking'));
   };
+  const handleOpenPolicySettings = (nodeId: number | null) => openPolicySettings({
+    nodeId,
+    nodes,
+    openViewOnNode,
+    onNodeMissing: () => toast.error('That node is no longer registered.'),
+  });
   const handleOpenNodeSecurity = (nodeId: number, tab: SecurityTab | null) => {
     openViewOnNode(nodeId, () => {
       setSecurityTab(tab ?? 'overview');
@@ -804,7 +863,181 @@ export default function EditorLayout() {
     [openFleetUpdates],
   );
 
+  const verifySavedUrl = useCallback(async (captured: {
+    nodeId: number | null;
+    stackName: string;
+    service: string;
+    url: string | null;
+  }) => {
+    const stillHere = () => selectedFileRef.current === captured.stackName && activeNodeIdRef.current === captured.nodeId;
+    let next;
+    try {
+      next = await refreshServiceUrls();
+    } catch (error) {
+      console.error('Failed to verify service URL:', error);
+      if (stillHere()) setServiceUrlVerify('The file was saved, but the URL could not be verified.');
+      return;
+    }
+    if (!stillHere()) return;
+    const effective = next?.status === 'ready' ? (serviceKeyGet(next.serviceUrls, captured.service) ?? null) : undefined;
+    if (next?.status === 'ready' && effective === captured.url) {
+      toast.success(captured.url ? 'Service URL saved.' : 'Service URL cleared.');
+      setServiceUrlTarget(null);
+      setServiceUrlVerify(null);
+      return;
+    }
+    const detail = typeof effective === 'string' ? ` Effective URL: ${effective}.` : '';
+    setServiceUrlVerify(`The file was saved, but the URL could not be verified.${detail}`);
+  }, [refreshServiceUrls]);
+
+  const commitServiceUrl = useCallback(async (url: string | null) => {
+    const opened = serviceUrlTarget;
+    if (!opened) return;
+    const current = { nodeId: activeNode?.id ?? null, stackName: selectedFile };
+    if (!sameServiceUrlTarget(opened, current)) {
+      setServiceUrlTarget(null);
+      toast.error('This stack is no longer open, so the URL was not saved.');
+      return;
+    }
+    const stackKey = opened.stackName.replace(/\.(ya?ml)$/, '');
+    if (!can('stack:edit', 'stack', stackKey, opened.nodeId)) {
+      toast.error('You cannot edit this stack.');
+      return;
+    }
+    // Clearing has its own authority: an earlier file, the open file's include,
+    // or an inherited service can still supply the label after the direct one is
+    // removed, so only the matching guard for the requested operation applies.
+    const refuseEdit = (message: string) => {
+      setServiceUrlEditBlock(message);
+      setServiceUrlEditBlockId((id) => id + 1);
+    };
+    const blocked = serviceUrlSaveBlockedMessage(serviceUrlEntry, opened.serviceName, url);
+    if (blocked) {
+      refuseEdit(blocked);
+      return;
+    }
+    let patched: ReturnType<typeof patchServiceUrlLabel>;
+    try {
+      patched = patchServiceUrlLabel(content, opened.serviceName, url);
+    } catch (error) {
+      console.error('Failed to update the service URL label:', error);
+      toast.error('The compose file could not be updated.');
+      return;
+    }
+    if (!patched.ok) {
+      refuseEdit(patched.reason === 'missing-service'
+        ? 'That service is defined in another compose file.'
+        : patched.reason === 'unsupported'
+          ? 'The URL cannot be changed here without changing other parts of this compose file. Edit the label in the editor instead.'
+          : 'The compose file could not be updated.');
+      return;
+    }
+    const captured = {
+      stackName: opened.stackName,
+      nodeId: opened.nodeId,
+      etag: editorState.composeEtag,
+      filename: editorState.composeFilename,
+      service: opened.serviceName,
+      url,
+      content: patched.yaml,
+    };
+    const write = async () => {
+      if (!canRef.current('stack:edit', 'stack', stackKey, captured.nodeId)) {
+        toast.error('You cannot edit this stack.');
+        return;
+      }
+      if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) {
+        toast.error('This stack is no longer open, so the URL was not saved.');
+        return;
+      }
+      setServiceUrlSaving(true);
+      try {
+        // Re-read the source authority from disk before writing: the anatomy
+        // entry held in state may be older than the compose files themselves.
+        // This orders the check, it does not lock the files; a later chain file
+        // changed mid-write is caught by the post-save verification instead.
+        const fresh = await refreshServiceUrls();
+        const freshBlocked = serviceUrlSaveBlockedMessage(fresh, opened.serviceName, url);
+        if (freshBlocked) {
+          refuseEdit(freshBlocked);
+          return;
+        }
+        const result = await commitServiceUrlWrite(
+          captured.content,
+          () => stackActions.saveComposeContent({
+            content: captured.content,
+            stackName: captured.stackName,
+            nodeId: captured.nodeId,
+            etag: captured.etag,
+            filename: captured.filename,
+          }),
+          (next) => {
+            if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) return;
+            setContent(next);
+          },
+        );
+        if (!result.ok) {
+          if (result.conflict && result.code === 'compose_source_changed'
+            && selectedFileRef.current === captured.stackName
+            && activeNodeIdRef.current === captured.nodeId) {
+            const reload = confirmComposeSourceReload(message => window.confirm(message));
+            if (reload) {
+              setContent(result.currentContent);
+              editorState.setOriginalContent(result.currentContent);
+              editorState.setComposeEtag(result.etag);
+              editorState.setComposeFilename(result.filename);
+              setServiceUrlTarget(null);
+              toast.info('Reloaded the current compose file.');
+              void refreshServiceUrls();
+            } else {
+              toast.error('The compose file on disk changed, so the URL was not saved.');
+            }
+            return;
+          }
+          toast.error(result.conflict
+            ? 'The compose file changed before it could be saved.'
+            : result.error);
+          return;
+        }
+        if (selectedFileRef.current !== captured.stackName || activeNodeIdRef.current !== captured.nodeId) return;
+        await verifySavedUrl(captured);
+        serviceUrlVerifyTarget.current = captured;
+      } finally {
+        setServiceUrlSaving(false);
+      }
+    };
+    if (diffPreviewEnabled && patched.yaml !== editorState.originalContent) {
+      overlayState.setDiffPreview({
+        mode: 'save',
+        language: 'yaml',
+        original: editorState.originalContent,
+        modified: patched.yaml,
+        fileName: editorState.composeFilename || 'compose.yaml',
+        onConfirm: write,
+      });
+      return;
+    }
+    await write();
+  }, [
+    activeNode?.id,
+    can,
+    content,
+    serviceUrlEntry,
+    diffPreviewEnabled,
+    editorState.composeEtag,
+    editorState.composeFilename,
+    editorState.originalContent,
+    overlayState,
+    refreshServiceUrls,
+    selectedFile,
+    serviceUrlTarget,
+    setContent,
+    stackActions,
+    verifySavedUrl,
+  ]);
+
   const renderEditor = (headerActions?: ReactNode) => (
+    <>
     <EditorView
       headerActions={headerActions}
       requestedAnatomyTab={pendingAnatomyTab}
@@ -821,6 +1054,7 @@ export default function EditorLayout() {
       content={content}
       envContent={envContent}
       envExists={envExists}
+      envInventoryFailed={envInventoryFailed}
       envFiles={envFiles}
       selectedEnvFile={selectedEnvFile}
       isFileLoading={isFileLoading}
@@ -847,6 +1081,7 @@ export default function EditorLayout() {
       closeComposeEditor={stackActions.closeComposeEditor}
       requestSave={stackActions.requestSave}
       requestSaveAndDeploy={stackActions.requestSaveAndDeploy}
+      requestSaveAndPullImages={stackActions.requestSaveAndPullImages}
       discardChanges={stackActions.discardChanges}
       setContent={setContent}
       setEnvContent={setEnvContent}
@@ -866,6 +1101,19 @@ export default function EditorLayout() {
         if (!selectedFile) return;
         void stackActions.requestServiceUpdate(selectedFile, serviceName, mode);
       }}
+      serviceUrlEntry={serviceUrlEntry}
+      onEditServiceUrl={(serviceName) => {
+        if (!selectedFile) return;
+        setServiceUrlDirty(content !== editorState.originalContent);
+        setServiceUrlVerify(null);
+        setServiceUrlEditBlock(null);
+        setServiceUrlTarget({
+          nodeId: activeNode?.id ?? null,
+          stackName: selectedFile,
+          serviceName,
+        });
+      }}
+      onRetryServiceUrls={() => { void refreshServiceUrls(); }}
       setActiveTab={setActiveTab}
       setLogsMode={setLogsMode}
       setEditingCompose={setEditingCompose}
@@ -892,6 +1140,35 @@ export default function EditorLayout() {
       hasUnsavedChanges={stackActions.hasUnsavedChanges}
       stackMuteActions={selectedFile ? stackMuteActions : undefined}
     />
+    <ServiceUrlModal
+      key={serviceUrlTarget ? `${serviceUrlTarget.nodeId}:${serviceUrlTarget.stackName}:${serviceUrlTarget.serviceName}` : 'closed'}
+      open={serviceUrlTarget !== null}
+      serviceName={serviceUrlTarget?.serviceName ?? ''}
+      initialUrl={serviceUrlTarget && serviceUrlEntry?.status === 'ready'
+        ? (serviceKeyGet(serviceUrlEntry.serviceUrls, serviceUrlTarget.serviceName) ?? '')
+        : ''}
+      dirty={serviceUrlDirty}
+      saving={serviceUrlSaving}
+      verifyMessage={serviceUrlVerify}
+      clearBlockedMessage={serviceUrlTarget
+        ? serviceUrlClearBlockedMessage(serviceUrlClearState(serviceUrlEntry, serviceUrlTarget.serviceName))
+        : null}
+      editBlockedMessage={serviceUrlEditBlock}
+      editBlockId={serviceUrlEditBlockId}
+      onOpenChange={(open) => {
+        if (!open && !serviceUrlSaving) {
+          setServiceUrlTarget(null);
+          setServiceUrlVerify(null);
+          setServiceUrlEditBlock(null);
+        }
+      }}
+      onSave={(url) => { void commitServiceUrl(url); }}
+      onRetryVerify={() => {
+        const captured = serviceUrlVerifyTarget.current;
+        if (captured) void verifySavedUrl(captured);
+      }}
+    />
+    </>
   );
 
   // Track the last "committed" node id so the node-switch dirty guard can
@@ -913,23 +1190,26 @@ export default function EditorLayout() {
     const previousId = lastSeenNodeIdRef.current;
     const isRealSwitch = previousId !== null && previousId !== activeNode.id;
 
-    // A node-switch prompt is already open. Ignore any further activeNode
-    // changes until the user resolves the current dialog; revert silently so
-    // the dialog's pendingUnsavedNode stays anchored to the first attempt.
-    if (isRealSwitch && overlayState.pendingUnsavedLoad === NODE_SWITCH_PENDING_TOKEN) {
-      const previousNode = nodes.find(n => n.id === previousId);
-      if (previousNode) {
-        // A reverted switch never lands, so a view queued for it must not
-        // fire on some later, unrelated arrival at that node.
-        pendingNodeViewRef.current = null;
-        revertingNodeSwitchRef.current = true;
-        setActiveNode(previousNode);
+    const previousNode = nodes.find(n => n.id === previousId);
+
+    // An unsaved-changes prompt is already open (a parked node switch, a stack
+    // load, or a stashed leave or back navigation). Ignore any further activeNode
+    // change until the user resolves it: revert, leaving the prompt with the
+    // navigation it was opened for. A view queued for the ignored switch is
+    // dropped, and if there was one the operator is told it was not followed.
+    // With no previous node to revert to, the switch lands and falls through to
+    // the discard path below.
+    if (isRealSwitch && previousNode
+      && (overlayState.pendingUnsavedLoad !== null || overlayState.pendingLeaveAction !== null)) {
+      if (dropQueuedView()) {
+        toast.info('Answer the unsaved-changes prompt first; the link was not followed.');
       }
+      revertingNodeSwitchRef.current = true;
+      setActiveNode(previousNode);
       return;
     }
 
     if (isRealSwitch && stackActions.hasUnsavedChanges()) {
-      const previousNode = nodes.find(n => n.id === previousId);
       if (previousNode) {
         // Stash the attempted node + open the unsaved-changes dialog via the
         // existing pendingUnsavedLoad/Node fields. Revert activeNode back to
@@ -938,9 +1218,10 @@ export default function EditorLayout() {
         overlayState.setPendingUnsavedNode(activeNode);
         overlayState.setPendingUnsavedLoad(NODE_SWITCH_PENDING_TOKEN);
         overlayState.setPendingLoadOptions(null);
-        // A reverted switch never lands, so a view queued for it must not
-        // fire on some later, unrelated arrival at that node.
-        pendingNodeViewRef.current = null;
+        // A view queued for this switch waits with the confirmation: accepting
+        // it re-queues the view and finishes the switch, cancelling drops it.
+        const resumeSwitch = parkForConfirmation(activeNode);
+        if (resumeSwitch) overlayState.setPendingLeaveAction({ run: resumeSwitch });
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
         return;
@@ -956,8 +1237,7 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
-    const pendingNodeView = pendingNodeViewRef.current;
-    pendingNodeViewRef.current = null;
+    const pendingNodeView = takeQueuedView();
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
@@ -1181,6 +1461,7 @@ export default function EditorLayout() {
           notifications={notifications}
           nodes={nodes}
           onMarkAllRead={markAllRead}
+          onMarkRead={markRead}
           onClearAll={clearAllNotifications}
           onDelete={deleteNotification}
           onNavigate={handleNotificationNavigate}
@@ -1260,6 +1541,7 @@ export default function EditorLayout() {
             onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
             homeNavigation={homeNavigation}
             unreportedNotificationNodeIds={unreportedNodeIds}
+            onMarkNotificationRead={markRead}
             fleetNodeIntent={fleetNodeIntent}
             onFleetNodeIntentConsumed={onFleetNodeIntentConsumed}
             securityTab={securityTab}
@@ -1291,11 +1573,13 @@ export default function EditorLayout() {
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
+          reapplySelfTarget={reapplySelfTarget}
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           deleteVolumePreservation={deleteVolumePreservation}
           onOpenFleetNodeUpdates={() => openFleetUpdates('nodes')}
+          onOpenPolicySettings={handleOpenPolicySettings}
           hydrationReady={hydrationReady}
         />
       );

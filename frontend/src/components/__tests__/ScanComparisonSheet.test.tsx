@@ -282,4 +282,19 @@ describe('ScanComparisonSheet', () => {
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledTimes(2));
     expect(mockedFetch).toHaveBeenLastCalledWith('/security/compare?scanId1=3&scanId2=4');
   });
+
+  it('does not refetch when the parent re-renders with a new onClose identity', async () => {
+    mockedFetch.mockResolvedValue(jsonResponse(200, result()));
+
+    const { rerender } = render(
+      <ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByText(/Baseline/i)).toBeInTheDocument());
+
+    rerender(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+    rerender(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Baseline/i)).toBeInTheDocument();
+  });
 });

@@ -175,8 +175,8 @@ export function useGitOpsPortfolio(): GitOpsPortfolioState {
   const fetchPortfolio = useCallback(async (activeFilters: GitOpsPortfolioFilters, activeCursor: string | null) => {
     const current = ++generation.current;
     // `refreshing` is the "there is already data, a newer answer is coming"
-    // state; the first load is `loading`, so the pill never overlays the
-    // initial skeleton.
+    // state, which the masthead reports as "refreshing"; the first load is
+    // `loading`, shown as the skeleton.
     if (dataRef.current !== null) setRefreshing(true);
     try {
       const res = await apiFetch(`/gitops/applications${buildQueryString(activeFilters, activeCursor)}`, { localOnly: true });

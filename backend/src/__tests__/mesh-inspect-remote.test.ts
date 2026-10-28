@@ -13,6 +13,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
+import { parseLastKnownServices } from '../services/MeshService';
 
 let tmpDir: string;
 let MeshService: typeof import('../services/MeshService').MeshService;
@@ -52,9 +53,52 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         const out = await (svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> })
             .inspectStackServices(localNodeId, 'audit-mesh-prod');
 
-        expect(localSpy).toHaveBeenCalledWith('audit-mesh-prod');
+        expect(localSpy).toHaveBeenCalledWith('audit-mesh-prod', undefined);
         expect(fetchSpy).not.toHaveBeenCalled();
         expect(out).toEqual([{ service: 'echo', ports: [9000] }]);
+    });
+
+    // A failed Docker inspection must not be read as "the stack is stopped",
+    // or the refresh strips that stack's hostnames from every other node's
+    // override on this tick. Driven through the real local inspector with a
+    // failing Dockerode, not a mocked method, so the catch under test is the
+    // one that actually runs in production.
+    async function withLocalDocker(listContainers: () => Promise<unknown[]>): Promise<void> {
+        const { default: DockerController } = await import('../services/DockerController');
+        vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+            getDocker: () => ({ listContainers }),
+        } as unknown as ReturnType<typeof DockerController.getInstance>);
+    }
+
+    it('marks a local inspection failure as unreachable, not as a stopped stack', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        await withLocalDocker(() => Promise.reject(new Error('docker daemon unreachable')));
+
+        const reach = { reachable: true };
+        const out = await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(localNodeId, 'audit-mesh-prod', reach);
+
+        expect(out).toEqual([]);
+        expect(reach.reachable).toBe(false);
+    });
+
+    it('keeps a local node reachable when its stack is merely stopped', async () => {
+        // The other half of the distinction: an empty answer is a stopped
+        // stack, which drops aliases but does not freeze them.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        await withLocalDocker(() => Promise.resolve([]));
+
+        const reach = { reachable: true };
+        await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(localNodeId, 'audit-mesh-prod', reach);
+
+        expect(reach.reachable).toBe(true);
     });
 
     it('fetches /api/mesh/local-services for remote nodes and forwards the proxy target headers', async () => {
@@ -81,14 +125,17 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         const fetchMock = vi
             .spyOn(globalThis, 'fetch')
             .mockResolvedValue(new Response(
-                JSON.stringify({ services: [{ service: 'echo', ports: [9001] }] }),
+                JSON.stringify({ services: [{ service: 'echo', ports: [9001], running: true }] }),
                 { status: 200, headers: { 'content-type': 'application/json' } },
             ));
 
         const out = await (svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> })
             .inspectStackServices(remoteNodeId, 'audit-mesh-pilot');
 
-        expect(out).toEqual([{ service: 'echo', ports: [9001] }]);
+        // The transient running flag has to survive the wire: without it a
+        // running remote service with no ports would look like a stopped one
+        // and keep ports it no longer publishes.
+        expect(out).toEqual([{ service: 'echo', ports: [9001], running: true }]);
         expect(fetchMock).toHaveBeenCalledTimes(1);
         const call = fetchMock.mock.calls[0];
         expect(String(call[0])).toBe('https://remote.example.com:1852/api/mesh/local-services/audit-mesh-pilot');
@@ -99,7 +146,9 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         db.deleteNode(remoteNodeId);
     });
 
-    it('returns [] when the remote responds non-2xx', async () => {
+    it('returns [] and marks the node unreachable when the remote responds non-2xx', async () => {
+        // A peer whose own Docker inspection failed answers 503. That must be
+        // distinguishable from a stopped stack, or central drops the aliases.
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const remoteNodeId = db.addNode({
@@ -118,11 +167,96 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
             trustedLoopback: false,
         });
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Internal Server Error', { status: 500 }));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the HTTP error log */ });
 
-        const out = await (svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> })
-            .inspectStackServices(remoteNodeId, 'audit-mesh-pilot');
+        const reach = { reachable: true };
+        const out = await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(remoteNodeId, 'audit-mesh-pilot', reach);
 
         expect(out).toEqual([]);
+        expect(reach.reachable).toBe(false);
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('marks the node unreachable when a 200 response has no services array', async () => {
+        // A missing array is a malformed answer, not a stopped stack. Reading
+        // it as the latter would drop that stack's aliases for the tick.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'inspect-remote-malformed',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'https://remote.example.com:1852',
+            api_token: 'remote-tok',
+        });
+
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'https://remote.example.com:1852',
+            apiToken: 'remote-tok',
+            trustedLoopback: false,
+        });
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        }));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the malformed log */ });
+
+        const reach = { reachable: true };
+        const out = await (svc as unknown as {
+            inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+        }).inspectStackServices(remoteNodeId, 'audit-mesh-pilot', reach);
+
+        expect(out).toEqual([]);
+        expect(reach.reachable).toBe(false);
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('marks the node unreachable when a 200 response contains a malformed service entry', async () => {
+        // The outer array check is not enough: an entry without a ports array
+        // would throw inside the refresh, and the allSettled loop would then
+        // skip the stack silently, dropping its aliases and reservations. A
+        // non-integer port is also unreadable: filtering it out would look
+        // like a live service that publishes nothing and release its ports.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'inspect-remote-entry',
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'https://remote.example.com:1852',
+            api_token: 'remote-tok',
+        });
+
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'https://remote.example.com:1852',
+            apiToken: 'remote-tok',
+            trustedLoopback: false,
+        });
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the malformed log */ });
+
+        for (const entry of [
+            { service: 'db' },
+            { service: 'db', ports: ['5432'], running: true },
+        ]) {
+            vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+                JSON.stringify({ services: [entry] }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            ));
+
+            const reach = { reachable: true };
+            const out = await (svc as unknown as {
+                inspectStackServices: (n: number, s: string, r?: { reachable: boolean }) => Promise<unknown>;
+            }).inspectStackServices(remoteNodeId, 'audit-mesh-pilot', reach);
+
+            expect(out).toEqual([]);
+            expect(reach.reachable).toBe(false);
+        }
         db.deleteNode(remoteNodeId);
     });
 
@@ -187,6 +321,158 @@ describe('MeshService.inspectStackServices dispatch (C-3 fix)', () => {
         );
         expect(erroredAsUnreachable).toBe(false);
 
+        db.deleteNode(remoteNodeId);
+    });
+});
+
+/**
+ * The saved snapshot holds claims that absence from a live inventory cannot
+ * release. The owning node's compose file is the authority on whether a
+ * service is still part of the stack, so central reads it over the same
+ * authenticated peer transport the live inspection uses.
+ */
+describe('MeshService.inspectDeclaredServices (peer declaration read)', () => {
+    function addRemoteNode(name: string): number {
+        return DatabaseService.getInstance().addNode({
+            name,
+            type: 'remote',
+            mode: 'proxy',
+            compose_dir: '/tmp',
+            is_default: false,
+            api_url: 'https://remote.example.com:1852',
+            api_token: 'remote-tok',
+        });
+    }
+
+    function mockTarget(): void {
+        vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({
+            apiUrl: 'https://remote.example.com:1852',
+            apiToken: 'remote-tok',
+            trustedLoopback: false,
+        });
+    }
+
+    async function readDeclared(nodeId: number): Promise<Set<string> | null> {
+        return (MeshService.getInstance() as unknown as {
+            inspectDeclaredServices: (n: number, s: string) => Promise<Set<string> | null>;
+        }).inspectDeclaredServices(nodeId, 'audit-mesh-pilot');
+    }
+
+    it('reads the peer declaration over the proxy chain', async () => {
+        const remoteNodeId = addRemoteNode('declared-remote');
+        mockTarget();
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: ['db', 'web'] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+
+        expect(await readDeclared(remoteNodeId)).toEqual(new Set(['db', 'web']));
+        const call = fetchMock.mock.calls[0];
+        expect(String(call[0])).toBe('https://remote.example.com:1852/api/mesh/local-declared-services/audit-mesh-pilot');
+        const headers = (call[1] as { headers: Record<string, string> }).headers;
+        expect(headers['Authorization']).toBe('Bearer remote-tok');
+        expect(headers).toHaveProperty('x-sencho-tier');
+        DatabaseService.getInstance().deleteNode(remoteNodeId);
+    });
+
+    it('returns null when the peer cannot read its compose declaration', async () => {
+        const remoteNodeId = addRemoteNode('declared-remote-503');
+        mockTarget();
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Service Unavailable', { status: 503 }));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the HTTP log */ });
+
+        expect(await readDeclared(remoteNodeId)).toBeNull();
+        DatabaseService.getInstance().deleteNode(remoteNodeId);
+    });
+
+    it('treats a malformed declaration answer as unknown', async () => {
+        const remoteNodeId = addRemoteNode('declared-remote-malformed');
+        mockTarget();
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: ['db', 7] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the malformed log */ });
+
+        expect(await readDeclared(remoteNodeId)).toBeNull();
+        DatabaseService.getInstance().deleteNode(remoteNodeId);
+    });
+
+    it('treats an empty declaration as unknown', async () => {
+        // A Compose project declares at least one service, so an empty list is
+        // not a valid answer. Accepting it would free every saved claim on a
+        // peer that answered with an empty body.
+        const remoteNodeId = addRemoteNode('declared-remote-empty');
+        mockTarget();
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: [] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the malformed log */ });
+
+        expect(await readDeclared(remoteNodeId)).toBeNull();
+        DatabaseService.getInstance().deleteNode(remoteNodeId);
+    });
+
+    it('keeps a saved claim that the peer still declares during a partial inventory', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = addRemoteNode('declared-remote-refresh');
+        mockTarget();
+        db.insertMeshStack(remoteNodeId, 'partial-stack', 'tester');
+        const seeded = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'partial-stack');
+        if (!seeded) throw new Error('missing mesh row');
+        db.setMeshStackLastKnownServices(seeded.id, JSON.stringify([
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]));
+        vi.spyOn(svc, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080], running: true }]);
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: ['db', 'web'] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'partial-stack');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([
+            { service: 'web', ports: [8080] },
+            { service: 'db', ports: [5432] },
+        ]);
+        const internals = svc as unknown as { reservedPorts: Map<number, { serviceName: string }> };
+        expect(internals.reservedPorts.get(5432)?.serviceName).toBe('db');
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('releases a saved claim the peer no longer declares', async () => {
+        // The release side of the same path: the peer's compose file dropped
+        // db, so its reservation must not survive the reconciliation.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = addRemoteNode('declared-remote-release');
+        mockTarget();
+        db.insertMeshStack(remoteNodeId, 'released-stack', 'tester');
+        const seeded = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'released-stack');
+        if (!seeded) throw new Error('missing mesh row');
+        db.setMeshStackLastKnownServices(seeded.id, JSON.stringify([
+            { service: 'db', ports: [5432] },
+            { service: 'web', ports: [8080] },
+        ]));
+        vi.spyOn(svc, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080], running: true }]);
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ declared: ['web'] }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        ));
+
+        await svc.refreshAliasCache();
+
+        const row = db.listMeshStacks(remoteNodeId).find((r) => r.stack_name === 'released-stack');
+        expect(parseLastKnownServices(row?.last_known_services)).toEqual([{ service: 'web', ports: [8080] }]);
+        const internals = svc as unknown as { reservedPorts: Map<number, { serviceName: string }> };
+        expect(internals.reservedPorts.has(5432)).toBe(false);
+        expect(internals.reservedPorts.get(8080)?.serviceName).toBe('web');
         db.deleteNode(remoteNodeId);
     });
 });

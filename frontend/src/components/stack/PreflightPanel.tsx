@@ -9,7 +9,7 @@ import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
-import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
+import { preflightFingerprint, useStackDismiss } from '@/hooks/useStackDismiss';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
@@ -295,7 +295,8 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
   const SummaryIcon = summary?.icon;
   const busy = loading || running;
 
-  const { dismissed, dismiss } = usePreflightDismiss(stackName, nodeId, activeFindings);
+  const activeFingerprint = useMemo(() => preflightFingerprint(activeFindings), [activeFindings]);
+  const { dismissed, dismiss } = useStackDismiss('doctor', stackName, nodeId, activeFingerprint);
   const hasActiveFindings = activeFindings.length > 0;
 
   const openAckDialog = (finding: PreflightFinding) => {

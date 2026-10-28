@@ -18,6 +18,7 @@ import type { ViewMode, SortField, FilterStatus, FilterType, FilterNetworking, F
 const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
 const SORT_OPTIONS = [
+    { value: 'attention', label: 'Attention' },
     { value: 'name', label: 'Name' },
     { value: 'cpu', label: 'CPU Usage' },
     { value: 'memory', label: 'Memory Usage' },
@@ -134,7 +135,7 @@ export function OverviewToolbar({
                             value={prefs.sortBy}
                             onValueChange={(v) => onPrefsChange({ sortBy: v as SortField })}
                             placeholder="Sort by..."
-                            className="[&>button]:!bg-background"
+                            className="[&>button]:!bg-control"
                         />
                     </div>
                     <TooltipProvider>
@@ -207,15 +208,17 @@ export function OverviewToolbar({
                             </div>
                             <div className="space-y-1.5">
                                 <label className={FILTER_SECTION_LABEL_CLASS}>Severity</label>
-                                <Button
-                                    variant={prefs.filterCritical ? 'default' : 'outline'}
-                                    size="sm"
-                                    className="h-7 text-xs px-2.5"
-                                    onClick={() => onPrefsChange({ filterCritical: !prefs.filterCritical })}
-                                >
-                                    <AlertTriangle className="w-3 h-3 mr-1" />
-                                    Critical Only
-                                </Button>
+                                <div className="flex items-center gap-1.5">
+                                    <Button
+                                        variant={prefs.filterCritical ? 'default' : 'outline'}
+                                        size="sm"
+                                        className="h-7 text-xs px-2.5"
+                                        onClick={() => onPrefsChange({ filterCritical: !prefs.filterCritical })}
+                                    >
+                                        <AlertTriangle className="w-3 h-3 mr-1" />
+                                        Critical Only
+                                    </Button>
+                                </div>
                             </div>
                             <div className="space-y-1.5">
                                 <label className={FILTER_SECTION_LABEL_CLASS}>Networking</label>

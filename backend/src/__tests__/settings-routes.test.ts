@@ -241,6 +241,87 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('gitops_history_retention_days (GitOps history and outbox retention)', () => {
+  it('defaults to 30 days in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('30');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.gitops_history_retention_days).toBe('30');
+  });
+
+  it('accepts a well-formed write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: '90' });
+    try {
+      expect(res.status).toBe(200);
+      expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('90');
+    } finally {
+      DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+    }
+  });
+
+  it('rejects an out-of-range value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: '366' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).not.toBe('366');
+  });
+
+  it('rejects a non-numeric value (400) and does not write it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: 'banana' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Validation failed');
+  });
+
+  it('accepts the bounds the settings page saves', async () => {
+    // The page PATCHes the stored string. 1 and 365 are the schema edges.
+    // Restore in a finally: a failed assertion would otherwise leave the
+    // shared test database on the last value this test wrote.
+    try {
+      for (const value of ['1', '365']) {
+        const res = await request(app)
+          .patch('/api/settings')
+          .set('Cookie', adminCookie)
+          .send({ gitops_history_retention_days: value });
+        expect(res.status, value).toBe(200);
+        expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe(value);
+      }
+    } finally {
+      DatabaseService.getInstance().updateGlobalSetting('gitops_history_retention_days', '30');
+    }
+  });
+
+  it('rejects an off value, a value past the ceiling, and a non-numeric value on PATCH', async () => {
+    // 0 is not an off switch. The page save is a PATCH, so a POST-only check
+    // would miss a schema that accepted it there.
+    for (const value of [0, 366, 'banana']) {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ gitops_history_retention_days: value });
+      expect(res.status, String(value)).toBe(400);
+      expect(res.body.error).toBe('Validation failed');
+    }
+    const postZero = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'gitops_history_retention_days', value: 0 });
+    expect(postZero.status).toBe(400);
+    expect(DatabaseService.getInstance().getGlobalSettings().gitops_history_retention_days).toBe('30');
+  });
+});
+
 describe('recovery_retention_days (superseded rollback generation retention)', () => {
   it('defaults to 7 days in a freshly seeded database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().recovery_retention_days).toBe('7');
@@ -283,8 +364,9 @@ describe('recovery_retention_days (superseded rollback generation retention)', (
 });
 
 describe('recovery_max_generations (cap on retained rollback generations per stack)', () => {
-  it('defaults to 0 (unlimited) in a freshly seeded database', () => {
-    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('0');
+  it('defaults to 1 in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('1');
+    expect(DatabaseService.getInstance().getRecoveryMaxGenerations()).toBe(1);
   });
 
   it('is exposed through the settings GET projection', async () => {
@@ -300,7 +382,7 @@ describe('recovery_max_generations (cap on retained rollback generations per sta
       .send({ key: 'recovery_max_generations', value: '3' });
     expect(res.status).toBe(200);
     expect(DatabaseService.getInstance().getGlobalSettings().recovery_max_generations).toBe('3');
-    DatabaseService.getInstance().updateGlobalSetting('recovery_max_generations', '0');
+    DatabaseService.getInstance().updateGlobalSetting('recovery_max_generations', '1');
   });
 
   it('rejects a negative value (400) and does not write it', async () => {
@@ -461,6 +543,44 @@ describe('health gate settings', () => {
   });
 });
 
+describe('gitops_artifact_retry_interval_mins setting', () => {
+  const KEY = 'gitops_artifact_retry_interval_mins';
+
+  it('seeds to 5 in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('5');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[KEY]).toBeDefined();
+  });
+
+  it('accepts an in-range value and persists it', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ [KEY]: 30 });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('30');
+    DatabaseService.getInstance().updateGlobalSetting(KEY, '5');
+  });
+
+  it('rejects zero, a negative value, and one past the ceiling', async () => {
+    // Zero is rejected rather than accepted as "off": the drift check is the
+    // only thing that recovers a target whose approved identity is unresolved,
+    // so disabling the retry would reintroduce the redeploy dependency.
+    for (const value of [0, -1, 1441]) {
+      const res = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: KEY, value });
+      expect(res.status, `value ${value}`).toBe(400);
+    }
+    expect(DatabaseService.getInstance().getGlobalSettings()[KEY]).toBe('5');
+  });
+});
+
 describe('notification_dispatch_retries setting', () => {
   it('seeds to "0" in a fresh database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe('0');
@@ -520,8 +640,8 @@ describe('notification_dispatch_retries setting', () => {
 });
 
 describe('env_block_deploy_on_missing_required setting', () => {
-  it('seeds to "0" (opt-in) in a fresh database', () => {
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
+  it('seeds to "1" (on) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
   });
 
   it('is exposed through the settings GET projection', async () => {
@@ -542,9 +662,9 @@ describe('env_block_deploy_on_missing_required setting', () => {
     const ok = await request(app)
       .post('/api/settings')
       .set('Cookie', adminCookie)
-      .send({ key: 'env_block_deploy_on_missing_required', value: '1' });
+      .send({ key: 'env_block_deploy_on_missing_required', value: '0' });
     expect(ok.status).toBe(200);
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
 
     const bad = await request(app)
       .post('/api/settings')
@@ -552,9 +672,9 @@ describe('env_block_deploy_on_missing_required setting', () => {
       .send({ key: 'env_block_deploy_on_missing_required', value: 'banana' });
     expect(bad.status).toBe(400);
     expect(bad.body.error).toBe('Validation failed');
-    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
+    expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');
 
-    DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '0');
+    DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '1');
   });
 });
 
@@ -785,30 +905,18 @@ describe('Paid-only setting keys (audit_retention_days)', () => {
   });
 });
 
-describe('reclaim_hero setting', () => {
-  it('is allowlisted and seeds to "0" (banner off by default)', async () => {
+describe('retired reclaim_hero setting', () => {
+  it('is neither projected nor writable, even when an old database still holds the row', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('reclaim_hero', '1');
     const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    expect(res.body.reclaim_hero).toBe('0');
-  });
+    expect(res.body).not.toHaveProperty('reclaim_hero');
 
-  it('accepts a well-formed write and rejects a non-enum value', async () => {
-    const ok = await request(app)
+    const write = await request(app)
       .patch('/api/settings')
       .set('Cookie', adminCookie)
       .send({ reclaim_hero: '1' });
-    expect(ok.status).toBe(200);
+    expect(write.status).toBe(400);
     expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('1');
-
-    const bad = await request(app)
-      .patch('/api/settings')
-      .set('Cookie', adminCookie)
-      .send({ reclaim_hero: 'banana' });
-    expect(bad.status).toBe(400);
-    expect(bad.body.error).toBe('Validation failed');
-    expect(DatabaseService.getInstance().getGlobalSettings().reclaim_hero).toBe('1');
-
-    // Reset for any later reads of the shared test DB.
-    DatabaseService.getInstance().updateGlobalSetting('reclaim_hero', '0');
   });
 });

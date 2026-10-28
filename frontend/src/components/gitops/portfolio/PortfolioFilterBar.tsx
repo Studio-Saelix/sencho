@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import { Search, X } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { Search, SlidersHorizontal, X } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { Input } from '@/components/ui/input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { GitOpsPortfolioFilters } from '@/types/gitopsPortfolio';
 
@@ -14,10 +16,11 @@ interface NodeOption {
 /**
  * Portfolio filter row.
  *
- * Same shape as the Security Images tab and the Fleet tabs: a collapsible
- * search affordance (square outline button that expands into a focused input)
- * followed by flat Combobox filters on one wrapping row, so a filtered triage
- * view looks and behaves like every other filtered list in the app.
+ * Same shape as the Fleet toolbar: a collapsible search affordance (square
+ * outline button that expands into a focused input) followed by one Filters
+ * popover that groups every filter into labelled sections, with a count badge
+ * for what is active. The stack and Blueprint scopes set by other surfaces stay
+ * visible as removable chips.
  *
  * Choices are server-side filters; narrowing a list is a question, never a
  * permission decision, and the summary/the queue above stay portfolio-wide.
@@ -26,12 +29,12 @@ interface NodeOption {
 const ALL = 'all';
 
 const ATTENTION_OPTIONS = [
-  { value: ALL, label: 'All applications' },
+  { value: ALL, label: 'All' },
   { value: 'attention', label: 'Attention required' },
 ];
 
 const TARGET_OPTIONS = [
-  { value: ALL, label: 'All targets' },
+  { value: ALL, label: 'All' },
   { value: 'direct', label: 'Direct' },
   { value: 'blueprint', label: 'Blueprint' },
 ];
@@ -48,14 +51,14 @@ const DRIFT_OPTIONS = [
 ];
 
 const EVIDENCE_OPTIONS = [
-  { value: ALL, label: 'Any evidence' },
+  { value: ALL, label: 'Any' },
   { value: 'stale', label: 'Stale evidence' },
   { value: 'unreachable', label: 'Unreachable' },
   { value: 'unknown', label: 'Unknown' },
 ];
 
-/** Flat combobox trigger styling, matching the Security and Fleet filter rows. */
-const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
+/** Section heading inside the popover, same as the Fleet filters. */
+const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
 export function PortfolioFilterBar({
   filters,
@@ -75,6 +78,7 @@ export function PortfolioFilterBar({
   /** Display name for a Blueprint scope chip (the filter carries only the id). */
   blueprintLabel?: string;
 }) {
+  const uid = useId();
   const without = (key: 'stack' | 'blueprintId') => () => {
     const next = { ...filters };
     delete next[key];
@@ -102,6 +106,8 @@ export function PortfolioFilterBar({
   const nodeValue = filters.nodeId !== undefined ? String(filters.nodeId) : ALL;
   const driftValue = filters.drift ?? ALL;
   const evidenceValue = filters.evidence ?? ALL;
+  const activeFilterCount = [attentionValue, targetValue, nodeValue, driftValue, evidenceValue]
+    .filter((value) => value !== ALL).length;
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -140,8 +146,9 @@ export function PortfolioFilterBar({
       )}
 
       {/* Scopes set by another surface (a stack's Git indicator, a
-          Blueprint's detail); they have no combobox, so they show as
-          removable chips rather than as an invisible narrowing. */}
+          Blueprint's detail); they have no control in the Filters popover,
+          so they show as removable chips rather than as an invisible
+          narrowing. */}
       {filters.stack !== undefined && (
         <ScopeChip label={`stack: ${filters.stack}`} removeLabel="Remove stack filter" onRemove={without('stack')} />
       )}
@@ -152,58 +159,92 @@ export function PortfolioFilterBar({
           onRemove={without('blueprintId')}
         />
       )}
-      <Combobox
-        options={ATTENTION_OPTIONS}
-        value={attentionValue}
-        onValueChange={(value) => {
-          const next = { ...filters };
-          if (value === 'attention') next.attention = '1'; else delete next.attention;
-          onChange(next);
-        }}
-        className={FILTER_CLASS}
-      />
-      <Combobox
-        options={TARGET_OPTIONS}
-        value={targetValue}
-        onValueChange={(value) => {
-          const next = { ...filters };
-          if (value === 'direct' || value === 'blueprint') next.mode = value; else delete next.mode;
-          onChange(next);
-        }}
-        className={FILTER_CLASS}
-      />
-      <Combobox
-        options={[{ value: ALL, label: 'All nodes' }, ...nodes.map(node => ({ value: String(node.id), label: node.name }))]}
-        value={nodeValue}
-        onValueChange={(value) => {
-          const next = { ...filters };
-          if (value === ALL) delete next.nodeId; else next.nodeId = Number(value);
-          onChange(next);
-        }}
-        className={FILTER_CLASS}
-        searchPlaceholder="Filter nodes"
-        emptyText="No nodes match"
-      />
-      <Combobox
-        options={DRIFT_OPTIONS}
-        value={driftValue}
-        onValueChange={(value) => {
-          const next = { ...filters };
-          if (value === ALL) delete next.drift; else next.drift = value;
-          onChange(next);
-        }}
-        className={FILTER_CLASS}
-      />
-      <Combobox
-        options={EVIDENCE_OPTIONS}
-        value={evidenceValue}
-        onValueChange={(value) => {
-          const next = { ...filters };
-          if (value === 'stale' || value === 'unreachable' || value === 'unknown') next.evidence = value; else delete next.evidence;
-          onChange(next);
-        }}
-        className={FILTER_CLASS}
-      />
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant={activeFilterCount > 0 ? 'default' : 'outline'}
+            size="sm"
+            className="h-9 gap-2 shrink-0"
+          >
+            <SlidersHorizontal className="w-4 h-4" />
+            Filters
+            {activeFilterCount > 0 && (
+              <Badge variant="secondary" className="h-5 min-w-[1.25rem] px-1.5 text-[10px] tabular-nums">
+                {activeFilterCount}
+              </Badge>
+            )}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-80 space-y-4">
+          <div className="space-y-1.5">
+            <label id={`${uid}-attention`} className={FILTER_SECTION_LABEL_CLASS}>Attention</label>
+            <OptionButtons
+              labelId={`${uid}-attention`}
+              options={ATTENTION_OPTIONS}
+              value={attentionValue}
+              onSelect={(value) => {
+                const next = { ...filters };
+                if (value === 'attention') next.attention = '1'; else delete next.attention;
+                onChange(next);
+              }}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label id={`${uid}-target`} className={FILTER_SECTION_LABEL_CLASS}>Target</label>
+            <OptionButtons
+              labelId={`${uid}-target`}
+              options={TARGET_OPTIONS}
+              value={targetValue}
+              onSelect={(value) => {
+                const next = { ...filters };
+                if (value === 'direct' || value === 'blueprint') next.mode = value; else delete next.mode;
+                onChange(next);
+              }}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label id={`${uid}-node`} htmlFor={`${uid}-node-control`} className={FILTER_SECTION_LABEL_CLASS}>Node</label>
+            <Combobox
+              id={`${uid}-node-control`}
+              options={[{ value: ALL, label: 'All nodes' }, ...nodes.map(node => ({ value: String(node.id), label: node.name }))]}
+              value={nodeValue}
+              onValueChange={(value) => {
+                const next = { ...filters };
+                if (value === ALL) delete next.nodeId; else next.nodeId = Number(value);
+                onChange(next);
+              }}
+              searchPlaceholder="Filter nodes"
+              emptyText="No nodes match"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label id={`${uid}-drift`} htmlFor={`${uid}-drift-control`} className={FILTER_SECTION_LABEL_CLASS}>Drift</label>
+            <Combobox
+              id={`${uid}-drift-control`}
+              options={DRIFT_OPTIONS}
+              value={driftValue}
+              onValueChange={(value) => {
+                const next = { ...filters };
+                if (value === ALL) delete next.drift; else next.drift = value;
+                onChange(next);
+              }}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label id={`${uid}-evidence`} className={FILTER_SECTION_LABEL_CLASS}>Evidence</label>
+            <OptionButtons
+              labelId={`${uid}-evidence`}
+              options={EVIDENCE_OPTIONS}
+              value={evidenceValue}
+              onSelect={(value) => {
+                const next = { ...filters };
+                if (value === 'stale' || value === 'unreachable' || value === 'unknown') next.evidence = value; else delete next.evidence;
+                onChange(next);
+              }}
+            />
+          </div>
+        </PopoverContent>
+      </Popover>
       {(Object.keys(filters).length > 0 || query !== '') && (
         <Button
           variant="ghost"
@@ -218,6 +259,36 @@ export function PortfolioFilterBar({
           Clear filters
         </Button>
       )}
+    </div>
+  );
+}
+
+function OptionButtons({
+  labelId,
+  options,
+  value,
+  onSelect,
+}: {
+  /** Id of the section label that names this group. */
+  labelId: string;
+  options: { value: string; label: string }[];
+  value: string;
+  onSelect: (value: string) => void;
+}) {
+  return (
+    <div role="group" aria-labelledby={labelId} className="flex flex-wrap items-center gap-1.5">
+      {options.map((option) => (
+        <Button
+          key={option.value}
+          variant={value === option.value ? 'default' : 'outline'}
+          size="sm"
+          className="h-7 text-xs px-2.5"
+          aria-pressed={value === option.value}
+          onClick={() => onSelect(option.value)}
+        >
+          {option.label}
+        </Button>
+      ))}
     </div>
   );
 }

@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
@@ -32,6 +33,42 @@ function validBlueprintBody(nodeId: number) {
         selector: { type: 'nodes', ids: [nodeId] },
         drift_mode: 'observe',
     };
+}
+
+/**
+ * A remote node standing in for a leaf, with the proxy target and the leaf's
+ * two HTTP answers stubbed. The preview's create blocker reaches a remote node
+ * through the proxy target, so a test that leaves it unstubbed makes the probe
+ * throw and the catch paint a blocker over the result: it would pass whatever
+ * the projection said. `collides` is whether the leaf lists the stack.
+ *
+ * Both URLs are stubbed separately because a mock answering every GET the same
+ * way cannot show which call was made.
+ */
+async function seedRemoteLeaf(collides: boolean): Promise<{ id: number; stackName: string }> {
+    counter += 1;
+    const db = DatabaseService.getInstance().getDb();
+    const id = db.prepare(
+        `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
+         VALUES (?, 'remote', 'proxy', '/tmp/compose', 0, 'online', ?)`,
+    ).run(`bp-preview-remote-${counter}`, Date.now()).lastInsertRowid as number;
+    const stackName = 'bp-preview-collide';
+
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const registry = NodeRegistry.getInstance();
+    vi.spyOn(registry, 'getProxyTarget').mockReturnValue({
+        nodeId: id,
+        apiUrl: 'https://leaf.example.test:1852',
+        apiToken: 'test-token',
+        trustedLoopback: false,
+    } as unknown as ReturnType<typeof registry.getProxyTarget>);
+    const listUrl = 'https://leaf.example.test:1852/api/stacks';
+    vi.spyOn(axios, 'get').mockImplementation((url: string) =>
+        String(url) === listUrl
+            ? Promise.resolve({ status: 200, data: collides ? [stackName] : [] })
+            : Promise.resolve({ status: 404, data: { error: 'File not found', code: 'NOT_FOUND' } }));
+
+    return { id, stackName };
 }
 
 beforeAll(async () => {
@@ -513,6 +550,49 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             .toBe('services:\n  app:\n    image: nginx\n');
     });
 
+    it('marks create as blocked when an unmanaged same-name stack exists on a remote node', async () => {
+        // The preview's create blocker asks one question per node, and on a
+        // remote node it is answered by the leaf's stack list. That list could
+        // only ever answer "no such stack", so a remote collision was never
+        // flagged: the row read as a plain create, the operator was asked to
+        // confirm an action the leaf would then refuse, and the refusal arrived
+        // a round trip later as a parked row instead of here.
+        const remote = await seedRemoteLeaf(true);
+
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({ ...validBlueprintBody(remote.id), name: remote.stackName });
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const change = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === remote.id);
+        expect(change.action).toBe('blocked_name_conflict');
+        expect(change.severity).toBe('blocker');
+        expect(preview.body.summary.blocker).toBeGreaterThan(0);
+    });
+
+    it('leaves a remote create as a plain create when the leaf lists no such stack', async () => {
+        const remote = await seedRemoteLeaf(false);
+
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({ ...validBlueprintBody(remote.id), name: remote.stackName });
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const change = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === remote.id);
+        expect(change.action).toBe('create');
+        expect(preview.body.summary.blocker).toBe(0);
+    });
+
     it('hasNameConflict is false for a matching marker and true for a foreign marker', async () => {
         const node = seedNode();
         counter += 1;
@@ -634,5 +714,99 @@ describe('preview projection status precedence', () => {
         const row = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === node.id);
         expect(row?.action).toBe('clear_stale_guard');
         expect(preview.body.executorActions).toContainEqual({ nodeId: node.id, action: 'clear_stale_guard' });
+    });
+
+    it('emits skip_withdrawn for a severed target the selector wants again', async () => {
+        // The finding this pins. A withdrawal tombstones the placement's target,
+        // and a tombstoned node is invisible to every automatic action, which is
+        // deliberate: only an explicit deploy re-opens it. Re-adding the label
+        // used to leave the node selected, online, and absent from the preview
+        // entirely, so the plan read as nothing to do with no way to find out
+        // why. The row says what the operator has to do, and stays
+        // informational so automatic placement still never revives it.
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({
+                name: `bp-severed-${counter}`,
+                compose_content: 'services:\n  app:\n    image: nginx:1.27\n',
+                selector: { type: 'nodes', ids: [node.id] },
+                drift_mode: 'observe',
+            });
+        expect(created.status).toBe(201);
+
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        // The Blueprint create already opens a placement for it, so the tombstone
+        // goes on the application that exists rather than a second one.
+        const placement = store.getLiveBlueprintApplication(created.body.id);
+        if (!placement) throw new Error('expected a placement for the new Blueprint');
+        store.upsertTarget({
+            ...emptyTargetRow(placement.id, node.id, 1),
+            target_status: 'tombstoned',
+        });
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const row = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === node.id);
+        expect(row?.action).toBe('skip_withdrawn');
+        expect(row?.kind).toBe('informational');
+        expect(row?.detail).toMatch(/deploy/i);
+        // Informational, so it takes no side in the plan and never authorizes a
+        // mutate on its own.
+        expect(preview.body.executorActions).not.toContainEqual({ nodeId: node.id, action: 'skip_withdrawn' });
+        expect(preview.body.confirmableActions).not.toContainEqual({ nodeId: node.id, action: 'skip_withdrawn' });
+    });
+
+    it('does not report the same node twice when a severed target also has an in-flight row', async () => {
+        // The row this fix adds is informational, and the status-precedence pass
+        // that follows pushes its own row with no `seen` guard. A node that is
+        // severed, desired, and carrying a `withdrawing` deployment row would
+        // therefore be reported twice: once by this fix and once by the
+        // precedence pass. The precedence row is the specific, actionable truth
+        // about what is happening right now, so it wins and this row stands
+        // down rather than piling a second explanation onto the same node.
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send({
+                name: `bp-severed-inflight-${counter}`,
+                compose_content: 'services:\n  app:\n    image: nginx:1.27\n',
+                selector: { type: 'nodes', ids: [node.id] },
+                drift_mode: 'observe',
+            });
+        expect(created.status).toBe(201);
+
+        const { GitOpsStore, emptyTargetRow } = await import('../services/gitops/store');
+        const store = GitOpsStore.getInstance();
+        const placement = store.getLiveBlueprintApplication(created.body.id);
+        if (!placement) throw new Error('expected a placement for the new Blueprint');
+        store.upsertTarget({
+            ...emptyTargetRow(placement.id, node.id, 1),
+            target_status: 'tombstoned',
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: created.body.id,
+            node_id: node.id,
+            status: 'withdrawing',
+            applied_revision: 1,
+        });
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const rows = preview.body.changes.filter((c: { nodeId: number }) => c.nodeId === node.id);
+        expect(rows).toHaveLength(1);
+        // The in-flight withdrawal is what the operator has to know about now;
+        // the "deploy again to restore" note would only add a second, competing
+        // instruction for the same node.
+        expect(rows[0]?.action).toBe('in_flight_withdraw');
     });
 });

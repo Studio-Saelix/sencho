@@ -288,7 +288,15 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/notifications?nodeId=${rn.id}`);
 
-        ws.onopen = () => { if (!active) { ws?.close(); } else { retryCount = 0; } };
+        ws.onopen = () => {
+          if (!active) { ws?.close(); return; }
+          retryCount = 0;
+          // Invalidations sent while this socket was down are gone. The local
+          // socket's connection event cannot say so for a remote node, and it
+          // must not be reused here: its disconnect edge reads as the local
+          // feed being down. The hub's node ID, not the remote's, names it.
+          window.dispatchEvent(new CustomEvent('sencho:node-notifications-open', { detail: { nodeId: rn.id } }));
+        };
 
         ws.onmessage = (event) => {
           try {
@@ -362,7 +370,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
       const results = await Promise.allSettled(unreadNodeIds.map(nodeId =>
         nodeId === localNode?.id
-          ? apiFetch('/notifications/read', { method: 'POST', localOnly: true } as Parameters<typeof apiFetch>[1])
+          ? apiFetch('/notifications/read', { method: 'POST', localOnly: true })
           : fetchForNode('/notifications/read', nodeId, { method: 'POST' }),
       ));
 
@@ -392,6 +400,34 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     } catch (e: unknown) {
       const err = e as { message?: string; error?: string };
       toast.error(err?.message || err?.error || 'Failed to mark notifications as read');
+    }
+  };
+
+  /**
+   * Marks one row read on the node that owns it. Notification ids are per-node,
+   * so the write is addressed by the row's own `nodeId`; the row flips locally
+   * only once that node confirms.
+   */
+  const markRead = async (notif: NotificationItem) => {
+    if (notif.nodeId == null) return;
+    try {
+      const localNode = nodesRef.current.find(n => n.type === 'local');
+      const path = `/notifications/${notif.id}/read`;
+      const res = notif.nodeId === localNode?.id
+        ? await apiFetch(path, { method: 'POST', localOnly: true })
+        : await fetchForNode(path, notif.nodeId, { method: 'POST' });
+      if (!res.ok) {
+        toast.error('Could not mark the notification as read');
+        return;
+      }
+      setNotifications(prev => prev.map(n =>
+        n.id === notif.id && n.nodeId === notif.nodeId ? { ...n, is_read: 1 } : n,
+      ));
+      // A feed request that started before the write could land after the flip and restore the stale row.
+      void fetchNotificationsRef.current();
+    } catch (e: unknown) {
+      const err = e as { message?: string; error?: string };
+      toast.error(err?.message || err?.error || 'Failed to mark notification as read');
     }
   };
 
@@ -431,6 +467,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     unreportedNodeIds,
     tickerConnected,
     markAllRead,
+    markRead,
     deleteNotification,
     clearAllNotifications,
     removeNotificationsForStack: purgeStackNotifications,

@@ -78,9 +78,10 @@ See [Backup & Restore](/operations/backup#restoring) for the restore steps and [
    docker compose -f /path/to/your/stack/compose.yaml logs
    ```
 2. The usual causes are a missing environment variable, a host port already in use, or a bind-mount path that does not exist yet. Each is fixed in the compose file or `.env`.
-3. If a previously working stack broke after an edit, use **Rollback** from the stack's overflow menu to revert the compose and env files to the last deployed snapshot and redeploy. It is only offered when a pre-deploy backup exists, and it restores the files, not previously built image layers.
+3. If the deploy stops with `Rollback coverage is unavailable`, nothing was changed. Fix the cause named in the message; see [Troubleshooting](/operations/troubleshooting#deploy-or-update-stops-with-rollback-coverage-is-unavailable).
+4. If a previously working stack broke after an edit, use **Rollback** from the stack's overflow menu to revert the stack's authored files to the last recovery generation and redeploy. It is only offered when a generation exists. Inputs a generation could not hold, such as an included file outside the stack folder, keep their current content, and application data in volumes is never restored. [Rollback readiness](/features/atomic-deployments#rollback-readiness) shows what a rollback would take from the live stack.
 
-See [Troubleshooting: containers won't start after deploy](/operations/troubleshooting#containers-wont-start-after-deploy) for the full cause list and [Stack management](/features/stack-management) for the editor and rollback.
+See [Troubleshooting: containers won't start after deploy](/operations/troubleshooting#containers-wont-start-after-deploy) for the full cause list and [Atomic Deployments](/features/atomic-deployments) for how recovery generations work.
 
 ---
 
@@ -142,6 +143,5 @@ See [Troubleshooting: remote node shows offline](/operations/troubleshooting#rem
 
 ## If none of this helps
 
-- Review the [known limitations](https://github.com/studio-saelix/sencho/blob/main/KNOWN_LIMITATIONS.md) to confirm you are not hitting a documented constraint.
 - Browse the full [Troubleshooting](/operations/troubleshooting) page for symptom-specific entries.
 - Reach the team through the channels on the [Contact & Support](/reference/contact) page.

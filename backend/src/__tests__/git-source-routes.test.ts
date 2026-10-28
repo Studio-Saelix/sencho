@@ -121,6 +121,9 @@ describe('PUT /api/stacks/:stackName/git-source — URL validation', () => {
             { repo_url: 'https://user:pass@github.com/example/repo.git', error: /userinfo/i },
             { repo_url: 'https://github.com/example/repo.git?token=1', error: /query/i },
             { repo_url: 'https://github.com/example/repo.git#head', error: /fragment/i },
+            // Parses as a URL but names no repository, so it could never be
+            // claimed by a Blueprint-mode application.
+            { repo_url: 'https://github.com/', error: /identify one repository/i },
         ];
         for (const c of cases) {
             const res = await request(app)
@@ -1603,6 +1606,80 @@ describe('POST /api/stacks/:stackName/git-source/apply fingerprint', () => {
             expect(JSON.stringify(res.body)).not.toContain('SUPER-SECRET');
         } finally {
             applySpy.mockRestore();
+        }
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/apply policy evidence', () => {
+    const allowed = {
+        policy: { id: 3, name: 'prod-gate' },
+        bypassed: false,
+        evidence: { outcome: 'allow', records: [], applications: [], summary: 'x' },
+    };
+
+    it('carries the decision the deploy gate allowed on, and nothing on a clean apply', async () => {
+        seedGitSource('existing-stack');
+        const applySpy = vi.spyOn(GitSourceService.getInstance(), 'apply')
+            .mockImplementationOnce(async (_stack, _sha, opts) => {
+                opts?.onAllowed?.(allowed as never);
+                return { applied: true, deployed: true } as never;
+            })
+            .mockResolvedValueOnce({ applied: true, deployed: true } as never);
+        try {
+            const body = { commitSha: 'abc123', planFingerprint: 'fp', deploy: true };
+            const withEvidence = await request(app)
+                .post('/api/stacks/existing-stack/git-source/apply')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(body);
+            expect(withEvidence.status).toBe(200);
+            expect(withEvidence.body).toMatchObject({ deployed: true, policyEvidence: { policy: { name: 'prod-gate' }, bypassed: false } });
+
+            const clean = await request(app)
+                .post('/api/stacks/existing-stack/git-source/apply')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send(body);
+            expect(clean.status).toBe(200);
+            expect(clean.body).not.toHaveProperty('policyEvidence');
+        } finally {
+            applySpy.mockRestore();
+        }
+    });
+});
+
+describe('POST /api/stacks/:stackName/git-source/retry policy evidence', () => {
+    const allowed = {
+        policy: { id: 3, name: 'prod-gate' },
+        bypassed: false,
+        evidence: { outcome: 'allow', records: [], applications: [], summary: 'x' },
+    };
+
+    it('carries the decision the retried deploy was allowed on, and nothing on a clean retry', async () => {
+        const result = { outcome: 'no_source_change', reason: 'ok', nextAction: 'none' } as never;
+        const retrySpy = vi.spyOn(GitSourceService.getInstance(), 'retry')
+            .mockImplementationOnce(async (_stack, opts) => {
+                opts.onAllowed?.(allowed as never);
+                return result;
+            })
+            .mockResolvedValueOnce(result);
+        try {
+            const withEvidence = await request(app)
+                .post('/api/stacks/existing-stack/git-source/retry')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({});
+            expect(withEvidence.status).toBe(200);
+            expect(withEvidence.body).toMatchObject({
+                outcome: 'no_source_change',
+                policyEvidence: { policy: { name: 'prod-gate' }, bypassed: false },
+            });
+
+            const clean = await request(app)
+                .post('/api/stacks/existing-stack/git-source/retry')
+                .set('Authorization', `Bearer ${adminToken()}`)
+                .send({});
+            expect(clean.status).toBe(200);
+            expect(clean.body).not.toHaveProperty('policyEvidence');
+        } finally {
+            retrySpy.mockRestore();
         }
     });
 });

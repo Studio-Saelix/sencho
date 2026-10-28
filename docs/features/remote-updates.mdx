@@ -45,7 +45,7 @@ There are two surfaces that initiate an update on a remote node:
 The **Skip** button next to Update hides the update prompt for that node and excludes it from **Update all** until a newer version is released; the row shows a **Skipped vX.Y.Z** badge with an **Unskip** button to bring the prompt back early. The skip is per-node and per-version: when the next Sencho release comes out, the skip clears automatically and the update surfaces again. Skipping and unskipping both require the admin role.
 
 <Frame>
-  <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing an Online badge, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
+  <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing a Proxy marker, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
 </Frame>
 
 When an update is available, this same card gains a warning **Update available** pill next to the version chip and an outline **Update to vX.Y.Z** button across the bottom (not pictured above, since every node in this fleet is currently up to date). Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.
@@ -61,11 +61,12 @@ Reapply:
 - Uses the same Compose project context as a version update (multiple Compose files, `env_file`, configs, secrets, and bind mounts).
 - Preserves the image reference declared in Compose. Sencho does not resolve a newer release or rewrite the pin.
 - Works for digest-pinned installs, because no repin step runs.
+- Recreates the Sencho service with `docker compose up -d --force-recreate`. Compose also recreates a service Sencho lists in `depends_on` (a Docker socket proxy in the same project, for example) when it changed, and some Compose versions recreate an unchanged one too, so the dashboard can lose its Docker connection until it is back.
 - Requires the admin role.
 
 Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Confirming a remote reapply uses the same required acknowledgement (recreate from current Compose, no newer version, no image rewrite) before the request is sent; Fleet then shows a **Reapplying** badge until the node restarts or the operation fails.
 
-Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path.
+Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path. On Sencho's own stack the stack-level **Start**, **Stop**, **Take down**, **Update**, **Rollback**, and **Delete** controls are disabled. Choosing **Stop service** on one of its services opens a **Reapply Sencho** confirmation instead; confirming it runs the same reapply.
 
 ## Updating the local (gateway) node
 

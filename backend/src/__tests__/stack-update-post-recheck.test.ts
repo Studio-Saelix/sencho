@@ -107,7 +107,10 @@ afterAll(() => {
   cleanupTestDb(tmpDir);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // The route's Docker endpoint check renders the stack's Compose config; this test is not about it.
+  const { ComposeService } = await import('../services/ComposeService');
+  vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
   callOrder.length = 0;
   mockExecute.mockReset();
   mockRecheckStack.mockReset();

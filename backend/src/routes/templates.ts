@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
@@ -9,10 +10,11 @@ import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
 import { ErrorParser } from '../utils/ErrorParser';
+import { MissingExternalNetworksError } from '../services/network/missingExternalNetworksError';
 import { isValidStackName, isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
-import { runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { policyEvidenceFor, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { getRegistryDeliveryContext, getRegistryDeliveryLockContext } from '../helpers/registryDeliveryContext';
 import { materializePreparedSourceToStack } from '../helpers/registryDeliveryMaterialize';
@@ -195,7 +197,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
       if (debug) console.debug(`[Templates:debug] Deploy timing: ${stackName} took ${Date.now() - deployStartedAt}ms`);
-      res.json({ success: true, message: 'Template deployed successfully' });
+      res.json({ success: true, message: 'Template deployed successfully', ...policyEvidenceFor(res) });
       if (!skip_scan) {
         triggerPostDeployScan(stackName, req.nodeId).catch(err =>
           console.error(`[Security] Post-deploy scan failed for ${stackName}:`, err),
@@ -204,35 +206,47 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
     } catch (deployError: unknown) {
       const rawError = getErrorMessage(deployError, String(deployError));
       console.error(`[Templates] Deploy failed: ${stackName} -`, rawError);
-      const parsed = ErrorParser.parse(rawError);
+      // A pre-flight refusal already carries a specific, actionable diagnosis
+      // and nothing was ever started, so it always rolls back. Matching its
+      // text against the generic rules would both suppress the rollback and
+      // replace the real cause with a rule's paraphrase.
+      const refusal = deployError instanceof MissingExternalNetworksError ? deployError : null;
+      const parsed = refusal === null ? ErrorParser.parse(rawError) : null;
 
-      const shouldRollback = parsed.rule ? parsed.rule.canSilentlyRollback : true;
+      const shouldRollback = refusal !== null || (parsed?.rule ? parsed.rule.canSilentlyRollback : true);
       let rolledBack = false;
 
       if (shouldRollback) {
         let dockerDownCompleted = true;
         let fileDeleteCompleted = true;
+        let dockerDownRefused = false;
         try {
           await ComposeService.getInstance(req.nodeId).downStack(stackName, { removeVolumes: true });
         } catch (downErr) {
           dockerDownCompleted = false;
+          dockerDownRefused = isDockerEndpointProtectedError(downErr);
           console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
         }
 
-        try {
-          await fsService.deleteStack(stackName);
-        } catch (fsErr) {
+        // A refused down leaves containers running; their files must stay.
+        if (!dockerDownRefused) {
+          try {
+            await fsService.deleteStack(stackName);
+          } catch (fsErr) {
+            fileDeleteCompleted = false;
+            console.error("[Templates] Rollback Stage 2 (File deletion) failed:", fsErr);
+          }
+        } else {
           fileDeleteCompleted = false;
-          console.error("[Templates] Rollback Stage 2 (File deletion) failed:", fsErr);
         }
         rolledBack = dockerDownCompleted && fileDeleteCompleted;
       }
 
       invalidateNodeCaches(req.nodeId);
       res.status(500).json({
-        error: parsed.message,
+        error: refusal?.message ?? parsed?.message ?? rawError,
         rolledBack,
-        ruleId: parsed.rule?.id || 'UNKNOWN'
+        ruleId: refusal?.code ?? parsed?.rule?.id ?? 'UNKNOWN',
       });
     }
   } catch (error: unknown) {

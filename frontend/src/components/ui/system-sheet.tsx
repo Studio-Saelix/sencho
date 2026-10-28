@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils';
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
 
 const KICKER_CLASS = 'font-mono text-[10px] uppercase tracking-[0.22em]';
 const CRUMB_CLASS = `${KICKER_CLASS} text-stat-subtitle`;
@@ -22,6 +23,12 @@ export interface SystemSheetAction {
   onClick: () => void;
   disabled?: boolean;
   icon?: LucideIcon;
+  /**
+   * Immediate interaction lock for async work. The button disables at once and,
+   * after the busy delay, its own icon spins (a refresh circle turns rather than
+   * being swapped for a spinner). The label stays caller-owned.
+   */
+  pending?: boolean;
 }
 
 export interface SystemSheetTab {
@@ -222,39 +229,42 @@ interface ToolbarBandProps {
 function ToolbarBand({ primary, secondaries, destructive }: ToolbarBandProps) {
   return (
     <div className="bg-popover/95 backdrop-blur-md flex items-center gap-2 border-b border-card-border/60 px-6 py-3" data-sn-glass="panel">
-      {primary && (
-        <Button size="sm" onClick={primary.onClick} disabled={primary.disabled} className="gap-1.5">
-          {primary.icon && <primary.icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
-          {primary.label}
-        </Button>
-      )}
+      {primary && <ToolbarActionButton action={primary} />}
       {secondaries?.map((action, idx) => (
-        <Button
-          key={idx}
-          size="sm"
-          variant="outline"
-          onClick={action.onClick}
-          disabled={action.disabled}
-          className="gap-1.5"
-        >
-          {action.icon && <action.icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
-          {action.label}
-        </Button>
+        <ToolbarActionButton key={idx} action={action} variant="outline" />
       ))}
       <span className="flex-1" />
       {destructive && (
-        <Button
-          size="sm"
+        <ToolbarActionButton
+          action={destructive}
           variant="ghost"
-          onClick={destructive.onClick}
-          disabled={destructive.disabled}
-          className="gap-1.5 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-        >
-          {destructive.icon && <destructive.icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
-          {destructive.label}
-        </Button>
+          className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+        />
       )}
     </div>
+  );
+}
+
+function ToolbarActionButton({ action, variant, className }: {
+  action: SystemSheetAction;
+  variant?: 'outline' | 'ghost';
+  className?: string;
+}) {
+  const pending = action.pending ?? false;
+  const { showBusy } = useVisualBusy(pending);
+  const Icon = action.icon;
+  return (
+    <Button
+      size="sm"
+      variant={variant}
+      onClick={action.onClick}
+      disabled={action.disabled || pending}
+      aria-busy={pending || undefined}
+      className={cn('gap-1.5', className)}
+    >
+      {Icon && <Icon className={cn('h-3.5 w-3.5', showBusy && 'animate-spin')} strokeWidth={1.5} />}
+      {action.label}
+    </Button>
   );
 }
 

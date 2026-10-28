@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function decryptEncValue(encValue: string, key: Buffer): string {
+function decryptEncValue(encValue: string, key: Buffer, aad: string): string {
   const match = ENC_FIELD_RE.exec(encValue);
   if (!match) {
     throw new SopsDecryptError('invalid_ciphertext', 'Malformed encrypted value');
@@ -33,11 +33,17 @@ function decryptEncValue(encValue: string, key: Buffer): string {
     key,
     Buffer.from(ivB64, 'base64'),
   );
+  decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(dataB64, 'base64')),
-    decipher.final(),
-  ]);
+  let decrypted: Buffer;
+  try {
+    decrypted = Buffer.concat([
+      decipher.update(Buffer.from(dataB64, 'base64')),
+      decipher.final(),
+    ]);
+  } catch {
+    throw new SopsDecryptError('decrypt_failed', 'SOPS value authentication failed');
+  }
   return decrypted.toString('utf8');
 }
 
@@ -78,21 +84,35 @@ function withTrailingNewline(text: string): string {
   return text.replace(/\n$/, '') + '\n';
 }
 
-function decryptNode(node: unknown, key: Buffer): unknown {
+function isSopsSectionName(name: string): boolean {
+  return /^sops(?:\.[^\]]+)?$/i.test(name);
+}
+
+function headerName(line: string): string | null {
+  const match = /^\[([^\]]+)\]$/.exec(line.trim());
+  return match ? match[1] : null;
+}
+
+/** sops authenticates every value with its colon-joined key path plus a trailing colon. */
+function aadForPath(path: string[]): string {
+  return `${path.join(':')}:`;
+}
+
+function decryptNode(node: unknown, key: Buffer, path: string[]): unknown {
   if (typeof node === 'string') {
     if (ENC_FIELD_RE.test(node)) {
-      return decryptEncValue(node, key);
+      return decryptEncValue(node, key, aadForPath(path));
     }
     return node;
   }
   if (Array.isArray(node)) {
-    return node.map((item) => decryptNode(item, key));
+    // sops authenticates array elements with the path of the array itself.
+    return node.map((item) => decryptNode(item, key, path));
   }
   if (isRecord(node)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(node)) {
-      if (k === 'sops') continue;
-      out[k] = decryptNode(v, key);
+      out[k] = decryptNode(v, key, [...path, k]);
     }
     return out;
   }
@@ -108,6 +128,32 @@ function unescapeDotenvValue(raw: string): string {
     value = value.slice(1, -1);
   }
   return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
+}
+
+function escapeSopsDotenvValue(value: string): string {
+  return value.replace(/\n/g, '\\n');
+}
+
+/**
+ * Format a decrypted dotenv value so Compose's env_file parser returns the
+ * exact plaintext. Compose expands escapes only in double-quoted values and
+ * interpolates $, so values it would otherwise rewrite are quoted and escaped.
+ * Only for inputs Compose parses as env; files an application reads verbatim
+ * use the sops-faithful output instead.
+ */
+function formatComposeEnvValue(value: string): string {
+  const needsQuoting = /[\n\r\t"\\$#]/.test(value)
+    || value.startsWith("'")
+    || value !== value.trim();
+  if (!needsQuoting) return value;
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, () => '$$')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+  return `"${escaped}"`;
 }
 
 function parseFlatAgeEntries(content: string): Array<{ recipient: string; enc: string }> {
@@ -128,7 +174,11 @@ function parseFlatAgeEntries(content: string): Array<{ recipient: string; enc: s
   return out;
 }
 
-async function decryptUnstructuredSops(content: string, identity: string): Promise<string> {
+async function decryptUnstructuredSops(
+  content: string,
+  identity: string,
+  dotenvOutput: SopsDotenvOutput,
+): Promise<string> {
   const ageEntries = parseFlatAgeEntries(content);
   if (ageEntries.length === 0) {
     throw new SopsDecryptError('invalid_ciphertext', 'SOPS metadata is missing');
@@ -136,17 +186,37 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
 
   const fileKey = await unwrapMatchingAgeFileKey(ageEntries.map((entry) => entry.enc), identity);
 
+  // INI stores flatten metadata below a [sops] section; dotenv stores flatten
+  // it into sops_* keys. The distinction decides how values are authenticated.
+  const contentLines = content.split(/\r?\n/);
+  const isIni = contentLines.some((line) => {
+    const name = headerName(line);
+    return name !== null && isSopsSectionName(name);
+  });
+
   const lines: string[] = [];
   let inSopsSection = false;
-  for (const rawLine of content.split(/\r?\n/)) {
+  let section: string | null = null;
+  for (const rawLine of contentLines) {
     const trimmed = rawLine.trim();
-    if (/^\[sops(?:\.[^\]]+)?\]$/i.test(trimmed)) {
-      inSopsSection = true;
+    const header = headerName(rawLine);
+    if (header !== null && !inSopsSection) {
+      if (isSopsSectionName(header)) {
+        inSopsSection = true;
+        continue;
+      }
+      section = header;
+      lines.push(rawLine);
       continue;
     }
     if (inSopsSection) {
-      if (trimmed.startsWith('[') && trimmed.endsWith(']')) inSopsSection = false;
-      else continue;
+      if (header !== null) {
+        inSopsSection = false;
+        section = header;
+        lines.push(rawLine);
+        continue;
+      }
+      continue;
     }
     if (/^(?:sops_|age__list_)/.test(trimmed)) continue;
     const eq = rawLine.indexOf('=');
@@ -157,7 +227,17 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
     const key = rawLine.slice(0, eq).trimEnd();
     const value = unescapeDotenvValue(rawLine.slice(eq + 1).trim());
     if (ENC_FIELD_RE.test(value)) {
-      lines.push(`${key}=${decryptEncValue(value, fileKey)}`);
+      // Dotenv values are authenticated with their flat key. INI values carry
+      // their section, with the implicit default section named DEFAULT.
+      const aad = isIni ? `${section ?? 'DEFAULT'}:${key}:` : `${key}:`;
+      const plaintext = decryptEncValue(value, fileKey, aad);
+      let emitted = plaintext;
+      if (!isIni) {
+        emitted = dotenvOutput === 'compose-env'
+          ? formatComposeEnvValue(plaintext)
+          : escapeSopsDotenvValue(plaintext);
+      }
+      lines.push(`${key}=${emitted}`);
     } else {
       lines.push(rawLine);
     }
@@ -165,23 +245,56 @@ async function decryptUnstructuredSops(content: string, identity: string): Promi
   return withTrailingNewline(lines.join('\n'));
 }
 
+/** How decrypted dotenv content will be consumed. */
+export type SopsDotenvOutput = 'sops' | 'compose-env';
+
 /**
  * Decrypt an age-only SOPS document using a single age identity string.
  * Returns plaintext file content (YAML without the sops metadata block, or
  * dotenv/INI without flattened sops_* keys).
+ *
+ * Dotenv output defaults to the sops-faithful form. Pass `compose-env` for
+ * inputs Compose parses as env files, so values survive its interpolation and
+ * comment rules; pass `sops` for files an application reads verbatim.
  */
-export async function decryptSopsAgeDocument(content: string, identity: string): Promise<string> {
+export async function decryptSopsAgeDocument(
+  content: string,
+  identity: string,
+  dotenvOutput: SopsDotenvOutput = 'sops',
+): Promise<string> {
+  // JSON documents are valid YAML; detect the source encoding so the output
+  // keeps it instead of converting every JSON secret to YAML.
+  let jsonDoc: unknown;
+  try {
+    jsonDoc = JSON.parse(content);
+  } catch {
+    jsonDoc = null;
+  }
+  if (isRecord(jsonDoc) && isRecord(jsonDoc.sops)) {
+    return decryptStructuredDocument(jsonDoc, identity, 'json');
+  }
+
   let doc: unknown;
   try {
     doc = parseYaml(content);
   } catch {
-    return decryptUnstructuredSops(content, identity);
+    return decryptUnstructuredSops(content, identity, dotenvOutput);
   }
   if (!isRecord(doc) || !isRecord(doc.sops)) {
-    return decryptUnstructuredSops(content, identity);
+    return decryptUnstructuredSops(content, identity, dotenvOutput);
   }
+  return decryptStructuredDocument(doc, identity, 'yaml');
+}
 
+async function decryptStructuredDocument(
+  doc: Record<string, unknown>,
+  identity: string,
+  format: 'yaml' | 'json',
+): Promise<string> {
   const sopsMeta = doc.sops;
+  if (!isRecord(sopsMeta)) {
+    throw new SopsDecryptError('invalid_ciphertext', 'SOPS metadata is malformed');
+  }
   const ageEntries = sopsMeta.age;
   if (!Array.isArray(ageEntries) || ageEntries.length === 0) {
     throw new SopsDecryptError('invalid_ciphertext', 'No age entries in SOPS metadata');
@@ -193,9 +306,14 @@ export async function decryptSopsAgeDocument(content: string, identity: string):
   }
   const fileKey = await unwrapMatchingAgeFileKey(encodings, identity);
 
-  const plaintextDoc = decryptNode(doc, fileKey);
+  // The top-level sops key is metadata; a nested key named sops is data.
+  const data = { ...doc };
+  delete data.sops;
+  const plaintextDoc = decryptNode(data, fileKey, []);
   if (typeof plaintextDoc === 'string') {
     return plaintextDoc;
   }
-  return withTrailingNewline(stringifyYaml(plaintextDoc));
+  return format === 'json'
+    ? withTrailingNewline(JSON.stringify(plaintextDoc, null, '\t'))
+    : withTrailingNewline(stringifyYaml(plaintextDoc));
 }

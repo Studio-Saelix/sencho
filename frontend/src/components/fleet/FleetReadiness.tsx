@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshCw, ServerOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -8,26 +8,35 @@ import { toSecurityTab } from '@/lib/router/senchoRoute';
 import type { SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ReadinessDomainKey, ReadinessFinding, ReadinessTarget } from '@/types/readiness';
-import { FleetEmptyCard, FleetEmptyState, FleetTabHeading } from './FleetEmptyState';
+import { useVisualBusy } from '@/hooks/useVisualBusy';
+import { FleetEmptyCard, FleetEmptyState } from './FleetEmptyState';
 import { TARGET_ACTION } from './readinessMeta';
-import { useFleetReadiness } from './readiness/useFleetReadiness';
+import type { FleetReadinessState } from './readiness/useFleetReadiness';
 import { ReadinessSummaryStrip } from './readiness/ReadinessSummaryStrip';
 import { ReadinessNodeMatrix } from './readiness/ReadinessNodeMatrix';
 import { ReadinessFindingsTable } from './readiness/ReadinessFindingsTable';
 import { ALL, EMPTY_FINDINGS_FILTER, type FindingsFilter } from './readiness/findingsFilter';
 import { useNow } from './readiness/useNow';
-
-const TITLE = 'Fleet Readiness';
-const SUBTITLE = 'What needs attention before you operate, update, or recover the fleet.';
+import { useReadinessVerbs } from './readiness/useReadinessVerbs';
+import type { ReadinessVerb } from './readiness/readinessVerbs';
+import { useFindingDismissal } from '@/hooks/useFindingDismissal';
+import { READINESS_SEVERITY_SCALE, partitionFindings } from '@/lib/findingDismissals';
+import type { FindingDismissal } from '@/types/findingDismissal';
 
 function navigate(detail: SenchoNavigateDetail): void {
   window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail }));
 }
 
+/** Status row and findings table, sized like the loaded layout so nothing shifts when data lands. */
 function ReadinessSkeleton() {
   return (
     <div className="space-y-4" aria-busy="true" aria-label="Checking readiness">
-      <Skeleton className="h-[104px] w-full rounded-lg" />
+      <div className="flex items-center gap-4 border-b border-card-border pb-3">
+        <Skeleton className="h-2 w-2 rounded-full" />
+        <Skeleton className="h-4 w-32" />
+        <Skeleton className="h-4 w-64" />
+        <Skeleton className="ml-auto h-4 w-24" />
+      </div>
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card p-4 shadow-card-bevel">
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -46,8 +55,11 @@ function ReadinessSkeleton() {
 }
 
 interface FleetReadinessProps {
-  /** Bumped by the Fleet toolbar's Refresh button to request a new check. */
-  refreshKey: number;
+  /**
+   * The hub's readiness check, owned by the Fleet shell so it starts when Fleet
+   * opens and survives switching tabs rather than reloading on every visit.
+   */
+  readiness: FleetReadinessState;
   /** Opens the in-view node details sheet. */
   onOpenNodeDetails: (nodeId: number) => void;
   /** Switches to a node and opens its Security view; absent when the shell did not provide one. */
@@ -56,6 +68,10 @@ interface FleetReadinessProps {
   onOpenSettingsSection?: (section: SectionId) => void;
   /** Snapshots is an admin-only tab, so its shortcut follows the same gate. */
   isAdmin: boolean;
+  /** Whether this account may dismiss the finding, from the shell that owns the auth context. */
+  canDismiss: (finding: ReadinessFinding) => boolean;
+  /** Whether this account may run the verb on the finding; a verb it may not run is not offered. */
+  canRun: (verb: ReadinessVerb, finding: ReadinessFinding) => boolean;
 }
 
 /**
@@ -63,17 +79,23 @@ interface FleetReadinessProps {
  * update, recover, or rely on it.
  *
  * Every state, reason code, and finding is decided on the hub; this surface
- * renders the payload and routes each finding to the surface that already owns
- * its remediation. Nothing here recomputes a verdict.
+ * renders the payload. A finding is resolved by a verb run where it is listed
+ * (chosen from the finding's structured facts), or routes to the surface that
+ * owns its remediation when the work lives elsewhere. Nothing here recomputes a
+ * verdict.
  */
 export function FleetReadiness({
-  refreshKey,
+  readiness,
   onOpenNodeDetails,
   onOpenNodeSecurity,
   onOpenSettingsSection,
   isAdmin,
+  canDismiss,
+  canRun,
 }: FleetReadinessProps) {
-  const { data, error, checking, retry } = useFleetReadiness(refreshKey);
+  const { data, error, checking, retry, patchDismissals } = readiness;
+  // A fast answer never flashes the skeleton; the pane just holds its height.
+  const { showBusy } = useVisualBusy(!data && error === null);
   const [filter, setFilter] = useState<FindingsFilter>(EMPTY_FINDINGS_FILTER);
   const findingsRef = useRef<HTMLDivElement>(null);
   // Relative "seen Xm ago" stamps in the matrix move with the clock.
@@ -105,6 +127,10 @@ export function FleetReadiness({
     }
   }, [onOpenNodeDetails, onOpenNodeSecurity, onOpenSettingsSection]);
 
+  const nodeNames = useMemo(() => new Map((data?.nodes ?? []).map(node => [node.id, node.name])), [data?.nodes]);
+  const nodeName = useCallback((nodeId: number) => nodeNames.get(nodeId) ?? `node ${nodeId}`, [nodeNames]);
+  const { verbFor, overlays } = useReadinessVerbs({ recheck: retry, openFinding, canRun, nodeName });
+
   // A finding is always listed; only the shortcut is withheld when the current
   // user cannot reach the surface it points at, so no row offers a dead button.
   const actionFor = useCallback((target: ReadinessTarget): string | null => {
@@ -118,19 +144,36 @@ export function FleetReadiness({
   // node), has no findings of its own, so it narrows to the node instead of
   // landing on an empty list.
   const findings = data?.findings;
+  const upsertDismissal = useCallback((dismissal: FindingDismissal) => {
+    patchDismissals(current => [...current.filter(item => item.id !== dismissal.id && item.findingKey !== dismissal.findingKey), dismissal]);
+  }, [patchDismissals]);
+  const removeDismissal = useCallback((id: number) => {
+    patchDismissals(current => current.filter(item => item.id !== id));
+  }, [patchDismissals]);
+  const { dismiss, restore, isPending } = useFindingDismissal({
+    surface: 'readiness',
+    onUpsert: upsertDismissal,
+    onRemove: removeDismissal,
+    onGone: retry,
+  });
+
+  // The matrix keeps the whole list: a dismissal moves a finding out of the
+  // attention list, it never changes what a cell says.
+  const partition = useMemo(
+    () => partitionFindings(data?.findings ?? [], data?.dismissals ?? [], now, READINESS_SEVERITY_SCALE),
+    [data?.findings, data?.dismissals, now],
+  );
   const focusCell = useCallback((nodeId: number, domain: ReadinessDomainKey) => {
     const hasOwn = findings?.some(finding => finding.nodeId === nodeId && finding.domain === domain) ?? false;
     setFilter({ ...EMPTY_FINDINGS_FILTER, nodeId, domain: hasOwn ? domain : ALL });
     findingsRef.current?.scrollIntoView({ block: 'start' });
   }, [findings]);
 
-  const heading = <FleetTabHeading title={TITLE} subtitle={SUBTITLE} />;
-
   if (!data) {
     return (
-      <div className="space-y-4">
-        {heading}
-        {error === null ? <ReadinessSkeleton /> : (
+      <div className="min-h-[320px] space-y-4">
+        {error === null && showBusy && <ReadinessSkeleton />}
+        {error !== null && (
           <FleetEmptyState>
             <FleetEmptyCard
               icon={ServerOff}
@@ -151,7 +194,6 @@ export function FleetReadiness({
 
   return (
     <div className="space-y-4">
-      {heading}
       {/* A failed refresh keeps the last result on screen, so it has to say so:
           a readiness board that silently shows stale states is the one thing it
           must never do. */}
@@ -176,16 +218,24 @@ export function FleetReadiness({
         </FleetEmptyState>
       ) : (
         <>
-          <ReadinessSummaryStrip data={data} checking={checking} />
+          <ReadinessSummaryStrip data={data} checking={checking} dismissedCount={partition.dismissed.length} />
           <div ref={findingsRef} className="scroll-mt-4">
             <ReadinessFindingsTable
-              findings={data.findings}
+              findings={partition.active}
+              dismissed={partition.dismissed}
+              onRestore={dismissal => { void restore(dismissal.id); }}
+              isRestoring={dismissal => isPending(dismissal.id)}
+              now={now}
+              canDismiss={canDismiss}
+              onDismiss={(finding, mode, days) => { void dismiss(finding, mode, days); }}
+              isDismissing={finding => isPending(finding.id)}
               domains={data.domains}
               nodes={data.nodes}
               filter={filter}
               onFilterChange={setFilter}
               actionFor={actionFor}
               onOpen={openFinding}
+              verbFor={verbFor}
             />
           </div>
           <ReadinessNodeMatrix
@@ -198,6 +248,7 @@ export function FleetReadiness({
           />
         </>
       )}
+      {overlays}
     </div>
   );
 }

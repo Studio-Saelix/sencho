@@ -13,7 +13,7 @@ export function BlueprintEmptyState({ onCreate, canCreate }: BlueprintEmptyState
                 <div className="flex items-center justify-between gap-3">
                     <div className="inline-flex items-center gap-2 text-brand">
                         <LayoutTemplate className="h-4 w-4" strokeWidth={1.5} />
-                        <span className="font-mono text-[10px] uppercase tracking-[0.2em]">Deployments · Blueprints</span>
+                        <span className="font-mono text-[10px] uppercase tracking-[0.2em]">Blueprints</span>
                     </div>
                 </div>
                 <h3 className="font-heading text-2xl leading-tight tracking-[-0.01em] text-stat-value">

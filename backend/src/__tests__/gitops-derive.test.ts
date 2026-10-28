@@ -4,10 +4,13 @@ import { FACET_EVIDENCE_SOURCE } from '../services/gitops/types';
 import { GitOpsStore, emptyTargetRow } from '../services/gitops/store';
 import { GitOpsTransitions, type EventEnvelope } from '../services/gitops/transitions';
 import { deriveGitOpsRevision, projectApplication } from '../services/gitops/derive';
+import { attentionReasons } from '../services/gitops/attention';
+import { postureOf } from '../services/gitops/portfolioAggregator';
 import { DatabaseService } from '../services/DatabaseService';
 import type {
   FutureGitOpsEvidence,
   GitOpsApplicationRow,
+  GitOpsDriftItem,
   GitOpsGenerationRow,
   GitOpsIntentRevisionRow,
   GitOpsRevisionProjection,
@@ -17,6 +20,7 @@ import {
   encodeObservedArtifactIdentity,
   type ServiceArtifactEvidence,
 } from '../services/gitops/json';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from '../services/gitops/policyComposition';
 
 describe('gitops derivation', () => {
   let tmpDir: string;
@@ -403,6 +407,108 @@ describe('gitops derivation', () => {
     // keeps a withdrawn node's failed recovery out of the status.
     expect(recovery.targets.find((target) => target.nodeId === 2)?.runtime.status).toBe('tombstoned');
     expect(recovery.facets.rollout.status).toBe('not_applicable');
+    // What the ordering hides is reported rather than dropped. The tombstone
+    // cleared the failure columns but left the recovery ones, so the row still
+    // holds the failed recovery, and the one thing that cannot be proven from
+    // here is what the withdrawn node is still running. A limitation rather than
+    // a state, because a withdrawal is not a runtime state.
+    expect(recovery.limitations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'withdrawal_residue',
+        evidence: { nodeId: 2, recoveryRef: 'recovery-tombstoned' },
+      }),
+    ]));
+  });
+
+  it('reports no withdrawal residue for a retirement that carried no failed recovery', () => {
+    const application = rawApp('app-tomb-clean', {
+      target_mode: 'blueprint',
+      blueprint_id: 96,
+      lifecycle_key: 'blueprint:96',
+      stack_name: null,
+      configured_source_stack_name: null,
+    });
+
+    const projection = deriveGitOpsRevision({
+      application,
+      targets: [
+        {
+          ...emptyTargetRow(application.id, 1, 1),
+          observed_artifact_identity_json: encodeObservedArtifactIdentity({
+            kind: 'exact',
+            identity: 'sha256:active',
+            observedAt: 1,
+          }),
+        },
+        {
+          ...emptyTargetRow(application.id, 2, 1),
+          target_status: 'tombstoned',
+        },
+      ],
+      healthDisabled: true,
+    }, null);
+
+    if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+    // The ordinary retirement has nothing to qualify, and a caveat on every one
+    // of them would be noise on a surface that stays silent by default. The
+    // retired target's own state already says it is no longer reconciled, and
+    // what a withdrawal cannot prove about the node is recorded in the internal
+    // docs rather than asserted per target.
+    expect(projection.limitations.map((limitation) => limitation.code)).not.toContain('withdrawal_residue');
+  });
+
+  it('reports withdrawal residue from either arm of the failed-recovery condition', () => {
+    // Two orderings reach a tombstoned row carrying a failed recovery, and they
+    // populate different columns, so each arm is exercised on its own. Asserting
+    // both on one row would pass even if the implementation read only one.
+    const orderings = [
+      {
+        label: 'recovered then withdrawn',
+        // Both retirement paths clear the failure columns and keep the recovery
+        // ones, so this is the shape a withdrawal leaves behind.
+        row: { recovery_phase: 'failed', recovery_ref: 'recovery-a' } as const,
+      },
+      {
+        label: 'withdrawn then recorded a failed recovery',
+        // `recoveryFailed` sets the failure stage on a tombstoned row too: it
+        // guards on nothing but the row existing, so this ordering is reachable.
+        row: { failure_stage: 'recovery', failure_class: 'post_mutation' } as const,
+      },
+    ] as const;
+
+    orderings.forEach(({ label, row }, index) => {
+      const application = rawApp(`app-tomb-arm-${index}`, {
+        target_mode: 'blueprint',
+        blueprint_id: 97 + index,
+        lifecycle_key: `blueprint:${97 + index}`,
+        stack_name: null,
+        configured_source_stack_name: null,
+      });
+
+      const projection = deriveGitOpsRevision({
+        application,
+        targets: [
+          {
+            ...emptyTargetRow(application.id, 1, 1),
+            observed_artifact_identity_json: encodeObservedArtifactIdentity({
+              kind: 'exact',
+              identity: 'sha256:active',
+              observedAt: 1,
+            }),
+          },
+          {
+            ...emptyTargetRow(application.id, 2, 1),
+            target_status: 'tombstoned',
+            ...row,
+          },
+        ],
+        healthDisabled: true,
+      }, null);
+
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.limitations.map((limitation) => limitation.code), label).toContain('withdrawal_residue');
+      expect(projection.targets[1]?.runtime.status, label).toBe('tombstoned');
+    });
   });
 
   it('projects connectivity for a Blueprint target from its recorded observation', () => {
@@ -545,11 +651,17 @@ describe('gitops derivation', () => {
     // A divergent Blueprint target reads applied_not_deployed like any other,
     // but Direct deployment is not a legal move for this mode: only an
     // identity-matched interruption retry ever deploys here.
+    //
+    // The deployed pointer is null, which is the shape a Blueprint target
+    // really has: nothing binds a deploy for a Blueprint-managed stack, so the
+    // running generation is the applied pointer and the divergence has to be
+    // expressed as desired versus applied. An earlier version of this fixture
+    // set the deployed pointer, which is a shape no Blueprint target can have,
+    // and the case passed for a reason production cannot reproduce.
     store.upsertTarget({
       ...emptyTargetRow('app-bp-deploy', 1, 1),
       desired_generation_id: 'gen-bp-wanted',
-      applied_generation_id: 'gen-bp-wanted',
-      deployed_generation_id: 'gen-bp-serving',
+      applied_generation_id: 'gen-bp-serving',
     });
 
     const projection = projectApplication('app-bp-deploy', false);
@@ -572,11 +684,15 @@ describe('gitops derivation', () => {
         configured_ref: null,
         ...overrides,
       });
+    // The deployed pointer is null, which is the shape a Blueprint target
+    // really has: nothing binds a deploy for a Blueprint-managed stack, so the
+    // running generation is the applied pointer and the divergence has to be
+    // expressed as desired versus applied. Setting the deployed pointer here
+    // built a row no Blueprint target can have.
     const divergentTarget = (appId: string) => ({
       ...emptyTargetRow(appId, 1, 1),
       desired_generation_id: `wanted-${appId}`,
-      applied_generation_id: `wanted-${appId}`,
-      deployed_generation_id: `serving-${appId}`,
+      applied_generation_id: `serving-${appId}`,
       interruption_stage: 'blueprint_deploy_started' as const,
       interruption_at: 1,
     });
@@ -1372,6 +1488,173 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).toContain('suspend');
   });
 
+  describe('retry after a failed health verdict', () => {
+    // Each case owns its application, generation, and stack, so health runs
+    // (keyed by node and stack) and the shared database never leak between them.
+    let seq = 0;
+    const fixture = () => {
+      seq += 1;
+      return { appId: `app-health-retry-${seq}`, genId: `gen-health-retry-${seq}`, stackName: `health-retry-${seq}-web` };
+    };
+    type Fixture = ReturnType<typeof fixture>;
+
+    const run = (f: Fixture, id: string, over: Partial<Parameters<DatabaseService['insertHealthGateRun']>[0]> = {}) => ({
+      id: `${f.appId}-${id}`,
+      node_id: 1,
+      stack_name: f.stackName,
+      trigger_action: 'deploy' as const,
+      status: 'failed' as const,
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: 20,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: f.genId,
+      ...over,
+    });
+
+    const seed = (
+      f: Fixture,
+      appOverrides: Partial<GitOpsApplicationRow> = {},
+      targetOverrides: Partial<ReturnType<typeof emptyTargetRow>> = {},
+    ) => {
+      const store = GitOpsStore.getInstance();
+      store.insertGeneration(gen(f.genId, f.appId));
+      store.insertApplication(rawApp(f.appId, {
+        stack_name: f.stackName,
+        accepted_generation_id: f.genId,
+        desired_commit_sha: 'abc123',
+        ...appOverrides,
+      }));
+      store.upsertTarget({
+        ...emptyTargetRow(f.appId, 1, 1),
+        desired_generation_id: f.genId,
+        applied_generation_id: f.genId,
+        deployed_generation_id: f.genId,
+        ...targetOverrides,
+      });
+    };
+
+    const projectionFor = (f: Fixture, healthDisabled = false) => {
+      const projection = projectApplication(f.appId, healthDisabled);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection;
+    };
+
+    it('offers retry when the applied generation failed its stack health gate', () => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      const projection = projectionFor(f);
+      // The source facet is still the settled one: this is the case no source status covered.
+      expect(projection.facets.source.status).toBe('application_generation_accepted');
+      expect(projection.availableActions).toContain('retry');
+      expect(projection.availableActions).toContain('suspend');
+    });
+
+    it('stops offering retry while health gates are off, because a retry would not clear the verdict', () => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      const { availableActions } = projectionFor(f, true);
+      expect(availableActions).not.toContain('retry');
+      expect(availableActions).toContain('suspend');
+    });
+
+    it.each([
+      ['a passed verdict', { status: 'passed' as const }],
+      ['an observing run', { status: 'observing' as const, ended_at: null }],
+      ['a verdict bound to another generation', { deployed_generation_id: 'gen-old' }],
+      ['a service-scoped run', { target_scope: 'service' as const, service_name: 'web' }],
+    ])('does not offer retry for %s', (_label, over) => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'run', over));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry when no health run exists', () => {
+      const f = fixture();
+      seed(f);
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry once a newer passing run follows the failure', () => {
+      const f = fixture();
+      seed(f);
+      const db = DatabaseService.getInstance();
+      db.insertHealthGateRun(run(f, 'failed'));
+      db.insertHealthGateRun(run(f, 'passed', { status: 'passed', started_at: 30, ended_at: 40 }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry when the target carries another failure', () => {
+      const f = fixture();
+      seed(f, {}, { failure_stage: 'deploy' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry before the applied pointer reaches the accepted generation', () => {
+      const f = fixture();
+      seed(f, {}, { applied_generation_id: null, deployed_generation_id: null });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it.each([
+      ['suspended', { suspended_at: 10 }],
+      ['interrupted', { interruption_stage: 'deploy_started' as const }],
+      ['mid-deploy', { active_operation_stage: 'deploy_started' as const }],
+      ['capturing a recovery', { recovery_phase: 'capturing' as const }],
+      ['recovering', { recovery_phase: 'failed' as const }],
+    ])('does not offer retry while the source is %s', (_label, appOverrides) => {
+      const f = fixture();
+      seed(f, appOverrides);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('still offers retry once a recovery has settled', () => {
+      const f = fixture();
+      seed(f, { recovery_phase: 'complete' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).toContain('retry');
+    });
+
+    it('does not offer retry for a target on a node other than the default one', () => {
+      // retry() reads only the default node's target, so a failed run elsewhere
+      // would take its fetch arm: the sheet must not promise a deploy resume.
+      const f = fixture();
+      seed(f, {}, { node_id: 2 });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed', { node_id: 2 }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry for a tombstoned target', () => {
+      const f = fixture();
+      seed(f, {}, { target_status: 'tombstoned' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry for a failed run that is older than a newer service-scoped pass', () => {
+      const f = fixture();
+      seed(f);
+      const db = DatabaseService.getInstance();
+      db.insertHealthGateRun(run(f, 'older-stack-failure'));
+      db.insertHealthGateRun(run(f, 'newer-stack-pass', { status: 'passed', started_at: 30, ended_at: 40 }));
+      db.insertHealthGateRun(run(f, 'newer-service-failure', {
+        target_scope: 'service', service_name: 'web', started_at: 50, ended_at: 60,
+      }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+  });
+
   it('does not offer controller actions on Blueprint applications', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(rawApp('app-bp-ctrl', {
@@ -1524,6 +1807,380 @@ describe('gitops derivation', () => {
   });
 
   /**
+   * A drift the Blueprint reconciler recorded, rather than one the pointer
+   * comparison found.
+   *
+   * The reconciler observes a node and records the result as its own runtime
+   * status, `drifted`, which outranks the pointer and artifact comparisons in
+   * `deriveRuntime`. So a Blueprint digest drift arrives here carrying that
+   * status, and the item has to be built from it or the canonical list says
+   * nothing about an application the deployment row calls drifted.
+   *
+   * Pinned in five directions: an item naming the service and digest that
+   * moved, the rollout class reported once rather than twice, a correction in
+   * progress reported as progress, an unverified observation reported as
+   * unverified rather than as agreement or as divergence, and a converged
+   * observation reported as nothing at all.
+   */
+  describe('a Blueprint reconciler observation reaches the canonical drift list', () => {
+    const approved = `sha256:${'a'.repeat(64)}`;
+    const moved = `sha256:${'b'.repeat(64)}`;
+    const approvedService = (): ServiceArtifactEvidence => ({
+      serviceName: 'web',
+      authoredRef: 'nginx:1.27',
+      source: 'registry',
+      platform: 'linux/amd64',
+      indexDigest: `sha256:${'1'.repeat(64)}`,
+      platformDigest: approved,
+      platformVariants: null,
+      localDigests: null,
+      buildContextFingerprint: null,
+      producedImageId: null,
+      failureClass: null,
+      resolvedAt: 1,
+    });
+    /** A running web whose approved child is not among the digests it reports. */
+    const movedService = (): ServiceArtifactEvidence => ({
+      ...approvedService(),
+      platformDigest: moved,
+      localDigests: [moved],
+    });
+
+    /**
+     * A deployed Blueprint target, converged on its pointers, that recorded
+     * `latest_stage` as the observation the reconciler left behind. The
+     * generation pointers all agree, so the only thing that can produce a
+     * runtime item here is the observation.
+     */
+    function seedObservedBlueprint(
+      applicationId: string,
+      blueprintId: number,
+      stage: 'blueprint_drifted' | 'blueprint_correcting',
+      observed: Parameters<typeof encodeObservedArtifactIdentity>[0],
+      expectedQualification: 'exact' | 'qualified' | 'stale' | 'local_build_unverified' = 'exact',
+    ): void {
+      const store = GitOpsStore.getInstance();
+      const generationId = `gen-${applicationId}`;
+      const artifactSetId = `art-${applicationId}`;
+      store.insertGeneration(gen(generationId, applicationId));
+      store.insertArtifactSet({
+        id: artifactSetId,
+        generation_id: generationId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: expectedQualification,
+        // `stale` and `local_build_unverified` sets still carry a real
+        // fingerprint identity, which is what makes the missing qualification
+        // check observable: the identity is present, so only the qualification
+        // can tell a comparable expectation from an unverified one.
+        evidence_json: encodeArtifactEvidenceJson({
+          kind: expectedQualification,
+          identity: `sha256:${'c'.repeat(64)}`,
+          services: [approvedService()],
+        }),
+        created_at: 1,
+      });
+      store.insertApplication(rawApp(applicationId, {
+        target_mode: 'blueprint',
+        blueprint_id: blueprintId,
+        lifecycle_key: `blueprint:${blueprintId}`,
+        stack_name: null,
+        configured_source_stack_name: null,
+        accepted_generation_id: generationId,
+        artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+      }));
+      store.upsertTarget({
+        ...emptyTargetRow(applicationId, 1, 1),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        // Deliberately left null, which is the shape a Blueprint target really
+        // has: nothing binds a deploy for a Blueprint-managed stack, so the
+        // ack's applied pointer is what names what the node acknowledged
+        // running. An earlier version of this fixture set the deployed pointer
+        // too, and every case here passed for a reason production cannot
+        // reproduce.
+        deployed_generation_id: null,
+        expected_artifact_set_id: artifactSetId,
+        latest_artifact_set_id: artifactSetId,
+        latest_stage: stage,
+        observed_artifact_identity_json: encodeObservedArtifactIdentity(observed),
+      });
+    }
+
+    it('reports one runtime item naming the service and digest that moved', () => {
+      seedObservedBlueprint('app-obs-drifted', 301, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-drifted', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The observation is what the target reports, and the item has to be
+      // built from it: a converged pointer set alone would report nothing.
+      expect(projection.targets[0]?.runtime.status).toBe('drifted');
+      expect(projection.drift).toHaveLength(1);
+      const item = projection.drift[0];
+      expect(item?.class).toBe('runtime');
+      expect(item?.owner).toBe('observed_artifact_identity');
+      expect(item?.freshnessAt).toBe(42);
+      expect(item?.affectedTargets).toEqual([{ nodeId: 1, stackName: null }]);
+      // The identity alone is a fingerprint over the set, so the per-service
+      // evidence is the only way the item can name what actually moved.
+      expect(item?.observed).toMatchObject({
+        kind: 'runtime_artifact',
+        observedAt: 42,
+        services: [{ serviceName: 'web', platformDigest: moved }],
+      });
+      // The reason the item exists: the attention queue reads the canonical
+      // list, so an application whose deployment row says drifted has to reach
+      // the operator through it.
+      expect(attentionReasons(projection)).toContain('drift');
+    });
+
+    it('reports a rollout-authorized target once, as the rollout class', () => {
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-rollout', 302, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The same target, now bound to an authorized rollout. Its identity
+      // disagrees with the approved set, and the class answers whose authority
+      // that is, so it must be reported once as rollout rather than also as
+      // runtime.
+      const target = store.getTarget('app-obs-rollout', 1)!;
+      store.upsertTarget({ ...target, rollout_authorization_ref: 'auth-obs-1' });
+
+      const projection = projectApplication('app-obs-rollout', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.class).toBe('rollout');
+    });
+
+    it('reports nothing for a drift Enforce is correcting on this pass', () => {
+      seedObservedBlueprint('app-obs-correcting', 303, 'blueprint_correcting', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-correcting', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // A repair in flight is progress. The target still reports the old
+      // identity, so reporting it would describe a divergence the model is
+      // actively resolving as though it had settled.
+      expect(projection.targets[0]?.runtime.status).toBe('correcting');
+      expect(projection.drift).toHaveLength(0);
+    });
+
+    it('reports nothing when the recorded observation is unverified', () => {
+      seedObservedBlueprint('app-obs-unverified', 304, 'blueprint_drifted', { kind: 'unavailable' });
+
+      const projection = projectApplication('app-obs-unverified', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The target says it drifted, but it cannot say what is running, so the
+      // model has no identity to compare. Silence here is the honest answer;
+      // asserting a divergence would be claiming evidence nobody recorded.
+      expect(projection.drift).toHaveLength(0);
+    });
+
+    it('reports nothing when the recorded observation agrees with the approved set', () => {
+      seedObservedBlueprint('app-obs-converged', 305, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'c'.repeat(64)}`,
+        observedAt: 42,
+        services: [approvedService()],
+      });
+
+      const projection = projectApplication('app-obs-converged', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      // The stage is the last thing the reconciler recorded, and it can be
+      // superseded. The comparison is made against the evidence rather than
+      // against the stage, so a target whose digests match reports nothing.
+      expect(projection.drift).toHaveLength(0);
+      expect(attentionReasons(projection)).not.toContain('drift');
+    });
+
+    it('does not blame a running workload for a drift the reconciler could have caused another way', () => {
+      // The reconciler records the same stage for a digest mismatch, a revision
+      // mismatch, and a container that is not running, and it refreshes the
+      // stored observation only on the first, so a `drifted` target's identity
+      // is the last one that was observed. The cause is on the Blueprint
+      // deployment row, which this projection does not read, so the item must
+      // not assert a cause it cannot prove.
+      seedObservedBlueprint('app-obs-stale', 306, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+
+      const projection = projectApplication('app-obs-stale', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      // If the container is down, nothing is running, and "the running workload
+      // reports" would send an operator to compare digests instead of looking
+      // at the node. The comparison that was made is the claim; the cause is the
+      // facet's to report, and the evidence's age is on the item.
+      expect(projection.drift[0]?.reason).toBe(
+        'the last artifact identity observed for this target differs from the expected artifact set',
+      );
+      expect(projection.drift[0]?.freshnessAt).toBe(42);
+    });
+
+    it('reports nothing when the approved set is not comparable enough to compare', () => {
+      // The two artifact-identity statuses are protected by deriveRuntime, which
+      // only assigns them when the approved set is exact or qualified. The
+      // observation is assigned before that check, so nothing else protects
+      // this path: an expectation Sencho cannot compare must not become a
+      // confirmed divergence just because a Blueprint recorded a stage.
+      //
+      // Both sets here carry a real fingerprint identity, so the identity is
+      // present and only the qualification distinguishes them. Without the
+      // qualification check this target reports a runtime drift item built on an
+      // expectation nothing verified, while the same target with no Blueprint
+      // stage reports artifact_verification_pending and no item.
+      const unverifiedSets = ['local_build_unverified', 'stale'] as const;
+      for (const [index, qualification] of unverifiedSets.entries()) {
+        seedObservedBlueprint(`app-obs-unpinned-${qualification}`, 307 + index, 'blueprint_drifted', {
+          kind: 'exact',
+          identity: `sha256:${'d'.repeat(64)}`,
+          observedAt: 42,
+          services: [movedService()],
+        }, qualification);
+
+        const projection = projectApplication(`app-obs-unpinned-${qualification}`, false);
+        if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+        // The facet says the same thing, so the two surfaces agree.
+        expect(projection.facets.artifact.status, qualification).toBe(
+          qualification === 'stale' ? 'artifact_stale' : 'artifact_local_build_unverified',
+        );
+        expect(projection.drift, qualification).toHaveLength(0);
+        expect(attentionReasons(projection), qualification).not.toContain('drift');
+      }
+    });
+
+    it('reports a rollout class for a target bound by its rollout generation alone', () => {
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-rollout-gen', 310, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The class is read off the target's rollout binding, and that binding is
+      // either an authorization or a rollout generation. Only the first arm had
+      // coverage, so a regression could split the class read from the facet's
+      // without a test noticing.
+      const target = store.getTarget('app-obs-rollout-gen', 1)!;
+      store.upsertTarget({ ...target, rollout_generation_id: 'gen-obs-rollout-1' });
+
+      const projection = projectApplication('app-obs-rollout-gen', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.drift).toHaveLength(1);
+      expect(projection.drift[0]?.class).toBe('rollout');
+    });
+
+    it('KNOWN LIMITATION: reports a drift from an observation the target has already moved past', () => {
+      // Pinned deliberately rather than left to chance, and named for what it
+      // is so a green suite does not read as a specification.
+      //
+      // Recording an acknowledgement rebinds the target to the new generation's
+      // approved set and leaves the stored observation as the previous
+      // generation recorded it. It also overwrites latest_stage, so the
+      // reconciler has to record the drift again on a later tick, through a
+      // cause that returns before re-observing: a stopped container, or a
+      // marker or revision mismatch. That comparison then reads the old
+      // generation's digests against the new generation's set.
+      //
+      // Every field of the resulting item is literally true and the operator is
+      // still misdirected, because the action is to deploy rather than to
+      // investigate a digest that moved. The assertions below pin the misleading
+      // fields, not just the count, so the case documents what is wrong.
+      //
+      // Suppressing it needs to know which generation the observation belongs
+      // to, and the observation records no generation of its own. The pointers
+      // cannot supply that: the acknowledgement sets the applied generation and
+      // the expected set from the same application row in one step, so they
+      // always agree, and a Blueprint target has no deploy-bound writer, so its
+      // deployed pointer is null. Two code-only routes remain open, neither
+      // taken here: have the acknowledgement invalidate an observation older
+      // than the rebind it performs, or give the reconciler's causes distinct
+      // observation stages so a drift recorded without re-observing is
+      // distinguishable from one recorded with it. Whichever lands, this test
+      // fails and becomes the regression test for it.
+      const store = GitOpsStore.getInstance();
+      seedObservedBlueprint('app-obs-superseded', 309, 'blueprint_drifted', {
+        kind: 'exact',
+        identity: `sha256:${'d'.repeat(64)}`,
+        observedAt: 42,
+        services: [movedService()],
+      });
+      // The application advances, because the acknowledgement copies the
+      // target's pointers from the application. A target can never lead its
+      // application in production, so the fixture must not.
+      const nextGenerationId = 'gen-app-obs-superseded-next';
+      const nextArtifactSetId = 'art-app-obs-superseded-next';
+      store.insertGeneration(gen(nextGenerationId, 'app-obs-superseded'));
+      store.insertArtifactSet({
+        id: nextArtifactSetId,
+        generation_id: nextGenerationId,
+        evidence_version: 1,
+        authoritative: 0,
+        qualification: 'exact',
+        evidence_json: encodeArtifactEvidenceJson({
+          kind: 'exact',
+          identity: `sha256:${'e'.repeat(64)}`,
+          services: [approvedService()],
+        }),
+        created_at: 2,
+      });
+      const application = store.getApplication('app-obs-superseded')!;
+      store.writeApplicationPointers({
+        ...application,
+        accepted_generation_id: nextGenerationId,
+        artifact_set_id: nextArtifactSetId,
+        latest_artifact_set_id: nextArtifactSetId,
+      });
+      store.upsertTarget({
+        ...store.getTarget('app-obs-superseded', 1)!,
+        desired_generation_id: nextGenerationId,
+        applied_generation_id: nextGenerationId,
+        expected_artifact_set_id: nextArtifactSetId,
+        latest_artifact_set_id: nextArtifactSetId,
+        // The acknowledgement overwrites the stage, and the reconciler records
+        // the drift again on a later tick through a cause that never
+        // re-observes. The observation is therefore still generation N's.
+        latest_stage: 'blueprint_drifted',
+      });
+
+      const projection = projectApplication('app-obs-superseded', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      expect(projection.targets[0]?.runtime.status).toBe('drifted');
+      expect(projection.drift).toHaveLength(1);
+      // The fields that mislead, pinned so the case is diagnosable and so a fix
+      // has something concrete to change.
+      expect(projection.drift[0]?.class).toBe('runtime');
+      expect(projection.drift[0]?.owner).toBe('observed_artifact_identity');
+      expect(projection.drift[0]?.expected).toMatchObject({
+        kind: 'artifact_set',
+        id: nextArtifactSetId,
+      });
+      // The digests are generation N's, presented as this generation's evidence.
+      expect(projection.drift[0]?.observed).toMatchObject({
+        kind: 'runtime_artifact',
+        observedAt: 42,
+        services: [{ serviceName: 'web', platformDigest: moved }],
+      });
+    });
+  });
+
+  /**
    * The application-level drift classes beyond the runtime family. Each class
    * is pinned in three directions: an item when the rows prove divergence, no
    * item when they agree, and no item (never a fabricated convergence or
@@ -1588,6 +2245,62 @@ describe('gitops derivation', () => {
          SET manifest_version = ?, manifest_state = ?, manifest_generation = ?, last_applied_commit_sha = ?, updated_at = ?
        WHERE stack_name = ?`,
     ).run(cache.version, cache.state, cache.generation, cache.commit, cache.updatedAt ?? 1, stackName);
+  }
+
+  /** Seeds a managed-project application in the one state that reports drift: the application is settled, every live target has applied the accepted generation, and the manifest cache names a different commit. A test that opens one window from here isolates a single suppression guard, because nothing else in the fixture can hold the item back. */
+  function seedManagedProjectDrift(suffix: string, options: {
+    application?: Partial<GitOpsApplicationRow>;
+    targets?: Array<{ nodeId: number } & Partial<ReturnType<typeof emptyTargetRow>>>;
+    previousGeneration?: boolean;
+    cache?: Partial<{ version: number | null; state: string | null; generation: string | null; commit: string | null }>;
+  } = {}): { appId: string; generationId: string } {
+    const store = GitOpsStore.getInstance();
+    const stackName = `mp-${suffix}`;
+    const appId = `app-mp-${suffix}`;
+    const generationId = `gen-mp-${suffix}`;
+    const previousGenerationId = `gen-mp-${suffix}-prev`;
+    const appliedDir = `generations/applied-${generationId}-3`;
+    seedGitSource(stackName);
+    store.insertApplication(rawApp(appId, {
+      stack_name: stackName,
+      desired_commit_sha: 'abc123',
+      accepted_generation_id: generationId,
+      ...options.application,
+    }));
+    const accepted: GitOpsGenerationRow = { ...gen(generationId, appId), manifest_version: 3, applied_dir: appliedDir };
+    if (options.previousGeneration) {
+      store.insertGeneration({
+        ...gen(previousGenerationId, appId),
+        manifest_version: 2,
+        applied_dir: `generations/applied-${previousGenerationId}-2`,
+      });
+      accepted.previous_generation_id = previousGenerationId;
+    }
+    store.insertGeneration(accepted);
+    for (const target of options.targets ?? [{ nodeId: 1 }]) {
+      const { nodeId, ...overrides } = target;
+      store.upsertTarget({
+        ...emptyTargetRow(appId, nodeId, 1),
+        desired_generation_id: generationId,
+        applied_generation_id: generationId,
+        deployed_generation_id: generationId,
+        ...overrides,
+      });
+    }
+    setManifestCache(stackName, {
+      version: 3,
+      state: 'active',
+      generation: appliedDir,
+      commit: 'othersha',
+      ...options.cache,
+    });
+    return { appId, generationId };
+  }
+
+  function managedProjectItems(applicationId: string): GitOpsDriftItem[] {
+    const projection = projectApplication(applicationId, false);
+    if (projection.targetMode === 'not_applicable') throw new Error(`expected ${applicationId} to be projectable`);
+    return projection.drift.filter((entry) => entry.class === 'managed_project');
   }
 
   function intentRev(
@@ -1741,36 +2454,47 @@ describe('gitops derivation', () => {
     expect(projection.drift).toEqual([]);
   });
 
-  it('reports a stale placement approval that no longer binds the current intent', () => {
+  /**
+   * An application whose recorded placement approval names a superseded intent,
+   * which is what makes the approval stale: it no longer binds the intent the
+   * application actually runs. `snapshotMode` is the mode frozen in that intent,
+   * which callers set differently on purpose to pin down which source the
+   * reported policy is read from.
+   */
+  function seedStalePlacementApproval(appId: string, blueprintId: number, snapshotMode: string): { current: string; old: string } {
+    // Ids are suffixed per caller because intent revisions are globally unique,
+    // so two applications cannot share one.
+    const current = `ir-current-${appId}`;
+    const old = `ir-old-${appId}`;
     const store = GitOpsStore.getInstance();
-    store.insertApplication(gitManagedApp('app-place-stale', 71, {
-      intent_revision_id: 'ir-place-current',
-      rollout_candidate_id: 'cand-place',
-      placement_approval_ref: 'place-stale',
+    store.insertApplication(gitManagedApp(appId, blueprintId, {
+      intent_revision_id: current,
+      rollout_candidate_id: `cand-${appId}`,
+      placement_approval_ref: `place-stale-${appId}`,
     }));
-    store.insertIntentRevision(intentRev('ir-place-current', 'app-place-stale', 'a'.repeat(64), 'suggest'));
-    store.insertIntentRevision(intentRev('ir-place-old', 'app-place-stale', 'b'.repeat(64)));
+    store.insertIntentRevision(intentRev(current, appId, 'a'.repeat(64), snapshotMode));
+    store.insertIntentRevision(intentRev(old, appId, 'b'.repeat(64)));
     store.insertRolloutCandidate({
-      id: 'cand-place',
-      application_id: 'app-place-stale',
-      intent_revision_id: 'ir-place-current',
+      id: `cand-${appId}`,
+      application_id: appId,
+      intent_revision_id: current,
       compose_content_sha256: 'a'.repeat(64),
       accepted_generation_id: null,
       artifact_set_id: null,
       required_targets_json: '{"nodeIds":[1]}',
       authoritative: 1,
       provenance: 'intent_change',
-      operation_id: 'op-cand-place',
+      operation_id: `op-cand-${appId}`,
       created_at: 1,
     });
     store.insertApproval({
-      id: 'place-stale',
+      id: `place-stale-${appId}`,
       kind: 'placement_approval',
       authority: 'operator',
       authoritative: 1,
-      application_id: 'app-place-stale',
+      application_id: appId,
       generation_id: null,
-      intent_revision_id: 'ir-place-old',
+      intent_revision_id: old,
       artifact_set_id: null,
       rollout_candidate_id: null,
       rollout_generation_id: null,
@@ -1784,14 +2508,46 @@ describe('gitops derivation', () => {
       actor: 'tester',
       created_at: 9,
     });
+    return { current, old };
+  }
 
-    const projection = projectApplication('app-place-stale', false);
+  function placementDriftItems(appId: string): GitOpsDriftItem[] {
+    const projection = projectApplication(appId, false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
-    const items = projection.drift.filter((entry) => entry.class === 'placement');
+    return projection.drift.filter((entry) => entry.class === 'placement');
+  }
+
+  it('reports the live drift mode, not the mode frozen in the intent', () => {
+    // A mode-only edit mints no intent, so the snapshot goes stale while the
+    // operator's choice does not. Naming the mode Sencho is configured with is
+    // the point of reporting a configured policy at all, so the live row is the
+    // only honest source; this leaves the snapshot on Suggest to prove it.
+    const live = DatabaseService.getInstance().createBlueprint({
+      name: 'live-mode-bp',
+      description: null,
+      compose_content: 'services:\n  web:\n    image: nginx:latest\n',
+      selector: { type: 'nodes', ids: [1] },
+      drift_mode: 'enforce',
+      classification: 'stateless',
+      classification_reasons: [],
+      enabled: true,
+      created_by: 'tester',
+    });
+    seedStalePlacementApproval('app-place-live', live.id, 'suggest');
+
+    expect(placementDriftItems('app-place-live')).toMatchObject([
+      { configuredPolicy: { kind: 'blueprint_drift', driftMode: 'enforce' } },
+    ]);
+  });
+
+  it('reports a stale placement approval that no longer binds the current intent', () => {
+    const { current, old } = seedStalePlacementApproval('app-place-stale', 71, 'suggest');
+
+    const items = placementDriftItems('app-place-stale');
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      expected: { kind: 'intent', id: 'ir-place-current', composeContentSha256: 'a'.repeat(64) },
-      observed: { kind: 'intent', id: 'ir-place-old', composeContentSha256: 'b'.repeat(64) },
+      expected: { kind: 'intent', id: current, composeContentSha256: 'a'.repeat(64) },
+      observed: { kind: 'intent', id: old, composeContentSha256: 'b'.repeat(64) },
       freshnessAt: 9,
       owner: 'BlueprintReconciler',
       configuredPolicy: { kind: 'blueprint_drift', driftMode: 'suggest' },
@@ -2019,6 +2775,362 @@ describe('gitops derivation', () => {
     projection = projectApplication('app-health-drift', false);
     if (projection.targetMode === 'not_applicable') throw new Error('expected application');
     expect(projection.drift.filter((entry) => entry.class === 'health')).toEqual([]);
+  });
+
+  it('marks a recorded health failure superseded only by a redeploy of its own generation', () => {
+    // A health observation the gate reserved for a generation and has not
+    // finished reading, in the durable shape `beginStack` writes.
+    const observingRun = (id: string, deployedGenerationId: string) => ({
+      id,
+      node_id: 1,
+      stack_name: 'health-supersede-web',
+      trigger_action: 'deploy' as const,
+      status: 'observing' as const,
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: deployedGenerationId,
+    });
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    store.insertApplication(rawApp('app-health-supersede', { stack_name: 'health-supersede-web' }));
+    store.insertGeneration(gen('gen-running', 'app-health-supersede'));
+    store.insertGeneration(gen('gen-incoming', 'app-health-supersede'));
+    const failed = {
+      ...emptyTargetRow('app-health-supersede', 1, 1),
+      desired_generation_id: 'gen-running',
+      applied_generation_id: 'gen-running',
+      deployed_generation_id: 'gen-running',
+      last_health_status: 'failed',
+      last_health_generation_id: 'gen-running',
+      last_health_run_id: 'run-supersede',
+    } as const;
+    const project = () => {
+      const projection = projectApplication('app-health-supersede', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+
+    // Settled: the failure is recorded, and nothing is in flight, so it stands
+    // on its own.
+    store.upsertTarget(failed);
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A retry of that same generation is the verdict this failure is waiting
+    // for, so it is about to be replaced rather than outstanding.
+    store.upsertTarget({
+      ...failed,
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().runtime.status).toBe('deploying');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // A deploy of a different generation is not this failure's successor. The
+    // generation match is what stops a broader rule from hiding a known-bad
+    // workload behind unrelated work.
+    store.upsertTarget({
+      ...failed,
+      applied_generation_id: 'gen-incoming',
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-incoming',
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // The identity compared is the one the failure was recorded against, not the
+    // running pointer. Here a verdict about a newer generation is waiting to be
+    // deployed while the running one is being redeployed, so the operation is not
+    // about the failure and the failure keeps standing. A rule keyed on the
+    // running pointer would call this superseded, and the case is the only one
+    // that tells the two rules apart, because everywhere else the desired
+    // generation, the running one and the failed one are the same id.
+    store.upsertTarget({
+      ...failed,
+      desired_generation_id: 'gen-incoming',
+      last_health_generation_id: 'gen-incoming',
+      active_operation_stage: 'deploy_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // The deploy has bound and the active stage is gone, but the gate reserved
+    // its run before the deploy and is still observing the same generation, so
+    // the failure is still the thing being worked on.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-watch', 'gen-running'));
+    store.upsertTarget(failed);
+    expect(project().runtime.status).toBe('fully_deployed_health_pending');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // An observation of a different generation is not this failure's successor,
+    // and neither is one that has already settled: both leave the failure
+    // standing.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-other', 'gen-incoming'));
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      ...observingRun('run-supersede-settled', 'gen-running'),
+      status: 'passed',
+      ended_at: 20,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+
+    // The observation arm is judged against the failure's own record, not the
+    // running pointer, and this is the only case that tells the two apart: a
+    // verdict about a newer generation is waiting to deploy while the old one
+    // still runs and is still being watched. Comparing the run against the
+    // running pointer would answer true here.
+    store.upsertTarget({
+      ...failed,
+      desired_generation_id: 'gen-incoming',
+      last_health_generation_id: 'gen-incoming',
+    });
+    db.insertHealthGateRun(observingRun('run-supersede-newer', 'gen-incoming'));
+    expect(project().healthFailureSuperseded).toBe(true);
+
+    // The mirror: watching the generation that is running is not watching the one
+    // the failure is about.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun(observingRun('run-supersede-stale-watch', 'gen-running'));
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // An update that reserved its observation without naming a generation cannot
+    // supersede anything, since there is nothing to compare it to.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      ...observingRun('run-supersede-unnamed', 'gen-incoming'),
+      deployed_generation_id: null,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    store.upsertTarget(failed);
+
+    // A recovery capture writes the live operation columns too, but it restores
+    // a generation rather than redeploying what runs, and the runtime facet
+    // claims it from the recovery phase before the live-operation table is read.
+    store.upsertTarget({
+      ...failed,
+      recovery_phase: 'restoring',
+      recovery_generation_id: 'gen-running',
+      active_operation_stage: 'recovery_started',
+      active_generation_id: 'gen-running',
+    });
+    expect(project().runtime.status).toBe('recovery_required');
+    expect(project().healthFailureSuperseded).toBe(false);
+  });
+
+  it('does not supersede a failure that is not standing, or is on a target recovering', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    store.insertApplication(rawApp('app-health-notsuperseded', { stack_name: 'health-notsuperseded-web' }));
+    store.insertGeneration(gen('gen-ns', 'app-health-notsuperseded'));
+    const row = {
+      ...emptyTargetRow('app-health-notsuperseded', 1, 1),
+      desired_generation_id: 'gen-ns',
+      applied_generation_id: 'gen-ns',
+      deployed_generation_id: 'gen-ns',
+      last_health_generation_id: 'gen-ns',
+      observed_artifact_identity_json: JSON.stringify({
+        kind: 'exact', identity: 'sha256:expected', observedAt: 1,
+      }),
+    } as const;
+    const project = () => {
+      const projection = projectApplication('app-health-notsuperseded', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+    const observing = {
+      id: 'run-ns',
+      node_id: 1,
+      stack_name: 'health-notsuperseded-web',
+      trigger_action: 'deploy' as const,
+      status: 'observing' as const,
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-ns',
+    };
+    db.insertHealthGateRun(observing);
+
+    // The open observation exists, but this target's own last verdict passed, so
+    // there is no failure standing for it to supersede. Without that guard the
+    // flag is true here and pays a store read for every healthy target.
+    store.upsertTarget({
+      ...row,
+      healthy_generation_id: 'gen-ns',
+      last_health_status: 'passed',
+      last_health_run_id: 'run-ns',
+    });
+    expect(project().health.status).toBe('passed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A failure the recovery is restoring is not superseded by the recovery's
+    // own observation: a recovery restores a generation rather than redeploying
+    // what runs, and the runtime facet reports it as a pending decision.
+    store.upsertTarget({
+      ...row,
+      last_health_status: 'failed',
+      last_health_run_id: 'run-ns',
+      recovery_phase: 'restoring',
+      recovery_generation_id: 'gen-ns',
+    });
+    expect(project().runtime.status).toBe('recovery_required');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // A tombstoned target keeps its row but has no workload left, so there is no
+    // failure standing for anything to supersede even with the observation open.
+    store.upsertTarget({
+      ...row,
+      last_health_status: 'failed',
+      last_health_run_id: 'run-ns',
+      target_status: 'tombstoned',
+    });
+    expect(project().tombstoned).toBe(true);
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+  });
+
+  it('leaves a redeployed Blueprint target reporting its recorded health failure', () => {
+    const store = GitOpsStore.getInstance();
+    const db = DatabaseService.getInstance();
+    // The blueprint CHECK requires a blueprint id, a null stack name, and a
+    // configured repo URL, which the shared app fixture already carries.
+    store.insertApplication(rawApp('app-health-supersede-bp', {
+      target_mode: 'blueprint',
+      blueprint_id: 411,
+      lifecycle_key: 'blueprint:411:app-health-supersede-bp',
+      stack_name: null,
+    }));
+    store.insertGeneration(gen('gen-bp', 'app-health-supersede-bp'));
+    const frozen = intentRev('ir-bp', 'app-health-supersede-bp', 'e'.repeat(64));
+    store.insertIntentRevision({
+      ...frozen,
+      deploy_stack_name: 'bp-check-web',
+    });
+    const project = () => {
+      const projection = projectApplication('app-health-supersede-bp', false);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection.targets[0]!;
+    };
+    const failed = {
+      ...emptyTargetRow('app-health-supersede-bp', 1, 1),
+      intent_revision_id: 'ir-bp',
+      applied_generation_id: 'gen-bp',
+      desired_generation_id: 'gen-bp',
+      last_health_status: 'failed',
+      last_health_generation_id: 'gen-bp',
+      last_health_run_id: 'run-bp',
+    } as const;
+
+    // A Blueprint deploy records the intent and candidate it is for, never the
+    // generation: there is no writer of `active_generation_id` on that path. With
+    // nothing to compare, the deploy arm cannot claim the failure is being
+    // superseded. Stated here so the gap is a pinned limitation rather than a
+    // silent hole.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    store.upsertTarget({
+      ...failed,
+      active_operation_stage: 'blueprint_deploy_started',
+      active_intent_revision_id: 'ir-bp',
+    });
+    expect(project().runtime.status).toBe('deploying');
+    expect(project().health.status).toBe('failed');
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // The observation arm is the one that covers this mode, because a
+    // health-gated retry reserves its run before the apply and so is only ever
+    // visible here.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'rollout',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-bp',
+    });
+    expect(project().healthFailureSuperseded).toBe(true);
+    // Posture as well as the flag: the classifier's suppression only reaches
+    // `in_progress` because the runtime facet already reads as in flight, so the
+    // aggregate is what has to be asserted rather than assumed. A Blueprint target
+    // bound with nothing deploying is fully deployed and awaiting its verdict,
+    // which the portfolio counts as work in flight.
+    expect(attentionReasons(projectApplication('app-health-supersede-bp', false)))
+      .not.toContain('health_failed');
+    expect(postureOf(projectApplication('app-health-supersede-bp', false))).toBe('in_progress');
+
+    // An observation of another generation is not this failure's successor.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch-other',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'rollout',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: 'gen-other',
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+
+    // An update that reserved its observation without naming a generation cannot
+    // supersede anything, since there is nothing to compare it to.
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
+    db.insertHealthGateRun({
+      id: 'run-bp-watch-null',
+      node_id: 1,
+      stack_name: 'bp-check-web',
+      trigger_action: 'update',
+      status: 'observing',
+      reason: null,
+      window_seconds: 90,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: null,
+      created_by: 'tester',
+      target_scope: 'stack',
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: null,
+    });
+    expect(project().healthFailureSuperseded).toBe(false);
+    db.getDb().prepare('DELETE FROM health_gate_runs').run();
   });
 
   it('says why it cannot compare placement when the required targets are unreadable', () => {
@@ -2343,6 +3455,159 @@ describe('gitops derivation', () => {
     expect(projection.drift.filter((entry) => entry.class === 'managed_project')).toEqual([]);
   });
 
+  // The cases below pin the windows in which this collector makes no claim:
+  // an application mid-apply, interrupted, or recovering; a live target that
+  // has not applied the accepted generation, or is itself mid-deploy,
+  // interrupted, or recovering; a tombstoned target, which is not one of the
+  // live targets at all; and a cache field nobody has written yet. Each opens
+  // exactly one window on its own fixture, because a window tested only
+  // alongside another can be deleted without its test noticing: the other
+  // window would hold the item back anyway. One window per fixture is what
+  // makes deleting one of them fail its own case.
+
+  it('stays quiet while the application is mid-apply, interrupted, or recovering', () => {
+    const applying = seedManagedProjectDrift('app-applying', {
+      application: {
+        active_operation_id: 'op-mp-applying',
+        active_operation_stage: 'apply_started',
+        active_operation_at: 90,
+      },
+    });
+    expect(managedProjectItems(applying.appId)).toEqual([]);
+
+    const interrupted = seedManagedProjectDrift('app-interrupted', {
+      application: {
+        interruption_stage: 'apply_started',
+        interruption_at: 90,
+        interruption_operation_id: 'op-mp-interrupted',
+      },
+    });
+    expect(managedProjectItems(interrupted.appId)).toEqual([]);
+
+    const capturing = seedManagedProjectDrift('app-capturing', {
+      application: { recovery_phase: 'capturing', recovery_ref: 'recovery-mp-capturing' },
+    });
+    expect(managedProjectItems(capturing.appId)).toEqual([]);
+
+    const restoring = seedManagedProjectDrift('app-restoring', {
+      application: { recovery_phase: 'restoring', recovery_ref: 'recovery-mp-restoring' },
+    });
+    expect(managedProjectItems(restoring.appId)).toEqual([]);
+
+    const compensating = seedManagedProjectDrift('app-compensating', {
+      application: { recovery_phase: 'compensating', recovery_ref: 'recovery-mp-compensating' },
+    });
+    expect(managedProjectItems(compensating.appId)).toEqual([]);
+  });
+
+  it('stays quiet while a live target has not yet applied the accepted generation', () => {
+    // Acceptance lands before the apply reaches the node, so the cache is
+    // behind rather than divergent until every live target catches up.
+    const pending = seedManagedProjectDrift('target-pending', {
+      previousGeneration: true,
+      targets: [
+        { nodeId: 1 },
+        {
+          nodeId: 2,
+          applied_generation_id: 'gen-mp-target-pending-prev',
+          deployed_generation_id: 'gen-mp-target-pending-prev',
+        },
+      ],
+    });
+    expect(managedProjectItems(pending.appId)).toEqual([]);
+  });
+
+  it('stays quiet while a target is mid-deploy, interrupted, or recovering', () => {
+    // A Blueprint deploy or withdrawal runs on the target alone while the
+    // application sits idle, so each window is checked one level down.
+    const deploying = seedManagedProjectDrift('target-deploying', {
+      targets: [{
+        nodeId: 1,
+        active_operation_id: 'op-mp-target-deploying',
+        active_operation_stage: 'blueprint_deploy_started',
+      }],
+    });
+    expect(managedProjectItems(deploying.appId)).toEqual([]);
+
+    const interrupted = seedManagedProjectDrift('target-interrupted', {
+      targets: [{
+        nodeId: 1,
+        interruption_stage: 'blueprint_withdraw_started',
+        interruption_at: 95,
+      }],
+    });
+    expect(managedProjectItems(interrupted.appId)).toEqual([]);
+
+    const recovering = seedManagedProjectDrift('target-recovering', {
+      targets: [{ nodeId: 1, recovery_phase: 'restoring', recovery_ref: 'recovery-mp-target' }],
+    });
+    expect(managedProjectItems(recovering.appId)).toEqual([]);
+  });
+
+  it('treats a null manifest cache field as unknown rather than disagreement', () => {
+    // The cache is a projection of the manifest file, so a null field is a
+    // field nobody wrote yet, not a value that contradicts the generation.
+    const version = seedManagedProjectDrift('cache-version-null', {
+      cache: { version: null, commit: 'abc123' },
+    });
+    expect(managedProjectItems(version.appId)).toEqual([]);
+
+    const generation = seedManagedProjectDrift('cache-generation-null', {
+      cache: { generation: null, commit: 'abc123' },
+    });
+    expect(managedProjectItems(generation.appId)).toEqual([]);
+
+    const commit = seedManagedProjectDrift('cache-commit-null', {
+      cache: { commit: null },
+    });
+    expect(managedProjectItems(commit.appId)).toEqual([]);
+  });
+
+  it('does not let a tombstoned target suppress the item', () => {
+    // A withdrawn target is not a node still catching up with the accepted
+    // generation, so it stays out of the settled check entirely.
+    const fixture = seedManagedProjectDrift('target-tombstoned', {
+      previousGeneration: true,
+      targets: [
+        { nodeId: 1 },
+        {
+          nodeId: 2,
+          target_status: 'tombstoned',
+          applied_generation_id: 'gen-mp-target-tombstoned-prev',
+          deployed_generation_id: 'gen-mp-target-tombstoned-prev',
+        },
+      ],
+    });
+    const items = managedProjectItems(fixture.appId);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ expected: { kind: 'generation', id: fixture.generationId } });
+  });
+
+  it('reports an item for each manifest state that cannot be read', () => {
+    const absent = seedManagedProjectDrift('state-absent', {
+      cache: { state: 'absent', commit: 'abc123' },
+    });
+    const missing = managedProjectItems(absent.appId);
+    expect(missing).toHaveLength(1);
+    expect(missing[0].reason).toContain('absent');
+
+    // A cache this build cannot interpret proves nothing about the generation,
+    // so it is the same claim as a manifest that is missing.
+    const migrating = seedManagedProjectDrift('state-migration-required', {
+      cache: { state: 'migration_required', commit: 'abc123' },
+    });
+    const uninterpretable = managedProjectItems(migrating.appId);
+    expect(uninterpretable).toHaveLength(1);
+    expect(uninterpretable[0].reason).toContain('migration_required');
+
+    const unsupported = seedManagedProjectDrift('state-unsupported', {
+      cache: { state: 'unsupported', commit: 'abc123' },
+    });
+    const unreadable = managedProjectItems(unsupported.appId);
+    expect(unreadable).toHaveLength(1);
+    expect(unreadable[0].reason).toContain('unsupported');
+  });
+
   it('carries the expected per-service digests so a reader can compare service by service', () => {
     const store = GitOpsStore.getInstance();
     const tx = GitOpsTransitions.getInstance();
@@ -2485,8 +3750,13 @@ function app(id: string, stackName: string): GitOpsApplicationRow {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: 'manual',
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+        placement_policy_refusal_reason: null,
+        placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

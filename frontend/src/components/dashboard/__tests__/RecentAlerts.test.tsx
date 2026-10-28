@@ -43,6 +43,8 @@ function renderAlerts(props: {
   unreportedNodeIds?: ReadonlySet<number>;
   navigation?: AlertNavigation;
   reserveHeight?: boolean;
+  onMarkRead?: (n: NotificationItem) => void;
+  canMute?: boolean;
 }) {
   const nodes = props.nodes ?? SINGLE;
   const navigation = props.navigation ?? makeNavigation(nodes);
@@ -53,6 +55,8 @@ function renderAlerts(props: {
       activeNodeId={props.activeNodeId === undefined ? 1 : props.activeNodeId}
       unreportedNodeIds={props.unreportedNodeIds ?? new Set()}
       navigation={navigation}
+      onMarkRead={props.onMarkRead ?? vi.fn()}
+      canMute={props.canMute ?? false}
       reserveHeight={props.reserveHeight}
     />,
   );
@@ -131,6 +135,8 @@ describe('RecentAlerts node scope', () => {
         activeNodeId={2}
         unreportedNodeIds={new Set()}
         navigation={navigation}
+        onMarkRead={vi.fn()}
+        canMute={false}
       />,
     );
     expect(screen.getByText('on node two')).toBeInTheDocument();
@@ -231,14 +237,15 @@ describe('RecentAlerts row actions', () => {
     // The row stays a table row; its primary cell carries the button.
     expect(row).not.toHaveAttribute('role');
     fireEvent.click(within(row).getAllByRole('cell')[2]);
-    within(row).getByRole('button').focus();
+    within(row).getByRole('button', { name: /web crashed/ }).focus();
     await user.keyboard('{Enter}');
     expect(navigation.open).toHaveBeenCalledTimes(2);
     expect(navigation.open).toHaveBeenCalledWith(expect.objectContaining({ kind: 'stack', nodeId: 1, stackName: 'web' }));
   });
 
   it('leaves a row without a destination inert and unfocusable', () => {
-    const { navigation } = renderAlerts({ notifications: [notif({ category: 'monitor_alert', message: 'CPU high' })] });
+    // Read, so there is no Mark read button; with no destination there is no navigation button either.
+    const { navigation } = renderAlerts({ notifications: [notif({ category: 'monitor_alert', message: 'CPU high', is_read: 1 })] });
     const row = rows()[0];
 
     expect(within(row).queryByRole('button')).toBeNull();
@@ -248,7 +255,7 @@ describe('RecentAlerts row actions', () => {
 
   it('leaves a row inert when the shell withholds its destination', () => {
     const navigation: AlertNavigation = { destinationFor: () => null, open: vi.fn(), viewAll: vi.fn() };
-    renderAlerts({ navigation, notifications: [notif({ stack_name: 'web' })] });
+    renderAlerts({ navigation, notifications: [notif({ stack_name: 'web', is_read: 1 })] });
 
     expect(within(rows()[0]).queryByRole('button')).toBeNull();
   });
@@ -257,7 +264,7 @@ describe('RecentAlerts row actions', () => {
 describe('RecentAlerts before the first fetch', () => {
   it('shows a loading state, not the all-clear, until the feed has reported', () => {
     render(
-      <RecentAlerts notifications={[]} nodes={SINGLE} activeNodeId={1} unreportedNodeIds={null} navigation={makeNavigation(SINGLE)} />,
+      <RecentAlerts notifications={[]} nodes={SINGLE} activeNodeId={1} unreportedNodeIds={null} navigation={makeNavigation(SINGLE)} onMarkRead={vi.fn()} canMute={false} />,
     );
     expect(screen.queryByText('No recent alerts.')).not.toBeInTheDocument();
   });
@@ -315,3 +322,80 @@ describe('RecentAlerts fixed height', () => {
   });
 });
 
+
+vi.mock('@/lib/muteRules', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/muteRules')>()),
+  createMuteFromNotification: vi.fn().mockResolvedValue(true),
+}));
+
+describe('RecentAlerts read and mute', () => {
+  it('marks an unread row read without navigating', async () => {
+    const user = userEvent.setup();
+    const onMarkRead = vi.fn();
+    const target = notif({ id: 5, message: 'disk is full', stack_name: 'web' });
+    const { navigation } = renderAlerts({ notifications: [target], onMarkRead });
+
+    await user.click(screen.getByRole('button', { name: 'Mark read' }));
+
+    expect(onMarkRead).toHaveBeenCalledTimes(1);
+    expect(onMarkRead).toHaveBeenCalledWith(expect.objectContaining({ id: 5, nodeId: 1 }));
+    expect(navigation.open).not.toHaveBeenCalled();
+  });
+
+  it('offers no Mark read on a row that is already read', () => {
+    renderAlerts({ notifications: [notif({ is_read: 1, stack_name: 'web' })] });
+    expect(screen.queryByRole('button', { name: 'Mark read' })).not.toBeInTheDocument();
+  });
+
+  it('hands the row to its own node when two nodes share an id', async () => {
+    window.localStorage.setItem(RECENT_ALERTS_SCOPE_KEY, 'all-nodes');
+    const user = userEvent.setup();
+    const onMarkRead = vi.fn();
+    renderAlerts({
+      nodes: FLEET,
+      activeNodeId: 1,
+      onMarkRead,
+      notifications: [
+        notif({ id: 7, nodeId: 1, message: 'on local', timestamp: 2_000 }),
+        notif({ id: 7, nodeId: 2, message: 'on node two', timestamp: 1_000 }),
+      ],
+    });
+
+    const row = screen.getByText('on node two').closest('[data-testid="recent-alert-row"]') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: 'Mark read' }));
+
+    expect(onMarkRead).toHaveBeenCalledWith(expect.objectContaining({ id: 7, nodeId: 2 }));
+  });
+
+  it('shows Mute only when the account can create mute rules', () => {
+    const rows = [notif({ stack_name: 'web' })];
+    const first = renderAlerts({ notifications: rows, canMute: false });
+    expect(screen.queryByRole('button', { name: 'Mute options' })).not.toBeInTheDocument();
+    first.unmount();
+
+    renderAlerts({ notifications: rows, canMute: true });
+    expect(screen.getByRole('button', { name: 'Mute options' })).toBeInTheDocument();
+  });
+
+  it('mutes from the menu without navigating', async () => {
+    const { createMuteFromNotification } = await import('@/lib/muteRules');
+    const user = userEvent.setup();
+    const target = notif({ id: 9, stack_name: 'web', category: 'monitor_alert' });
+    const { navigation } = renderAlerts({ notifications: [target], canMute: true });
+
+    await user.click(screen.getByRole('button', { name: 'Mute options' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Mute this stack' }));
+
+    expect(createMuteFromNotification).toHaveBeenCalledWith(expect.objectContaining({ id: 9 }), 'stack');
+    expect(navigation.open).not.toHaveBeenCalled();
+  });
+
+  it('still navigates when the row itself is clicked', async () => {
+    const user = userEvent.setup();
+    const { navigation } = renderAlerts({ notifications: [notif({ stack_name: 'web' })] });
+
+    await user.click(screen.getByText('test alert'));
+
+    expect(navigation.open).toHaveBeenCalledTimes(1);
+  });
+});

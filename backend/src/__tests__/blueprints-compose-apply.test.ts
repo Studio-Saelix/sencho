@@ -191,6 +191,36 @@ describe('Blueprint compose apply (real filesystem)', () => {
         expect(await fsPromises.access(stackDir).then(() => true, () => false)).toBe(true);
     });
 
+    it('puts the prior files back and surfaces the refusal when the Docker endpoint guard refuses a re-apply', async () => {
+        const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+        const nodeId = seedLocalNode();
+        const stackName = `bp-reapply-refused-${counter}`;
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+        const priorMarker = JSON.stringify({ blueprintId: 9, revision: 2, lastApplied: 1 }, null, 2);
+        await fsPromises.mkdir(stackDir, { recursive: true });
+        await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  proxy:\n    image: socket-proxy:1\n');
+        await fsPromises.writeFile(path.join(stackDir, '.blueprint.json'), priorMarker);
+
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new DockerEndpointProtectedError({
+            reason: 'provider',
+            service: 'proxy',
+            message: 'Service "proxy" carries the Docker connection Sencho is using.',
+        }));
+
+        const attempt = BlueprintService.getInstance().applyLocalUnderLock(
+            nodeId,
+            stackName,
+            'services:\n  proxy:\n    image: socket-proxy:2\n',
+            JSON.stringify({ blueprintId: 9, revision: 3, lastApplied: Date.now() }, null, 2),
+            '/api/blueprints/test/apply',
+        );
+
+        await expect(attempt).rejects.toBeInstanceOf(DockerEndpointProtectedError);
+        expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8'))
+            .toBe('services:\n  proxy:\n    image: socket-proxy:1\n');
+        expect(await fsPromises.readFile(path.join(stackDir, '.blueprint.json'), 'utf-8')).toBe(priorMarker);
+    });
+
     it('refuses to overwrite an existing unmanaged stack directory inside the lock', async () => {
         const { BlueprintNameConflictError } = await import('../services/BlueprintService');
         const nodeId = seedLocalNode();

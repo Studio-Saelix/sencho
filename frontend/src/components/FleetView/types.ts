@@ -55,6 +55,9 @@ export interface NodeUpdateStatus {
     type: 'local' | 'remote';
     version: string | null;
     latestVersion: string | null;
+    /** False when the control instance could not reach or poll the node; its
+     *  version and update availability are then unknown. */
+    online: boolean;
     updateAvailable: boolean;
     updateStatus: 'updating' | 'completed' | 'timeout' | 'failed' | null;
     error?: string | null;
@@ -88,7 +91,7 @@ export interface NodeUpdateStatus {
 }
 
 export type ViewMode = 'grid' | 'topology';
-export type SortField = 'name' | 'cpu' | 'memory' | 'containers' | 'status';
+export type SortField = 'attention' | 'name' | 'cpu' | 'memory' | 'containers' | 'status';
 export type SortDir = 'asc' | 'desc';
 export type FilterStatus = 'all' | 'online' | 'offline';
 export type FilterType = 'all' | 'local' | 'remote';

@@ -11,10 +11,7 @@ import {
     ScrollText,
     Undo2,
     Loader2,
-    Check,
     ShieldCheck,
-    ArrowUpRight,
-    Copy,
     CloudDownload,
     ArrowDownToLine,
     Layers,
@@ -26,7 +23,7 @@ import {
     HeartPulse,
     Eye,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Button } from '../ui/button';
 import { Skeleton } from '../ui/skeleton';
 import { CardTitle } from '../ui/card';
@@ -42,9 +39,9 @@ import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
-import { copyToClipboard } from '@/lib/clipboard';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { buildServiceUrl } from '@/lib/serviceUrl';
+import type { ServiceUrlEditBlock, ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { ServicePortLink } from './ServicePortLink';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
 import StructuredLogViewer from '../StructuredLogViewer';
@@ -360,6 +357,12 @@ export interface ContainersHealthProps {
      */
     syncStale?: boolean;
     onRetrySync?: () => void;
+    serviceUrlEntry?: ServiceUrlEntry | null;
+    canEditServiceUrl?: boolean;
+    sourceServices?: readonly string[] | null;
+    lockedServices?: ReadonlyMap<string, ServiceUrlEditBlock>;
+    onEditServiceUrl?: (serviceName: string) => void;
+    onRetryServiceUrls?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -386,32 +389,21 @@ export function ContainersHealth({
     onRetryContainersLoad,
     syncStale = false,
     onRetrySync,
+    serviceUrlEntry = null,
+    canEditServiceUrl = false,
+    sourceServices,
+    lockedServices,
+    onEditServiceUrl,
+    onRetryServiceUrls,
 }: ContainersHealthProps) {
     // Multi-service only: a single-service stack keeps the existing flat layout
     // untouched, including its per-container Start/Stop/Restart kebab.
     const isMultiService = effectiveServices.length > 1;
-    const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
-    const copiedUrlTimerRef = useRef<number | null>(null);
     // Compact mode hides sparkline grids across all containers for a denser
     // list. Detailed mode (default) shows CPU / Mem / Net per container.
     const [density, setDensity] = useState<'compact' | 'detailed'>(
         safeContainers.length > 1 ? 'compact' : 'detailed',
     );
-    useEffect(() => () => {
-        if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
-    }, []);
-    const copyServiceUrl = useCallback((id: string | undefined, url: string) => {
-        void copyToClipboard(url).then(() => {
-            if (!id) return;
-            setCopiedUrlId(id);
-            if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
-            copiedUrlTimerRef.current = window.setTimeout(() => {
-                setCopiedUrlId(prev => (prev === id ? null : prev));
-                copiedUrlTimerRef.current = null;
-            }, 1500);
-        }).catch(() => { /* clipboard unavailable */ });
-    }, []);
-
     // Summary strip + density/expand toggles: multi-container stacks only,
     // whether the body is flat or grouped by declared service.
     const total = safeContainers.length;
@@ -570,9 +562,6 @@ export function ContainersHealth({
                             mainPortProto = 'tcp';
                         }
 
-                        const serviceUrl = mainPort && mainPortPrivate
-                            ? buildServiceUrl({ node: activeNode, publicPort: mainPort, privatePort: mainPortPrivate })
-                            : null;
                         const portLabel = mainPort && mainPortPrivate
                             ? `${mainPort} → ${mainPortPrivate}/${mainPortProto}`
                             : '';
@@ -595,13 +584,15 @@ export function ContainersHealth({
                         const sparkStroke = health === 'unhealthy' ? 'var(--destructive)' : health === 'starting' ? 'var(--warning)' : 'var(--chart-1)';
 
                         return (
-                            <div key={container?.Id || Math.random()} className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2.5">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                            <div key={container?.Id || Math.random()} className="min-w-0 max-w-full rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2.5">
+                                {/* The action cluster does not shrink. A 12rem floor wraps it
+                                    under the name before a narrow pane can crush the port link. */}
+                                <div className="flex min-w-0 max-w-full flex-wrap items-start justify-between gap-4">
+                                    <div className="flex min-w-[12rem] max-w-full flex-1 items-start gap-3 max-md:min-w-0 max-md:basis-full">
                                         <div className={cn('mt-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold', badgeClass)}>
                                             {badgeGlyph}
                                         </div>
-                                        <div className="flex min-w-0 flex-col gap-0.5">
+                                        <div className="flex min-w-0 max-w-full flex-col gap-0.5">
                                             <div className="flex min-w-0 items-center gap-2">
                                                 <div className="truncate font-mono text-sm text-foreground">{containerName}</div>
                                                 {updateAffordance?.hasUpdate && (
@@ -610,51 +601,31 @@ export function ContainersHealth({
                                                     </span>
                                                 )}
                                             </div>
-                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-stat-subtitle">
+                                            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-stat-subtitle">
                                                 {uptime ? <span>{uptime}</span> : <span>{(container.State || 'unknown').toLowerCase()}</span>}
                                                 {hcLabel ? <><span>·</span><span>{hcLabel}</span></> : null}
                                                 {mainPort && mainPortPrivate ? (
                                                     <>
                                                         <span>·</span>
-                                                        {serviceUrl ? (
-                                                            <>
-                                                                <a
-                                                                    href={serviceUrl}
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    className="inline-flex items-center gap-1 text-brand hover:underline"
-                                                                >
-                                                                    {portLabel} <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
-                                                                </a>
-                                                                <TooltipProvider>
-                                                                  <Tooltip>
-                                                                    <TooltipTrigger asChild>
-                                                                      <button
-                                                                        type="button"
-                                                                        aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
-                                                                        onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
-                                                                        className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                                                      >
-                                                                    {copiedUrlId === container?.Id ? (
-                                                                        <Check className="h-3 w-3" strokeWidth={2} />
-                                                                    ) : (
-                                                                        <Copy className="h-3 w-3" strokeWidth={1.5} />
-                                                                    )}
-                                                                </button>
-                                                                    </TooltipTrigger>
-                                                                    <TooltipContent>Copy service URL</TooltipContent>
-                                                                  </Tooltip>
-                                                                </TooltipProvider>
-                                                            </>
-                                                        ) : (
-                                                            <span>{portLabel}</span>
-                                                        )}
+                                                        <ServicePortLink
+                                                            portLabel={portLabel}
+                                                            publicPort={mainPort}
+                                                            privatePort={mainPortPrivate}
+                                                            serviceName={composeService}
+                                                            entry={serviceUrlEntry}
+                                                            node={activeNode}
+                                                            canEdit={canEditServiceUrl}
+                                                            sourceServices={sourceServices}
+                                                            lockedServices={lockedServices}
+                                                            onEdit={onEditServiceUrl}
+                                                            onRetry={onRetryServiceUrls}
+                                                        />
                                                     </>
                                                 ) : null}
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex shrink-0 items-center gap-1">
+                                    <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
                                         {updateAffordance ? renderServiceUpdateButton(updateAffordance) : null}
                                         <ImageSourceMenu
                                             imageRef={container.Image}

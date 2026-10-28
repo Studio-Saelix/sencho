@@ -6,6 +6,7 @@ import { GitOpsStore } from '../services/gitops/store';
 import { GitOpsBindingError, GitOpsBindingService } from '../services/gitops/binding';
 import { SourceController } from '../services/gitops/SourceController';
 import type { GitOpsRevisionProjection } from '../services/gitops/types';
+import type { AllowedPolicyEvidence } from '../services/allowedPolicyEvidence';
 import { GitProjectManifestService } from '../services/GitProjectManifestService';
 import { FileSystemService } from '../services/FileSystemService';
 import { DatabaseService } from '../services/DatabaseService';
@@ -703,6 +704,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
     const source = DatabaseService.getInstance().getGitSource(stackName);
     const willDeploy = typeof deploy === 'boolean' ? deploy : source?.auto_deploy_on_apply === true;
     if (willDeploy && !requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+    let policyEvidence: AllowedPolicyEvidence | undefined;
     const result = await GitSourceService.getInstance().apply(
       stackName,
       commitSha.trim(),
@@ -712,6 +714,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
         bypassPolicy: req.query.ignorePolicy === 'true' && req.user?.role === 'admin',
         planFingerprint: planFingerprint.trim(),
         requirePlanFingerprint: true,
+        onAllowed: (allowed) => { policyEvidence = allowed; },
       },
     );
     // Cache invalidation and the post-deploy scan now run inside GitSourceService.apply() itself.
@@ -723,7 +726,7 @@ stackGitSourceRouter.post('/:stackName/git-source/apply', async (req: Request, r
     } else {
       console.log('[GitSource] Applied commit %s to %s', sanitizeForLog(shortSha), sanitizeForLog(stackName));
     }
-    res.json(result);
+    res.json(policyEvidence ? { ...result, policyEvidence } : result);
   } catch (error) {
     sendGitSourceError(res, error);
   }
@@ -1050,10 +1053,12 @@ stackGitSourceRouter.post('/:stackName/git-source/retry', async (req: Request, r
   }
   if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
   try {
+    let policyEvidence: AllowedPolicyEvidence | undefined;
     const result = await GitSourceService.getInstance().retry(stackName, {
       actor: req.user?.username ?? 'unknown',
+      onAllowed: (allowed) => { policyEvidence = allowed; },
     });
-    res.json(result);
+    res.json(policyEvidence ? { ...result, policyEvidence } : result);
   } catch (error) {
     sendGitSourceError(res, error);
   }
@@ -1160,16 +1165,17 @@ stackGitSourceRouter.get('/:stackName/git-source/sops-identities', async (req: R
   const applicationId = resolveSopsApplicationId(stackName);
   const policy = getEncryptedSourcePolicy(stackName);
   const identities = SopsIdentityStore.getInstance().listPublic(applicationId, stackName);
-  const { resolveActiveRequiredRecipients } = await import('../services/gitops/sops/capability');
-  const requiredRecipients = resolveActiveRequiredRecipients({
+  const { resolveActiveCapability } = await import('../services/gitops/sops/capability');
+  const capability = resolveActiveCapability({
     stackName,
     nodeId: req.nodeId ?? 0,
+    basis: 'applied',
   });
   const readiness = SopsIdentityStore.getInstance().computeReadiness({
     applicationId,
     stackName,
     policy,
-    requiredRecipients,
+    inputs: capability?.inputs ?? [],
   });
   res.json({
     encrypted_source_policy: policy,

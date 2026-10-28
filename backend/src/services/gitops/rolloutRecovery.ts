@@ -14,6 +14,7 @@
  * generation-selection contract, so both paths enforce identical evidence
  * rules.
  */
+import { DOCKER_ENDPOINT_PROTECTED_CODE } from '../../helpers/dockerEndpointError';
 import axios from 'axios';
 import type { PermissionAction } from '../../middleware/permissions';
 import { DatabaseService } from '../DatabaseService';
@@ -34,6 +35,7 @@ import {
   PROXY_TIER_HEADER,
 } from '../license-headers';
 import type { PolicyEnforcementOptions } from '../PolicyEnforcement';
+import { parseRemotePolicyEvidence, type AllowedPolicyEvidence } from '../allowedPolicyEvidence';
 import type { GitOpsApplicationRow, GitOpsTargetCurrentRow } from './types';
 import { GitOpsStore } from './store';
 import { decodeGitOpsRequiredTargetsJson } from './json';
@@ -49,11 +51,70 @@ export type RolloutRollbackTargetResult = {
   nodeId: number;
   status: 'restored' | 'failed';
   error?: string;
+  /** Set on a restore whose policy gate allowed on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 };
 
 export type RestoreTargetOutcome =
-  | { ok: true }
-  | { ok: false; code: string; error: string };
+  /**
+   * `policyEvidence` is present when the restore's policy gate allowed on
+   * evidence that was not a clean pass, so the rollback response can say so.
+   */
+  | { ok: true; policyEvidence?: AllowedPolicyEvidence }
+  | {
+      ok: false;
+      code: string;
+      error: string;
+      /**
+       * The restoring node's own classification, when it could prove one. A
+       * thrown compensation error carries it from the restore's catch, which
+       * is the only place that knows whether the files had already moved.
+       */
+      failureClass?: 'pre_mutation' | 'post_mutation';
+    };
+
+/**
+ * Restore refusal codes that prove this restore moved nothing: each is
+ * answered before it touches the project, so no half-restored state of its
+ * making can exist.
+ *
+ * The stack-busy codes are deliberately absent: a busy answer means another
+ * operation is moving that stack right now, so it cannot prove the target is
+ * unchanged. Every other failure, including a transport error that may have
+ * landed after the restore, stays mutable too.
+ */
+const PRE_MUTATION_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  'NO_RECOVERY_POINT',
+  'RECOVERY_POINT_MISMATCH',
+  'STACK_NOT_FOUND',
+  'self_stack_protected',
+  DOCKER_ENDPOINT_PROTECTED_CODE,
+  'PERMISSION_DENIED',
+]);
+
+/**
+ * Whether a failed restore can have mutated the target it was refused on.
+ *
+ * The node's own `failureClass` wins when it is present: a code alone does not
+ * say how far a restore got (`RECOVERY_PROBE_FAILED` arrives after the files
+ * moved), so only the restore's catch knows. The code set below is the fallback
+ * for a node that sends no class, and it is not exhaustive.
+ */
+export function restoreFailureMutated(outcome: {
+  code: string;
+  failureClass?: 'pre_mutation' | 'post_mutation';
+}): boolean {
+  if (outcome.failureClass === 'pre_mutation') return false;
+  if (outcome.failureClass === 'post_mutation') return true;
+  return !PRE_MUTATION_REFUSAL_CODES.has(outcome.code);
+}
+
+/** Validate a failure classification that crossed a process boundary. */
+export function parseRestoreFailureClass(
+  value: unknown,
+): 'pre_mutation' | 'post_mutation' | undefined {
+  return value === 'pre_mutation' || value === 'post_mutation' ? value : undefined;
+}
 
 /**
  * The frozen target set the current rollout was authorized against.
@@ -61,8 +122,9 @@ export type RestoreTargetOutcome =
  * The live authorization binding is authoritative while it resolves. A
  * superseded generation whose pointer is still on the application keeps
  * naming the set the operator reviewed, so a rollback can act on the targets
- * that actually moved. An invalidation clears the pointer, and then there is
- * no set to recover.
+ * that actually moved. An invalidation clears the pointer; an active rollback
+ * fence still names the generation on its target row, so the set stays
+ * recoverable until the rollback finishes.
  */
 export function rolloutTargetSet(app: GitOpsApplicationRow): {
   nodeIds: number[];
@@ -73,8 +135,20 @@ export function rolloutTargetSet(app: GitOpsApplicationRow): {
   if (binding) {
     return { nodeIds: [...binding.requiredNodeIds], acceptedGenerationId: binding.acceptedGenerationId };
   }
-  if (!app.rollout_generation_id) return null;
-  const generation = store.getRolloutGeneration(app.rollout_generation_id);
+  // The pointer is the normal fallback. Without one, an unfinished rollback is
+  // the exception: the target row still names the generation whose targets
+  // moved, and the rollback route needs a target set to finish rather than a
+  // permanent ROLLBACK_UNAVAILABLE.
+  const fenced = app.rollout_generation_id === null
+    ? store.listTargets(app.id).find(
+        (target) => target.target_status === 'active'
+          && target.health_stop_reason === 'rollback_pending'
+          && target.rollout_generation_id !== null,
+      )
+    : undefined;
+  const generationId = app.rollout_generation_id ?? fenced?.rollout_generation_id ?? null;
+  if (!generationId) return null;
+  const generation = store.getRolloutGeneration(generationId);
   if (!generation) return null;
   try {
     return {
@@ -207,12 +281,17 @@ export function resolveRollbackTargets(
   return { ok: true, nodeIds: changed };
 }
 
-function policyOptions(actor: string | null, applicationId: string): PolicyEnforcementOptions {
+function policyOptions(
+  actor: string | null,
+  applicationId: string,
+  onAllowed: (allowed: AllowedPolicyEvidence) => void,
+): PolicyEnforcementOptions {
   return {
     bypass: false,
     actor: actor ?? 'system:gitops-rollback',
     auditMethod: 'POST',
     auditPath: `/api/gitops/applications/${applicationId}/rollout/rollback`,
+    onAllowed,
   };
 }
 
@@ -223,6 +302,14 @@ function errorCode(error: unknown): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error && error.message.length > 0 ? error.message : 'The restore did not complete.';
+}
+
+/** The classification a thrown restore error carries, when it carries one. */
+function restoreFailureClassOf(error: unknown): { failureClass?: 'pre_mutation' | 'post_mutation' } {
+  const failureClass = parseRestoreFailureClass(
+    (error as { failureClass?: unknown } | null)?.failureClass,
+  );
+  return failureClass ? { failureClass } : {};
 }
 
 function restoreLocal(args: {
@@ -250,28 +337,42 @@ function restoreLocal(args: {
           error: 'The recovery point on this node restores a different generation than the one selected.',
         };
       }
+      let policyEvidence: AllowedPolicyEvidence | undefined;
       try {
-        const rolledBack = await recovery.compensateWithCandidate(
+        // A restore pins every service to its recovery tag, which recreates the
+        // container carrying this node's Docker API when the stack holds it.
+        const endpointRefusal = await ComposeService.getInstance(args.nodeId)
+          .evaluateDockerEndpoint(args.stackName, { kind: 'update' });
+        if (endpointRefusal) {
+          return {
+            ok: false as const,
+            code: DOCKER_ENDPOINT_PROTECTED_CODE,
+            error: endpointRefusal.message,
+            failureClass: 'pre_mutation' as const,
+          };
+        }
+        const compensation = await recovery.compensateWithCandidateOutcome(
           current.id,
           (overridePath, invocation, overlay) => ComposeService.getInstance(args.nodeId)
             .composeUpWithRecoveryOverride(args.stackName, overridePath, undefined, invocation, overlay),
-          policyOptions(args.actor, args.app.id),
+          policyOptions(args.actor, args.app.id, (allowed) => { policyEvidence = allowed; }),
         );
-        if (!rolledBack) {
+        if (!compensation.rolledBack) {
           return {
             ok: false as const,
             code: 'ROLLBACK_FAILED',
             error: 'The restore did not complete.',
+            failureClass: compensation.failureClass,
           };
         }
-        return { ok: true as const };
+        return { ok: true as const, ...(policyEvidence ? { policyEvidence } : {}) };
       } catch (error) {
         console.error(
         '[GitOps recovery] Local restore failed for %s:',
         sanitizeForLog(args.stackName),
         sanitizeForLog(error instanceof Error ? error.message : String(error)),
       );
-        return { ok: false as const, code: errorCode(error), error: errorText(error) };
+        return { ok: false as const, code: errorCode(error), error: errorText(error), ...restoreFailureClassOf(error) };
       }
     })
     .then((result) => {
@@ -296,7 +397,14 @@ async function restoreRemote(args: {
 }): Promise<RestoreTargetOutcome> {
   const target = NodeRegistry.getInstance().getProxyTarget(args.nodeId);
   if (!target) {
-    return { ok: false, code: 'NODE_UNREACHABLE', error: 'The owning node is unreachable.' };
+    // No request left the hub, so this restore moved nothing. A transport
+    // failure after a request goes out is different and keeps the hold.
+    return {
+      ok: false,
+      code: 'RESTORE_NOT_SENT',
+      error: 'The owning node is unreachable.',
+      failureClass: 'pre_mutation',
+    };
   }
   const baseUrl = target.apiUrl.replace(/\/$/, '');
   const headers: Record<string, string> = {
@@ -320,20 +428,28 @@ async function restoreRemote(args: {
         validateStatus: () => true,
       },
     );
-    const body = res.data as { error?: unknown; code?: unknown; gitopsGenerationId?: unknown } | null;
+    const body = res.data as {
+      error?: unknown;
+      code?: unknown;
+      gitopsGenerationId?: unknown;
+      failureClass?: unknown;
+    } | null;
     if (res.status >= 200 && res.status < 300) {
       // The node must confirm the restored generation. A node that does not
       // know the guard (an older build) would ignore it and answer 200 for
       // whatever its current recovery point is, so an absent or different
-      // echo fails closed rather than claiming the requested restore.
+      // echo fails closed rather than claiming the requested restore. The
+      // node answered 2xx, so it restored something; without the echo the hub
+      // cannot prove what, which is not a pre-mutation refusal.
       if (body?.gitopsGenerationId !== args.generationId) {
         return {
           ok: false,
-          code: 'RECOVERY_POINT_MISMATCH',
+          code: 'RECOVERY_POINT_UNCONFIRMED',
           error: 'The node did not confirm restoring the requested application generation.',
         };
       }
-      return { ok: true };
+      const policyEvidence = parseRemotePolicyEvidence(body);
+      return policyEvidence ? { ok: true, policyEvidence } : { ok: true };
     }
     const code = typeof body?.code === 'string' && body.code.length > 0
       ? body.code
@@ -341,7 +457,13 @@ async function restoreRemote(args: {
     const message = typeof body?.error === 'string' && body.error.length > 0
       ? body.error
       : `The node answered HTTP ${res.status} to the restore request.`;
-    return { ok: false, code, error: message };
+    const failureClass = parseRestoreFailureClass(body?.failureClass);
+    return {
+      ok: false,
+      code,
+      error: message,
+      ...(failureClass ? { failureClass } : {}),
+    };
   } catch (error) {
     console.error(
       '[GitOps recovery] Remote restore request failed for node %s:',

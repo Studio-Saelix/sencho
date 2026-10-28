@@ -19,6 +19,8 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
+import { ENV_READ_FAILED_NOTICE } from '../envNotice';
 import {
   absentRevision,
   missingApplicationLimitation,
@@ -65,10 +67,15 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEnvFiles: vi.fn(),
     setSelectedEnvFile: vi.fn(),
     setEnvExists: vi.fn(),
+    envExists: true,
+    setEnvInventoryFailed: vi.fn(),
+    envInventoryFailed: false,
     setBackupInfo: vi.fn(),
     setIsFileLoading: vi.fn(),
     setGitSourcePendingMap: vi.fn(),
     setComposeEtag: vi.fn(),
+    composeFilename: 'compose.yaml',
+    setComposeFilename: vi.fn(),
     setEnvEtag: vi.fn(),
     effectiveServices: [],
     setEffectiveServices: vi.fn(),
@@ -84,6 +91,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
     stackPorts: {},
+    stackPortServices: {},
     stackSelfFlags: {},
     setSelectedFile: vi.fn(),
     setOptimisticStatus: vi.fn(),
@@ -153,6 +161,9 @@ function setup(over: {
   isAdmin?: boolean;
   canReapplyCompose?: boolean;
   hasServiceScopedUpdate?: boolean;
+  diffPreviewEnabled?: boolean;
+  onStackFilesChanged?: () => void;
+  serviceUrlsRef?: { current: ServiceUrlEntry | null };
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -183,15 +194,17 @@ function setup(over: {
       nodes: [],
       runWithLog,
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
-      diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
       hasGuidedExternalNetworkPreflight: over.hasGuidedExternalNetworkPreflight ?? false,
       hasServiceScopedUpdate: over.hasServiceScopedUpdate ?? false,
+      diffPreviewEnabled: over.diffPreviewEnabled ?? false,
       canEditStack: over.canEditStack ?? (() => true),
+      onStackFilesChanged: over.onStackFilesChanged,
       onDeletedOpenStack,
       removeNotificationsForStack,
       isAdmin: over.isAdmin ?? false,
       canReapplyCompose: over.canReapplyCompose ?? false,
+      serviceUrlsRef: over.serviceUrlsRef,
     }),
   );
   return { result, rerender, activeNodeHolder, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
@@ -224,6 +237,51 @@ describe('useStackActions.saveFile', () => {
     expect(editorState.setOriginalContent).not.toHaveBeenCalled();
   });
 
+  it('keeps a dirty compose draft when the opened file is no longer the source', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: '',
+      filename: null,
+    }), { status: 412 }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).not.toHaveBeenCalled();
+      expect(editorState.setOriginalContent).not.toHaveBeenCalled();
+      expect(editorState.setComposeFilename).not.toHaveBeenCalled();
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('reloads a changed compose source only after the operator discards the draft', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      code: 'compose_source_changed',
+      currentContent: 'remote file',
+      filename: 'compose.yaml',
+    }), {
+      status: 412,
+      headers: { etag: 'W/"9"', 'x-compose-file': 'compose.yaml' },
+    }));
+    const { result, editorState } = setup({
+      editorState: { content: 'local draft', originalContent: 'old', composeFilename: 'docker-compose.yml' },
+    });
+    try {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(false);
+      expect(editorState.setContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setOriginalContent).toHaveBeenCalledWith('remote file');
+      expect(editorState.setComposeFilename).toHaveBeenCalledWith('compose.yaml');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
   it('returns false when no stack is selected', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
     const editorState = makeEditorState();
@@ -248,7 +306,666 @@ describe('useStackActions.saveFile', () => {
     expect(ok).toBe(false);
     expect(apiFetch).not.toHaveBeenCalled();
   });
+
+  it('asks the backend to create the default .env when the env tab has no file', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      okJson({ message: 'Env file saved successfully', mtimeMs: 123, created: true, envPath: '/compose/web/.env' }),
+    );
+    const { result, editorState } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: false,
+        selectedEnvFile: '',
+        envContent: 'FOO=1',
+        originalEnvContent: '',
+      },
+    });
+
+    const ok = await result.current.saveFile();
+
+    expect(ok).toBe(true);
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes('/stacks/web.yml/env') && (c[1] as RequestInit | undefined)?.method === 'PUT',
+    );
+    expect(String(call?.[0])).toBe('/stacks/web.yml/env?create=1');
+    // The precondition this build ignores but a pre-create=1 node honors: an
+    // existing file answers 412 there instead of being overwritten.
+    expect((call?.[1] as RequestInit | undefined)?.headers).toMatchObject({ 'If-Match': 'W/"0"' });
+    expect(editorState.setOriginalEnvContent).toHaveBeenCalledWith('FOO=1');
+    expect(editorState.setEnvExists).toHaveBeenCalledWith(true);
+    expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('/compose/web/.env');
+    expect(editorState.setEnvFiles).toHaveBeenCalledWith(['/compose/web/.env']);
+  });
+
+  it('skips the create when the env buffer is empty and unchanged', async () => {
+    // Save & Deploy / Save & Pull on an untouched env tab must not plant an
+    // empty .env: no PUT, and the caller still proceeds.
+    const { result } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: false,
+        selectedEnvFile: '',
+        envContent: '',
+        originalEnvContent: '',
+      },
+    });
+
+    const ok = await result.current.saveFile();
+
+    expect(ok).toBe(true);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('refuses to create when the env inventory failed to load', async () => {
+    const { result } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: false,
+        envInventoryFailed: true,
+        selectedEnvFile: '',
+        envContent: 'FOO=1',
+        originalEnvContent: '',
+      },
+    });
+
+    const ok = await result.current.saveFile();
+
+    expect(ok).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(ENV_READ_FAILED_NOTICE);
+  });
+
+  it('records a failed env inventory load as failed instead of empty', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'GET') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u === '/stacks/web.yml/envs') return Promise.resolve(new Response('boom', { status: 500 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+    });
+
+    await result.current.loadFile('web.yml');
+
+    expect(editorState.setEnvInventoryFailed).toHaveBeenCalledWith(true);
+  });
+
+  it('names a refused compose path instead of a connection problem', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'The compose file does not resolve inside the stack directory' }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded).toEqual({ ok: false, error: 'Could not open "linked". The compose file does not resolve inside the stack directory' });
+    expect(toast.error).toHaveBeenCalledWith('Could not open "linked". The compose file does not resolve inside the stack directory');
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
+  it('refreshes service URLs only when the open stack is reloaded', async () => {
+    const onStackFilesChanged = vi.fn();
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/web.yml' || u === '/stacks/other.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.endsWith('/envs')) return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const same = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      onStackFilesChanged,
+    });
+    await same.result.current.loadFile('web.yml');
+    expect(onStackFilesChanged).toHaveBeenCalledTimes(1);
+
+    onStackFilesChanged.mockClear();
+    const next = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: 'web.yml' },
+      onStackFilesChanged,
+    });
+    await next.result.current.loadFile('other.yml');
+    expect(onStackFilesChanged).not.toHaveBeenCalled();
+  });
+
+  it('treats an unreadable env file content as unknown, not empty', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'GET') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u === '/stacks/web.yml/envs') {
+        return Promise.resolve(new Response(JSON.stringify({ envFiles: ['/compose/web/.env'] }), { status: 200 }));
+      }
+      if (u.startsWith('/stacks/web.yml/env?file=')) return Promise.resolve(new Response('boom', { status: 500 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+    });
+
+    await result.current.loadFile('web.yml');
+
+    // The file exists but could not be read: the editor must not present an
+    // empty buffer for it and must refuse to save over it.
+    expect(editorState.setEnvInventoryFailed).toHaveBeenCalledWith(true);
+    expect(editorState.setEnvExists).toHaveBeenCalledWith(false);
+  });
+
+  it('clears the previous env state when a stack fails to load', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'GET') return Promise.resolve(new Response('offline', { status: 500 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: {
+        content: 'same',
+        originalContent: 'same',
+        envExists: true,
+        envFiles: ['/compose/old/.env'],
+        selectedEnvFile: '/compose/old/.env',
+      },
+    });
+
+    await result.current.loadFile('web.yml');
+
+    expect(editorState.setEnvExists).toHaveBeenCalledWith(false);
+    expect(editorState.setEnvFiles).toHaveBeenCalledWith([]);
+    expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('');
+    expect(editorState.setEnvInventoryFailed).toHaveBeenCalledWith(false);
+  });
+
+  it('saves an existing env file through its selected path without the create flag', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: true,
+        selectedEnvFile: '/compose/web/.env',
+        envContent: 'FOO=2',
+        originalEnvContent: 'FOO=1',
+      },
+    });
+
+    const ok = await result.current.saveFile();
+
+    expect(ok).toBe(true);
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes('/stacks/web.yml/env') && (c[1] as RequestInit | undefined)?.method === 'PUT',
+    );
+    expect(String(call?.[0])).toBe(`/stacks/web.yml/env?file=${encodeURIComponent('/compose/web/.env')}`);
+    expect(String(call?.[0])).not.toContain('create=1');
+  });
+
+  it('shows the server error text when a save fails instead of the raw JSON envelope', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Requested env file not allowed' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const { result } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: true,
+        selectedEnvFile: '/compose/web/.env',
+        envContent: 'FOO=2',
+        originalEnvContent: 'FOO=1',
+      },
+    });
+
+    const ok = await result.current.saveFile();
+
+    expect(ok).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith('Failed to save file: Requested env file not allowed');
+    expect(
+      vi.mocked(toast.error).mock.calls.some(c => String(c[0]).includes('HTTP 400')),
+    ).toBe(false);
+  });
+
+  it('adopts the existing file and retries with force when the create save conflicts', async () => {
+    const conflict = new Response(
+      JSON.stringify({
+        error: "web's env file already exists.",
+        code: 'stack_file_changed',
+        currentContent: 'SECRET=keepme',
+        envPath: '/compose/web/.env',
+      }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    const saved = okJson({ message: 'Env file saved successfully', mtimeMs: 222, envPath: '/compose/web/.env' });
+    vi.mocked(apiFetch).mockResolvedValueOnce(conflict).mockResolvedValueOnce(saved);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(true);
+      const puts = vi.mocked(apiFetch).mock.calls.filter(
+        c => String(c[0]).includes('/stacks/web.yml/env') && (c[1] as RequestInit | undefined)?.method === 'PUT',
+      );
+      expect(String(puts[0]?.[0])).toBe('/stacks/web.yml/env?create=1');
+      expect((puts[0]?.[1] as RequestInit | undefined)?.headers).toMatchObject({ 'If-Match': 'W/"0"' });
+      expect(String(puts[1]?.[0])).toBe(
+        `/stacks/web.yml/env?create=1&force=1&file=${encodeURIComponent('/compose/web/.env')}`,
+      );
+      // The forced retry is unconditional: the user just confirmed the write.
+      expect((puts[1]?.[1] as RequestInit | undefined)?.headers).not.toHaveProperty('If-Match');
+      // The create-conflict copy names the existing file and points at reload.
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringContaining('already exists for this stack and you have not loaded its contents'),
+      );
+      // The conflict response adopts the real file and its ETag so the notice
+      // clears and a failed forced retry leaves later saves guarded.
+      expect(editorState.setEnvExists).toHaveBeenCalledWith(true);
+      expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('/compose/web/.env');
+      expect(editorState.setEnvFiles).toHaveBeenCalledWith(['/compose/web/.env']);
+      expect(editorState.setEnvEtag).toHaveBeenCalledWith('W/"111"');
+      expect(editorState.setOriginalEnvContent).toHaveBeenCalledWith('FOO=1');
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('reloads and adopts the existing file when the create conflict is declined', async () => {
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', envPath: '/compose/web/.env' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    // Declining reloads the env state instead of trusting the payload, so the
+    // editor adopts whatever is on disk now.
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(okJson({ envFiles: ['/compose/web/.env'] }))
+      .mockResolvedValueOnce(new Response('SECRET=keepme', { status: 200, headers: { ETag: 'W/"111"' } }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(false);
+      expect(editorState.setEnvContent).toHaveBeenCalledWith('SECRET=keepme');
+      expect(editorState.setOriginalEnvContent).toHaveBeenCalledWith('SECRET=keepme');
+      expect(editorState.setEnvEtag).toHaveBeenCalledWith('W/"111"');
+      expect(editorState.setEnvExists).toHaveBeenCalledWith(true);
+      expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('/compose/web/.env');
+      expect(editorState.setEnvFiles).toHaveBeenCalledWith(['/compose/web/.env']);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('returns to create mode when the conflicted file is gone by the time the decline reloads', async () => {
+    // The file was deleted while the dialog was open and the operator chose
+    // Cancel. Adopting the vanished path would make every later save fail the
+    // allowed-file check; the reload must leave the editor in create mode.
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', envPath: '/compose/web/.env' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(okJson({ envFiles: [] }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(false);
+      // clearEnvState leaves no adopted path and no buffer.
+      expect(editorState.setEnvExists).toHaveBeenLastCalledWith(false);
+      expect(editorState.setSelectedEnvFile).toHaveBeenLastCalledWith('');
+      expect(editorState.setEnvFiles).toHaveBeenLastCalledWith([]);
+      expect(
+        vi.mocked(toast.info).mock.calls.some(c => String(c[0]).includes('no longer exists')),
+      ).toBe(true);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('refreshes the inventory when an older node conflicts without naming the file', async () => {
+    // A pre-create=1 node's 412 has content and an ETag but no envPath, so the
+    // client cannot adopt the file directly; it must refresh the inventory so
+    // the tab stops offering to create one.
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', code: 'stack_file_changed' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(okJson({ envFiles: ['/compose/web/.env'] }))
+      .mockResolvedValueOnce(new Response('SECRET=keepme', { status: 200, headers: { etag: 'W/"111"' } }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(false);
+      expect(editorState.setEnvExists).toHaveBeenCalledWith(true);
+      expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('/compose/web/.env');
+      expect(editorState.setEnvFiles).toHaveBeenCalledWith(['/compose/web/.env']);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('keeps the conflicted content when the older-node inventory refresh fails', async () => {
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', code: 'stack_file_changed' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(false);
+      // The failed refresh cleared the buffer; the restored content is the
+      // conflicted file's, guarded by its ETag, and the toast says so.
+      expect(editorState.setEnvContent).toHaveBeenLastCalledWith('SECRET=keepme');
+      expect(editorState.setOriginalEnvContent).toHaveBeenLastCalledWith('SECRET=keepme');
+      expect(editorState.setEnvEtag).toHaveBeenLastCalledWith('W/"111"');
+      expect(
+        vi.mocked(toast.error).mock.calls.some(c => String(c[0]).includes('Could not reload the environment files')),
+      ).toBe(true);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('keeps the conflicted content when the refresh loads the list but not the file', async () => {
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', code: 'stack_file_changed' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(okJson({ envFiles: ['/compose/web/.env'] }))
+      .mockResolvedValueOnce(new Response('boom', { status: 500 }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+
+      const ok = await result.current.saveFile();
+
+      expect(ok).toBe(false);
+      expect(editorState.setEnvContent).toHaveBeenLastCalledWith('SECRET=keepme');
+      expect(
+        vi.mocked(toast.error).mock.calls.some(c => String(c[0]).includes('Could not reload the environment files')),
+      ).toBe(true);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('honors an explicit create retry even when state already reports a file', async () => {
+    // The conflict retry passes create explicitly so the mode cannot depend on
+    // state-update ordering; pin that contract here.
+    vi.mocked(apiFetch).mockResolvedValue(
+      okJson({ message: 'Env file saved successfully', mtimeMs: 123, envPath: '/compose/web/.env' }),
+    );
+    const { result } = setup({
+      editorState: {
+        activeTab: 'env',
+        envExists: true,
+        selectedEnvFile: '/compose/web/.env',
+        envContent: 'FOO=1',
+        originalEnvContent: '',
+      },
+    });
+
+    const ok = await result.current.saveFile({ create: true, force: true });
+
+    expect(ok).toBe(true);
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes('/stacks/web.yml/env') && (c[1] as RequestInit | undefined)?.method === 'PUT',
+    );
+    expect(String(call?.[0])).toBe('/stacks/web.yml/env?create=1&force=1');
+  });
+
+  it('leaves create mode after an older node accepts the overwrite without naming the path', async () => {
+    // Sequence on a node that predates the envPath response: create -> 412
+    // without a path -> confirm -> forced retry -> 200 without a path. The
+    // editor must refresh the inventory so later saves are normal conditional
+    // writes instead of prompting for an overwrite every time.
+    const conflict = new Response(
+      JSON.stringify({ currentContent: 'SECRET=keepme', code: 'stack_file_changed' }),
+      { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+    );
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(okJson({ message: 'Env file saved successfully', mtimeMs: 222 }))
+      .mockResolvedValueOnce(okJson({ envFiles: ['/compose/web/.env'] }))
+      .mockResolvedValueOnce(new Response('SECRET=keepme', { status: 200, headers: { ETag: 'W/"222"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 200, headers: { ETag: 'W/"333"' } }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const { result, editorState } = setup({
+        editorState: {
+          activeTab: 'env',
+          envExists: false,
+          selectedEnvFile: '',
+          envContent: 'FOO=1',
+          originalEnvContent: '',
+        },
+      });
+      // Mirror the real state for the follow-up save: these setters mutate the
+      // stub so the next saveFile call observes the adopted file.
+      const mutable = editorState as unknown as Record<string, unknown>;
+      mutable.setEnvExists = vi.fn((v: unknown) => { mutable.envExists = v; });
+      mutable.setSelectedEnvFile = vi.fn((v: unknown) => { mutable.selectedEnvFile = v; });
+      mutable.setEnvEtag = vi.fn((v: unknown) => { mutable.envEtag = v; });
+
+      const first = await result.current.saveFile();
+
+      expect(first).toBe(true);
+      const envsCalls = vi.mocked(apiFetch).mock.calls.filter(c => String(c[0]) === '/stacks/web.yml/envs');
+      expect(envsCalls).toHaveLength(1);
+      expect(editorState.setEnvExists).toHaveBeenCalledWith(true);
+      expect(editorState.setSelectedEnvFile).toHaveBeenCalledWith('/compose/web/.env');
+
+      // The next save is a normal conditional write with the refreshed ETag.
+      const second = await result.current.saveFile();
+
+      expect(second).toBe(true);
+      const puts = vi.mocked(apiFetch).mock.calls.filter(
+        c => String(c[0]).includes('/stacks/web.yml/env') && (c[1] as RequestInit | undefined)?.method === 'PUT',
+      );
+      expect(String(puts[2]?.[0])).toBe(`/stacks/web.yml/env?file=${encodeURIComponent('/compose/web/.env')}`);
+      expect((puts[2]?.[1] as RequestInit | undefined)?.headers).toMatchObject({ 'If-Match': 'W/"222"' });
+      expect(String(puts[2]?.[0])).not.toContain('create=1');
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('does not adopt a create response that lands after a stack switch', async () => {
+    // Stack A's load owns the controller the save captures; switching to B
+    // aborts it while A's PUT is still in flight, so the late success response
+    // must not paint A's file state into B's editor.
+    let resolveComposeA!: (r: Response) => void;
+    const composeA = new Promise<Response>((resolve) => { resolveComposeA = resolve; });
+    let resolvePut!: (r: Response) => void;
+    const put = new Promise<Response>((resolve) => { resolvePut = resolve; });
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/a.yml' && method === 'GET') return composeA;
+      if (u === '/stacks/a.yml/env?create=1' && method === 'PUT') return put;
+      if (u === '/stacks/b.yml' && method === 'GET') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.endsWith('/envs')) return Promise.resolve(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: {
+        content: 'same',
+        originalContent: 'same',
+        activeTab: 'env',
+        envExists: false,
+        selectedEnvFile: '',
+        envContent: 'FOO=1',
+        originalEnvContent: '',
+      },
+      stackList: { selectedFile: 'a.yml' },
+    });
+
+    const loadA = result.current.loadFile('a.yml');
+    const savePromise = result.current.saveFile();
+    await result.current.loadFile('b.yml', { skipUnsavedCheck: true });
+
+    resolvePut(okJson({ message: 'Env file saved successfully', mtimeMs: 1, created: true, envPath: '/compose/a/.env' }));
+    const saved = await savePromise;
+
+    expect(saved).toBe(true);
+    expect(editorState.setEnvExists).not.toHaveBeenCalledWith(true);
+    expect(editorState.setSelectedEnvFile).not.toHaveBeenCalledWith('/compose/a/.env');
+    expect(editorState.setEnvFiles).not.toHaveBeenCalledWith(['/compose/a/.env']);
+    resolveComposeA(new Response('services: {}', { status: 200 }));
+    await loadA;
+  });
+
+  it('does not prompt for a create conflict that lands after a stack switch', async () => {
+    let resolveComposeA!: (r: Response) => void;
+    const composeA = new Promise<Response>((resolve) => { resolveComposeA = resolve; });
+    let resolvePut!: (r: Response) => void;
+    const put = new Promise<Response>((resolve) => { resolvePut = resolve; });
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/a.yml' && method === 'GET') return composeA;
+      if (u === '/stacks/a.yml/env?create=1' && method === 'PUT') return put;
+      if (u === '/stacks/b.yml' && method === 'GET') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.endsWith('/envs')) return Promise.resolve(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.endsWith('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      if (u.endsWith('/effective-services')) {
+        return Promise.resolve(new Response(JSON.stringify({ renderable: false, services: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: {
+        content: 'same',
+        originalContent: 'same',
+        activeTab: 'env',
+        envExists: false,
+        selectedEnvFile: '',
+        envContent: 'FOO=1',
+        originalEnvContent: '',
+      },
+      stackList: { selectedFile: 'a.yml' },
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      const loadA = result.current.loadFile('a.yml');
+      const savePromise = result.current.saveFile();
+      await result.current.loadFile('b.yml', { skipUnsavedCheck: true });
+
+      resolvePut(
+        new Response(
+          JSON.stringify({ currentContent: 'SECRET=keepme', code: 'stack_file_changed', envPath: '/compose/a/.env' }),
+          { status: 412, headers: { 'Content-Type': 'application/json', ETag: 'W/"111"' } },
+        ),
+      );
+      const saved = await savePromise;
+
+      expect(saved).toBe(false);
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(editorState.setEnvExists).not.toHaveBeenCalledWith(true);
+      expect(editorState.setSelectedEnvFile).not.toHaveBeenCalledWith('/compose/a/.env');
+      resolveComposeA(new Response('services: {}', { status: 200 }));
+      await loadA;
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
 });
+
+// Shared by the save-then-deploy and save-then-pull blocks: both assert on the
+// toast text, and both need it at module scope so neither block re-declares it.
+const errorTexts = () => vi.mocked(toast.error).mock.calls.map(c => String(c[0]));
 
 describe('useStackActions.handleSaveAndDeploy', () => {
   beforeEach(() => {
@@ -272,6 +989,312 @@ describe('useStackActions.handleSaveAndDeploy', () => {
     await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
     const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
     expect(calls.some(c => String(c).includes('/deploy'))).toBe(true);
+  });
+
+  it('proceeds to deploy without an env PUT on an untouched empty env tab', async () => {
+    // Save & Deploy on the still-empty env tab must not plant an empty
+    // .env; the deploy still runs.
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null, { status: 200 })); // deploy OK
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response('[]', { status: 200 })); // containers refresh
+    const { result } = setup({
+      editorState: { activeTab: 'env', envExists: false, envContent: '', originalEnvContent: '' },
+    });
+    await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0]));
+    expect(calls.some(c => c.includes('/env'))).toBe(false);
+    expect(calls.some(c => c.includes('/deploy'))).toBe(true);
+  });
+
+  // Same split outcome the image-pull path reports: the save's own success toast
+  // must not be the last word when the deploy it was chained onto never started.
+  it('says the deploy did not start when the stack is already busy after the save', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.handleSaveAndDeploy({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    expect(errorTexts()).toContain(
+      'Saved; deploy not started: another operation is already running on this stack.',
+    );
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/deploy'))).toBe(false);
+  });
+
+  it('stays silent when a bare deploy is skipped on a busy stack', async () => {
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.deployStack();
+    // No save happened, so there is no split outcome to report, and the busy
+    // state is already carried by the disabled affordance. A second click landing
+    // while the first deploy is still starting must not read as an error either.
+    expect(errorTexts()).toEqual([]);
+  });
+});
+
+describe('useStackActions.handleSaveAndPullImages', () => {
+  const pullEvent = () =>
+    ({ preventDefault: vi.fn(), stopPropagation: vi.fn() }) as unknown as React.MouseEvent;
+
+  // URL-keyed dispatcher, like the editor chain below: the save PUT and the pull
+  // POST are addressed independently, so neither a Once-chain nor an extra
+  // incidental request can desynchronize the pair.
+  function mockPullChain(options: { save?: Response; pull?: Response } = {}) {
+    vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u === '/stacks/web.yml' && method === 'PUT') {
+        return Promise.resolve(options.save ?? new Response(null, { status: 200 }));
+      }
+      if (u === '/stacks/web/pull-images' && method === 'POST') {
+        return Promise.resolve(
+          options.pull ?? okJson({ message: 'Pulled registry images', skippedBuildBacked: [] }),
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+  }
+
+  function initFor(fragment: string, method: string) {
+    const call = vi.mocked(apiFetch).mock.calls.find(
+      c => String(c[0]).includes(fragment) && ((c[1] as RequestInit | undefined)?.method ?? 'GET') === method,
+    );
+    expect(call, `expected a ${method} call matching ${fragment}`).toBeDefined();
+    return (call![1] ?? {}) as RequestInit & { nodeId?: number | null };
+  }
+
+  const pullFailure = (error: string) =>
+    new Response(JSON.stringify({ error }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+
+  const successTexts = () => vi.mocked(toast.success).mock.calls.map(c => String(c[0]));
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    lastRunWithLogParams = null;
+  });
+
+  it('does NOT pull when saveFile fails', async () => {
+    mockPullChain({ save: new Response('save broke', { status: 500 }) });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/pull-images'))).toBe(false);
+  });
+
+  it('publishes the pull as an in-flight stack action, then clears it', async () => {
+    mockPullChain();
+    const { result, stackListState } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(vi.mocked(stackListState.setStackAction)).toHaveBeenCalledWith('web.yml', 'pull');
+    expect(vi.mocked(stackListState.clearStackAction)).toHaveBeenCalledWith('web.yml');
+
+    // Ordering is the point, not just the calls: an action published after the
+    // request leaves the stack looking idle while it is locked, and one cleared
+    // before the response leaves it looking busy after it settled.
+    const pullCallIndex = vi.mocked(apiFetch).mock.calls.findIndex(
+      c => String(c[0]).includes('/pull-images') && (c[1] as RequestInit | undefined)?.method === 'POST',
+    );
+    expect(pullCallIndex).toBeGreaterThanOrEqual(0);
+    const postOrder = vi.mocked(apiFetch).mock.invocationCallOrder[pullCallIndex];
+    expect(vi.mocked(stackListState.setStackAction).mock.invocationCallOrder[0]).toBeLessThan(postOrder);
+    expect(postOrder).toBeLessThan(vi.mocked(stackListState.clearStackAction).mock.invocationCallOrder[0]);
+  });
+
+  it('clears the published action even when the pull fails', async () => {
+    mockPullChain({ pull: new Response('registry unreachable', { status: 500 }) });
+    const { result, stackListState } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // A stuck action would leave every other affordance for this stack disabled
+    // until a reload, so the clear belongs in the finally, not the success path.
+    expect(vi.mocked(stackListState.clearStackAction)).toHaveBeenCalledWith('web.yml');
+  });
+
+  it('opens the diff preview in the pull mode instead of pulling, when that setting is on', async () => {
+    mockPullChain();
+    const { result, overlayState } = setup({ diffPreviewEnabled: true });
+    result.current.requestSaveAndPullImages(pullEvent());
+    expect(vi.mocked(overlayState.setDiffPreview)).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'save-and-pull-images' }),
+    );
+    // Confirming the preview is what saves and pulls; a wrong mode literal here
+    // would silently downgrade the confirm button, to a plain Save or a deploy
+    // depending on which one.
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+
+  it('pulls on the same captured node as the save, under the pull verb', async () => {
+    mockPullChain();
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(initFor('/stacks/web.yml', 'PUT').nodeId).toBe(1);
+    expect(initFor('/pull-images', 'POST').nodeId).toBe(1);
+    // The feedback panel labels the run from this verb; 'deploy' here would
+    // announce a reconciliation that never happens.
+    expect(lastRunWithLogParams).toEqual({ stackName: 'web', action: 'pull', nodeId: 1 });
+  });
+
+  it('reports a save that succeeded and a pull that failed, with no second save confirmation', async () => {
+    mockPullChain({ pull: new Response('registry unreachable', { status: 500 }) });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toHaveLength(1);
+    expect(errorTexts()[0]).toContain('Image pull failed');
+  });
+
+  // The mixed-version-fleet shape: the save half lands, then the node that has no
+  // copy of this action answers 404 with its own unmatched-/api body. That body is
+  // the only thing carrying the reason, so the toast has to keep it verbatim rather
+  // than substituting a generic sentence, and the save half must still be reported
+  // separately. The Compose Editor page states this exact outcome.
+  it('names the missing endpoint when the node has no copy of the action', async () => {
+    mockPullChain({
+      pull: new Response(JSON.stringify({ error: 'API endpoint not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toEqual(['Image pull failed: API endpoint not found']);
+  });
+
+  it('condenses a multi-line compose failure to its error lines in the toast', async () => {
+    const output = [
+      ' db Pulling',
+      ' web Pulling',
+      ' 4f4fb700ef54 Pulling fs layer',
+      ' 4f4fb700ef54 Download complete',
+      ' db Pulled',
+      ' web Error manifest for nginx:nope not found: manifest unknown',
+      'Error response from daemon: manifest for nginx:nope not found: manifest unknown',
+    ].join('\n');
+    mockPullChain({
+      pull: pullFailure(output),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual([
+      'Image pull failed: web Error manifest for nginx:nope not found: manifest unknown; ' +
+        'Error response from daemon: manifest for nginx:nope not found: manifest unknown',
+    ]);
+  });
+
+  it('keeps the last three distinct error lines and counts the rest', async () => {
+    const output = ['a Error x', 'a Error x', 'b Error y', 'c Error z', 'd Error w', 'd Error w'].join('\n');
+    mockPullChain({
+      pull: pullFailure(output),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual([
+      'Image pull failed: b Error y; c Error z; d Error w (+1 more in the progress output)',
+    ]);
+  });
+
+  it('ignores progress lines that merely contain the word error', async () => {
+    mockPullChain({
+      pull: pullFailure(' error-reporter Pulling\n error-reporter Pulled\n pull access denied for private/app'),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual(['Image pull failed: pull access denied for private/app']);
+  });
+
+  it('falls back to the last output line when no line names an error', async () => {
+    mockPullChain({
+      pull: pullFailure(' web Pulling\n\n denied: access forbidden\n'),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toEqual(['Image pull failed: denied: access forbidden']);
+  });
+
+  it('names the build-backed services the pull skipped', async () => {
+    mockPullChain({
+      pull: okJson({ message: 'Pulled registry images', skippedBuildBacked: ['web', 'api'] }),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(successTexts()).toContain(
+      'Pulled registry images. Skipped 2 build-backed services: web, api.',
+    );
+  });
+
+  it('renders a 409 from a concurrent pull as the in-progress sentence, not a raw error', async () => {
+    mockPullChain({
+      pull: new Response(
+        JSON.stringify({
+          code: 'stack_op_in_progress',
+          inProgress: { action: 'image_pull', startedAt: 1, user: 'system' },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // The pull half names itself: the save's own toast already claimed success,
+    // so the reader must be able to tell which half this reports.
+    expect(errorTexts()).toContain('Image pull failed: web is already pulling images.');
+  });
+
+  it('renders a 409 from a concurrent deploy with the deploy sentence', async () => {
+    mockPullChain({
+      pull: new Response(
+        JSON.stringify({
+          code: 'stack_op_in_progress',
+          inProgress: { action: 'deploy', startedAt: 1, user: 'system' },
+        }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } },
+      ),
+    });
+    const { result } = setup();
+    await result.current.handleSaveAndPullImages(pullEvent());
+    expect(errorTexts()).toContain('Image pull failed: web is already deploying.');
+  });
+
+  // A pull that never starts is the split outcome the save's own success toast
+  // would otherwise hide: one green toast, no images, no explanation.
+  it('says the pull did not start when the stack is already busy after the save', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // The save half still reports itself; the pull half must add its own.
+    expect(successTexts()).toEqual(['File saved successfully!']);
+    expect(errorTexts()).toEqual([
+      'Saved; image pull not started: another operation is already running on this stack.',
+    ]);
+    const calls = vi.mocked(apiFetch).mock.calls.map(c => c[0]);
+    expect(calls.some(c => String(c).includes('/pull-images'))).toBe(false);
+  });
+
+  it('stays silent when a bare pull finds status evidence unavailable', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { hydrationReady: vi.fn().mockReturnValue(false) } });
+    await result.current.pullStackImages();
+    // Both production entry points check readiness before they get here and report
+    // it themselves, so this guard is defensive only. With no save toast
+    // outstanding it must not add one of its own.
+    expect(errorTexts()).toEqual([]);
+    expect(successTexts()).toEqual([]);
+  });
+
+  it('refuses before the save when status evidence is unavailable, like the diff-preview path', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { hydrationReady: vi.fn().mockReturnValue(false) } });
+    await result.current.handleSaveAndPullImages(pullEvent());
+    // One action, one refusal sentence: the diff-preview sibling in ShellOverlays
+    // already answers this condition, and a silent path here would be a dead click.
+    expect(errorTexts()).toEqual(['Status data unavailable. Refresh and try again.']);
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when a bare pull is skipped on a busy stack', async () => {
+    mockPullChain();
+    const { result } = setup({ stackList: { isStackBusy: vi.fn().mockReturnValue(true) } });
+    await result.current.pullStackImages();
+    // Same rule as the post-save case: with no save toast outstanding there is no
+    // split outcome to explain, and the busy state is already on the disabled UI.
+    expect(errorTexts()).toEqual([]);
   });
 });
 
@@ -680,7 +1703,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.deployStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -689,7 +1712,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.updateStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -698,7 +1721,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'deploy', 'deploy');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -730,7 +1753,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'update', 'update');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -739,7 +1762,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.rollbackStack();
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback', nodeId: 1 }),
     );
   });
 });
@@ -990,6 +2013,19 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith({ run: perform });
   });
 
+  it.each([
+    ['a stashed navigation', { pendingLeaveAction: { run: vi.fn() } }],
+    ['a stack load', { pendingUnsavedLoad: 'other.yml' }],
+  ])('refuses the navigation and says so when %s already owns the dialog', (_owner, overlay) => {
+    const perform = vi.fn();
+    const { result, overlayState } = setup({ overlay });
+    result.current.attemptLeaveEditor(perform);
+    expect(perform).not.toHaveBeenCalled();
+    // The open prompt keeps its own navigation; nothing replaces it.
+    expect(overlayState.setPendingLeaveAction).not.toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/unsaved-changes prompt first/));
+  });
+
   it('runs the navigation immediately when the editor is clean', () => {
     const perform = vi.fn();
     const { result, overlayState } = setup({
@@ -1016,6 +2052,25 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(run).toHaveBeenCalledTimes(1);
     // The leave branch returns before the load branch, so no stack fetch fires.
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('lets a node switch carry its own resume step: the stashed action runs and discard does not switch on its own', () => {
+    // The shell parks a queued destination on the leave action when a node
+    // switch waits on this dialog; the action finishes the switch itself.
+    const run = vi.fn();
+    const setActiveNode = vi.fn();
+    const targetNode = { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result } = setup({
+      overlay: {
+        pendingLeaveAction: { run },
+        pendingUnsavedLoad: '__node-switch-pending__',
+        pendingUnsavedNode: targetNode as never,
+      },
+      setActiveNode,
+    });
+    result.current.discardAndLoadPending();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(setActiveNode).not.toHaveBeenCalled();
   });
 
   it('clears a stashed leave action on cancel', () => {
@@ -1749,57 +2804,200 @@ describe('useStackActions.getStackMenuVisibility', () => {
 describe('useStackActions.openStackApp', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: {},
+      ports: {},
+      services: [],
+      networks: [],
+      volumes: {},
+      restart: null,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
   });
 
-  function openAndCaptureHref(over: Parameters<typeof setup>[0]): {
+  function blankPopup() {
+    return { location: { href: '' }, close: vi.fn(), opener: null, closed: false };
+  }
+
+  async function openAndCaptureHref(over: Parameters<typeof setup>[0]): Promise<{
     href: string | undefined;
-    clickCount: number;
-  } {
-    let href: string | undefined;
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(function (this: HTMLAnchorElement) {
-        href = this.href;
-      });
+    openCount: number;
+    closeCount: number;
+  }> {
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
     try {
       const { result } = setup(over);
-      result.current.openStackApp('web.yml');
-      return { href, clickCount: click.mock.calls.length };
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      return {
+        href: popup.location.href || undefined,
+        openCount: opened.mock.calls.length,
+        closeCount: popup.close.mock.calls.length,
+      };
     } finally {
-      click.mockRestore();
+      opened.mockRestore();
     }
   }
 
-  it('opens the published port on the browser host for a local node', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
-    expect(href).toBe('http://localhost:8989/');
+  it('opens the published port on the browser host for a local node', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+    expect(href).toBe('http://localhost:8989');
   });
 
-  it('opens on the remote node host derived from its api_url', () => {
-    const { href } = openAndCaptureHref({
+  it('opens on the remote node host derived from its api_url', async () => {
+    const { href } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(href).toBe('http://10.0.0.5:8989/');
+    expect(href).toBe('http://10.0.0.5:8989');
   });
 
-  it('does nothing for a remote node with no api_url (pilot) and does not throw', () => {
-    const { href, clickCount } = openAndCaptureHref({
+  it('does nothing for a remote node with no api_url (pilot) and does not throw', async () => {
+    const { href, openCount, closeCount } = await openAndCaptureHref({
       stackList: { stackPorts: { 'web.yml': 8989 } },
       activeNode: { id: 3, type: 'remote', api_url: '' } as Parameters<typeof useStackActions>[0]['activeNode'],
     });
-    expect(clickCount).toBe(0);
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
     expect(href).toBeUndefined();
   });
 
-  it('appends a known service path via the published port', () => {
-    const { href } = openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
+  it('appends a known service path via the published port', async () => {
+    const { href } = await openAndCaptureHref({ stackList: { stackPorts: { 'web.yml': 32400 } } });
     expect(href).toBe('http://localhost:32400/web');
   });
 
-  it('does nothing when the stack has no published port', () => {
-    const { clickCount } = openAndCaptureHref({});
-    expect(clickCount).toBe(0);
+  it('audit F02: opens the runtime owner URL when another service declares the assigned port', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
+      ports: {
+        app: [{ host: '0', container: '80', proto: 'tcp' }],
+        stopped: [{ host: '49152', container: '80', proto: 'tcp' }],
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const { href } = await openAndCaptureHref({
+      stackList: { stackPorts: { 'web.yml': 49152 }, stackPortServices: { 'web.yml': 'app' } },
+    });
+    expect(href).toBe('https://app.example.com');
+  });
+
+  it('does nothing when the stack has no published port', async () => {
+    const { href, openCount, closeCount } = await openAndCaptureHref({});
+    expect(openCount).toBe(1);
+    expect(closeCount).toBe(1);
+    expect(href).toBeUndefined();
+  });
+
+  it('opens the tab before the service URL lookup finishes', async () => {
+    const order: string[] = [];
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => {
+      order.push('open');
+      return popup as unknown as Window;
+    });
+    vi.mocked(apiFetch).mockImplementation(() => {
+      order.push('fetch');
+      return Promise.resolve(new Response(JSON.stringify({
+        renderable: true,
+        serviceUrls: {},
+        ports: {},
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    });
+    try {
+      const { result } = setup({ stackList: { stackPorts: { 'web.yml': 8989 } } });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(order[0]).toBe('open');
+      expect(order[1]).toBe('fetch');
+      expect(popup.location.href).toBe('http://localhost:8989');
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('waits for the first lookup instead of opening the generated address while it is loading', async () => {
+    // A fresh selection hands out an in-flight entry with no metadata yet. The
+    // handler must not read that as "no override" and open the generated
+    // address: the tab opens in the click and is navigated once the configured
+    // URL is known.
+    const loading: ServiceUrlEntry = {
+      status: 'loading',
+      nodeId: 1,
+      stackName: 'web.yml',
+      serviceUrls: {},
+      serviceUrlEdit: {},
+      serviceUrlClear: {},
+      ports: {},
+      renderable: false,
+    };
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      renderable: true,
+      serviceUrls: { web: 'https://web.example.com' },
+      ports: { web: [{ host: '8989', proto: 'tcp' }] },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
+    try {
+      const { result } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+        serviceUrlsRef: { current: loading },
+      });
+      await act(async () => { result.current.openStackApp('web.yml'); });
+      expect(opened).toHaveBeenCalled();
+      expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml/effective-anatomy', expect.objectContaining({ nodeId: 1 }));
+      expect(popup.location.href).toBe('https://web.example.com');
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('does not open after the operator switches node', async () => {
+    let resolveAnatomy: ((response: Response) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation(() => new Promise(resolve => { resolveAnatomy = resolve; }));
+    const popup = blankPopup();
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => popup as unknown as Window);
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        resolveAnatomy?.(new Response(JSON.stringify({
+          renderable: true,
+          serviceUrls: { web: 'https://app.example.com' },
+          ports: {},
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        await Promise.resolve();
+      });
+      expect(popup.location.href).toBe('');
+      expect(popup.close).toHaveBeenCalled();
+      expect(opened).toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('does not report a failed lookup after the operator switches node', async () => {
+    let rejectAnatomy: ((error: Error) => void) | null = null;
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => blankPopup() as unknown as Window);
+    vi.mocked(apiFetch).mockImplementation(() => new Promise((_resolve, reject) => { rejectAnatomy = reject; }));
+    try {
+      const { result, rerender, activeNodeHolder } = setup({
+        stackList: { stackPorts: { 'web.yml': 8989 } },
+      });
+      act(() => { result.current.openStackApp('web.yml'); });
+      activeNodeHolder.current = { id: 2, type: 'remote', api_url: 'http://10.0.0.5:1852' } as ActiveNode;
+      rerender();
+      await act(async () => {
+        rejectAnatomy?.(new Error('offline'));
+        await Promise.resolve();
+      });
+      expect(toast.error).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
   });
 });
 

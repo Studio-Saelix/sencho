@@ -6,9 +6,10 @@
  * facet statuses, so a reason code a newer server build introduces renders as
  * its raw code rather than crashing the page.
  */
+import type { StatusTone } from '@/lib/statusTone';
 import type { GitOpsAttentionReason, GitOpsPortfolioPosture, GitOpsPortfolioTargetSummary } from '@/types/gitopsPortfolio';
 
-export type PortfolioTone = 'brand' | 'success' | 'warning' | 'destructive' | 'neutral';
+export type PortfolioTone = StatusTone;
 
 export interface PortfolioLabel {
   /** Short label, rendered in tracked-mono chips. */
@@ -18,7 +19,7 @@ export interface PortfolioLabel {
   line: string;
 }
 
-export const POSTURE_LABEL: Record<GitOpsPortfolioPosture, { label: string; tone: PortfolioTone }> = {
+export const POSTURE_LABEL: Readonly<Partial<Record<GitOpsPortfolioPosture, { label: string; tone: PortfolioTone }>>> = {
   failed: { label: 'failed', tone: 'destructive' },
   attention: { label: 'needs attention', tone: 'warning' },
   in_progress: { label: 'in progress', tone: 'brand' },
@@ -27,7 +28,7 @@ export const POSTURE_LABEL: Record<GitOpsPortfolioPosture, { label: string; tone
   unknown: { label: 'unknown', tone: 'neutral' },
 };
 
-export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLabel>> = {
+export const ATTENTION_LABEL: Readonly<Partial<Record<GitOpsAttentionReason, PortfolioLabel>>> = {
   source_failed: { label: 'source failed', tone: 'destructive', line: 'The last reconciliation of the Git source failed.' },
   source_unknown_outcome: { label: 'outcome unknown', tone: 'warning', line: 'A source operation was interrupted before its outcome could be confirmed.' },
   source_review_pending: { label: 'review required', tone: 'warning', line: 'A fetched commit is waiting for review before it can apply.' },
@@ -44,6 +45,7 @@ export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLab
   rollout_paused: { label: 'rollout paused', tone: 'warning', line: 'The rollout is paused.' },
   rollout_partial: { label: 'partial rollout', tone: 'warning', line: 'The rollout completed on only some required targets.' },
   rollout_completion_unknown: { label: 'completion unknown', tone: 'warning', line: 'A rollout step was interrupted; Sencho cannot confirm where it stopped.' },
+  rollout_stale_acknowledgement: { label: 'stale acknowledgement', tone: 'warning', line: 'A node applied a generation the application has since moved past. Rolling the newer revision out to that node resolves it.' },
   rollback_failed: { label: 'rollback failed', tone: 'destructive', line: 'A rollback did not complete.' },
   target_stale: { label: 'stale target', tone: 'warning', line: 'A target is reporting evidence older than the current intent.' },
   target_unreachable: { label: 'target unreachable', tone: 'destructive', line: 'A required target could not be reached.' },
@@ -58,7 +60,25 @@ export const ATTENTION_LABEL: Partial<Record<GitOpsAttentionReason, PortfolioLab
 
 /** Fallback rendering for a reason this build has not heard of. */
 export function attentionLabel(reason: GitOpsAttentionReason): PortfolioLabel {
-  return ATTENTION_LABEL[reason] ?? { label: reason.replace(/_/g, ' '), tone: 'warning', line: 'This application reports an attention reason this Sencho build does not know.' };
+  const unrecognized: PortfolioLabel = {
+    label: reason.replace(/_/g, ' '),
+    tone: 'warning',
+    line: 'This application reports an attention reason this Sencho build does not know.',
+  };
+  return Object.hasOwn(ATTENTION_LABEL, reason) && ATTENTION_LABEL[reason]
+    ? ATTENTION_LABEL[reason]
+    : unrecognized;
+}
+
+/**
+ * Whether this build has wording for a posture, own property or not.
+ *
+ * Every surface that shows a posture needs the same answer, and an inherited
+ * key such as `toString` has to read as unrecognized rather than resolve to
+ * something truthy.
+ */
+export function hasKnownPosture(posture: string): boolean {
+  return Object.hasOwn(POSTURE_LABEL, posture);
 }
 
 export const POSTURE_TONE_CLASS: Record<PortfolioTone, string> = {
@@ -92,7 +112,7 @@ export function portfolioMastheadState(summary: {
   if (summary.attentionRequired > 0) return { state: 'Needs attention', tone: 'warn' };
   if (summary.inProgress > 0) return { state: 'In progress', tone: 'live' };
   if (summary.applications === 0) return { state: 'No applications', tone: 'idle' };
-  if (summary.unknown > 0) return { state: 'Partially known', tone: 'idle' };
+  if (summary.unknown > 0 || coverageFailed) return { state: 'Partially known', tone: 'idle' };
   // Qualified convergence is not exact convergence: when nothing is provably
   // exact, the verdict says so instead of borrowing the stronger word.
   if (summary.converged === 0 && summary.convergedQualified > 0) {

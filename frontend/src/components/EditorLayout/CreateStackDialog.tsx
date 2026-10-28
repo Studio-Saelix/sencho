@@ -205,7 +205,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
         setCreatingFromGit(true);
         const loadingId = toast.loading(gitDeployNow ? 'Fetching, creating, and deploying...' : 'Fetching and creating stack...');
         try {
-            const autoApply = gitApplyMode !== 'review';
+            const autoApply = gitApplyMode === 'auto-write' || gitApplyMode === 'auto-deploy';
             const autoDeploy = gitApplyMode === 'auto-deploy';
             const body: Record<string, unknown> = {
                 stack_name: stackName,
@@ -215,6 +215,9 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                 context_dir: gitContextDir.trim() || null,
                 sync_env: gitSyncEnv,
                 auth_type: gitAuthType,
+                source_policy: gitApplyMode === 'manual'
+                  ? 'manual'
+                  : gitApplyMode === 'review' ? 'review' : 'automatic',
                 auto_apply_on_webhook: autoApply,
                 auto_deploy_on_apply: autoDeploy,
                 deploy_now: gitDeployNow,

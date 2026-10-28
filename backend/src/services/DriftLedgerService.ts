@@ -8,6 +8,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { buildStackDriftReport } from './DriftDetectionService';
 import type { StackDriftReport, StackDriftFinding } from './DriftDetectionService';
+import { holdRank } from './findingDismissals/FindingDismissalStore';
+import type { DismissalTiming } from './findingDismissals/types';
+import { driftFindingFacts, toDriftDismissal } from './driftDismissals';
+import type { DriftDismissal, ParsedDriftKey } from './driftDismissals';
 
 /**
  * The persistence-backed Drift Ledger that builds on the read-only spatial
@@ -32,6 +36,30 @@ export interface DriftReconcileResult {
     detected: number;
     resolved: number;
 }
+
+/** Record one live finding as a new open ledger row and return its id. */
+function insertFindingRow(db: DatabaseService, nodeId: number, stackName: string, f: StackDriftFinding, detectedAt: number): number {
+    return db.insertDriftFinding({
+        node_id: nodeId,
+        stack_name: stackName,
+        service: f.service,
+        finding_type: f.kind,
+        severity: 'warning',
+        message: f.detail,
+        expected_json: f.expected !== undefined ? JSON.stringify(f.expected) : null,
+        actual_json: f.actual !== undefined ? JSON.stringify(f.actual) : null,
+        detected_at: detectedAt,
+    });
+}
+
+export type DriftDismissRequest = DismissalTiming & {
+    createdBy: string;
+    now: number;
+};
+
+export type DriftDismissOutcome =
+    | { ok: true; dismissal: DriftDismissal; kept: boolean }
+    | { ok: false; code: 'FINDING_GONE' | 'FINDING_CHANGED' | 'EVIDENCE_UNAVAILABLE' };
 
 /** Stable identity for a finding across checks: same service + kind is the same finding. */
 function findingKey(service: string, kind: string): string {
@@ -163,17 +191,7 @@ export class DriftLedgerService {
         db.getDb().transaction(() => {
             db.setStackDossierDriftCheck(nodeId, stackName, now);
             for (const f of toInsert) {
-                db.insertDriftFinding({
-                    node_id: nodeId,
-                    stack_name: stackName,
-                    service: f.service,
-                    finding_type: f.kind,
-                    severity: 'warning',
-                    message: f.detail,
-                    expected_json: f.expected !== undefined ? JSON.stringify(f.expected) : null,
-                    actual_json: f.actual !== undefined ? JSON.stringify(f.actual) : null,
-                    detected_at: now,
-                });
+                insertFindingRow(db, nodeId, stackName, f, now);
             }
             for (const row of toResolve) {
                 db.resolveDriftFinding(row.id, now);
@@ -223,17 +241,7 @@ export class DriftLedgerService {
         db.getDb().transaction(() => {
             db.setStackDossierDriftCheck(nodeId, stackName, now);
             for (const f of toInsert) {
-                db.insertDriftFinding({
-                    node_id: nodeId,
-                    stack_name: stackName,
-                    service: f.service,
-                    finding_type: f.kind,
-                    severity: 'warning',
-                    message: f.detail,
-                    expected_json: f.expected !== undefined ? JSON.stringify(f.expected) : null,
-                    actual_json: f.actual !== undefined ? JSON.stringify(f.actual) : null,
-                    detected_at: now,
-                });
+                insertFindingRow(db, nodeId, stackName, f, now);
             }
             for (const row of toResolve) {
                 db.resolveDriftFinding(row.id, now);
@@ -340,6 +348,95 @@ export class DriftLedgerService {
                 db.resolveDriftFinding(row.id, now);
             }
         })();
+    }
+
+    /** The team dismissals on a stack's open findings, as the wire shape. */
+    getOpenDismissals(nodeId: number, stackName: string): DriftDismissal[] {
+        return DatabaseService.getInstance().getOpenDriftFindings(nodeId, stackName)
+            .map(toDriftDismissal)
+            .filter((d): d is DriftDismissal => d !== null);
+    }
+
+    /**
+     * Dismiss one live finding. `report` is a fresh read taken for this call: the
+     * finding must be in it, and it must still be the state the operator saw
+     * (`seen`), so a finding that changed after the click is never hidden unseen.
+     * A live finding no check has recorded yet gets its own open row to carry the
+     * dismissal; no other finding on the stack is read or changed. A stronger
+     * dismissal that still covers the finding is kept, not weakened by a second
+     * click.
+     */
+    dismissFinding(
+        nodeId: number,
+        stackName: string,
+        report: StackDriftReport,
+        key: ParsedDriftKey,
+        seen: { fingerprint: string; count: number },
+        request: DriftDismissRequest,
+    ): DriftDismissOutcome {
+        // Without an authoritative read there is no way to say the finding exists.
+        if (report.status === 'unreachable' || report.parseError) {
+            return { ok: false, code: 'EVIDENCE_UNAVAILABLE' };
+        }
+        const live = report.findings.find(f => f.kind === key.kind && f.service === key.service);
+        if (!live) return { ok: false, code: 'FINDING_GONE' };
+        const facts = driftFindingFacts(live);
+        if (facts.fingerprint !== seen.fingerprint || facts.count !== seen.count) {
+            return { ok: false, code: 'FINDING_CHANGED' };
+        }
+
+        const db = DatabaseService.getInstance();
+        let recorded = false;
+        const outcome = db.getDb().transaction((): DriftDismissOutcome => {
+            // Only this finding's own row is touched. The snapshot may already be
+            // behind a concurrent check, so it must never resolve or insert siblings.
+            let row = db.getOpenDriftFindingByKey(nodeId, stackName, key.service, key.kind);
+            if (!row) {
+                const id = insertFindingRow(db, nodeId, stackName, live, request.now);
+                row = db.getDriftFinding(id);
+                recorded = true;
+            }
+            if (!row) return { ok: false, code: 'FINDING_GONE' };
+            const existing = toDriftDismissal(row);
+            if (
+                existing
+                && existing.fingerprint === facts.fingerprint
+                && existing.count >= facts.count
+                && holdRank(existing.mode, existing.expiresAt, request.now) > holdRank(request.mode, request.expiresAt, request.now)
+            ) {
+                return { ok: true, dismissal: existing, kept: true };
+            }
+            db.setDriftFindingDismissal(row.id, {
+                by: request.createdBy,
+                at: request.now,
+                fingerprint: facts.fingerprint,
+                mode: request.mode,
+                expiresAt: request.expiresAt,
+                count: facts.count,
+            });
+            const written = db.getDriftFinding(row.id);
+            const dismissal = written ? toDriftDismissal(written) : null;
+            if (!dismissal) throw new Error('A dismissal was written but could not be read back');
+            return { ok: true, dismissal, kept: false };
+        })();
+        if (recorded) {
+            this.recordActivity(nodeId, stackName, 'drift_detected', 'warning',
+                `Drift detected on ${stackName}: 1 new finding`, request.now);
+        }
+        return outcome;
+    }
+
+    /**
+     * Clear a dismissal. False when the row is not one of this stack's, so one
+     * stack's permission can never restore another's finding; true when it is
+     * clear afterwards (including when it already was).
+     */
+    restoreDismissal(nodeId: number, stackName: string, id: number): boolean {
+        const db = DatabaseService.getInstance();
+        const row = db.getDriftFinding(id);
+        if (!row || row.node_id !== nodeId || row.stack_name !== stackName) return false;
+        db.clearDriftFindingDismissal(id);
+        return true;
     }
 
     /**

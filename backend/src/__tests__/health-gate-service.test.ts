@@ -41,6 +41,9 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGlobalSettings: () => state.settings,
+      // The gate asks which kind of node it is observing before it reads:
+      // local nodes are read in-process, remote ones over the proxy.
+      getNode: (nodeId: number) => ({ id: nodeId, type: 'local' }),
       insertHealthGateRun: (run: StoredRun) => { state.runs.set(run.id, { ...run }); },
       finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string, failureSource: StoredRun['failure_source'] = null) => {
         if (state.failFinalizeFor === id) throw new Error('row is unreadable');
@@ -97,6 +100,7 @@ vi.mock('../services/ComposeService', () => ({
 }));
 
 import { HealthGateService } from '../services/HealthGateService';
+import { decideHealthRolloutAction } from '../services/gitops/healthPolicy';
 
 type ContainerFixture = {
   id: string;
@@ -370,6 +374,125 @@ describe('HealthGateService verdicts', () => {
     expect(latest().reason).toContain('exited during observation');
   });
 
+  it('ends unknown, not failed, when the declared intent cannot be rendered', async () => {
+    // Without the render, a container that finished exactly as declared and one
+    // that died look identical, and a rollback policy must not restore a
+    // workload on evidence that was never read.
+    state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'no' }]);
+    await ticks(1);
+
+    expect(latest().status).toBe('unknown');
+    expect(latest().reason).toContain('declared restart intent could not be read');
+  });
+
+  // An ambiguous clean exit is not a verdict until the rest of the observed set
+  // has been checked. A peer that is unhealthy or exited non-zero is a definite
+  // failure whatever the ambiguous container turns out to be, so the verdict
+  // (and the policy action it selects) must not depend on the order Docker
+  // returned the containers in.
+  const mixedObservations = [
+    {
+      label: 'an unhealthy peer',
+      peer: { state: 'running', health: 'unhealthy' },
+      reason: 'reported unhealthy',
+    },
+    {
+      label: 'a non-zero-exited peer',
+      peer: { state: 'exited', exitCode: 1 },
+      reason: 'exited during observation',
+    },
+  ] as const;
+
+  for (const mixed of mixedObservations) {
+    for (const ambiguousFirst of [true, false]) {
+      it(`fails on ${mixed.label} with the ambiguous exit ${ambiguousFirst ? 'first' : 'last'}`, async () => {
+        state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+        const job: ContainerFixture = {
+          id: 'job', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no',
+        };
+        const app: ContainerFixture = {
+          id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+        };
+        const ordered = (jobContainer: ContainerFixture, appContainer: ContainerFixture): ContainerFixture[] =>
+          ambiguousFirst ? [jobContainer, appContainer] : [appContainer, jobContainer];
+
+        setContainers(ordered(job, app));
+        svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+        await ticks(1); // baseline
+
+        setContainers(ordered({ ...job, state: 'exited', exitCode: 0 }, { ...app, ...mixed.peer }));
+        await ticks(1);
+
+        const report = latest();
+        expect(report.status).toBe('failed');
+        expect(report.reason).toContain(mixed.reason);
+        if (report.status === 'failed') {
+          expect(decideHealthRolloutAction({
+            policy: 'rollback', verdict: report.status, attemptsUsed: 0, recoveryAvailable: true,
+          }).action).toBe('rollback');
+        }
+      });
+    }
+  }
+
+  it('fails on a missing peer at the window end instead of softening it to unknown', async () => {
+    // The clean exit is ambiguous, but the other expected container was never
+    // returned. At the window end that is a definite failure, and it must not
+    // be excused by the ambiguity.
+    state.renderConfig.mockResolvedValue({ rendered: null, stderr: 'render failed', code: 1, timedOut: false });
+
+    const job: ContainerFixture = {
+      id: 'job', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no',
+    };
+    const app: ContainerFixture = {
+      id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+    };
+    setContainers([job, app]);
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1); // baseline
+    await ticks(4); // stay healthy through the window
+
+    setContainers([{ ...job, state: 'exited', exitCode: 0 }]); // app is gone
+    await ticks(1); // reach the 30s window end
+
+    const report = latest();
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('not running at the end of the window');
+    if (report.status === 'failed') {
+      expect(decideHealthRolloutAction({
+        policy: 'rollback', verdict: report.status, attemptsUsed: 0, recoveryAvailable: true,
+      }).action).toBe('rollback');
+    }
+  });
+
+  it('fails on a missing peer at the window end instead of softening it to a starting healthcheck', async () => {
+    // A healthcheck that never finished starting is not a pass, but it is not a
+    // definite failure either: a peer the poll never returned is, and it must
+    // decide the verdict rather than ending the window unknown.
+    const app: ContainerFixture = {
+      id: 'app', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped',
+    };
+    const worker: ContainerFixture = {
+      id: 'worker', name: 'web-worker-1', service: 'worker', restartPolicy: 'unless-stopped',
+    };
+    setContainers([app, worker]);
+    svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1); // baseline
+    await ticks(4); // stay healthy through the window
+
+    setContainers([{ ...app, health: 'starting' }]); // the worker is gone
+    await ticks(1); // reach the 30s window end
+
+    const report = latest();
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('not running at the end of the window');
+  });
+
   it('fails fast when a healthcheck reports unhealthy', async () => {
     svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
     await ticks(1);
@@ -501,6 +624,42 @@ describe('HealthGateService verdicts', () => {
     await ticks(4);
     expect(latest().status).toBe('unknown');
     expect(latest().reason).toContain('no containers');
+  });
+});
+
+describe('HealthGateService container-op supersede', () => {
+  it('finalizes the gates on the stack as unknown when the stack is stopped', async () => {
+    const gate = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    expect(svc().supersedeForContainerOp(0, 'web', 'the stack was stopped during the observation')).toBe(1);
+    const report = svc().getReport(0, 'web', gate);
+    expect(report.status).toBe('unknown');
+    expect(report.reason).toContain('stopped');
+  });
+
+  it('leaves another stack observing', async () => {
+    const web = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    const api = svc().beginStack(0, 'api', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    svc().supersedeForContainerOp(0, 'web', 'the stack was taken down during the observation');
+    expect(svc().getReport(0, 'web', web).status).toBe('unknown');
+    expect(svc().getReport(0, 'api', api).status).toBe('observing');
+  });
+
+  it('records the named reason on every gate it finalizes', async () => {
+    const stack = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null })!;
+    await ticks(2);
+
+    expect(svc().supersedeForContainerOp(0, 'web', 'the service app was stopped during the observation', ['app'])).toBe(1);
+    const report = svc().getReport(0, 'web', stack);
+    expect(report.status).toBe('unknown');
+    expect(report.reason).toBe('the service app was stopped during the observation');
+  });
+
+  it('reports nothing to supersede for a stack with no live gate', () => {
+    expect(svc().supersedeForContainerOp(0, 'quiet', 'the stack was stopped')).toBe(0);
   });
 });
 
@@ -654,6 +813,26 @@ describe('HealthGateService recovery reservations', () => {
 
     expect(state.runs.get(older!)!.status).toBe('unknown');
     expect(state.runs.get(older!)!.reason).toContain('superseded');
+    await ticks(7);
+    expect(state.runs.get(runId!)!.status).toBe('passed');
+  });
+
+  it('leaves the recovery run a rollback arms observing, when the gates end first', async () => {
+    // A generation rollback ends the gates from earlier runs before it replaces
+    // the runtime, then arms its own recovery observation. Ending the gates
+    // after the restore instead would finalize that recovery run as unknown, and
+    // the rollback could never be verified healthy.
+    const older = svc().beginStack(0, 'web', 'update', 'tester', { deployedGenerationId: null });
+    await ticks(1);
+
+    svc().supersedeForContainerOp(0, 'web', 'the stack was rolled back during the observation');
+    expect(state.runs.get(older!)!.status).toBe('unknown');
+
+    const { runId } = reserve();
+    svc().armReservedRun(runId!, 0, 'web');
+    expect(state.runs.get(runId!)!.status).toBe('observing');
+    expect(state.runs.get(older!)!.status).toBe('unknown');
+
     await ticks(7);
     expect(state.runs.get(runId!)!.status).toBe('passed');
   });

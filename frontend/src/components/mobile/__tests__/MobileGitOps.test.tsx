@@ -9,6 +9,8 @@ import { portfolioRow } from '../../gitops/application/applicationFixtures';
 import { MobileGitOps } from '../MobileGitOps';
 import type { GitOpsPortfolioResponse } from '@/types/gitopsPortfolio';
 
+// The sheet host has its own tests; here it only needs to mount.
+vi.mock('@/components/gitops/portfolio/GitOpsGitSourceHost', () => ({ GitOpsGitSourceHost: () => null }));
 vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
 }));

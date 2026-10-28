@@ -300,6 +300,7 @@ export function buildSecurityOverview(nodeId: number): SecurityOverviewResponse 
       failedScans,
       needsReview,
       fixableWithImageUpdateTargets: remediation.imageRefsUpdateAvailable,
+      fixableWithImageUpdateServiceTargets: remediation.updateServiceTargets,
       fixableWaitingUpstreamTargets: remediation.imageRefsWaitingUpstream,
       fixableUpdateUnknownTargets: remediation.imageRefsUpdateUnknown,
       knownExploitedTargets,

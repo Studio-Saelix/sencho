@@ -189,7 +189,7 @@ describe('useUrlSync', () => {
     expect(setActiveView).not.toHaveBeenCalledWith('dashboard');
   });
 
-  it('settles env tab route when stack has no env files', async () => {
+  it('opens the env tab for a route to a stack that has no env files yet', async () => {
     const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
     const applyEditorRouteState = vi.fn();
 
@@ -214,7 +214,9 @@ describe('useUrlSync', () => {
     });
 
     expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
-    expect(applyEditorRouteState).toHaveBeenCalledWith('compose');
+    // The env tab is usable without an env file (its first save creates one),
+    // so an /env deep link must land there instead of bouncing to compose.
+    expect(applyEditorRouteState).toHaveBeenCalledWith('env');
   });
 
   it('restores non-default env selection after stack load populates file list', async () => {
@@ -502,6 +504,33 @@ describe('useUrlSync', () => {
     expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
     expect(result.current.routeDetailError).toContain('Could not open');
     expect(window.location.pathname).toBe('/nodes/local/stacks/radarr/compose');
+  });
+
+  it('shows a refused compose path instead of a connection problem', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+    const loadFileForRoute = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'Could not open "radarr". The compose file does not resolve inside the stack directory',
+    });
+
+    const { result } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          isMobile: true,
+          loadFileForRoute,
+          activeView: 'editor',
+          files: ['radarr'],
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.routeDetailError).toBe('Could not open "radarr". The compose file does not resolve inside the stack directory');
+    expect(result.current.routeDetailError).not.toContain('connection');
   });
 
   it('clears routeDetailError after a successful retry', async () => {

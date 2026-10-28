@@ -35,7 +35,7 @@
 
 version: '1'
 schema: 'matrix-v1'
-implementation_baseline: 79b86ddcd4aefdd6941f098e35990ab397b13c72
+implementation_baseline: 27495c56b42dec90dcc1b5ce10910cb26d248b5a
 attestations: docs/git-transport-attestations.yaml
 
 claims:
@@ -180,7 +180,7 @@ claims:
   # Evidence lives in docs/git-transport-attestations.yaml. A row stays
   # `unverified` (no evidence permitted) until a live pass actually exercises
   # it; nothing here is extrapolated from a different host or node_path.
-  # Live-attested 2026-09-01 (see the attestation ids referenced below).
+  # Live-attested 2026-10-23 (see the attestation ids referenced below).
 
   - id: https-none-branch-system-github-local
     transport: https
@@ -195,7 +195,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-github-branch
+      attestation: att-2026-10-23-github-branch
 
   - id: https-none-tag-system-github-local
     transport: https
@@ -222,7 +222,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-github-sha
+      attestation: att-2026-10-23-github-sha
 
   - id: https-pat-branch-system-github-local
     transport: https
@@ -260,7 +260,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-https-branch
+      attestation: att-2026-10-23-gitea-https-branch
 
   - id: https-pat-tag-persource-gitea-local
     transport: https
@@ -275,7 +275,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-https-tag
+      attestation: att-2026-10-23-gitea-https-tag
 
   - id: https-pat-sha-persource-gitea-local
     transport: https
@@ -289,7 +289,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-https-sha
+      attestation: att-2026-10-23-gitea-https-sha
 
   - id: ssh-deploy-key-branch-na-gitea-local
     transport: ssh
@@ -304,7 +304,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-ssh-branch
+      attestation: att-2026-10-23-gitea-ssh-branch
 
   - id: ssh-deploy-key-tag-na-gitea-local
     transport: ssh
@@ -319,7 +319,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-ssh-tag
+      attestation: att-2026-10-23-gitea-ssh-tag
 
   - id: ssh-deploy-key-sha-na-gitea-local
     transport: ssh
@@ -333,7 +333,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitea-ssh-sha
+      attestation: att-2026-10-23-gitea-ssh-sha
 
   - id: https-pat-branch-persource-forgejo-local
     transport: https
@@ -349,7 +349,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-https-branch
+      attestation: att-2026-10-23-forgejo-https-branch
 
   - id: https-pat-tag-persource-forgejo-local
     transport: https
@@ -364,7 +364,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-https-tag
+      attestation: att-2026-10-23-forgejo-https-tag
 
   - id: https-pat-sha-persource-forgejo-local
     transport: https
@@ -378,7 +378,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-https-sha
+      attestation: att-2026-10-23-forgejo-https-sha
 
   - id: ssh-deploy-key-branch-na-forgejo-local
     transport: ssh
@@ -393,7 +393,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-ssh-branch
+      attestation: att-2026-10-23-forgejo-ssh-branch
 
   - id: ssh-deploy-key-tag-na-forgejo-local
     transport: ssh
@@ -408,7 +408,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-ssh-tag
+      attestation: att-2026-10-23-forgejo-ssh-tag
 
   - id: ssh-deploy-key-sha-na-forgejo-local
     transport: ssh
@@ -422,7 +422,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-forgejo-ssh-sha
+      attestation: att-2026-10-23-forgejo-ssh-sha
 
   - id: https-none-branch-system-gitlab-local
     transport: https
@@ -437,7 +437,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitlab-branch
+      attestation: att-2026-10-23-gitlab-branch
 
   - id: https-none-tag-system-gitlab-local
     transport: https
@@ -452,7 +452,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitlab-tag
+      attestation: att-2026-10-23-gitlab-tag
 
   - id: https-none-sha-system-gitlab-local
     transport: https
@@ -467,7 +467,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-gitlab-sha
+      attestation: att-2026-10-23-gitlab-sha
 
   - id: https-none-branch-system-bitbucket-local
     transport: https
@@ -482,7 +482,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-bitbucket-branch
+      attestation: att-2026-10-23-bitbucket-branch
 
   - id: https-none-tag-system-bitbucket-local
     transport: https
@@ -509,7 +509,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-bitbucket-sha
+      attestation: att-2026-10-23-bitbucket-sha
 
   # ===== Distribution: does the same combination hold off the local node =====
   # Scoped to host: github (a real branded host reachable over public egress)
@@ -531,7 +531,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-github-direct-proxy
+      attestation: att-2026-10-23-github-direct-proxy
 
   - id: https-none-branch-system-github-pilot
     transport: https
@@ -546,7 +546,7 @@ claims:
     evidence:
       kind: live
       outcome: success
-      attestation: att-2026-09-01-github-pilot
+      attestation: att-2026-10-23-github-pilot
 
 limitations:
   - id: no-git-lfs
@@ -622,7 +622,7 @@ error_model:
 reconciliation_only_codes:
   # Not part of this transport matrix; listed so the partition of
   # GitSourceErrorCode is visible and auditable. Owned by the GitOps
-  # change-plan lifecycle, not by repository transport.
+  # change-plan and repository-secret lifecycle, not by repository transport.
   - STALE_PLAN
   - PLAN_FINGERPRINT_REQUIRED
   - PLAN_BLOCKED
@@ -630,3 +630,4 @@ reconciliation_only_codes:
   - PLAN_UNAVAILABLE
   - OPERATION_IN_FLIGHT
   - SOURCE_CLAIMED_BY_BLUEPRINT
+  - SOPS_DECRYPT_FAILED

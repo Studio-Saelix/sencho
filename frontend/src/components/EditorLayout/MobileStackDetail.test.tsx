@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useState, type ReactNode } from 'react';
 import { MobileStackDetail } from './MobileStackDetail';
 import type { EditorViewProps } from './EditorView';
@@ -48,6 +49,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         content: '',
         envContent: '',
         envExists: false,
+        envInventoryFailed: false,
         envFiles: [],
         selectedEnvFile: '',
         isFileLoading: false,
@@ -72,6 +74,7 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         closeComposeEditor: vi.fn(),
         requestSave: vi.fn(),
         requestSaveAndDeploy: vi.fn(),
+        requestSaveAndPullImages: vi.fn(),
         actionsReady: true,
         discardChanges: vi.fn(),
         setContent: vi.fn(),
@@ -236,6 +239,23 @@ describe('MobileStackDetail mobile editing', () => {
         expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
     });
 
+    it('disables save actions while a pull is running', () => {
+        // A pull takes the same per-stack lock a deploy does, so the phone row has
+        // to disable for it too or a second save lands on a busy stack.
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, loadingAction: 'pull' })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeDisabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeDisabled();
+        expect(screen.getByTestId('mobile-editor-actions-menu')).toBeDisabled();
+    });
+
+    it('leaves save actions live during an unrelated action', () => {
+        // Scoped to the lifecycle actions on purpose: a stop or a rollback must
+        // not strand the operator on the phone editor.
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, loadingAction: 'stop' })} />);
+        expect(screen.getByTestId('mobile-editor-save')).toBeEnabled();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeEnabled();
+    });
+
     it('routes Cancel through the close handler even after a save and a fresh edit', () => {
         const requestSave = vi.fn();
         const onCloseEditor = vi.fn();
@@ -283,10 +303,35 @@ describe('MobileStackDetail mobile editing', () => {
         expect(setActiveTab).toHaveBeenCalledWith('compose');
     });
 
-    it('normalizes an env tab to compose when the stack has no env file', () => {
+    it('keeps the env tab usable without an env file and explains the creation', () => {
         const setActiveTab = vi.fn();
         render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false, setActiveTab })} />);
-        expect(setActiveTab).toHaveBeenCalledWith('compose');
+        // No redirect to compose: the tab stays usable and its first save
+        // creates the default .env.
+        expect(setActiveTab).not.toHaveBeenCalled();
+        expect(screen.getByRole('tab', { name: '.env' })).toHaveAttribute('aria-selected', 'true');
+        expect(
+            screen.getByText(/will be created in the stack directory when you save/),
+        ).toBeInTheDocument();
+    });
+
+    it('hides the mobile creation notice while an env file exists', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, activeTab: 'env', envExists: true, envFiles: ['.env'] })} />);
+        expect(
+            screen.queryByText(/will be created in the stack directory when you save/),
+        ).not.toBeInTheDocument();
+    });
+
+    it('shows the mobile inventory-failure notice instead of the creation notice', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({ editingCompose: true, activeTab: 'env', envExists: false, envInventoryFailed: true })}
+            />,
+        );
+        expect(
+            screen.queryByText(/will be created in the stack directory when you save/),
+        ).not.toBeInTheDocument();
+        expect(screen.getByText(/environment files could not be loaded/)).toBeInTheDocument();
     });
 
     it('blocks textarea edits while an env-file load is in flight', () => {
@@ -310,6 +355,40 @@ describe('MobileStackDetail mobile editing', () => {
         fireEvent.change(editor, { target: { value: 'late-edit' } });
         expect(setEnvContent).not.toHaveBeenCalled();
         expect(setContent).not.toHaveBeenCalled();
+    });
+});
+
+// The pull action lives behind a chevron attached to Save & Deploy rather than
+// as a third button in the footer row, so the primary label never truncates.
+describe('MobileStackDetail image pull affordance', () => {
+    it('offers Save & Pull Images behind the chevron when the user holds both permissions', async () => {
+        const requestSaveAndPullImages = vi.fn();
+        render(
+            <MobileStackDetail {...makeProps({ editingCompose: true, requestSaveAndPullImages })} />,
+        );
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toHaveTextContent('Save & Deploy');
+        await userEvent.click(screen.getByTestId('mobile-editor-actions-menu'));
+        const item = await screen.findByText('Save & Pull Images');
+        await userEvent.click(item);
+        expect(requestSaveAndPullImages).toHaveBeenCalledTimes(1);
+    });
+
+    it('hides the chevron for an edit-only user while Save & Deploy stays available', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    editingCompose: true,
+                    can: (action) => action === 'stack:edit',
+                })}
+            />,
+        );
+        expect(screen.queryByTestId('mobile-editor-actions-menu')).not.toBeInTheDocument();
+        expect(screen.getByTestId('mobile-editor-save-deploy')).toBeInTheDocument();
+    });
+
+    it('hides the chevron on the self stack, whose images update through their own channel', () => {
+        render(<MobileStackDetail {...makeProps({ editingCompose: true, isSelfStack: true })} />);
+        expect(screen.queryByTestId('mobile-editor-actions-menu')).not.toBeInTheDocument();
     });
 });
 

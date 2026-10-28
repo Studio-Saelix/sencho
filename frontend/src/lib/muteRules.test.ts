@@ -27,6 +27,14 @@ describe('muteRules schedule defaults', () => {
       }),
     );
   });
+
+  it('createMuteRule always addresses the hub, whichever node is active', async () => {
+    await createMuteRule(stackMuteAllDraft('web'));
+    expect(mockApiFetch).toHaveBeenCalledWith(
+      '/notification-suppression-rules',
+      expect.objectContaining({ localOnly: true }),
+    );
+  });
 });
 
 describe('nodeMuteUpdatesDraft', () => {

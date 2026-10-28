@@ -3,7 +3,16 @@
  * degrade-everything-to-unknown contract when every collaborator fails. The
  * grading rules themselves are covered by the pure readiness tests.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+// The rollback-readiness rows read managed-input coverage through the real
+// inventory, so the fixtures below need a compose root it can actually read.
+const mockState = { composeDir: fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-guard-')) };
+fs.mkdirSync(path.join(mockState.composeDir, 'app'), { recursive: true });
+fs.writeFileSync(path.join(mockState.composeDir, 'app', 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
 
 const {
   mockListContainers,
@@ -61,6 +70,22 @@ vi.mock('../services/FileSystemService', () => ({
       getBackupInfo: mockGetBackupInfo,
       getBackupEnvSummary: mockGetBackupEnvSummary,
       envExists: mockEnvExists,
+      getBaseDir: () => mockState.composeDir,
+      getOverrideFilename: async () => null,
+      // The real inventory resolves COMPOSE_FILE through these, so a stack whose
+      // env sets it must read as unverifiable rather than as a read failure.
+      getEnvContent: async (stackName: string) =>
+        fs.readFileSync(path.join(mockState.composeDir, stackName, '.env'), 'utf8'),
+      readFile: async (absPath: string) => fs.readFileSync(absPath, 'utf8'),
+    }),
+  },
+}));
+
+vi.mock('../services/NodeRegistry', () => ({
+  NodeRegistry: {
+    getInstance: () => ({
+      getComposeDir: () => mockState.composeDir,
+      getDefaultNodeId: () => 0,
     }),
   },
 }));
@@ -76,6 +101,9 @@ vi.mock('../services/DatabaseService', () => ({
       getGitSource: mockGetGitSource,
       // Generation supersede path; no current recovery generation in these fixtures.
       getCurrentStackUpdateRecovery: () => undefined,
+      // Managed-input coverage reads these through the real inventory.
+      isMeshStackEnabled: () => false,
+      getStackProjectEnvFiles: () => [],
     }),
   },
 }));
@@ -104,6 +132,10 @@ beforeEach(() => {
   // Sensible defaults for the rollback-readiness inputs (only computeRollbackReadiness reads these).
   mockGetBackupEnvSummary.mockResolvedValue({ exists: true, envPresent: true, keys: ['DB_HOST'] });
   mockEnvExists.mockResolvedValue(true);
+});
+
+afterAll(() => {
+  fs.rmSync(mockState.composeDir, { recursive: true, force: true });
 });
 
 describe('UpdateGuardService.probeContainers', () => {

@@ -24,7 +24,9 @@ import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
-import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
+import { DOCKER_ENDPOINT_PROTECTED_CODE, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
+import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
+import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
@@ -384,13 +386,43 @@ function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetN
 // GET /api/fleet/overview (and the Fleet, Heartbeat, and Mobile loading states).
 const FLEET_OVERVIEW_PROBE_TIMEOUT_MS = 3000;
 
+// Per-remote budget for the Fleet fan-outs that fetch a node's own data (the
+// dependency map and the networking summary). A healthy node answers well
+// inside it, but the remote builds a full container, network and volume
+// snapshot, so it is looser than the 3s overview probe. A Pilot whose tunnel is
+// half-open (agent frozen, tunnel not yet reaped, up to ~90s) or a dead proxy
+// host must still degrade inside this window instead of holding the Fleet tab.
+const FLEET_NODE_READ_TIMEOUT_MS = 8000;
+
+/**
+ * The reason a per-node Fleet read failed, as shown beside the node. A budget
+ * overrun says so (a Retry may succeed) instead of surfacing the runtime's
+ * "operation was aborted due to timeout".
+ */
+function describeNodeReadError(error: unknown): string {
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return `Timed out after ${FLEET_NODE_READ_TIMEOUT_MS / 1000}s`;
+  }
+  return getErrorMessage(error, 'Failed to reach node');
+}
+
+// A Pilot with no tunnel still reads as online for this long after its tunnel
+// closed, so a brief reconnect does not flap the Fleet card. The agent's first
+// reconnect attempts land inside it (backoff 1s, 2s, 4s, 8s).
+const PILOT_RECONNECT_GRACE_MS = 30_000;
+
 async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target) {
-    // Soft-online keeps the Fleet card from flapping during a brief pilot
-    // tunnel reconnect: a recent pilot_last_seen still counts as reachable.
+    // `pilot_last_seen` is the last recorded moment the tunnel was up (stamped
+    // on connect and on close). A Pilot gone longer than the grace window is
+    // offline, not soft-online. After a hub restart the stamp predates the new
+    // process, so Pilots read offline until their agents reconnect.
+    const sinceSeen = node.pilot_last_seen ? Date.now() - node.pilot_last_seen : null;
     const status: 'online' | 'offline' =
-      node.mode === 'pilot_agent' && node.pilot_last_seen ? 'online' : 'offline';
+      node.mode === 'pilot_agent' && sinceSeen !== null
+        && sinceSeen >= 0 && sinceSeen <= PILOT_RECONNECT_GRACE_MS
+        ? 'online' : 'offline';
     return offlineRemoteOverview(node, status);
   }
 
@@ -754,7 +786,54 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 });
 
 /**
- * Fleet-wide dependency map. Auth-only (read-only visibility, Community). Fans
+ * One node's dependency graph as a merge-ready result. The hub builds its own
+ * in-process; a remote is read through its auth-only per-node route within the
+ * per-remote budget. Every failure degrades to an error result for that node.
+ */
+async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
+  if (node.type === 'local') {
+    const graph = await buildLocalGraph(node.id, node.name);
+    return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+  }
+
+  const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+  if (!target) {
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
+  }
+
+  const resp = await safeRemoteFetch(
+    `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
+    {
+      headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
+      signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS),
+    },
+    target.trustedLoopback,
+  );
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => null) as { error?: string } | null;
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
+  }
+  let graph: unknown;
+  try {
+    graph = await resp.json();
+  } catch (readError) {
+    // A budget overrun mid-body is a timeout, not a malformed payload.
+    console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+    const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: reason };
+  }
+  // Shape-guard a reachable-but-malformed payload (proxy HTML, version
+  // drift) so one bad node degrades to a nodeError instead of crashing
+  // mergeFleetGraph and 500-ing the whole fleet map.
+  if (!isLocalDependencyGraph(graph)) {
+    console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
+    return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
+  }
+  return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
+}
+
+/**
+ * Fleet-wide dependency map, or one node's slice of it with `?nodeId=`. Auth-only (read-only visibility, Community). Fans
  * out to every node, building each node's local graph in-process for the hub
  * and via its auth-only per-node route for remotes, then merges with per-node
  * attribution. Unreachable nodes degrade to nodeErrors so the rest still draws.
@@ -762,49 +841,30 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
+    let nodes = DatabaseService.getInstance().getNodes();
 
-    const results = await Promise.allSettled(
-      nodes.map(async (node: Node): Promise<FleetNodeGraphResult> => {
-        if (node.type === 'local') {
-          const graph = await buildLocalGraph(node.id, node.name);
-          return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
-        }
+    // `nodeId` narrows the answer to one node (same response shape), so a caller
+    // can draw each node as it answers instead of waiting on the slowest one.
+    const nodeIdParam = req.query.nodeId;
+    if (nodeIdParam !== undefined) {
+      if (typeof nodeIdParam !== 'string' || !/^[1-9]\d*$/.test(nodeIdParam)) {
+        res.status(400).json({ error: 'nodeId must be a positive node id' });
+        return;
+      }
+      const only = nodes.find(n => n.id === Number(nodeIdParam));
+      if (!only) {
+        res.status(404).json({ error: 'Node not found' });
+        return;
+      }
+      nodes = [only];
+    }
 
-        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-        if (!target) {
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: formatNoTargetError(node) };
-        }
-
-        const resp = await safeRemoteFetch(
-          `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
-          {
-            headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
-            signal: AbortSignal.timeout(15000),
-          },
-          target.trustedLoopback,
-        );
-        if (!resp.ok) {
-          const errBody = await resp.json().catch(() => null) as { error?: string } | null;
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
-        }
-        const graph = await resp.json().catch(() => null);
-        // Shape-guard a reachable-but-malformed payload (proxy HTML, version
-        // drift) so one bad node degrades to a nodeError instead of crashing
-        // mergeFleetGraph and 500-ing the whole fleet map.
-        if (!isLocalDependencyGraph(graph)) {
-          console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
-          return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: 'Remote returned an unexpected dependency-graph payload' };
-        }
-        return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
-      }),
-    );
+    const results = await Promise.allSettled(nodes.map(readNodeGraph));
 
     const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Dependency map fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: describeNodeReadError(result.reason) };
     });
 
     res.json(mergeFleetGraph(perNode));
@@ -1021,13 +1081,20 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         }
         const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
-          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(15000) },
+          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS) },
           target.trustedLoopback,
         );
         if (!resp.ok) {
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: `Remote returned ${resp.status}` };
         }
-        const summary = await resp.json().catch(() => null);
+        let summary: unknown;
+        try {
+          summary = await resp.json();
+        } catch (readError) {
+          console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: reason };
+        }
         if (!isNodeNetworkingSummary(summary)) {
           console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} returned an unexpected payload (status ${resp.status})`);
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: 'Remote returned an unexpected summary payload' };
@@ -1039,7 +1106,7 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
     const perNode: FleetNetworkingSummaryNode[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Networking summary fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: describeNodeReadError(result.reason) };
     });
 
     res.json({ nodes: perNode });
@@ -1276,8 +1343,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
         let updateAvailable = false;
         if (!isValidVersion(version)) {
-          // Assume remote nodes are outdated when their version is unresolvable.
-          updateAvailable = node.type === 'remote';
+          // Assume a reachable remote is outdated when it reports no parseable
+          // version. An unreachable one has no reading at all, so flagging an
+          // update for it would be a guess.
+          updateAvailable = node.type === 'remote' && remoteOnline;
         } else if (compareValid) {
           updateAvailable = semver.lt(version, compareVersion!);
         }
@@ -1355,6 +1424,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           type: node.type,
           version,
           latestVersion: latestValid ? latestVersion : gatewayVersion,
+          online: node.type === 'local' || remoteOnline,
           updateAvailable,
           updateStatus: currentTracker?.status ?? null,
           error: currentTracker?.error ?? null,
@@ -1379,17 +1449,26 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     const nodeStatuses = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       console.warn(`[Fleet] Update-status poll failed for node ${nodes[i].name}:`, r.reason);
+      // A remote whose poll failed is unreadable, so it reads as offline with
+      // no version. The local row is the process serving this request, so it
+      // stays online with the gateway version and its gateway-versus-target
+      // result, with an active skip honored. Tracker and pin state are not
+      // recomputed here and read empty.
+      const isLocal = nodes[i].type === 'local';
+      const skipRow = isLocal ? db.getNodeUpdateSkip(nodes[i].id) : null;
+      const skipActive = skipRow !== null && compareValid && skipRow.skippedVersion === compareVersion;
       return {
         nodeId: nodes[i].id,
         name: nodes[i].name,
         type: nodes[i].type,
-        version: null,
+        version: isLocal ? gatewayVersion : null,
         latestVersion: latestValid ? latestVersion : gatewayVersion,
-        updateAvailable: false,
+        online: isLocal,
+        updateAvailable: isLocal && !skipActive && gatewayValid && compareValid && semver.lt(gatewayVersion, compareVersion!),
         updateStatus: null,
         error: null,
-        skipActive: false,
-        skippedVersion: null,
+        skipActive,
+        skippedVersion: skipActive ? skipRow.skippedVersion : null,
         ...EMPTY_PIN_STATUS,
         isDevImage: false,
         devBuildUpdateAvailable: false,
@@ -2793,6 +2872,8 @@ interface RemoteProxyContext {
 async function remoteStackError(action: string, res: Awaited<ReturnType<typeof fetch>>): Promise<Error> {
   let detail = '';
   let code: string | undefined;
+  let remoteError: string | undefined;
+  let remoteReason: string | undefined;
   try {
     const raw = (await res.text()).trim();
     detail = raw.slice(0, 300);
@@ -2800,12 +2881,18 @@ async function remoteStackError(action: string, res: Awaited<ReturnType<typeof f
     if (typeof parsed === 'object' && parsed !== null && 'code' in parsed && typeof parsed.code === 'string') {
       code = parsed.code;
     }
+    if (typeof parsed === 'object' && parsed !== null && 'error' in parsed && typeof parsed.error === 'string') {
+      remoteError = parsed.error;
+    }
+    if (typeof parsed === 'object' && parsed !== null && 'reason' in parsed && typeof parsed.reason === 'string') {
+      remoteReason = parsed.reason;
+    }
   } catch {
     // Body missing or not JSON; status (and any truncated text) still name the failure.
   }
   return Object.assign(
     new Error(`${action} on remote node (${res.status})${detail ? `: ${detail}` : ''}`),
-    { code, httpStatus: res.status },
+    { code, httpStatus: res.status, remoteError, remoteReason },
   );
 }
 
@@ -2864,8 +2951,10 @@ async function applySnapshotStackFiles(
 
 // Redeploys a stack after its files are restored. The deploy policy gate stays
 // with the caller (local deploys gate centrally; remote deploys are gated by
-// the remote node), so this only performs the deploy itself.
-async function redeploySnapshotStack(node: Node, stackName: string): Promise<void> {
+// the remote node), so this only performs the deploy itself. A remote node's
+// gate decision rides back on its deploy response; it is returned so the hub's
+// own response can report it, as the local arm does from its central gate.
+async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ policyEvidence?: AllowedPolicyEvidence }> {
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
@@ -2879,7 +2968,7 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
     if (!lock.ran) {
       throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
     }
-    return;
+    return {};
   }
   const ctx = buildRemoteProxyContext(node);
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
@@ -2923,6 +3012,8 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (verification.source === 'hub_authority' && verification.status !== 'verified') {
     console.warn(`[FleetSnapshot] Redeploy completed; verification incomplete for "${stackName}" on node ${node.id}: ${verification.detail}`);
   }
+  const policyEvidence = parseRemotePolicyEvidence(payload);
+  return policyEvidence ? { policyEvidence } : {};
 }
 
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
@@ -3049,11 +3140,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       // Local deploys are gated centrally here; remote deploys are gated by the
       // remote node's own deploy endpoint.
       if (node.type === 'local' && !(await runPolicyGate(req, res, stackName, node.id))) return;
-      await redeploySnapshotStack(node, stackName);
+      const redeployResult = await redeploySnapshotStack(node, stackName);
+      if (redeployResult.policyEvidence) res.locals.policyEvidence = redeployResult.policyEvidence;
     }
 
     console.log('[Fleet] Snapshot restore: snapshot=%s node=%s stack=%s', snapshotId, sanitizeForLog(nodeId), sanitizeForLog(stackName));
-    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError });
+    res.json({ message: 'Stack restored successfully', redeployed: redeploy, notesRestored, notesError, ...policyEvidenceFor(res) });
   } catch (error) {
     if (error instanceof SnapshotProxyTargetError) {
       res.status(503).json({ error: error.message });
@@ -3069,6 +3161,15 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
     const refusal = registryDeliveryRefusal(error);
     if (refusal) {
       res.status(refusal.status).json({ error: getErrorMessage(error, 'Registry delivery refused'), code: refusal.code });
+      return;
+    }
+    const endpointRefusal = dockerEndpointRefusalOf(error);
+    if (endpointRefusal) {
+      res.status(409).json({
+        error: `The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`,
+        code: DOCKER_ENDPOINT_PROTECTED_CODE,
+        reason: endpointRefusal.reason,
+      });
       return;
     }
     console.error('[Fleet Snapshot] Restore error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -3088,8 +3189,10 @@ interface SnapshotRestoreResult {
   error?: string;
   /** A non-fatal documentation-notes restore failure; files still restored. */
   notesError?: string;
-  /** Machine-readable registry delivery refusal code, when the redeploy failed on one. */
+  /** Machine-readable refusal code (registry delivery or Docker endpoint guard), when the redeploy failed on one. */
   code?: string;
+  /** Set when the redeploy proceeded on evidence that was not a clean pass. */
+  policyEvidence?: AllowedPolicyEvidence;
 }
 
 fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -3178,14 +3281,27 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         }
 
         let redeployed = false;
+        let policyEvidence: AllowedPolicyEvidence | undefined;
         if (redeploy) {
-          if (node.type === 'local') await assertPolicyGateAllows(group.stackName, node.id, policyOptions);
-          await redeploySnapshotStack(node, group.stackName);
+          if (node.type === 'local') ({ policyEvidence } = await assertPolicyGateAllows(group.stackName, node.id, policyOptions));
+          try {
+            const remoteRedeploy = await redeploySnapshotStack(node, group.stackName);
+            policyEvidence ??= remoteRedeploy.policyEvidence;
+          } catch (redeployError) {
+            const endpointRefusal = dockerEndpointRefusalOf(redeployError);
+            if (endpointRefusal) {
+              throw Object.assign(
+                new Error(`The snapshot files were restored, but the stack was not redeployed. ${endpointRefusal.message}`),
+                { code: DOCKER_ENDPOINT_PROTECTED_CODE, httpStatus: 409, cause: redeployError },
+              );
+            }
+            throw redeployError;
+          }
           redeployed = true;
         }
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: true, redeployed, notesRestored, notesError, ...(policyEvidence ? { policyEvidence } : {}) });
       } catch (e) {
-        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code });
+        results.push({ nodeId: group.nodeId, nodeName: group.nodeName, stackName: group.stackName, success: false, redeployed: false, notesRestored: false, error: getErrorMessage(e, 'Restore failed'), code: registryDeliveryRefusal(e)?.code ?? (dockerEndpointRefusalOf(e) ? DOCKER_ENDPOINT_PROTECTED_CODE : undefined) });
       }
     }
 

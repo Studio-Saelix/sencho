@@ -6,6 +6,7 @@ import { encodeGitOpsJson } from './json';
 import { materializationFingerprint } from './fingerprint';
 import { parseLegacyRepoUrl, parseStorableRepoUrl, secretFreeRepoUrl, secretFreeRepoUrlFromStorable, serializeRepoIdentity, serializeRepoIdentityFromStorable, type RepoIdentity } from './repoIdentity';
 import type { SourcePolicy } from './types';
+import { DEFAULT_PLACEMENT_POLICY, DEFAULT_ROLLOUT_AUTHORIZATION_POLICY } from './policyComposition';
 import type { RefKind } from '../git/types';
 import type {
   GitOpsApplicationRow,
@@ -160,8 +161,17 @@ export function buildDirectApplicationRow(args: {
     active_generation_id: null,
     pause_at: null,
     pause_reason: null,
+    pause_origin: 'operator',
     source_suspended_reason: null,
     source_policy: policy,
+    // A Direct application has no Blueprint placement, so its placement policy
+    // is never consulted. It still carries the default rather than a null so
+    // that the policy contract reads the same shape for every application.
+    placement_policy: DEFAULT_PLACEMENT_POLICY,
+    rollout_authorization_policy: DEFAULT_ROLLOUT_AUTHORIZATION_POLICY,
+    // Nothing has declined yet on a row that was just inserted.
+    placement_policy_refusal_reason: null,
+    placement_policy_refused_at: null,
     poll_interval_secs: null,
     next_poll_at: null,
     attempt_seq: 0,

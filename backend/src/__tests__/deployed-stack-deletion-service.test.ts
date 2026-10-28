@@ -2,7 +2,8 @@
  * Deployed-stack deletion: ready transaction retires both recovery models;
  * blocking intents gate same-name create.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import fs from 'fs';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -197,3 +198,50 @@ describe('DeployedStackDeletionService blueprint ownership probe', () => {
   });
 });
 
+
+describe('DeployedStackDeletionService when the Docker endpoint guard refuses the teardown', () => {
+  it('keeps the stack, its files and its records, and reports the refusal instead of a deletion', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    const stackName = 'proxy-stack';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  socket-proxy:\n    image: proxy\n');
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }),
+    );
+
+    const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: NODE,
+      stackName,
+      pruneVolumes: false,
+      actor: 'tester',
+    });
+
+    expect(result).toMatchObject({ ok: false, code: 'docker_endpoint_protected', error: 'carries the Docker connection' });
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+    expect(db().hasBlockingDeletionIntent(NODE, stackName)).toBe(false);
+    down.mockRestore();
+  });
+
+  it('still carries on to delete the files when the teardown merely failed', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stackName = 'plain-stack';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(new Error('compose down failed'));
+
+    const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: NODE,
+      stackName,
+      pruneVolumes: false,
+      actor: 'tester',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fs.existsSync(dir)).toBe(false);
+    down.mockRestore();
+  });
+});

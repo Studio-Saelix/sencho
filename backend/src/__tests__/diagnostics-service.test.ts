@@ -51,6 +51,7 @@ describe('collectDiagnostics', () => {
         db.updateGlobalSetting('auth_jwt_secret', 'top-secret-signing-key');
         db.updateGlobalSetting('cloud_backup_secret_key', 'enc:deadbeef');
         db.updateGlobalSetting('host_cpu_limit', '80');
+        db.updateGlobalSetting('gitops_history_retention_days', '45');
 
         const report = await collectDiagnostics();
 
@@ -58,6 +59,9 @@ describe('collectDiagnostics', () => {
         expect(report.config.cloud_backup_secret_key).toBeUndefined();
         // The allowlisted, non-secret value is present.
         expect(report.config.host_cpu_limit).toBe('80');
+        // The retention window decides what history an instance keeps, so a
+        // support bundle that omits it cannot explain a missing timeline.
+        expect(report.config.gitops_history_retention_days).toBe('45');
         // No emitted value is one of the seeded secrets, regardless of key name.
         expect(Object.values(report.config)).not.toContain('top-secret-signing-key');
         expect(Object.values(report.config)).not.toContain('enc:deadbeef');

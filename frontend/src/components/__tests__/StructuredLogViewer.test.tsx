@@ -313,7 +313,8 @@ describe('StructuredLogViewer', () => {
 
   // ── Chip color mode ──────────────────────────────────────────────────
 
-  it('in unified mode (default), chip has brand classes and no inline style', async () => {
+  it('in unified mode, chip has brand classes and no inline style', async () => {
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'unified');
     render(<StructuredLogViewer stackName="test-stack" showServiceChips />);
     await act(async () => {
       MockWS.instances[0].onopen?.();
@@ -326,8 +327,7 @@ describe('StructuredLogViewer', () => {
     expect(chip.getAttribute('style')).toBeNull();
   });
 
-  it('in per-service mode, chip has inline label-token style', async () => {
-    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'per-service');
+  it('in per-service mode (default), chip has inline label-token style', async () => {
     render(<StructuredLogViewer stackName="test-stack" showServiceChips />);
     await act(async () => {
       MockWS.instances[0].onopen?.();
@@ -341,6 +341,7 @@ describe('StructuredLogViewer', () => {
   });
 
   it('updates chip style when setting changes from unified to per-service', async () => {
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'unified');
     render(<StructuredLogViewer stackName="test-stack" showServiceChips />);
     await act(async () => {
       MockWS.instances[0].onopen?.();

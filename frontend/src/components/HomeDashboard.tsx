@@ -30,13 +30,15 @@ interface HomeDashboardProps {
   notifications: NotificationItem[];
   /** Nodes whose latest notification fetch did not land; null before the first fetch settles. */
   unreportedNodeIds: ReadonlySet<number> | null;
+  /** Marks one alert read on the node that owns it. */
+  onMarkNotificationRead: (notif: NotificationItem) => void;
   navigation: HomeNavigation;
   stackUpdates?: Record<string, StackUpdateInfo>;
 }
 
-export default function HomeDashboard({ notifications, unreportedNodeIds, navigation, stackUpdates = {} }: HomeDashboardProps) {
+export default function HomeDashboard({ notifications, unreportedNodeIds, onMarkNotificationRead, navigation, stackUpdates = {} }: HomeDashboardProps) {
   const { activeNode, nodes } = useNodes();
-  const { can } = useAuth();
+  const { can, isAdmin } = useAuth();
   const data = useDashboardData();
   const gitopsSourceStates = useGitOpsSourceStates();
   const [scope, setScope] = useStackHealthScopePreference();
@@ -66,6 +68,8 @@ export default function HomeDashboard({ notifications, unreportedNodeIds, naviga
       activeNodeId={activeNode?.id ?? null}
       unreportedNodeIds={unreportedNodeIds}
       navigation={navigation.alerts}
+      onMarkRead={onMarkNotificationRead}
+      canMute={isAdmin}
       className={className}
       reserveHeight={reserveHeight}
     />

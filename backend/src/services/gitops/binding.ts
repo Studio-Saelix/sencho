@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'crypto';
 import { DatabaseService, type Blueprint } from '../DatabaseService';
-import { BlueprintService } from '../BlueprintService';
+import { BlueprintService, type MarkerRead } from '../BlueprintService';
 import { buildBlueprintPreview, type BlueprintPreviewResult } from '../blueprintPreviewProjection';
 import { GitOpsStore } from './store';
 import { GitOpsTransitions, GitOpsTransitionError, type EventEnvelope } from './transitions';
 import type { GitOpsApplicationRow, GitOpsIntentRevisionRow, GitOpsRolloutCandidateRow } from './types';
 import { decodeGitOpsEvidenceLimitations, decodeGitOpsJson, encodeGitOpsEvidenceLimitations } from './json';
+import { carriedHealthPolicyJson } from './healthPolicy';
 import { isGitManagedBlueprint } from './gitManaged';
 
 export { GitManagedContentError, isGitManagedBlueprint } from './gitManaged';
@@ -184,7 +185,9 @@ export class GitOpsBindingService {
       });
     } catch (error) {
       if (error instanceof GitOpsTransitionError) {
-        const code = error.message.includes('repo') ? 'live_blueprint_repo' : 'live_blueprint_application';
+        const code = error.code === 'live_blueprint_repo'
+          ? 'live_blueprint_repo'
+          : 'live_blueprint_application';
         throw new GitOpsBindingError(code, error.message);
       }
       throw error;
@@ -234,10 +237,22 @@ export class GitOpsBindingService {
     );
   }
 
+  /**
+   * Hand the Blueprint back to Inline editing.
+   *
+   * The revision moves with the origin. A Git-managed deploy stamps the
+   * deployment with the Blueprint revision, and Git content never bumps that
+   * number, so a node that ran an older generation still compares equal to the
+   * restored snapshot. Leaving the number in place lets a later automatic
+   * placement treat that node as current and place the snapshot on a node the
+   * operator has not confirmed. The new revision makes every such stamp stale
+   * until Apply records it.
+   */
   private restoreInline(blueprintId: number): void {
     const db = DatabaseService.getInstance();
     db.updateBlueprintContentOrigin(blueprintId, 'inline', null);
     db.clearBlueprintApproval(blueprintId);
+    db.updateBlueprint(blueprintId, { bumpRevision: true });
   }
 
   private clearGitManagedRolloutEvidence(applicationId: string): void {
@@ -298,7 +313,7 @@ export class GitOpsBindingService {
       application: applicationPreview(app),
       blueprintPreview,
       markers: await this.classifyMarkers(blueprint, blueprintPreview),
-      rollbackLimitations: rollbackLimitationsFor(transition),
+      rollbackLimitations: bindingLimitations(transition, app?.source_policy ?? null),
     };
   }
 
@@ -316,11 +331,11 @@ export class GitOpsBindingService {
         out.push({ nodeId: change.nodeId, nodeName: change.nodeName, classification: 'unproven' });
         continue;
       }
-      const marker = await svc.readMarker(blueprint.name, node);
+      const markerRead = await svc.readMarker(blueprint.name, node);
       out.push({
         nodeId: node.id,
         nodeName: node.name,
-        classification: classifyMarker(marker, change.action, blueprint.id),
+        classification: classifyMarker(markerRead, change.action, blueprint.id),
       });
     }
     return out;
@@ -360,19 +375,39 @@ function parseComposePathList(raw: string | null | undefined): string[] | null {
 }
 
 function classifyMarker(
-  marker: { blueprintId: number } | null,
+  markerRead: MarkerRead,
   action: string,
   blueprintId: number,
 ): BindingMarkerClassification {
-  if (marker == null) return action === 'create' ? 'unmanaged' : 'unproven';
-  if (marker.blueprintId === blueprintId) return 'managed';
+  // A marker this node could not be asked about is unproven whatever the action.
+  // Reading it as absent would call a `create` target unmanaged on the strength
+  // of a transport failure, which tells the operator the directory is clear to
+  // write to when nobody has established that.
+  if (markerRead.kind === 'failed') return 'unproven';
+  if (markerRead.kind === 'missing') return action === 'create' ? 'unmanaged' : 'unproven';
+  if (markerRead.marker.blueprintId === blueprintId) return 'managed';
   return 'conflicting';
+}
+
+const MANUAL_SOURCE_PULL =
+  'This source is manual. Polling and provider hooks do not fetch it. Pull source fetches the next commit, and Accept source records it.';
+
+function bindingLimitations(
+  transition: BindingPreview['transition'],
+  sourcePolicy: string | null,
+): string[] {
+  const limitations = rollbackLimitationsFor(transition);
+  if ((transition === 'adopt' || transition === 'convert') && sourcePolicy === 'manual') {
+    limitations.push(MANUAL_SOURCE_PULL);
+  }
+  return limitations;
 }
 
 function rollbackLimitationsFor(transition: BindingPreview['transition']): string[] {
   if (transition === 'detach') {
     return [
       'Detach restores the frozen Inline snapshot; later Git commits are not written back.',
+      'The snapshot is recorded as a new revision, and rollout authorization returns to operator-authorized.',
       'Existing node directories keep their current marker until a later rollout.',
     ];
   }
@@ -399,6 +434,11 @@ function blockedIntentRow(
   blueprint: Blueprint,
   envelope: EventEnvelope,
 ): GitOpsIntentRevisionRow {
+  const store = GitOpsStore.getInstance();
+  const current = store.getApplication(applicationId);
+  const previous = current?.intent_revision_id
+    ? store.getIntentRevision(current.intent_revision_id)
+    : undefined;
   return {
     id: randomUUID(),
     application_id: applicationId,
@@ -412,7 +452,7 @@ function blockedIntentRow(
     rollout_strategy_json: JSON.stringify({ driftMode: blueprint.drift_mode, enabled: blueprint.enabled }),
     runtime_drift_policy: blueprint.drift_mode,
     stateful_policy_json: null,
-    health_failure_rollback_policy_json: null,
+    health_failure_rollback_policy_json: carriedHealthPolicyJson(previous),
     operation_id: envelope.operationId,
     actor: envelope.actor,
     created_at: envelope.at,

@@ -155,6 +155,75 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     insertSpy.mockRestore();
   });
 
+  // The audit trail must attribute a host shell to the address the request
+  // actually came from. A forwarded header is only the client's address when
+  // the direct peer is a proxy Sencho trusts (SENCHO_TRUSTED_PROXY_CIDRS);
+  // otherwise any caller can write an arbitrary IP into the audit log.
+  const SPOOFED_IP = '203.0.113.50';
+  // The peer is this test's loopback client, which the kernel reports bare or
+  // IPv4-mapped depending on the listener family, and as ::1 on a runner that
+  // dials IPv6 loopback.
+  const LOOPBACK_PEER_RE = /^(::ffff:)?127\.0\.0\.1$|^::1$/;
+
+  /** Run `body` with the given trusted proxy CIDRs, then restore the process. */
+  async function withTrustedProxyCidrs(cidrs: string | undefined, body: () => Promise<void>) {
+    const { resetTrustedProxyBlockListCache } = await import('../helpers/trustedProxyCidrs');
+    const previous = process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+    if (cidrs === undefined) delete process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+    else process.env.SENCHO_TRUSTED_PROXY_CIDRS = cidrs;
+    resetTrustedProxyBlockListCache();
+    try {
+      await body();
+    } finally {
+      if (previous === undefined) delete process.env.SENCHO_TRUSTED_PROXY_CIDRS;
+      else process.env.SENCHO_TRUSTED_PROXY_CIDRS = previous;
+      resetTrustedProxyBlockListCache();
+    }
+  }
+
+  /** Open a console as an admin and return the session-open audit row. */
+  async function openConsoleAndReadAuditRow(forwardedFor?: string) {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const insertSpy = vi.spyOn(DatabaseService.getInstance(), 'insertAuditLog');
+    let ws: WebSocket | undefined;
+    try {
+      ws = new WebSocket(wsUrl(), {
+        headers: {
+          Cookie: `sencho_token=${adminToken()}`,
+          ...(forwardedFor ? { 'X-Forwarded-For': forwardedFor } : {}),
+        },
+      });
+      const opened = await new Promise<boolean>((resolve) => {
+        ws?.on('open', () => resolve(true));
+        ws?.on('error', () => resolve(false));
+        ws?.on('unexpected-response', () => resolve(false));
+      });
+      expect(opened).toBe(true);
+      return await openSessionAuditRow(insertSpy);
+    } finally {
+      // Release the socket, or the server cannot close in afterAll.
+      ws?.close();
+      insertSpy.mockRestore();
+    }
+  }
+
+  it('records the socket address, not a spoofed forwarded IP, from an untrusted peer', async () => {
+    await withTrustedProxyCidrs(undefined, async () => {
+      const openRow = await openConsoleAndReadAuditRow(SPOOFED_IP);
+      expect(openRow?.ip_address).not.toBe(SPOOFED_IP);
+      expect(openRow?.ip_address).toMatch(LOOPBACK_PEER_RE);
+    });
+  });
+
+  it('records the forwarded address when the direct peer is a trusted proxy', async () => {
+    // The test client dials loopback, so allowlisting loopback models a
+    // reverse proxy in front of Sencho.
+    await withTrustedProxyCidrs('127.0.0.0/8', async () => {
+      const openRow = await openConsoleAndReadAuditRow(SPOOFED_IP);
+      expect(openRow?.ip_address).toBe(SPOOFED_IP);
+    });
+  });
+
   it('rejects a stack path that escapes the base directory', async () => {
     const ws = new WebSocket(wsUrl('?stack=' + encodeURIComponent('../escape-evil')), {
       headers: { Cookie: `sencho_token=${adminToken()}` },
@@ -286,4 +355,25 @@ async function waitFor(predicate: () => boolean): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 20));
   }
   return predicate();
+}
+
+type AuditRow = Omit<import('../services/DatabaseService').AuditLogEntry, 'id'>;
+
+/**
+ * The session-open audit row is written server-side just after the PTY spawns.
+ * Poll for it so the assertions read the row the audit trail would show.
+ */
+async function openSessionAuditRow(
+  insertSpy: { mock: { calls: unknown[][] } },
+): Promise<AuditRow | undefined> {
+  let openRow: AuditRow | undefined;
+  await waitFor(() => {
+    const call = insertSpy.mock.calls.find(([entry]) => {
+      const row = entry as AuditRow | undefined;
+      return row?.path === HOST_CONSOLE_PATH && row?.summary === 'Opened host console session';
+    });
+    if (call) openRow = call[0] as AuditRow;
+    return openRow !== undefined;
+  });
+  return openRow;
 }

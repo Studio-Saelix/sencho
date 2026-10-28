@@ -113,6 +113,36 @@ describe('GitOpsDigestDetail', () => {
     expect(screen.getByTestId('gitops-digest-row')).toHaveAttribute('data-state', 'matched');
   });
 
+  it('matches an index-only observation when the store exposes no platform child', () => {
+    // The containerd image store records only the image index digest, so the
+    // approved child cannot appear in the observed candidates. The index plus
+    // the observed platform is the proof the model uses.
+    const index = `sha256:${'1'.repeat(64)}`;
+    render(
+      <GitOpsDigestDetail
+        target={target({
+          artifact: artifactWith([service({
+            indexDigest: index,
+            platformDigest: APPROVED,
+            platformVariants: [
+              { platform: 'linux/amd64', digest: APPROVED },
+              { platform: 'linux/arm64', digest: OTHER },
+            ],
+          })]),
+          observedArtifactIdentity: observed([service({
+            platformDigest: index,
+            indexDigest: null,
+            localDigests: [index],
+          })]),
+        })}
+      />,
+    );
+    const row = screen.getByTestId('gitops-digest-row');
+    expect(row).toHaveAttribute('data-state', 'matched');
+    expect(row).toHaveTextContent(short(index));
+    expect(row).toHaveTextContent(/index digest/i);
+  });
+
   it('ignores values that are not content digests rather than comparing them', () => {
     render(
       <GitOpsDigestDetail
