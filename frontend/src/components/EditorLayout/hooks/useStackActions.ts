@@ -504,22 +504,30 @@ export function useStackActions(options: UseStackActionsOptions) {
    * replacement path for the same node, stack and provider). Returns true when
    * the response was one of those refusals.
    */
-  const openProtectedRefusal = (rawBody: string, status: number | undefined, stackFile: string): boolean => {
-    // The target is required: a refusal must name the stack that was actually
-    // refused, never whatever happens to be selected when the answer arrives.
+  const openProtectedRefusal = (
+    rawBody: string,
+    status: number | undefined,
+    stackFile: string,
+    opNodeId: number | null,
+  ): boolean => {
+    // The target is required: a refusal must name the node and stack that were
+    // actually refused, never whatever happens to be active when the answer
+    // arrives.
     if (isSelfStackProtectedResponse(rawBody, status)) {
       overlayState.openSelfStackProtected();
       return true;
     }
     const endpointRefusal = dockerEndpointRefusal(rawBody, status);
     if (endpointRefusal) {
+      // A switch during the request must not retarget the preview. Names and
+      // types are only attached when the refused node is still the active one;
+      // the dialog then explains that the editor moved.
+      const sameNode = opNodeId !== null && activeNode?.id === opNodeId;
       overlayState.openDockerEndpointProtected({
         ...endpointRefusal,
-        nodeId: activeNode?.id ?? null,
-        nodeName: activeNode?.name ?? null,
-        nodeType: activeNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
-        // A sidebar action can target a stack that is not the one loaded in the
-        // editor; bind the handoff to the stack that was actually refused.
+        nodeId: opNodeId,
+        nodeName: sameNode ? activeNode.name : null,
+        nodeType: sameNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
         stackFile,
       });
       return true;
@@ -1699,7 +1707,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }));
       if (!response.ok) {
         const rawBody = await response.text();
-        if (openProtectedRefusal(rawBody, response.status, stackFile)) {
+        if (openProtectedRefusal(rawBody, response.status, stackFile, opNodeId ?? null)) {
           return { ok: false, errorMessage: 'Protected by Sencho' };
         }
         if (response.status === 409) {
@@ -1806,7 +1814,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       );
       if (!response.ok) {
         const rawBody = await response.text();
-        if (openProtectedRefusal(rawBody, response.status, stackFile)) {
+        if (openProtectedRefusal(rawBody, response.status, stackFile, opNodeId ?? null)) {
           return { ok: false, errorMessage: 'Protected by Sencho' };
         }
         if (response.status === 409) {
@@ -2115,7 +2123,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const res = await apiFetch(path, { method: 'POST', nodeId: opNodeId });
       if (!res.ok) {
         const rawBody = await res.text();
-        if (openProtectedRefusal(rawBody, res.status, stackFile)) {
+        if (openProtectedRefusal(rawBody, res.status, stackFile, opNodeId)) {
           return;
         }
         if (res.status === 409) {
@@ -2304,7 +2312,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
-            if (openProtectedRefusal(errText, response.status, stackFile)) {
+            if (openProtectedRefusal(errText, response.status, stackFile, opNodeId)) {
               return { ok: false as const, errorMessage: 'Protected by Sencho' };
             }
             if (response.status === 409) {
@@ -2373,6 +2381,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!stackListState.selectedFile) return;
     const stackFile = stackListState.selectedFile;
     if (action === 'stop' && openSelfStackProtectedIfNeeded(stackFile)) return;
+    const opNodeId = activeNode?.id ?? null;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     try {
       const r = await apiFetch(
@@ -2381,7 +2390,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       );
       if (!r.ok) {
         const rawBody = await r.text();
-        if (openProtectedRefusal(rawBody, r.status, stackFile)) {
+        if (openProtectedRefusal(rawBody, r.status, stackFile, opNodeId)) {
           return;
         }
         throw new Error(rawBody || `${action} failed`);
@@ -2589,7 +2598,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(url, { method: 'DELETE', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
-        if (openProtectedRefusal(errText, response.status, deleteKey)) {
+        if (openProtectedRefusal(errText, response.status, deleteKey, opNodeId)) {
           overlayState.closeDeleteDialog();
           return;
         }
@@ -2671,7 +2680,7 @@ export function useStackActions(options: UseStackActionsOptions) {
                 return { ok: false as const, errorMessage: message };
               }
             }
-            if (openProtectedRefusal(errText, response.status, stackFile)) {
+            if (openProtectedRefusal(errText, response.status, stackFile, opNodeId)) {
               overlayState.closeTakeDownDialog();
               return { ok: false as const, errorMessage: 'Protected stack' };
             }
@@ -2842,7 +2851,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
-        if (openProtectedRefusal(errText, response.status, stackFile)) {
+        if (openProtectedRefusal(errText, response.status, stackFile, opNodeId)) {
           return;
         }
         if (response.status === 409) {

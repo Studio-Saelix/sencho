@@ -40,7 +40,7 @@ export const UPDATE_TIMEOUT_MSG = 'Node did not come back online within 5 minute
  * the sweep may time the row out even if the node still claims it is pending,
  * so a lost node cannot leave an updating badge forever.
  */
-export const ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS = 40 * 60 * 1000;
+export const ENDPOINT_PROVIDER_TRACKER_TIMEOUT_MS = 70 * 60 * 1000;
 /** How long a resolved `completed` tracker lingers before it is reaped, so the
  *  badge stays briefly visible after the update lands. */
 export const TERMINAL_TTL_MS = 60 * 1000;

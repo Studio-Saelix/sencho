@@ -38,7 +38,8 @@ afterEach(async () => {
     pollMs: 2_000,
     requestMs: 10_000,
     verifyMs: 90_000,
-    outcomeMs: selfUpdateModule.ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS + selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
+    outcomeMs: selfUpdateModule.SELF_UPDATE_PULL_TIMEOUT_MS + selfUpdateModule.ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS
+      + selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
     watchMs: selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
     recoveryMs: 15_000,
   };
@@ -328,6 +329,12 @@ describe('provider-only reapply (Sencho stays running)', () => {
     await service.claimComposeReapply({ replace: true, only: true });
     const operationId = (await service.getCurrentOperation())!.operationId;
     await service.executeClaimedComposeReapply();
+    // The row this process installs replaces the route's row; it must keep the
+    // flag that stops the five-minute sweep from timing out a replacement.
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({
+      status: 'updating',
+      endpointProviderPending: true,
+    });
 
     // Before the provider exists there is nothing to verify: no ack may be written.
     await new Promise(resolve => setTimeout(resolve, 50));

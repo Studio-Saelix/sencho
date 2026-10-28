@@ -2595,6 +2595,34 @@ describe('useStackActions refusal target binding', () => {
     expect(overlayState.closeDeleteDialog).toHaveBeenCalled();
   });
 
+  it('does not retarget a refused operation to the node active when the answer arrives', async () => {
+    vi.mocked(apiFetch).mockReset();
+    let resolveResponse!: (response: Response) => void;
+    vi.mocked(apiFetch).mockReturnValue(new Promise<Response>(resolve => { resolveResponse = resolve; }));
+    const { result, overlayState, rerender, activeNodeHolder } = setup({
+      overlay: { deleteTarget: { name: 'other.yml', nodeId: 1 } },
+      stackList: {
+        selectedFile: 'selected.yml',
+        files: ['selected.yml', 'other.yml'],
+        stackStatuses: { 'other.yml': 'running' } as never,
+      },
+    });
+    const pending = result.current.deleteStack(false);
+    // The operator moves to another node while the DELETE is in flight.
+    activeNodeHolder.current = { id: 2, name: 'Other', type: 'remote' } as ActiveNode;
+    rerender();
+    await act(async () => {
+      resolveResponse(new Response(refusalBody, { status: 409 }));
+      await pending;
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'other.yml',
+    }));
+  });
+
   it('binds a Take down refusal to the dialog target, not the selected file', async () => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(apiFetch).mockResolvedValue(new Response(refusalBody, { status: 409 }));

@@ -148,9 +148,13 @@ describe('buildEndpointProviderHelperArgs', () => {
     expect(args).toContain('/etc/sencho/env:/etc/sencho/env:ro');
   });
 
-  it('detaches only the replace run, so recreating the provider cannot cut the client', () => {
-    expect(buildEndpointProviderHelperArgs({ ...input, mode: 'replace' }).slice(0, 3)).toEqual(['run', '-d', '--rm']);
-    expect(buildEndpointProviderHelperArgs({ ...input, mode: 'stage' })).not.toContain('-d');
+  it('creates the replace helper without starting it, so a lost create answer is inert', () => {
+    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'replace' });
+    expect(args.slice(0, 2)).toEqual(['create', '--rm']);
+    expect(args).toContain('--name');
+    expect(args).toContain(`sencho-endpoint-helper-${OP}`);
+    expect(args).not.toContain('-d');
+    expect(buildEndpointProviderHelperArgs({ ...input, mode: 'stage' }).slice(0, 2)).toEqual(['run', '--rm']);
   });
 
   it('mounts the working directory read-write only for a Sencho repin', () => {
@@ -199,11 +203,12 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
 
     expect(instance.getLastError()).toBeNull();
     const calls = dockerCalls();
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(4);
     expect(calls[0][calls[0].length - 1]).toMatch(/ config$/);
     expect(calls[1].slice(-2)).toEqual(['stage', OP]);
-    expect(calls[2].slice(0, 2)).toEqual(['run', '-d']);
+    expect(calls[2].slice(0, 2)).toEqual(['create', '--rm']);
     expect(calls[2].slice(-2)).toEqual(['replace', OP]);
+    expect(calls[3]).toEqual(['start', `sencho-endpoint-helper-${OP}`]);
     // Both helper runs must carry this process's uid/gid, or a non-root Sencho
     // cannot read the marker and outcome the root helper writes.
     if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
@@ -283,7 +288,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     await instance.triggerComposeReapply({ endpointProvider: { ...request, scope: 'provider' } });
     expect(instance.getLastError()).toBeNull();
     expect(JSON.parse(fs.readFileSync(planFile, 'utf8'))).toMatchObject({ mode: 'reapply', scope: 'provider' });
-    expect(dockerCalls()).toHaveLength(3);
+    expect(dockerCalls()).toHaveLength(4);
   });
 
   it('refuses an endpoint-only replacement from an image update, which recreates Sencho', async () => {
@@ -344,6 +349,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'No such image: sha256:running' });
+      if (args[0] === 'inspect') throw Object.assign(new Error('inspect failed'), { stderr: 'Error: No such object: helper' });
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -356,8 +362,8 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
-      // The operation's helper exists even though the start answer was lost.
-      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      // The operation's helper exists even though the create answer was lost.
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -376,7 +382,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
         // the CLI reported EOF on stderr. Nonempty stderr is not proof of failure.
         throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
       }
-      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -389,7 +395,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: Buffer.from('daemon said EOF') });
-      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -406,7 +412,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
-      if (args[0] === 'ps') return { stdout: 'helper-container-id\n', stderr: '' };
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -419,9 +425,9 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'Error response from daemon: EOF' });
-      // No container carries this operation's label, so this is a definitive
+      // No container carries this operation's name, so this is a definitive
       // rejection even though stderr is nonempty.
-      if (args[0] === 'ps') return { stdout: '', stderr: '' };
+      if (args[0] === 'inspect') throw Object.assign(new Error('inspect failed'), { stderr: 'Error: No such object: helper' });
       return { stdout: '', stderr: '' };
     });
     const instance = service();
@@ -434,7 +440,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
       if (args.includes('replace')) throw Object.assign(new Error('exit 125'), { stderr: 'lost answer' });
-      if (args[0] === 'ps') throw new Error('docker ps unavailable');
+      if (args[0] === 'inspect') throw new Error('docker inspect unavailable');
       return { stdout: '', stderr: '' };
     });
     const instance = service();

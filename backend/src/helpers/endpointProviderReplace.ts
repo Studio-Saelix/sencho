@@ -46,8 +46,13 @@ export const ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS =
   3_000 // the deliberate pause that lets the route answer first
   + HELPER_COMPOSE_TIMEOUT_MS * 2 // provider and Sencho recreation
   + PROVIDER_ACK_SECONDS * 1_000
-  + 10 * 60_000 // rollback: container calls, restore, readiness
+  + 12 * 60_000 // rollback: serial container/network calls, restore, readiness
   + 60_000; // scheduling and handoff-write slack
+
+/** Names the detached helper so a create response that was lost can be inspected. */
+export function endpointProviderHelperName(operationId: string): string {
+  return `sencho-endpoint-helper-${operationId}`;
+}
 
 export type ProviderReplaceMode = 'update' | 'reapply';
 

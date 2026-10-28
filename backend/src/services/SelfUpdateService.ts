@@ -14,6 +14,7 @@ import {
   HELPER_SOCKET_PATH,
   PROVIDER_ACK_SECONDS,
   PROVIDER_READY_SECONDS,
+  endpointProviderHelperName,
   type ProviderReplaceMode,
   type ProviderReplacePlan,
   type StageResult,
@@ -51,6 +52,9 @@ const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
 // Update DECISIONS always read fresh (fresh: true), so this only bounds how
 // stale a displayed pin kind can be after a live compose edit.
 const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Ceiling for pulling the Sencho image before an endpoint replacement stages. */
+export const SELF_UPDATE_PULL_TIMEOUT_MS = 5 * 60_000;
 
 // Operator-facing block reasons. Deliberately generic: no host paths, compose
 // contents, or registry/repository names (this text can reach the UI).
@@ -245,7 +249,12 @@ export function buildEndpointProviderHelperArgs(input: {
     mountArgs.push('-v', `${source}:${source}:ro`);
   }
   return [
-    'run', ...(mode === 'replace' ? ['-d'] : []), '--rm',
+    // The detached phase is created first and started separately: a create that
+    // reported an error can still have made the container, but a created
+    // container cannot mutate anything until it is started.
+    mode === 'replace' ? 'create' : 'run',
+    '--rm',
+    ...(mode === 'replace' ? ['--name', endpointProviderHelperName(operationId)] : []),
     '--user', 'root',
     '--label', 'io.sencho.helper=endpoint-provider',
     // The operation id lets a lost `docker run` answer be classified against a
@@ -701,7 +710,7 @@ class SelfUpdateService {
     console.log(`[SelfUpdate] Pulling image: ${pullRef}...`);
     if (debug) console.debug('[SelfUpdate:debug] Pull context:', { targetVersion: targetVersion ?? null, repin: !!repin });
     try {
-      await execFileAsync('docker', ['pull', pullRef], { env, timeout: 300_000 });
+      await execFileAsync('docker', ['pull', pullRef], { env, timeout: SELF_UPDATE_PULL_TIMEOUT_MS });
       if (debug) console.debug('[SelfUpdate:debug] Pull completed in', Math.round((Date.now() - pullStart) / 1000) + 's');
     } catch (error) {
       const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
@@ -956,63 +965,68 @@ class SelfUpdateService {
     }
     console.log(`[SelfUpdate] Staged ${staged.providerImage} for "${provider.service}" (previous image ${staged.previousImageId}); spawning the replacement helper (last breath)`);
 
+    const helperName = endpointProviderHelperName(request.operationId);
+    let createError: unknown = null;
     try {
       await execFileAsync('docker', buildEndpointProviderHelperArgs({ ...helperInput, mode: 'replace' }), { env, timeout: 60_000 });
     } catch (error) {
-      // A CLI error never proves the daemon did not create the detached helper:
-      // the start answer can be lost, and stderr can carry a diagnostic for a
-      // container that is nevertheless running. Only a reliable negative —
-      // no container with this operation's label — allows the claim to be
-      // released. The helper sleeps 3 seconds before its first mutation, so a
-      // helper that exists is still visible to this check.
-      const timedOut = (error as { killed?: boolean; signal?: string }).killed === true
-        || !!(error as { signal?: string }).signal;
-      if (timedOut) {
-        // A client deadline says nothing about whether the daemon accepted the
-        // request; the helper may still be created. Never release ownership on it.
-        console.warn('[SelfUpdate] The replacement helper start timed out; waiting for its outcome:', getErrorMessage(error, 'docker run failed'));
+      createError = error;
+      // `docker create` does not start anything. If it made the container before
+      // its answer was lost, that container is still inert. Only a reliable
+      // "no such container" lets the claim go; otherwise the start below (or
+      // the outcome watcher) decides.
+      const state = await this.replacementHelperState(helperName, env);
+      if (state === 'absent') {
+        this.refuseReplacementHelperStart(createError);
         return;
       }
-      const launched = await this.replacementHelperExists(request.operationId, env);
-      if (launched !== false) {
-        console.warn(
-          '[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:',
-          getErrorMessage(error, 'docker run failed'),
-        );
+      console.warn(
+        '[SelfUpdate] The replacement helper create was not confirmed; inspecting its container:',
+        getErrorMessage(error, 'docker create failed'),
+      );
+    }
+    try {
+      await execFileAsync('docker', ['start', helperName], { env, timeout: 30_000 });
+    } catch (error) {
+      // A container that is still `created` never ran, so it cannot have
+      // mutated the endpoint. Anything else may be running: the watcher decides.
+      const state = await this.replacementHelperState(helperName, env);
+      if (state === 'created') {
+        await execFileAsync('docker', ['rm', '-f', helperName], { env, timeout: 15_000 }).catch(() => undefined);
+        this.refuseReplacementHelperStart(error);
         return;
       }
-      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
-      this.refuseEndpointProviderReplacement(
-        `Nothing was stopped. The replacement helper could not start: ${stderr || getErrorMessage(error, 'docker run failed')}`,
+      console.warn(
+        '[SelfUpdate] The replacement helper start was not confirmed; waiting for its outcome:',
+        getErrorMessage(error, 'docker start failed'),
       );
     }
   }
 
+  /** Records a helper that provably never ran as a pre-cutover refusal. */
+  private refuseReplacementHelperStart(error: unknown): void {
+    const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+    this.refuseEndpointProviderReplacement(
+      `Nothing was stopped. The replacement helper could not start: ${stderr || getErrorMessage(error, 'docker create failed')}`,
+    );
+  }
+
   /**
-   * Whether a detached replacement helper exists for this operation. `null`
-   * means the answer could not be read, which is treated as ambiguous and
-   * never as "nothing stopped".
+   * The helper container's state by its deterministic name, or `absent` when
+   * Docker says it does not exist. `unknown` is never treated as a refusal.
    */
-  private async replacementHelperExists(operationId: string, env: NodeJS.ProcessEnv): Promise<boolean | null> {
-    // Two looks one second apart cover a daemon that is still finishing the
-    // create after the client abandoned it. The helper cannot mutate anything
-    // for its first three seconds, so this window is still before the cutover.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const { stdout } = await execFileAsync('docker', [
-          'ps', '-a',
-          '--filter', 'label=io.sencho.helper=endpoint-provider',
-          '--filter', `label=io.sencho.operation=${operationId}`,
-          '--format', '{{.ID}}',
-        ], { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
-        if (stdout.trim().length > 0) return true;
-      } catch (error) {
-        console.warn('[SelfUpdate] Could not check whether the replacement helper started:', getErrorMessage(error, 'docker ps failed'));
-        return null;
-      }
-      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1_000));
+  private async replacementHelperState(name: string, env: NodeJS.ProcessEnv): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'inspect', '--format', '{{.State.Status}}', name,
+      ], { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
+      return stdout.trim() || 'unknown';
+    } catch (error) {
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString() ?? '';
+      if (/no such (object|container)/i.test(stderr) || /not found/i.test(stderr)) return 'absent';
+      console.warn('[SelfUpdate] Could not read the replacement helper state:', getErrorMessage(error, 'docker inspect failed'));
+      return 'unknown';
     }
-    return false;
   }
 
   /**

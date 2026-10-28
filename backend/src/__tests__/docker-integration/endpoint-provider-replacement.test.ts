@@ -104,6 +104,23 @@ function inspect(id: string): {
   }>)[0];
 }
 
+/**
+ * Whether the recreated LinuxServer proxy actually serves the Docker API from
+ * inside its own network namespace. A running container alone does not prove
+ * the replacement is usable.
+ */
+function proxyAnswers(proxyContainerId: string): boolean {
+  try {
+    const output = execFileSync('docker', [
+      'run', '--rm', '--network', `container:${proxyContainerId}`,
+      SENCHO_IMAGE, 'wget', '-qO-', 'http://127.0.0.1:2375/_ping',
+    ], { encoding: 'utf8', timeout: 60_000 });
+    return output.trim() === 'OK';
+  } catch {
+    return false;
+  }
+}
+
 async function waitFor(check: () => Promise<boolean> | boolean, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -125,8 +142,6 @@ async function fixture(mode: 'provider' | 'stack'): Promise<Fixture> {
   const dir = path.join(rootDir, project);
   await fs.mkdir(dir, { recursive: true });
   projects.push(project);
-  execFileSync('docker', ['pull', SENCHO_IMAGE], { stdio: 'ignore', timeout: 300_000 });
-  execFileSync('docker', ['pull', PROXY_IMAGE], { stdio: 'ignore', timeout: 300_000 });
   await fs.writeFile(path.join(dir, 'compose.yaml'), composeFile(workingProxy()), 'utf8');
   compose(project, dir, ['up', '-d', '--pull', 'never']);
 
@@ -184,6 +199,9 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-endpoint-replace-'));
     dataDir = path.join(rootDir, 'data');
     await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
+    for (const image of [SENCHO_IMAGE, PROXY_IMAGE, 'docker:27-cli']) {
+      execFileSync('docker', ['pull', image], { stdio: 'ignore', timeout: 300_000 });
+    }
   }, 300_000);
 
   afterAll(async () => {
@@ -213,6 +231,7 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
     expect(senchoAfter).toBe(senchoBefore);
     expect(proxyAfter).not.toBe(proxyBefore);
     expect(inspect(proxyAfter).State.Running).toBe(true);
+    expect(proxyAnswers(proxyAfter), 'the recreated proxy must answer the Docker API').toBe(true);
   }, 300_000);
 
   it('applies a configuration-only change to the provider', async () => {
@@ -229,10 +248,12 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
 
     const outcome = await answerAfterMarker(fix);
     expect(outcome).toEqual({ operationId: fix.plan.operationId, ok: true });
-    const after = inspect(await containerId(fix.project, fix.dir, 'socket-proxy'));
+    const proxyAfter = await containerId(fix.project, fix.dir, 'socket-proxy');
+    const after = inspect(proxyAfter);
     expect(after.State.Running).toBe(true);
     expect(after.Config.Env).toContain('SENCHO_E2E_CONFIG=changed');
-    expect(await containerId(fix.project, fix.dir, 'socket-proxy')).not.toBe(proxyBefore);
+    expect(proxyAfter).not.toBe(proxyBefore);
+    expect(proxyAnswers(proxyAfter), 'the reconfigured proxy must answer the Docker API').toBe(true);
   }, 300_000);
 
   it('applies an image change to the provider without restarting Sencho', async () => {
@@ -270,11 +291,12 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
       });
     });
     expect(outcome).toEqual({ operationId: fix.plan.operationId, ok: true });
-    expect(await containerId(fix.project, fix.dir, 'socket-proxy')).not.toBe(proxyBefore);
+    const proxyAfter = await containerId(fix.project, fix.dir, 'socket-proxy');
+    expect(proxyAfter).not.toBe(proxyBefore);
+    expect(proxyAnswers(proxyAfter), 'the recreated proxy must answer the Docker API').toBe(true);
   }, 300_000);
 
   it('renders required, defaulted and .env Compose values with the validation helper arguments', async () => {
-    execFileSync('docker', ['pull', 'docker:27-cli'], { stdio: 'ignore', timeout: 300_000 });
     const dir = path.join(rootDir, 'validation');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, 'compose.yaml'), [
@@ -344,8 +366,8 @@ describe.skipIf(!hasDocker || process.platform !== 'linux')('Docker endpoint rep
     const restored = await containerId(fix.project, fix.dir, 'socket-proxy');
     expect(restored).not.toBe(proxyBefore);
     expect(inspect(restored)).toMatchObject({ Image: previousImageId, State: { Running: true } });
-    // The restored container answers through the host socket, so the helper can
-    // be trusted to have recreated the previous effective configuration.
-    expect(inspect(restored).State.Running).toBe(true);
+    // The restore must put back a proxy that actually answers the Docker API,
+    // not merely a container that is running.
+    expect(proxyAnswers(restored), 'the restored proxy must answer the Docker API').toBe(true);
   }, 300_000);
 });
