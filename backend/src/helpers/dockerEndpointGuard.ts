@@ -25,7 +25,10 @@ import type { DockerEndpointRefusal } from './dockerEndpointError';
  * stack that is deployed, updated, or changed per service cannot be rendered
  * (a stop, restart, take down, or delete is judged from the deployed
  * containers, running or stopped, and does not need the render), when Compose's
- * recreate decision cannot be predicted, and when a deploy would remove a
+ * recreate decision cannot be predicted (including when the container was
+ * created by a different `docker compose` version than the one the deploy would
+ * run, or records none, because a different Compose can recreate it even when
+ * the configuration hash and image both match), and when a deploy would remove a
  * protected container as an orphan (it is not stopped, carries a project label,
  * and its service label is missing or names a service the rendered file does
  * not contain). That is wider than what Compose 5.1.3 removes: it removes only
@@ -131,6 +134,12 @@ export interface EndpointGuardProbes {
   configHash(service: string): Promise<string | null>;
   /** The local image id behind `imageRef`; Compose recreates a service whose image id changed. */
   localImage(imageRef: string): Promise<LocalImageLookup>;
+  /**
+   * The `docker compose` version that would run the deploy (`docker compose
+   * version --short`), null when it cannot be read. A deploy is only predictable
+   * for containers created by that same version (see `ownRecreate`).
+   */
+  composeVersion(): Promise<string | null>;
 }
 
 export interface EndpointGuardInput {
@@ -361,19 +370,28 @@ function namespaceOwnerRefusal(role: ProtectedRole, service: string, via: string
   };
 }
 
-function unknownRecreateRefusal(role: ProtectedRole, service: string, via?: string, hashUnreliable = false): DockerEndpointRefusal {
+function unknownRecreateRefusal(
+  role: ProtectedRole,
+  service: string,
+  via?: string,
+  cause: 'hash' | 'version' | 'unknown' = 'unknown',
+): DockerEndpointRefusal {
   const subject = via ? `owns a namespace that "${via}" runs in, and "${via}" ${carriesClause(role)}` : carriesClause(role);
-  const cause = hashUnreliable
+  const why = cause === 'hash'
     ? '(the service, or a service it is wired to, uses volumes_from or a service: network, pid, or ipc mode, and the configuration hash Docker records for such a service never equals the one Compose renders, so the two cannot be compared). '
-    : '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can pull or build a different image). ';
+    : cause === 'version'
+      ? '(the container was created by a different Docker Compose version than the one this deploy would run, or does not record one, and a different Compose can recreate a service whose configuration hash and image still match). '
+      : '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can pull or build a different image). ';
   const remedy = role === 'sencho' && !via
     ? `use Reapply in ${REAPPLY_PATH} to recreate Sencho on purpose.`
-    : 'recreate the service from the host (docker compose up -d) while Sencho is idle.';
+    : cause === 'version'
+      ? "recreate the service once with the Docker Compose version that runs deploys here (the one Sencho's image ships) while Sencho is idle."
+      : 'recreate the service from the host (docker compose up -d) while Sencho is idle.';
   return {
     reason: 'unresolved',
     service,
     message: `Sencho could not tell whether this operation would recreate service "${service}", which ${subject} `
-      + cause
+      + why
       + 'It is refused rather than guessed; '
       + remedy,
   };
@@ -544,7 +562,7 @@ function namespaceOwners(services: Array<string | null>, rendered: Map<string, R
 }
 
 /** `unreliable`: the running container's hash cannot be compared (see `RenderedService.hashUnreliable`). */
-type Recreate = 'yes' | 'no' | 'unknown' | 'unreliable';
+type Recreate = 'yes' | 'no' | 'unknown' | 'unreliable' | 'version';
 
 /**
  * Compose pull policies that can replace the image on `up`: the pulling ones
@@ -557,13 +575,15 @@ const REPLACING_POLICY = /^(always|refresh|daily|weekly|every_.+|build)$/i;
 /**
  * Whether `service` itself would be recreated by `compose up -d`: a different
  * config hash, a different local image id behind its tag (a pull that landed
- * outside Sencho), or a digest-pin overlay rewriting its image all do.
+ * outside Sencho), a digest-pin overlay rewriting its image, or a container
+ * created by a different Compose version all do.
  */
 async function ownRecreate(
   input: EndpointGuardInput,
   stackContainers: ListedContainer[],
   service: string,
   rendered: RenderedService | undefined,
+  composeVersion: () => Promise<string | null>,
 ): Promise<Recreate> {
   const mutation = input.mutation;
   if (mutation.kind === 'up' && mutation.pinnedServices?.includes(service)) return 'yes';
@@ -584,7 +604,20 @@ async function ownRecreate(
     const wanted = image.id.replace(/^sha256:/, '');
     if (existing.some(container => (container.ImageID ?? '').replace(/^sha256:/, '') !== wanted)) return 'yes';
   }
+  // "Unchanged" is only knowable for the Compose version that created the
+  // container: a different Compose can recreate it even when the hash and the
+  // image both match (Compose 5.6 recreated an unchanged project created by
+  // 5.1.3), so a version mismatch, or a container that records none, cannot be
+  // predicted and is refused rather than guessed.
+  const running = normalizeComposeVersion(await composeVersion());
+  if (!running) return 'unknown';
+  if (existing.some(container => normalizeComposeVersion(container.Labels?.['com.docker.compose.version']) !== running)) return 'version';
   return 'no';
+}
+
+/** The `v` prefix `docker compose version --short` may print is not part of the container label. */
+function normalizeComposeVersion(version: string | null | undefined): string {
+  return (version ?? '').trim().replace(/^v/, '');
 }
 
 /**
@@ -600,9 +633,11 @@ async function wouldRecreate(
   stackContainers: ListedContainer[],
   service: string,
   rendered: Map<string, RenderedService>,
+  composeVersion: () => Promise<string | null>,
 ): Promise<Recreate> {
   let unknown = false;
   let unreliable = false;
+  let version = false;
   const visited = new Set<string>();
   const queue = [service];
   while (queue.length > 0) {
@@ -610,14 +645,16 @@ async function wouldRecreate(
     if (visited.has(name)) continue;
     visited.add(name);
     const view = rendered.get(name);
-    const own = await ownRecreate(input, stackContainers, name, view);
+    const own = await ownRecreate(input, stackContainers, name, view, composeVersion);
     if (own === 'yes') return 'yes';
     if (own === 'unknown') unknown = true;
     if (own === 'unreliable') unreliable = true;
+    if (own === 'version') version = true;
     // A link to a service the render does not contain (a disabled profile) cannot be recreated.
     queue.push(...(view?.linkedServices ?? []).filter(linked => rendered.has(linked)));
   }
   if (unreliable) return 'unreliable';
+  if (version) return 'version';
   return unknown ? 'unknown' : 'no';
 }
 
@@ -645,6 +682,10 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const self = SelfIdentityService.getInstance();
   const selfState = await self.ensureResolved();
   const provider = viewOf(await resolveDockerEndpointProvider());
+  // One read per evaluation: the version is the same for every service, and a
+  // deploy may judge several protected services.
+  let composeVersionCall: Promise<string | null> | null = null;
+  const composeVersion = () => (composeVersionCall ??= input.probes.composeVersion());
 
   let allContainers: ListedContainer[];
   let stackContainers: ListedContainer[];
@@ -838,9 +879,11 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
       if (mutation.kind === 'service' && mutation.service !== service) continue;
       if (restartsSelf && entry.role === 'sencho' && !entry.via) continue;
       if (mutation.kind === 'up') {
-        const recreate = await wouldRecreate(input, stackContainers, service, rendered);
+        const recreate = await wouldRecreate(input, stackContainers, service, rendered, composeVersion);
         if (recreate === 'no') continue;
-        if (recreate === 'unknown' || recreate === 'unreliable') return unknownRecreateRefusal(entry.role, service, entry.via, recreate === 'unreliable');
+        if (recreate === 'unknown' || recreate === 'unreliable' || recreate === 'version') {
+          return unknownRecreateRefusal(entry.role, service, entry.via, recreate === 'unreliable' ? 'hash' : recreate === 'version' ? 'version' : 'unknown');
+        }
       }
       // A stop, restart, take down, or delete of a service whose containers have all stopped: recreating it is not the advice that fits.
       // (An unidentified provider keeps its own refusal: the cause is that detection failed, not the container.)

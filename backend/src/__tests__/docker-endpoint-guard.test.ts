@@ -43,24 +43,27 @@ const SELF_ID = 'a'.repeat(64);
 const PROXY_ID = 'b'.repeat(64);
 const WEB_ID = 'c'.repeat(64);
 const VPN_ID = 'e'.repeat(64);
+/** The Compose version that runs the deploys in these tests, and the one their containers record. */
+const COMPOSE_VERSION = '5.6.0';
 
 function container(
   id: string,
   service: string,
-  over: { project?: string; hash?: string; networks?: string[]; imageId?: string; labels?: Record<string, string> } = {},
+  over: { project?: string; hash?: string; networks?: string[]; imageId?: string; labels?: Record<string, string>; composeVersion?: string | null } = {},
 ) {
   const project = over.project ?? 'sencho';
+  const labels: Record<string, string> = {
+    'com.docker.compose.project': project,
+    'com.docker.compose.service': service,
+    'com.docker.compose.project.working_dir': `/srv/compose/${project}`,
+    'com.docker.compose.config-hash': over.hash ?? 'hash-current',
+  };
+  if (over.composeVersion !== null) labels['com.docker.compose.version'] = over.composeVersion ?? COMPOSE_VERSION;
   return {
     Id: id,
     Names: [`/${service}`],
     ImageID: over.imageId,
-    Labels: {
-      'com.docker.compose.project': project,
-      'com.docker.compose.service': service,
-      'com.docker.compose.project.working_dir': `/srv/compose/${project}`,
-      'com.docker.compose.config-hash': over.hash ?? 'hash-current',
-      ...over.labels,
-    },
+    Labels: { ...labels, ...over.labels },
     NetworkSettings: { Networks: Object.fromEntries((over.networks ?? []).map(name => [name, { NetworkID: `id-${name}` }])) },
   };
 }
@@ -105,6 +108,7 @@ function probes(over: Partial<EndpointGuardProbes> = {}): EndpointGuardProbes {
     renderConfig: vi.fn().mockImplementation(renderListingDeployedServices),
     configHash: vi.fn().mockResolvedValue('hash-current'),
     localImage: vi.fn().mockResolvedValue({ state: 'unknown' }),
+    composeVersion: vi.fn().mockResolvedValue(COMPOSE_VERSION),
     ...over,
   };
 }
@@ -280,6 +284,77 @@ describe('the Docker socket proxy', () => {
     }));
 
     expect(refusal).toBeNull();
+  });
+
+  it('refuses a deploy it would otherwise allow when the proxy was created by a different Compose version, which recreates it', async () => {
+    mockListContainers.mockResolvedValue([container(PROXY_ID, 'socket-proxy', { composeVersion: '5.1.3' }), webContainer]);
+    const composeVersion = vi.fn().mockResolvedValue('5.6.0');
+
+    const refusal = await run({ kind: 'up' }, probes({ composeVersion }));
+
+    expect(composeVersion).toHaveBeenCalled();
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('Docker Compose version');
+  });
+
+  it('refuses the same deploy when the container was created by a newer Compose than the one that would run it', async () => {
+    mockListContainers.mockResolvedValue([container(PROXY_ID, 'socket-proxy', { composeVersion: '5.6.0' }), webContainer]);
+
+    const refusal = await run({ kind: 'up' }, probes({ composeVersion: vi.fn().mockResolvedValue('5.1.3') }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('Docker Compose version');
+  });
+
+  it('refuses a deploy when the proxy records no Compose version, rather than assuming it is unchanged', async () => {
+    mockListContainers.mockResolvedValue([container(PROXY_ID, 'socket-proxy', { composeVersion: null }), webContainer]);
+
+    const refusal = await run({ kind: 'up' }, probes());
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('does not record one');
+  });
+
+  it('refuses a deploy when the Compose version that would run it cannot be read', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
+
+    const refusal = await run({ kind: 'up' }, probes({ composeVersion: vi.fn().mockResolvedValue(null) }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+  });
+
+  it('reads the Compose version once per evaluation, and only when the hash and image both matched', async () => {
+    const composeVersion = vi.fn().mockResolvedValue(COMPOSE_VERSION);
+
+    expect(await run({ kind: 'up' }, probes({ composeVersion }))).toBeNull();
+    expect(composeVersion).toHaveBeenCalledTimes(1);
+
+    composeVersion.mockClear();
+    expect(await run({ kind: 'up' }, probes({ composeVersion, configHash: vi.fn().mockResolvedValue('hash-new') })))
+      .toMatchObject({ reason: 'sencho' });
+    expect(composeVersion).not.toHaveBeenCalled();
+  });
+
+  it('refuses a deploy when a service the proxy is wired to was created by a different Compose version', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer, container('d'.repeat(64), 'dep', { composeVersion: '5.1.3' }), webContainer]);
+    const rendered = 'services:\n  socket-proxy:\n    links: [dep]\n  dep:\n    command: run\n';
+
+    const refusal = await run({ kind: 'up' }, probes({
+      renderConfig: vi.fn().mockResolvedValue(rendered),
+      configHash: vi.fn().mockResolvedValue('hash-current'),
+    }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('Docker Compose version');
+  });
+
+  it('applies the Compose version check to Sencho itself', async () => {
+    mockListContainers.mockResolvedValue([container(SELF_ID, 'sencho', { composeVersion: '5.1.3' })]);
+
+    const refusal = await run({ kind: 'up' }, probes({ composeVersion: vi.fn().mockResolvedValue('5.6.0') }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'sencho' });
+    expect(refusal?.message).toContain('Reapply');
   });
 
   it('refuses a deploy when the proxy image cannot be inspected, rather than guessing', async () => {

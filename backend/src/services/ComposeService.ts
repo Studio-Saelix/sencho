@@ -327,6 +327,7 @@ export class ComposeService {
         },
         configHash: (service) => this.composeConfigHash(stackName, service, stackDirOverride),
         localImage: (imageRef) => this.localImageLookup(imageRef),
+        composeVersion: () => this.composeVersion(),
       },
     });
   }
@@ -377,6 +378,22 @@ export class ComposeService {
       return null;
     } catch (error) {
       console.warn('[ComposeService] config hash for %s/%s unavailable:', sanitizeForLog(stackName), sanitizeForLog(service), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
+  }
+
+  /**
+   * The `docker compose` version that runs deploys on this node, which the
+   * endpoint guard compares with the version label of a container it would
+   * otherwise call unchanged; null when it cannot be read. The same binary is
+   * spawned as for a deploy, so a bundle, wrapper, or PATH difference is seen.
+   */
+  private async composeVersion(): Promise<string | null> {
+    try {
+      const stdout = await this.captureCompose(['version', '--short'], this.baseDir);
+      return stdout.trim() || null;
+    } catch (error) {
+      console.warn('[ComposeService] compose version unavailable for the Docker endpoint guard:', sanitizeForLog(getErrorMessage(error, 'unknown')));
       return null;
     }
   }
