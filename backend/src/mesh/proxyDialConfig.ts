@@ -1,5 +1,6 @@
 import fs from 'fs';
 import tls from 'tls';
+import { X509Certificate } from 'crypto';
 
 /**
  * Operator configuration for the central → remote proxy-mode mesh dial.
@@ -43,7 +44,7 @@ export class MeshProxyDialConfigError extends Error {
 export interface MeshProxyDialConfig {
     /** Extra upgrade headers for the node with this name. */
     headersFor(nodeName: string | undefined): Record<string, string>;
-    /** Trust anchors to use instead of Node's defaults, or undefined for defaults. */
+    /** Default roots plus the configured bundle, or undefined for defaults alone. */
     ca?: string[];
 }
 
@@ -60,12 +61,15 @@ function validateHeaderMap(raw: unknown, where: string): Record<string, string> 
         if (RESERVED_HEADERS.has(lower) || lower.startsWith('sec-websocket-')) {
             throw new MeshProxyDialConfigError(`${MESH_PROXY_HEADERS_ENV}: header "${name}" is managed by Sencho and cannot be set`);
         }
-        // Any C0 control character or DEL. CR and LF are the obvious
-        // injection risk, but the rest are equally illegal in a header value
-        // and would fail later at request construction, where the operator
-        // would see "remote unreachable" instead of the real problem.
-        if (typeof value !== 'string' || /[\u0000-\u001F\u007F]/.test(value)) {
-            throw new MeshProxyDialConfigError(`${MESH_PROXY_HEADERS_ENV}: header "${name}" in ${where} must be a single-line string without control characters`);
+        // Node's outgoing header validator accepts only HTAB, printable
+        // ASCII, and Latin-1 (U+0080-U+00FF). Anything else fails later at
+        // request construction, where the operator would see "remote
+        // unreachable" instead of the real configuration problem. CR and LF
+        // are the obvious injection risk; the rest are equally illegal.
+        if (typeof value !== 'string' || /[\u0000-\u001F\u007F\u0100-\uFFFF]/.test(value)) {
+            throw new MeshProxyDialConfigError(
+                `${MESH_PROXY_HEADERS_ENV}: header "${name}" in ${where} must be a single-line string without control characters or characters above U+00FF`,
+            );
         }
         out[name] = value;
     }
@@ -109,6 +113,38 @@ function defaultTrustAnchors(): string[] {
     return anchors;
 }
 
+/**
+ * Reject a bundle Node's TLS layer would silently accept but never use: a
+ * truncated block, a block whose base64 is not a certificate, or stray
+ * markers. `tls.createSecureContext` accepts such strings when default roots
+ * are present, so validating with `X509Certificate` is the only way the
+ * operator learns about a corrupt CA file at configuration time instead of
+ * seeing every node fail later with a TLS error.
+ *
+ * Text outside certificate blocks is allowed: exported bundles and keytool
+ * output carry comments between the certificates.
+ */
+function validateCaBundle(pem: string, source: string): void {
+    const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    const begins = pem.match(/-----BEGIN CERTIFICATE-----/g)?.length ?? 0;
+    const ends = pem.match(/-----END CERTIFICATE-----/g)?.length ?? 0;
+    if (blocks.length === 0) {
+        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} does not contain a PEM certificate`);
+    }
+    if (blocks.length !== begins || blocks.length !== ends) {
+        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete PEM certificate block`);
+    }
+    for (const block of blocks) {
+        try {
+            new X509Certificate(block);
+        } catch {
+            throw new MeshProxyDialConfigError(
+                `${MESH_PROXY_CA_FILE_ENV}: ${source} contains a PEM block that is not a valid X.509 certificate`,
+            );
+        }
+    }
+}
+
 function parseCa(caPath: string | undefined): string[] | undefined {
     const trimmed = caPath?.trim();
     if (!trimmed) return undefined;
@@ -118,9 +154,7 @@ function parseCa(caPath: string | undefined): string[] | undefined {
     } catch (err) {
         throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: cannot read ${trimmed}: ${(err as Error).message}`);
     }
-    if (!pem.includes('-----BEGIN CERTIFICATE-----')) {
-        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${trimmed} does not contain a PEM certificate`);
-    }
+    validateCaBundle(pem, trimmed);
     return [...defaultTrustAnchors(), pem];
 }
 

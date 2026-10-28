@@ -196,7 +196,16 @@ export function attachUpgrade(
         const settings = DatabaseService.getInstance().getGlobalSettings();
         const jwtSecret = settings.auth_jwt_secret;
         if (!jwtSecret) throw new Error('No JWT secret');
-        decoded = jwt.verify(token, jwtSecret) as typeof decoded;
+        try {
+          decoded = jwt.verify(token, jwtSecret) as typeof decoded;
+        } catch {
+          // Expired, malformed, or wrong-signature JWTs are credential
+          // failures, not the generic handler exception the outer catch
+          // classifies as `forbidden`. Reporting them as `forbidden` told the
+          // dialing central this Sencho refused for an unstated reason
+          // instead of `unauthorized`.
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
+        }
       }
 
       // Node proxy tokens are machine-to-machine credentials and must never be

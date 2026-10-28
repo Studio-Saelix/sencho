@@ -3,11 +3,15 @@
  * `/api/mesh/proxy-tunnel` WebSocket to a Distributed API remote.
  *
  * These tests cover the deterministic surface: failure caching when no
- * proxy target is configured, idle-close behavior, and recent-failure
- * lookup. End-to-end TLS / handshake paths are covered by the manual
- * production verification recipe rather than by network-bound tests.
+ * proxy target is configured, idle-close behavior, recent-failure lookup,
+ * and the pre-connection configuration refusals. The successful WSS path
+ * with gateway headers and a private CA is covered by
+ * `mesh-proxy-tunnel-wss.test.ts`.
  */
+import fs from 'fs';
 import http from 'http';
+import os from 'os';
+import path from 'path';
 import type { AddressInfo } from 'net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -179,6 +183,52 @@ describe('MeshProxyTunnelDialer', () => {
         } finally {
             delete process.env.SENCHO_MESH_PROXY_HEADERS;
             MeshProxyTunnelDialer.resetForTest(0);
+            await new Promise<void>((r) => server.close(() => r()));
+        }
+    });
+
+    it.each([
+        ['SENCHO_MESH_PROXY_HEADERS with a value above U+00FF', 'headers'],
+        ['SENCHO_MESH_PROXY_CA_FILE with an invalid certificate', 'ca'],
+    ])('reports %s as config_invalid before opening a socket', async (_label, kind) => {
+        // Both are configuration errors, not network failures: the dial must
+        // stop before any upgrade so the node card names the real problem.
+        const seen: http.IncomingHttpHeaders[] = [];
+        const server = http.createServer();
+        server.on('upgrade', (req) => { seen.push(req.headers); });
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+        const { port } = server.address() as AddressInfo;
+        let dir: string | undefined;
+        try {
+            if (kind === 'headers') {
+                process.env.SENCHO_MESH_PROXY_HEADERS = JSON.stringify({ 'X-Test': 'hello世界' });
+            } else {
+                dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-'));
+                const file = path.join(dir, 'ca.pem');
+                fs.writeFileSync(file, '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----');
+                process.env.SENCHO_MESH_PROXY_CA_FILE = file;
+            }
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const nodeId = DatabaseService.getInstance().addNode({
+                name: `proxy-test-bad-config-${kind}`,
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: `https://127.0.0.1:${port}`,
+                api_token: 'test-token',
+            });
+
+            expect(await dialer.ensureBridge(nodeId)).toBeNull();
+            expect(seen).toEqual([]);
+            const failure = dialer.getRecentFailure(nodeId);
+            expect(failure?.code).toBe('config_invalid');
+            expect(failure?.message).toMatch(kind === 'headers' ? /characters above U\+00FF/ : /valid X\.509/);
+        } finally {
+            delete process.env.SENCHO_MESH_PROXY_HEADERS;
+            delete process.env.SENCHO_MESH_PROXY_CA_FILE;
+            MeshProxyTunnelDialer.resetForTest(0);
+            if (dir) fs.rmSync(dir, { recursive: true, force: true });
             await new Promise<void>((r) => server.close(() => r()));
         }
     });

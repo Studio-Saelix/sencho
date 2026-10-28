@@ -64,6 +64,13 @@ export type DialFailureCode =
     | 'blocked_by_proxy'
     /** The remote Sencho itself refused the upgrade for a reason it did not classify. */
     | 'remote_refused'
+    /**
+     * Something answered 401/403/429 but did not identify itself. Older
+     * Sencho receivers have no rejection marker, so in a mixed-version fleet
+     * this can be their credential refusal or a gateway in front of them;
+     * do not claim either.
+     */
+    | 'refused_unverified'
     /** A reverse proxy or tunnel in front of the remote answered but could not reach Sencho. */
     | 'proxy_upstream_error'
     /** The HTTP response was not a WebSocket upgrade (proxy not forwarding Upgrade headers, wrong port). */
@@ -624,15 +631,27 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
         if (senchoReason === 'forbidden') {
             return { code: 'remote_refused', message: 'remote refused the mesh upgrade without a stated reason' };
         }
-        // 401/403 are the common gateway refusals. 407 is a proxy auth
-        // challenge and 429 is a rate limit; both are also something in front
-        // of the remote refusing, and neither is fixed by forwarding Upgrade.
-        if (httpStatus === 401 || httpStatus === 403 || httpStatus === 407 || httpStatus === 429) {
+        if (httpStatus === 407) {
+            // 407 is by definition a proxy authentication challenge, so this
+            // one does identify something in front of the remote.
+            return { code: 'blocked_by_proxy', message: 'proxy authentication required (HTTP 407) by a proxy in front of the remote' };
+        }
+        if (cloudflare && (httpStatus === 401 || httpStatus === 403 || httpStatus === 429)) {
+            // Gateway-identifying headers (Cloudflare edge or Access) are
+            // positive evidence, unlike a bare 401/403.
             return {
                 code: 'blocked_by_proxy',
-                message: cloudflare
-                    ? `refused by Cloudflare (HTTP ${httpStatus}), likely Cloudflare Access or a WAF rule`
-                    : `refused with HTTP ${httpStatus} by the remote or a proxy in front of it`,
+                message: `refused by Cloudflare (HTTP ${httpStatus}), likely Cloudflare Access or a WAF rule`,
+            };
+        }
+        // Unmarked 401/403/429: an older Sencho receiver emits its credential
+        // refusals without a marker too, so marker absence proves nothing
+        // about which hop refused. Keep the uncertainty instead of sending
+        // the operator to the gateway when the token is the actual problem.
+        if (httpStatus === 401 || httpStatus === 403 || httpStatus === 429) {
+            return {
+                code: 'refused_unverified',
+                message: `refused or rate-limited with HTTP ${httpStatus} without identifying whether the remote Sencho or a proxy in front of it answered`,
             };
         }
         if (httpStatus === 502 || httpStatus === 503 || httpStatus === 504 || (httpStatus >= 520 && httpStatus <= 530)) {

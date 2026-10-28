@@ -73,6 +73,7 @@ const REACHABLE_REASON: Record<DialFailureCode, string> = {
     endpoint_not_found: 'remote does not support proxy mesh (update it, or check the proxy forwards /api/mesh/proxy-tunnel)',
     blocked_by_proxy: 'blocked by an access proxy in front of the remote (Cloudflare Access, SSO); add a bypass or SENCHO_MESH_PROXY_HEADERS',
     remote_refused: 'the remote Sencho refused the mesh connection; check the node token scope and the remote mesh setup',
+    refused_unverified: 'the remote or a proxy in front of it refused the mesh connection without identifying itself; check the node token first, then the access gateway or WAF',
     proxy_upstream_error: 'reverse proxy or tunnel in front of the remote cannot reach Sencho',
     upgrade_rejected: 'WebSocket upgrade refused; check the proxy forwards Upgrade and Connection headers',
     tls_failed: 'TLS handshake failed; if the certificate is from a private CA set SENCHO_MESH_PROXY_CA_FILE, otherwise check the URL scheme matches the server',
@@ -84,6 +85,14 @@ const REACHABLE_REASON: Record<DialFailureCode, string> = {
     no_target: 'proxy target missing',
     network_error: 'remote unreachable',
 };
+
+/**
+ * Operator-facing explanation for a dial failure code. Kept as a function so
+ * tests can assert the wording the node card will show, not only the enum.
+ */
+export function meshReachableReason(code: DialFailureCode): string {
+    return REACHABLE_REASON[code] ?? 'remote unreachable';
+}
 
 /**
  * One service in a meshed stack, with the container ports the mesh routes.
@@ -3879,8 +3888,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // storm.
             const failure = MeshProxyTunnelDialer.getInstance().getRecentFailure(node.id);
             if (failure) {
-                const reason = REACHABLE_REASON[failure.code] ?? failure.message ?? 'remote unreachable';
-                return { mode: 'unreachable', reason };
+                return { mode: 'unreachable', reason: meshReachableReason(failure.code) };
             }
             return { mode: 'proxy', reason: null };
         }

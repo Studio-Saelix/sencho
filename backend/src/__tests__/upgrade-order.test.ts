@@ -17,6 +17,7 @@ import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { generateApiToken } from '../utils/apiTokenFormat';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
+import { classifyDialError } from '../services/MeshProxyTunnelDialer';
 
 describe('WebSocket upgrade dispatch order', () => {
   let tmpDir: string;
@@ -263,6 +264,45 @@ describe('WebSocket upgrade dispatch order', () => {
       });
       const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
       expect(out).toEqual({ status: 403, reason: 'scope' });
+    });
+
+    function classifyRejection(status: number, reason: string): string {
+      const err = new Error(`upgrade failed: HTTP ${status}`) as Error & {
+        httpStatus: number;
+        httpHeaders: Record<string, string>;
+      };
+      err.httpStatus = status;
+      err.httpHeaders = { 'x-sencho-mesh-reject': reason };
+      return classifyDialError(err).code;
+    }
+
+    it.each([
+      ['a malformed JWT', 'not-a-jwt'],
+      ['an expired node JWT', jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: -60 })],
+      ['a wrong-signature node JWT', jwt.sign({ scope: 'node_proxy' }, 'another-instances-secret', { expiresIn: '1m' })],
+      ['a malformed opaque key', 'sen_sk_short'],
+    ])('marks %s as a credential failure, not a generic refusal', async (_label, token) => {
+      // The verifier throws for every one of these; the dialing central has
+      // to hear `unauthorized` or it tells the operator to check the gateway.
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: token }));
+      expect(out).toEqual({ status: 401, reason: 'unauthorized' });
+      expect(classifyRejection(out.status, out.reason!)).toBe('auth_failed');
+    });
+
+    it('keeps an unrelated handler exception a generic refusal', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const spy = vi.spyOn(DatabaseService.getInstance(), 'getUserByUsername').mockImplementation(() => {
+        throw new Error('database unavailable');
+      });
+      try {
+        // A valid session-shaped JWT passes verification and fails later in
+        // the user lookup. That says nothing about the credential.
+        const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { cookie: sessionCookie }));
+        expect(out).toEqual({ status: 401, reason: 'forbidden' });
+        expect(classifyRejection(out.status, out.reason!)).toBe('remote_refused');
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('does not add the marker on other paths', async () => {

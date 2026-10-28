@@ -9,6 +9,7 @@ import path from 'path';
 import tls from 'tls';
 import { describe, expect, it } from 'vitest';
 import { classifyDialError } from '../services/MeshProxyTunnelDialer';
+import { meshReachableReason } from '../services/MeshService';
 import { loadMeshProxyDialConfig, MeshProxyDialConfigError } from '../mesh/proxyDialConfig';
 import { UnsafeOutboundTargetError } from '../utils/outboundTarget';
 
@@ -29,9 +30,20 @@ describe('classifyDialError', () => {
         [upgradeFailure(403, { 'x-sencho-mesh-reject': 'scope' }), 'scope_denied'],
         [upgradeFailure(403, { 'x-sencho-mesh-reject': 'tier' }), 'tier_denied'],
         [upgradeFailure(404), 'endpoint_not_found'],
+        // Gateway-identifying responses: Cloudflare edge or Access headers,
+        // a login redirect, or a proxy auth challenge.
         [upgradeFailure(403, { server: 'cloudflare', 'cf-ray': 'abc' }), 'blocked_by_proxy'],
+        [upgradeFailure(401, { server: 'cloudflare' }), 'blocked_by_proxy'],
+        [upgradeFailure(429, { 'cf-ray': 'abc' }), 'blocked_by_proxy'],
         [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' }), 'blocked_by_proxy'],
-        [upgradeFailure(401, { server: 'nginx' }), 'blocked_by_proxy'],
+        [upgradeFailure(407, { server: 'nginx' }), 'blocked_by_proxy'],
+        // Markerless 401/403/429: an older Sencho receiver emits its
+        // credential refusals without a marker too, so the hop is unknown.
+        [upgradeFailure(401), 'refused_unverified'],
+        [upgradeFailure(403), 'refused_unverified'],
+        [upgradeFailure(401, { server: 'nginx' }), 'refused_unverified'],
+        [upgradeFailure(403, { server: 'nginx' }), 'refused_unverified'],
+        [upgradeFailure(429), 'refused_unverified'],
         [upgradeFailure(502, { server: 'nginx' }), 'proxy_upstream_error'],
         [upgradeFailure(530, { server: 'cloudflare' }), 'proxy_upstream_error'],
         [upgradeFailure(200), 'upgrade_rejected'],
@@ -49,12 +61,30 @@ describe('classifyDialError', () => {
         // gateway problem, so it must not be reported as either.
         [upgradeFailure(403, { 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
         [upgradeFailure(401, { 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
-        // A proxy auth challenge and a rate limit are both something in front
-        // of the remote refusing; neither is fixed by forwarding Upgrade.
-        [upgradeFailure(407, { server: 'nginx' }), 'blocked_by_proxy'],
-        [upgradeFailure(429, { server: 'cloudflare' }), 'blocked_by_proxy'],
     ])('classifies %s as %s', (err, code) => {
         expect(classifyDialError(err).code).toBe(code);
+    });
+
+    it.each([
+        // A bare 401/403 from an older Sencho says nothing about which hop
+        // refused, and the operator has to be told that.
+        [401, 'legacy credential refusal'],
+        [403, 'legacy scope or tier refusal'],
+        [429, 'rate limit'],
+    ])('leaves the cause of an unmarked HTTP %i (%s) unclaimed', (status) => {
+        const out = classifyDialError(upgradeFailure(status));
+        expect(out.code).toBe('refused_unverified');
+        expect(out.message).toMatch(/without identifying whether the remote Sencho or a proxy in front of it answered/);
+    });
+
+    it('shows an explanation that matches the evidence for each refusal class', () => {
+        // The node card renders REACHABLE_REASON, not the classification
+        // message, so the certainty claim has to be pinned there too.
+        expect(meshReachableReason('refused_unverified')).toMatch(/remote or a proxy in front of it/);
+        expect(meshReachableReason('refused_unverified')).not.toMatch(/^blocked by an access proxy/);
+        expect(meshReachableReason('blocked_by_proxy')).toMatch(/access proxy/);
+        expect(meshReachableReason('remote_refused')).toMatch(/remote Sencho/);
+        expect(meshReachableReason('auth_failed')).toMatch(/token/);
     });
 
     it('reads the reason through a wrapped unsafe-target error', () => {
@@ -130,33 +160,73 @@ describe('loadMeshProxyDialConfig', () => {
         [JSON.stringify({ 'X-Bad': 'del\u007Fhere' }), /control characters/],
         [JSON.stringify({ 'X-Bad': 42 }), /single-line/],
         [JSON.stringify({ 'bad header': 'x' }), /invalid header name/],
+        // Node's HTTP client cannot encode anything above Latin-1; accepting
+        // these made a configuration error look like a network failure.
+        [JSON.stringify({ 'X-Bad': 'hello世界' }), /characters above U\+00FF/],
+        [JSON.stringify({ edge: { 'X-Bad': 'hello世界' } }), /characters above U\+00FF/],
+        [JSON.stringify({ '*': { 'X-Bad': 'hello世界' } }), /characters above U\+00FF/],
+        [JSON.stringify({ '*': { 'X-Ok': '1' }, edge: { 'X-Bad': 'snowman ☃' } }), /characters above U\+00FF/],
     ])('rejects invalid header config %s', (raw, pattern) => {
         expect(() => loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_HEADERS: raw })).toThrow(pattern);
     });
 
-    it('adds a CA bundle on top of the default trust anchors', () => {
+    it('accepts Latin-1 header values that Node can encode', () => {
+        const cfg = loadMeshProxyDialConfig({
+            SENCHO_MESH_PROXY_HEADERS: JSON.stringify({ 'X-Cafe': 'Café Münster' }),
+        });
+        expect(cfg.headersFor('edge')).toEqual({ 'X-Cafe': 'Café Münster' });
+    });
+
+    function withCaFile(content: string, check: (file: string) => void): void {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-'));
         const file = path.join(dir, 'ca.pem');
-        const pem = tls.rootCertificates[0];
-        fs.writeFileSync(file, pem);
+        fs.writeFileSync(file, content);
         try {
-            const cfg = loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file });
-            expect(cfg.ca?.at(-1)).toBe(pem);
-            expect((cfg.ca ?? []).length).toBeGreaterThan(1);
+            check(file);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
+    }
+
+    it('adds a CA bundle on top of the default trust anchors', () => {
+        const pem = tls.rootCertificates[0];
+        withCaFile(pem, (file) => {
+            const cfg = loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file });
+            expect(cfg.ca?.at(-1)).toBe(pem);
+            expect((cfg.ca ?? []).length).toBeGreaterThan(1);
+            // Passing `ca` replaces Node's defaults, so the rebuilt list has
+            // to keep a real default root or every public node breaks.
+            expect(cfg.ca).toContain(tls.rootCertificates[0]);
+        });
+    });
+
+    it('accepts a bundle with several valid certificates', () => {
+        const [first, second] = tls.rootCertificates;
+        withCaFile(`${first}\n${second}`, (file) => {
+            const cfg = loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file });
+            expect(cfg.ca?.at(-1)).toContain(first.trim());
+            expect(cfg.ca?.at(-1)).toContain(second.trim());
+        });
     });
 
     it('rejects an unreadable or non-PEM CA file', () => {
         expect(() => loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: '/nonexistent/ca.pem' })).toThrow(MeshProxyDialConfigError);
-        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-'));
-        const file = path.join(dir, 'ca.pem');
-        fs.writeFileSync(file, 'not a cert');
-        try {
+        withCaFile('not a cert', (file) => {
             expect(() => loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file })).toThrow(/PEM certificate/);
-        } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
-        }
+        });
+    });
+
+    it.each([
+        // Node's TLS context accepts these when default roots are present, so
+        // only parsing the block can turn them into a configuration error.
+        ['a truncated block', '-----BEGIN CERTIFICATE-----\nMIIB'],
+        ['a truncated certificate', tls.rootCertificates[0].slice(0, tls.rootCertificates[0].indexOf('-----END CERTIFICATE-----'))],
+        ['a block whose body is not a certificate', '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----'],
+        ['a valid block followed by a truncated one', `${tls.rootCertificates[0]}\n-----BEGIN CERTIFICATE-----\nMIIB`],
+        ['a stray end marker', `${tls.rootCertificates[0]}\n-----END CERTIFICATE-----`],
+    ])('rejects %s as ca configuration', (_label, content) => {
+        withCaFile(content, (file) => {
+            expect(() => loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file })).toThrow(MeshProxyDialConfigError);
+        });
     });
 });
