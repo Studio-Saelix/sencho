@@ -9,7 +9,8 @@ import { apiFetch } from '@/lib/api';
 export type EndpointProviderOption =
     | { state: 'none' }
     | { state: 'unsupported' }
-    | { state: 'available'; service: string; containerName: string }
+    /** `providerOnly` is false on a node whose build cannot leave Sencho running. */
+    | { state: 'available'; service: string; containerName: string; project: string | null; providerOnly: boolean }
     | { state: 'unavailable'; service: string | null; reason: string };
 
 /** Reads the option for one node; null when the check failed (the dialog then offers nothing). */

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import BashExecModal from '../BashExecModal';
 import { toast } from '@/components/ui/toast-store';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
+import { DockerEndpointProtectedDialog } from '../stack/DockerEndpointProtectedDialog';
 import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { MissingExternalNetworksDialog } from '../stack/MissingExternalNetworksDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
@@ -43,6 +44,8 @@ interface ShellOverlaysProps {
   canSelfUpdate: boolean;
   /** The active node when the caller may reapply Sencho from its Compose configuration, else null. */
   reapplySelfTarget: ComposeReapplyTarget | null;
+  /** The stack file the editor has selected, so a handoff confirm is bound to it. */
+  activeStackFile: string | null;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
@@ -70,6 +73,7 @@ export function ShellOverlays({
   setGitSourceOpen,
   canSelfUpdate,
   reapplySelfTarget,
+  activeStackFile,
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
@@ -91,6 +95,7 @@ export function ShellOverlays({
     preDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen,
+    dockerEndpointProtected, setDockerEndpointProtected,
     composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
@@ -105,6 +110,19 @@ export function ShellOverlays({
     shownForNodeId.current = reapplyNodeId;
     setSelfStackProtectedOpen(false);
   }, [reapplyNodeId, setSelfStackProtectedOpen]);
+
+  // The refusal handlers capture the node and stack they targeted; a later
+  // node or stack switch must not retarget the safe replacement preview.
+  const refusalContextCurrent = dockerEndpointProtected !== null
+    && dockerEndpointProtected.nodeId !== null
+    && dockerEndpointProtected.nodeId === (reapplySelfTarget?.nodeId ?? null)
+    && dockerEndpointProtected.stackFile !== null
+    && dockerEndpointProtected.stackFile === activeStackFile;
+  const refusalContextStale = dockerEndpointProtected !== null
+    && dockerEndpointProtected.nodeId !== null
+    && reapplySelfTarget !== null
+    && (dockerEndpointProtected.nodeId !== reapplySelfTarget.nodeId
+      || dockerEndpointProtected.stackFile !== activeStackFile);
 
   const isDeleteConfirming =
     deleteTarget != null &&
@@ -163,6 +181,9 @@ export function ShellOverlays({
         mode="reapply"
         nodeType={composeReapplyCapture?.nodeType ?? 'local'}
         nodeId={composeReapplyCapture?.nodeId ?? null}
+        nodeName={composeReapplyCapture?.nodeName ?? null}
+        allowEndpointProviderOnly
+        initialScope={composeReapplyCapture?.initialScope ?? 'none'}
         onOpenChange={(open) => {
           if (!open) setComposeReapplyCapture(null);
         }}
@@ -178,6 +199,37 @@ export function ShellOverlays({
             type: capture.nodeType,
             name: capture.nodeName,
           }, choice);
+        }}
+      />
+
+      <DockerEndpointProtectedDialog
+        open={dockerEndpointProtected !== null}
+        onOpenChange={(open) => { if (!open) setDockerEndpointProtected(null); }}
+        message={dockerEndpointProtected?.message ?? ''}
+        reason={dockerEndpointProtected?.reason ?? null}
+        service={dockerEndpointProtected?.service ?? null}
+        nodeId={dockerEndpointProtected?.nodeId ?? null}
+        nodeName={dockerEndpointProtected?.nodeName ?? null}
+        canRecreate={refusalContextCurrent}
+        contextMoved={refusalContextStale}
+        onRecreate={() => {
+          const refusal = dockerEndpointProtected;
+          if (!refusal || refusal.nodeId === null || !refusal.stackFile) return;
+          if (!hydrationReady()) {
+            toast.error('Status data unavailable. Refresh and try again.');
+            return;
+          }
+          if (composeReapply.dispatching) return;
+          setDockerEndpointProtected(null);
+          // Open the same preview the editor uses, for the node and stack that
+          // were refused, with endpoint-only preselected.
+          setComposeReapplyCapture({
+            nodeId: refusal.nodeId,
+            nodeType: refusal.nodeType ?? 'local',
+            nodeName: refusal.nodeName ?? 'this node',
+            stackFile: refusal.stackFile,
+            initialScope: 'only',
+          });
         }}
       />
 

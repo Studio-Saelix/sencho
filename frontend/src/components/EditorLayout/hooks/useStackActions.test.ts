@@ -129,6 +129,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
+    openDockerEndpointProtected: vi.fn(),
     setComposeReapplyCapture: vi.fn(),
     composeReapplyCapture: null,
     setDiffPreview: vi.fn(),
@@ -2610,6 +2611,31 @@ describe('useStackActions.getStackMenuVisibility', () => {
     await act(async () => { await result.current.updateStack(); });
     expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
     expect(stackListState.setStackAction).not.toHaveBeenCalled();
+  });
+
+  it('opens the Docker endpoint handoff instead of a plain error when the guard refuses a deploy', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({
+      stackList: { selectedFile: 'shared.yml', stackSelfFlags: { 'shared.yml': false } },
+    });
+    await act(async () => {
+      await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith({
+      message: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      reason: 'provider',
+      service: null,
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'shared.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 
   it('opens reapply capture for eligible admin Save & Deploy on self-stack without posting deploy', async () => {

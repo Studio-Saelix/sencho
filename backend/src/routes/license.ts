@@ -12,7 +12,7 @@ import { imageChannelRouter } from './imageChannel';
 import {
   ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
   HARDENED_ENDPOINT_PROVIDER_REASON,
-  parseReplaceEndpointProvider,
+  parseEndpointProviderChoice,
   respondClaimRefused,
 } from '../helpers/endpointProviderRequest';
 
@@ -136,8 +136,9 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
   }
   const targetVersion = parseRequestedTargetVersion(req, res);
   if (targetVersion === null) return; // invalid supplied value; 400 already sent
-  const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
-  if (replaceEndpointProvider === null) return;
+  const endpointProvider = parseEndpointProviderChoice(req, res, { allowOnly: false });
+  if (endpointProvider === null) return;
+  const replaceEndpointProvider = endpointProvider.replace;
   const pin = await selfUpdate.getPinInfo({ fresh: true });
   const channel = pin ? classifyImageChannel(pin.composeImageRef) : 'unknown';
   const machineCredential = req.user?.userId === 0 || !!req.apiTokenScope;
@@ -193,11 +194,15 @@ systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response):
     res.status(503).json({ error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.' });
     return;
   }
-  const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
-  if (replaceEndpointProvider === null) return;
-  const claim = await ImageOperationService.getInstance().claimComposeReapply({ replaceEndpointProvider });
+  const endpointProvider = parseEndpointProviderChoice(req, res);
+  if (endpointProvider === null) return;
+  const claim = await ImageOperationService.getInstance().claimComposeReapply(endpointProvider);
   if (respondClaimRefused(res, claim)) return;
-  res.status(202).json({ message: 'Compose reapply initiated. The server will restart shortly.' });
+  res.status(202).json({
+    message: endpointProvider.only
+      ? 'Recreating the Docker endpoint. Sencho keeps running and reconnects through the new container.'
+      : 'Compose reapply initiated. The server will restart shortly.',
+  });
   setTimeout(() => {
     ImageOperationService.getInstance().executeClaimedComposeReapply().catch(error => {
       console.error('[ImageOperation] Unexpected compose reapply failure:', error);

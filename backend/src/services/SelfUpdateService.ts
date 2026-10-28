@@ -184,7 +184,7 @@ interface ComposeContext {
  */
 export type EndpointProviderOption =
   | { state: 'none' }
-  | { state: 'available'; service: string; containerName: string }
+  | { state: 'available'; service: string; containerName: string; project: string | null; providerOnly: boolean }
   | { state: 'unavailable'; service: string | null; reason: string };
 
 /** A replacement Sencho can run: the option plus what the helper needs. */
@@ -226,6 +226,9 @@ export function buildEndpointProviderHelperArgs(input: {
     'run', ...(mode === 'replace' ? ['-d'] : []), '--rm',
     '--user', 'root',
     '--label', 'io.sencho.helper=endpoint-provider',
+    // The Sencho image's HEALTHCHECK probes a server the helper never starts;
+    // over a run of minutes it would report the helper unhealthy and alert.
+    '--no-healthcheck',
     '-e', `DOCKER_HOST=unix://${HELPER_SOCKET_PATH}`,
     '--entrypoint', 'node',
     ...mountArgs,
@@ -310,6 +313,11 @@ export interface EndpointProviderRequest {
   operationId: string;
   /** The service the operator confirmed; a different provider at run time is refused. */
   service: string;
+  /**
+   * `provider` replaces only the endpoint container and leaves Sencho running;
+   * `stack` also recreates Sencho. Image updates always recreate Sencho.
+   */
+  scope: 'provider' | 'stack';
   /** Sencho-side directory holding the handoff files; the helper sees it under /app/data. */
   handoffDir: string;
   planFile: string;
@@ -735,7 +743,15 @@ class SelfUpdateService {
   async getEndpointProviderOption(): Promise<EndpointProviderOption> {
     const result = await this.resolveReplaceableProvider();
     if ('state' in result) return result;
-    return { state: 'available', service: result.provider.service, containerName: result.provider.containerName };
+    return {
+      state: 'available',
+      service: result.provider.service,
+      containerName: result.provider.containerName,
+      project: result.provider.project,
+      // This build can recreate the endpoint on its own; the flag lets the hub
+      // withhold the option from nodes that cannot.
+      providerOnly: true,
+    };
   }
 
   /**
@@ -774,7 +790,8 @@ class SelfUpdateService {
    * Stage, then hand over to the detached replacement helper. Every refusal
    * lands in lastUpdateError before anything stops. After a successful spawn
    * the helper's outcome file is the only verdict (ImageOperationService
-   * watches it); this process will be recreated part way through.
+   * watches it). A `stack`-scope replacement recreates this process part way
+   * through; a `provider`-scope one leaves it running to answer the helper.
    */
   private async runEndpointProviderReplacement(
     env: NodeJS.ProcessEnv,
@@ -797,10 +814,16 @@ class SelfUpdateService {
       console.error('[SelfUpdate] Docker endpoint replacement refused:', this.lastUpdateError);
       return;
     }
+    if (request.scope === 'provider' && mode === 'update') {
+      this.lastUpdateError = 'An image update recreates Sencho, so it cannot replace only the Docker endpoint. Use Reapply.';
+      console.error('[SelfUpdate] Docker endpoint replacement refused:', this.lastUpdateError);
+      return;
+    }
     const plan: ProviderReplacePlan = {
       schemaVersion: 1,
       operationId: request.operationId,
       mode,
+      scope: request.scope,
       project: ctx.project!,
       workingDir: ctx.workingDir,
       configFiles: ctx.configFiles.split(',').map(file => file.trim()).filter(Boolean),

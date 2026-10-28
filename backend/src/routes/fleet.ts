@@ -27,10 +27,12 @@ import { classifyImageChannel } from '../helpers/imageChannel';
 import { DOCKER_ENDPOINT_PROTECTED_CODE, dockerEndpointRefusalOf } from '../helpers/dockerEndpointError';
 import {
   ENDPOINT_PROVIDER_CAPABILITY,
+  ENDPOINT_PROVIDER_ONLY_CAPABILITY,
   ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
   HARDENED_ENDPOINT_PROVIDER_REASON,
   describeRemoteUpdateError,
-  parseReplaceEndpointProvider,
+  parseEndpointProviderChoice,
+  type EndpointProviderChoice,
   respondClaimRefused,
 } from '../helpers/endpointProviderRequest';
 import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
@@ -1239,6 +1241,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteUpdateBlocked = false;
         let remoteImageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         let remoteCapabilities: string[] = [];
+        let remoteEndpointProviderCompletedAt: number | null = null;
         // A Docker endpoint replacement is verified by the node itself before it
         // reports success; until it does, a restart is not a completion.
         let endpointProviderPending = node.type === 'local' && ImageOperationService.getInstance().isEndpointProviderPending();
@@ -1255,6 +1258,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteImageChannel = meta.imageChannel;
           remoteCapabilities = meta.capabilities ?? [];
           endpointProviderPending = meta.endpointProviderPending === true;
+          remoteEndpointProviderCompletedAt = meta.endpointProviderCompletedAt ?? null;
         }
 
         const isReapply = tracker?.operationKind === 'reapply_configuration';
@@ -1291,6 +1295,16 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               // The node is back but still verifying its new Docker endpoint; its
               // own verdict (updateError or the flag clearing) decides.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'is verifying its Docker endpoint replacement');
+            } else if (
+              isReapply &&
+              remoteEndpointProviderCompletedAt !== null &&
+              tracker.previousEndpointProviderCompletedAt !== undefined &&
+              remoteEndpointProviderCompletedAt !== tracker.previousEndpointProviderCompletedAt
+            ) {
+              // Signal 0: a provider-only reapply verified its new Docker endpoint;
+              // Sencho was never restarted, so no process-start signal exists.
+              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via endpoint replacement:', tracker.previousEndpointProviderCompletedAt, '->', remoteEndpointProviderCompletedAt);
+              updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (!isReapply && isValidVersion(version) && version !== tracker.previousVersion) {
               // Signal 1: a valid, different version. Skipped for reapply because
               // the authored image/version is not expected to change.
@@ -1545,15 +1559,32 @@ function postSystemEndpoint(
   }, target.trustedLoopback);
 }
 
-function postSystemUpdate(target: ProxyTarget, targetVersion?: string, replaceEndpointProvider = false) {
+function postSystemUpdate(target: ProxyTarget, targetVersion: string | undefined, replaceEndpointProvider: boolean) {
   return postSystemEndpoint(target, '/api/system/update', {
     ...(targetVersion ? { targetVersion } : {}),
     ...(replaceEndpointProvider ? { replaceEndpointProvider: true } : {}),
   });
 }
 
-function postSystemReapplyCompose(target: ProxyTarget, replaceEndpointProvider = false) {
-  return postSystemEndpoint(target, '/api/system/reapply-compose', replaceEndpointProvider ? { replaceEndpointProvider: true } : {});
+function postSystemReapplyCompose(target: ProxyTarget, endpointProvider: EndpointProviderChoice) {
+  return postSystemEndpoint(target, '/api/system/reapply-compose', {
+    ...(endpointProvider.replace ? { replaceEndpointProvider: true } : {}),
+    ...(endpointProvider.only ? { endpointProviderOnly: true } : {}),
+  });
+}
+
+/**
+ * Refuses an endpoint-only replacement when the node cannot do one: an older
+ * build ignores the flag and recreates Sencho too, which is not what the
+ * operator confirmed, so it is never sent.
+ */
+function refuseUnsupportedProviderOnly(res: Response, capabilities: string[], only: boolean): boolean {
+  if (!only || capabilities.includes(ENDPOINT_PROVIDER_ONLY_CAPABILITY)) return false;
+  res.status(409).json({
+    error: 'This node runs a Sencho version that can only recreate its Docker endpoint together with Sencho. Update the node first, then try again.',
+    code: ENDPOINT_PROVIDER_UNAVAILABLE_CODE,
+  });
+  return true;
 }
 
 /** Refuses a remote Docker endpoint replacement when the node does not advertise it. */
@@ -1690,7 +1721,10 @@ fleetRouter.get('/nodes/:nodeId/endpoint-provider', authMiddleware, async (req: 
       res.status(502).json({ error: 'The node could not report its Docker endpoint.' });
       return;
     }
-    res.json(parseEndpointProviderOption(await response.json().catch(() => null)));
+    res.json(parseEndpointProviderOption(
+      await response.json().catch(() => null),
+      meta.capabilities.includes(ENDPOINT_PROVIDER_ONLY_CAPABILITY),
+    ));
   } catch (error) {
     console.error('[Fleet] Docker endpoint option error:', error);
     res.status(500).json({ error: 'Could not determine the Docker endpoint of this node.' });
@@ -1698,12 +1732,20 @@ fleetRouter.get('/nodes/:nodeId/endpoint-provider', authMiddleware, async (req: 
 });
 
 /** Accepts only the documented option shapes from a remote node; anything else reads as unavailable. */
-function parseEndpointProviderOption(payload: unknown): EndpointProviderOption {
+function parseEndpointProviderOption(payload: unknown, providerOnly: boolean): EndpointProviderOption {
   const value = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
   const service = typeof value.service === 'string' && value.service ? value.service : null;
   if (value.state === 'none') return { state: 'none' };
   if (value.state === 'available' && service && typeof value.containerName === 'string') {
-    return { state: 'available', service, containerName: value.containerName };
+    // Both the node's capability and its own answer must agree: an older node
+    // has neither, and a newer one always reports true.
+    return {
+      state: 'available',
+      service,
+      containerName: value.containerName,
+      project: typeof value.project === 'string' && value.project ? value.project : null,
+      providerOnly: providerOnly && value.providerOnly === true,
+    };
   }
   return {
     state: 'unavailable',
@@ -1728,8 +1770,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
 
     const requestedTarget = parseRequestedTargetVersion(req, res);
     if (requestedTarget === null) return; // invalid supplied value; 400 already sent
-    const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
-    if (replaceEndpointProvider === null) return;
+    const endpointProvider = parseEndpointProviderChoice(req, res, { allowOnly: false });
+    if (endpointProvider === null) return;
+    const replaceEndpointProvider = endpointProvider.replace;
 
     const conflict = beginTrackerOperation(nodeId, 'Update already in progress for this node.');
     if (conflict) {
@@ -1850,8 +1893,9 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       return;
     }
 
-    const replaceEndpointProvider = parseReplaceEndpointProvider(req, res);
-    if (replaceEndpointProvider === null) return;
+    const endpointProvider = parseEndpointProviderChoice(req, res);
+    if (endpointProvider === null) return;
+    const replaceEndpointProvider = endpointProvider.replace;
 
     const conflict = beginTrackerOperation(nodeId, 'An update or reapply is already in progress for this node.');
     if (conflict) {
@@ -1867,13 +1911,17 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         res.status(503).json({ error: 'Compose reapply unavailable on the local node.' });
         return;
       }
-      const claim = await ImageOperationService.getInstance().claimComposeReapply({ replaceEndpointProvider });
+      const claim = await ImageOperationService.getInstance().claimComposeReapply(endpointProvider);
       if (respondClaimRefused(res, claim)) return;
       updateTracker.set(
         nodeId,
         updateTracker.create('updating', getSenchoVersion(), null, undefined, undefined, 'reapply_configuration'),
       );
-      res.status(202).json({ message: 'Compose reapply initiated on local node. The server will restart shortly.' });
+      res.status(202).json({
+        message: endpointProvider.only
+          ? 'Recreating the Docker endpoint on the local node. Sencho keeps running.'
+          : 'Compose reapply initiated on local node. The server will restart shortly.',
+      });
       setTimeout(() => {
         ImageOperationService.getInstance().executeClaimedComposeReapply().catch(error => {
           console.error('[ImageOperation] Unexpected compose reapply failure:', error);
@@ -1925,24 +1973,29 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         return;
       }
       if (refuseUnsupportedEndpointProvider(res, meta.capabilities, replaceEndpointProvider)) return;
+      if (refuseUnsupportedProviderOnly(res, meta.capabilities, endpointProvider.only)) return;
       // Digest pins and updateBlocked are intentional non-gates: reapply never
       // repins the image, so blocked update rows remain eligible.
 
       // Reserve before the remote POST so a concurrent reapply still sees
       // 'updating' after this request leaves the dispatch set in finally.
-      updateTracker.set(
-        nodeId,
-        updateTracker.create(
-          'updating',
-          meta.version,
-          meta.startedAt,
-          undefined,
-          undefined,
-          'reapply_configuration',
-        ),
+      const tracker = updateTracker.create(
+        'updating',
+        meta.version,
+        meta.startedAt,
+        undefined,
+        undefined,
+        'reapply_configuration',
       );
+      // A Docker-endpoint-only reapply never restarts the remote Sencho, so the
+      // process-start signal cannot complete the row. The node's own completion
+      // timestamp can: it changes once, when that node verified the replacement.
+      updateTracker.set(nodeId, {
+        ...tracker,
+        previousEndpointProviderCompletedAt: meta.endpointProviderCompletedAt ?? null,
+      });
 
-      const response = await postSystemReapplyCompose(target, replaceEndpointProvider);
+      const response = await postSystemReapplyCompose(target, endpointProvider);
 
       if (!response.ok) {
         const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
@@ -1951,7 +2004,11 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
         return;
       }
 
-      res.status(202).json({ message: `Compose reapply initiated on ${node.name}.` });
+      res.status(202).json({
+        message: endpointProvider.only
+          ? `Recreating the Docker endpoint on ${node.name}. Sencho keeps running.`
+          : `Compose reapply initiated on ${node.name}.`,
+      });
     } finally {
       remoteReapplyDispatching.delete(nodeId);
     }
@@ -2023,7 +2080,7 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      const response = await postSystemUpdate(target, updateAllTarget);
+      const response = await postSystemUpdate(target, updateAllTarget, false);
       if (response.ok) {
         updateTracker.set(node.id, updateTracker.create('updating', meta.version, meta.startedAt));
         return { nodeId: node.id, name: node.name, kind: 'updating' as const };

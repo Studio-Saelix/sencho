@@ -15,6 +15,12 @@ export interface UpdateTracker {
   resolvedAt?: number;
   /** Distinguishes version updates from compose reapply so poll heuristics stay correct. */
   operationKind: FleetOperationKind;
+  /**
+   * The remote's endpoint-replacement completion timestamp when the reapply was
+   * dispatched. A provider-only reapply never restarts the node, so a change to
+   * this value (not the process start time) is its completion signal.
+   */
+  previousEndpointProviderCompletedAt?: number | null;
 }
 
 export type TerminalStatus = 'completed' | 'failed' | 'timeout';

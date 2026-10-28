@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { apiFetch, withDeploySession } from '@/lib/api';
 import {
+  dockerEndpointRefusal,
   isRecord,
   isSelfStackProtectedResponse,
   parseStackActionError,
@@ -494,6 +495,31 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!isSelfStackFile(file)) return false;
     overlayState.openSelfStackProtected();
     return true;
+  };
+
+  /**
+   * Opens the matching protected-operation dialog for a refused request: the
+   * self-stack one, or the Docker endpoint guard's (which offers the safe
+   * replacement path for the same node, stack and provider). Returns true when
+   * the response was one of those refusals.
+   */
+  const openProtectedRefusal = (rawBody: string, status?: number): boolean => {
+    if (isSelfStackProtectedResponse(rawBody, status)) {
+      overlayState.openSelfStackProtected();
+      return true;
+    }
+    const endpointRefusal = dockerEndpointRefusal(rawBody, status);
+    if (endpointRefusal) {
+      overlayState.openDockerEndpointProtected({
+        ...endpointRefusal,
+        nodeId: activeNode?.id ?? null,
+        nodeName: activeNode?.name ?? null,
+        nodeType: activeNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
+        stackFile: stackListState.selectedFile,
+      });
+      return true;
+    }
+    return false;
   };
 
   const openStackApp = (file: string) => {
@@ -1646,9 +1672,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }));
       if (!response.ok) {
         const rawBody = await response.text();
-        if (isSelfStackProtectedResponse(rawBody, response.status)) {
-          overlayState.openSelfStackProtected();
-          return { ok: false, errorMessage: 'Sencho instance protected' };
+        if (openProtectedRefusal(rawBody, response.status)) {
+          return { ok: false, errorMessage: 'Protected by Sencho' };
         }
         if (response.status === 409) {
           // Either 409 sub-case (op-in-progress or policy block) leaves the
@@ -1753,9 +1778,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       );
       if (!response.ok) {
         const rawBody = await response.text();
-        if (isSelfStackProtectedResponse(rawBody, response.status)) {
-          overlayState.openSelfStackProtected();
-          return { ok: false, errorMessage: 'Sencho instance protected' };
+        if (openProtectedRefusal(rawBody, response.status)) {
+          return { ok: false, errorMessage: 'Protected by Sencho' };
         }
         if (response.status === 409) {
           const inProgress = parseStackOpInProgress(rawBody);
@@ -2063,8 +2087,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const res = await apiFetch(path, { method: 'POST', nodeId: opNodeId });
       if (!res.ok) {
         const rawBody = await res.text();
-        if (isSelfStackProtectedResponse(rawBody, res.status)) {
-          overlayState.openSelfStackProtected();
+        if (openProtectedRefusal(rawBody, res.status)) {
           return;
         }
         if (res.status === 409) {
@@ -2242,9 +2265,8 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
-            if (isSelfStackProtectedResponse(errText, response.status)) {
-              overlayState.openSelfStackProtected();
-              return { ok: false as const, errorMessage: 'Sencho instance protected' };
+            if (openProtectedRefusal(errText, response.status)) {
+              return { ok: false as const, errorMessage: 'Protected by Sencho' };
             }
             if (response.status === 409) {
               const inProgress = parseStackOpInProgress(errText);
@@ -2319,8 +2341,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       );
       if (!r.ok) {
         const rawBody = await r.text();
-        if (isSelfStackProtectedResponse(rawBody, r.status)) {
-          overlayState.openSelfStackProtected();
+        if (openProtectedRefusal(rawBody, r.status)) {
           return;
         }
         throw new Error(rawBody || `${action} failed`);
@@ -2522,8 +2543,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(url, { method: 'DELETE', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
-        if (isSelfStackProtectedResponse(errText, response.status)) {
-          overlayState.openSelfStackProtected();
+        if (openProtectedRefusal(errText, response.status)) {
           overlayState.closeDeleteDialog();
           return;
         }
@@ -2605,8 +2625,7 @@ export function useStackActions(options: UseStackActionsOptions) {
                 return { ok: false as const, errorMessage: message };
               }
             }
-            if (isSelfStackProtectedResponse(errText, response.status)) {
-              overlayState.openSelfStackProtected();
+            if (openProtectedRefusal(errText, response.status)) {
               overlayState.closeTakeDownDialog();
               return { ok: false as const, errorMessage: 'Protected stack' };
             }
@@ -2777,8 +2796,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
-        if (isSelfStackProtectedResponse(errText, response.status)) {
-          overlayState.openSelfStackProtected();
+        if (openProtectedRefusal(errText, response.status)) {
           return;
         }
         if (response.status === 409) {

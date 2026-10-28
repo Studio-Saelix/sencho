@@ -39,6 +39,7 @@ import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
 import { useComposeReapplyAction, type ComposeReapplyTarget } from './FleetView/hooks/useComposeReapplyAction';
+import { useEndpointProviderOption } from './FleetView/hooks/useEndpointProviderOption';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
     GlobalCommandPalette,
@@ -254,6 +255,14 @@ export default function EditorLayout() {
     isAdmin && canReapplyCompose && activeNode
       ? { nodeId: activeNode.id, type: activeNode.type === 'local' ? 'local' : 'remote', name: activeNode.name }
       : null;
+  // The dedicated "recreate only the Docker endpoint" action needs a provider
+  // this node can replace from here; the confirm itself re-reads the option and
+  // explains any refusal.
+  const selfEndpointProvider = useEndpointProviderOption(
+    isSelfStackSelected && isAdmin ? activeNode?.id ?? null : null,
+    isSelfStackSelected && isAdmin,
+  );
+  const canRecreateDockerEndpoint = canSaveAndReapply && selfEndpointProvider?.state === 'available';
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -1124,6 +1133,15 @@ export default function EditorLayout() {
       isSelfStack={isSelfStackSelected}
       actionsReady={actionsReady}
       canSaveAndReapply={canSaveAndReapply}
+      onRecreateDockerEndpoint={canRecreateDockerEndpoint && selectedFile && reapplySelfTarget ? () => {
+        overlayState.setComposeReapplyCapture({
+          nodeId: reapplySelfTarget.nodeId,
+          nodeType: reapplySelfTarget.type,
+          nodeName: reapplySelfTarget.name,
+          stackFile: selectedFile,
+          initialScope: 'only',
+        });
+      } : undefined}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
         if (!selectedFile) return;
@@ -1574,6 +1592,7 @@ export default function EditorLayout() {
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
           reapplySelfTarget={reapplySelfTarget}
+          activeStackFile={selectedFile}
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}

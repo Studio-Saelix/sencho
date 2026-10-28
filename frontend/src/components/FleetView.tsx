@@ -377,6 +377,8 @@ export function FleetView({
                 open={confirmOpen}
                 mode={confirmMode}
                 nodeId={confirmNodeId}
+                nodeName={confirmMode === 'reapply' ? (updateStatus.reapplyConfirmTarget?.name ?? null) : (confirmStatus?.name ?? null)}
+                allowEndpointProviderOnly={confirmMode === 'reapply'}
                 nodeType={
                     confirmMode === 'reapply'
                         ? (updateStatus.reapplyConfirmTarget?.type ?? 'local')

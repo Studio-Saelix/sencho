@@ -3,7 +3,7 @@ import { renderHook, act } from '@testing-library/react';
 
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
-vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { success: vi.fn(), error: vi.fn(), loading: vi.fn(() => 'toast-1'), dismiss: vi.fn() } }));
 
 import { useFleetUpdateStatus } from '../useFleetUpdateStatus';
 import { useComposeReapplyAction } from '../useComposeReapplyAction';
@@ -47,7 +47,7 @@ describe('remote update with a Docker endpoint', () => {
     expect(result.current.localUpdateConfirm).toBe(2);
     expect(posts('/fleet/nodes/2/update')).toEqual([]);
 
-    await act(async () => { await result.current.confirmLocalUpdate({ replaceEndpointProvider: true }); });
+    await act(async () => { await result.current.confirmLocalUpdate({ replaceEndpointProvider: true, endpointProviderOnly: false }); });
     expect(JSON.parse(posts('/fleet/nodes/2/update')[0].body!)).toEqual({ targetVersion: '1.1.0', replaceEndpointProvider: true });
     expect(result.current.reconnecting).toBe(false);
   });
@@ -76,7 +76,7 @@ describe('remote update with a Docker endpoint', () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ startedAt: 1 })));
     const { result } = await loaded();
     await act(async () => { await result.current.triggerNodeUpdate(1); });
-    await act(async () => { await result.current.confirmLocalUpdate({ replaceEndpointProvider: true }); });
+    await act(async () => { await result.current.confirmLocalUpdate({ replaceEndpointProvider: true, endpointProviderOnly: false }); });
     expect(JSON.parse(posts('/fleet/nodes/1/update')[0].body!)).toMatchObject({ replaceEndpointProvider: true });
     vi.unstubAllGlobals();
   });
@@ -87,11 +87,23 @@ describe('reapply with a Docker endpoint', () => {
     route({});
     const { result } = renderHook(() => useComposeReapplyAction());
     act(() => { result.current.openConfirm({ nodeId: 2, type: 'remote', name: 'Edge' }); });
-    await act(async () => { await result.current.confirmReapply({ replaceEndpointProvider: true }); });
+    await act(async () => { await result.current.confirmReapply({ replaceEndpointProvider: true, endpointProviderOnly: false }); });
     expect(posts('/fleet/nodes/2/reapply-compose')[0]).toMatchObject({ method: 'POST', body: JSON.stringify({ replaceEndpointProvider: true }) });
 
     act(() => { result.current.openConfirm({ nodeId: 2, type: 'remote', name: 'Edge' }); });
-    await act(async () => { await result.current.confirmReapply({ replaceEndpointProvider: false }); });
+    await act(async () => { await result.current.confirmReapply({ replaceEndpointProvider: false, endpointProviderOnly: false }); });
     expect(posts('/fleet/nodes/2/reapply-compose')[1].body).toBeUndefined();
+  });
+
+  it('sends the endpoint-only choice and never shows the reconnect overlay', async () => {
+    route({});
+    const { result } = renderHook(() => useComposeReapplyAction());
+    act(() => { result.current.openConfirm({ nodeId: 2, type: 'remote', name: 'Edge' }); });
+    await act(async () => { await result.current.confirmReapply({ replaceEndpointProvider: true, endpointProviderOnly: true }); });
+    expect(JSON.parse(posts('/fleet/nodes/2/reapply-compose')[0].body!)).toEqual({
+      replaceEndpointProvider: true,
+      endpointProviderOnly: true,
+    });
+    expect(result.current.reconnecting).toBe(false);
   });
 });

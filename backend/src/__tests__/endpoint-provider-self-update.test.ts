@@ -23,7 +23,7 @@ vi.mock('../services/DatabaseService', () => ({
 }));
 vi.mock('../services/DockerEndpointProvider', () => ({ resolveDockerEndpointProvider: mockResolveProvider }));
 
-import SelfUpdateService, { buildEndpointProviderHelperArgs, parseStageResult } from '../services/SelfUpdateService';
+import SelfUpdateService, { buildEndpointProviderHelperArgs, parseStageResult, type EndpointProviderRequest } from '../services/SelfUpdateService';
 
 const OP = '3f2b8c1e-5a4d-4e7f-9b2a-1c3d5e7f9a0b';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-endpoint-provider-'));
@@ -78,7 +78,7 @@ beforeEach(() => {
 describe('getEndpointProviderOption', () => {
   it('offers the provider of Sencho\'s own project when it mounts the host socket', async () => {
     await expect(service().getEndpointProviderOption()).resolves.toEqual({
-      state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1',
+      state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', providerOnly: true, project: 'stack',
     });
   });
 
@@ -129,6 +129,10 @@ describe('buildEndpointProviderHelperArgs', () => {
     expect(args).toContain('DOCKER_HOST=unix:///var/run/docker.sock');
   });
 
+  it('disables the image healthcheck, which probes a server the helper never runs', () => {
+    expect(buildEndpointProviderHelperArgs({ ...input, mode: 'replace' })).toContain('--no-healthcheck');
+  });
+
   it('runs the running image by ID with the helper entry point', () => {
     const args = buildEndpointProviderHelperArgs({ ...input, mode: 'stage' });
     expect(args.slice(-4)).toEqual(['sha256:running', '/app/dist/endpointProviderHelper.js', 'stage', OP]);
@@ -148,7 +152,7 @@ describe('buildEndpointProviderHelperArgs', () => {
 });
 
 describe('triggerComposeReapply with the Docker endpoint', () => {
-  const request = { operationId: OP, service: 'socket-proxy', handoffDir, planFile };
+  const request: EndpointProviderRequest = { operationId: OP, service: 'socket-proxy', scope: 'stack', handoffDir, planFile };
 
   function dockerCalls(): string[][] {
     return mockExecFileAsync.mock.calls.map(call => call[1] as string[]);
@@ -175,6 +179,26 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
       operationId: OP, mode: 'reapply', project: 'stack', providerService: 'socket-proxy', senchoService: 'sencho',
       providerContainerId: 'proxy-id', composeCopy: null, pruneOnUpdate: false,
     });
+  });
+
+  it('writes a provider-scoped plan when the operator chose endpoint-only', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: 'p:1' }), stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: { ...request, scope: 'provider' } });
+    expect(instance.getLastError()).toBeNull();
+    expect(JSON.parse(fs.readFileSync(planFile, 'utf8'))).toMatchObject({ mode: 'reapply', scope: 'provider' });
+    expect(dockerCalls()).toHaveLength(3);
+  });
+
+  it('refuses an endpoint-only replacement from an image update, which recreates Sencho', async () => {
+    mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+    const instance = service();
+    await instance.triggerUpdate({ endpointProvider: { ...request, scope: 'provider' } });
+    expect(instance.getLastError()).toContain('cannot replace only the Docker endpoint');
+    expect(dockerCalls().some(args => args.includes('stage'))).toBe(false);
   });
 
   it('stops before anything is recreated when staging refuses', async () => {
@@ -236,7 +260,7 @@ describe('triggerUpdate with the Docker endpoint', () => {
       return { stdout: '', stderr: '' };
     });
     const instance = service();
-    await instance.triggerUpdate({ endpointProvider: { operationId: OP, service: 'socket-proxy', handoffDir, planFile } });
+    await instance.triggerUpdate({ endpointProvider: { operationId: OP, service: 'socket-proxy', scope: 'stack', handoffDir, planFile } });
     const calls = mockExecFileAsync.mock.calls.map(call => call[1] as string[]);
     expect(calls[0]).toEqual(['pull', 'saelix/sencho:0.99.0']);
     expect(calls[1].slice(-2)).toEqual(['stage', OP]);
@@ -249,7 +273,7 @@ describe('triggerUpdate with the Docker endpoint', () => {
       return { stdout: '', stderr: '' };
     });
     const instance = service();
-    await instance.triggerUpdate({ endpointProvider: { operationId: OP, service: 'socket-proxy', handoffDir, planFile } });
+    await instance.triggerUpdate({ endpointProvider: { operationId: OP, service: 'socket-proxy', scope: 'stack', handoffDir, planFile } });
     expect(instance.getLastError()).toBe('manifest unknown');
     expect(mockExecFileAsync.mock.calls.some(call => (call[1] as string[]).includes('stage'))).toBe(false);
   });

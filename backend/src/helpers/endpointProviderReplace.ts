@@ -11,8 +11,9 @@
  *            same engine, renders the Compose project, makes the provider image
  *            available, and snapshots the running provider for rollback.
  *   replace  (detached, the last breath) recreates the provider, waits for it,
- *            recreates Sencho, then waits for the new Sencho to report that it
- *            reaches Docker through the new provider (the ack). Any failure
+ *            then either recreates Sencho (`stack` scope) or leaves it running
+ *            (`provider` scope). Either way it waits for Sencho to report that
+ *            it reaches Docker through the new provider (the ack). Any failure
  *            restores the snapshot. The outcome file is the only success signal.
  *
  * Everything the helper does goes through `HelperDeps`, so the sequence is
@@ -27,10 +28,21 @@ export const HELPER_SOCKET_PATH = '/var/run/docker.sock';
 
 export type ProviderReplaceMode = 'update' | 'reapply';
 
+/**
+ * What the helper is allowed to recreate. `stack` recreates Sencho after the
+ * provider (a shared-project Update or Reapply, whose ack comes from the new
+ * Sencho process). `provider` replaces only the endpoint container and leaves
+ * Sencho running: the process that spawned the helper verifies Docker through
+ * the new container and answers, so no Sencho release or restart is involved.
+ */
+export type ProviderReplaceScope = 'provider' | 'stack';
+
 export interface ProviderReplacePlan {
   schemaVersion: 1;
   operationId: string;
   mode: ProviderReplaceMode;
+  /** Absent in plans written before provider-only replacement existed, which always recreated Sencho. */
+  scope?: ProviderReplaceScope;
   project: string;
   workingDir: string;
   configFiles: string[];
@@ -118,6 +130,8 @@ export function operationDir(dataDir: string, operationId: string): string {
 export const helperFiles = {
   plan: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/plan.json`,
   snapshot: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/rollback.json`,
+  /** Written once the provider container has been recreated, before the helper waits for the ack. */
+  recreated: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/provider-recreated.json`,
   ack: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/ack.json`,
   outcome: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/outcome.json`,
   log: (dataDir: string, id: string) => `${operationDir(dataDir, id)}/helper.log`,
@@ -263,8 +277,8 @@ async function readAck(plan: ProviderReplacePlan, deps: HelperDeps): Promise<Pro
 }
 
 /**
- * The last breath. Recreates the provider, then Sencho, and decides the
- * outcome from the new Sencho's ack. Writes exactly one outcome file.
+ * The last breath. Recreates the provider, then (for `stack` scope) Sencho, and
+ * decides the outcome from Sencho's ack. Writes exactly one outcome file.
  */
 export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDeps): Promise<ProviderOutcome> {
   const fail = async (phase: ProviderPhase, error: string): Promise<ProviderOutcome> => {
@@ -308,9 +322,21 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
   ]);
   if (!provider.ok) return fail('provider', `Recreating "${plan.providerService}" failed: ${trimOutput(provider.output)}`);
 
-  deps.log(`recreating ${plan.senchoService}`);
-  const sencho = await deps.compose(['up', '-d', '--no-deps', '--force-recreate', plan.senchoService]);
-  if (!sencho.ok) return fail('sencho', `Recreating "${plan.senchoService}" failed: ${trimOutput(sencho.output)}`);
+  // Durable phase marker: the replacement exists now, so a process that stayed
+  // running may verify Docker through it and answer. Without this the ack could
+  // be written before the old container was ever replaced.
+  await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
+    operationId: plan.operationId,
+    at: deps.now(),
+  });
+
+  if (plan.scope === 'provider') {
+    deps.log('Sencho stays running; waiting for it to reconnect through the new Docker endpoint');
+  } else {
+    deps.log(`recreating ${plan.senchoService}`);
+    const sencho = await deps.compose(['up', '-d', '--no-deps', '--force-recreate', plan.senchoService]);
+    if (!sencho.ok) return fail('sencho', `Recreating "${plan.senchoService}" failed: ${trimOutput(sencho.output)}`);
+  }
 
   const deadline = deps.now() + plan.ackSeconds * 1000;
   let ack: ProviderAck | null = null;

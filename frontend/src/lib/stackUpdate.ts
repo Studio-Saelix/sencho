@@ -18,6 +18,7 @@ const NODE_UNREACHABLE_FAILURE: FailureClassification = {
 const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
 const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
+const DOCKER_ENDPOINT_PROTECTED_CODE = 'docker_endpoint_protected';
 
 export const isSelfStackProtectedResponse = (rawBody: string, status?: number): boolean => {
   if (status !== 409) return false;
@@ -26,6 +27,39 @@ export const isSelfStackProtectedResponse = (rawBody: string, status?: number): 
     return isRecord(parsed) && parsed.code === SELF_STACK_PROTECTED_CODE;
   } catch {
     return false;
+  }
+};
+
+/** Why the Docker endpoint guard refused: Sencho's own container, the provider, an unreadable label, or an unknown owner. */
+export type DockerEndpointRefusalReason = 'sencho' | 'provider' | 'invalid_label' | 'unresolved';
+
+export interface DockerEndpointRefusal {
+  message: string;
+  reason: DockerEndpointRefusalReason | null;
+  /** The service the guard protected; the endpoint replacement is only the remedy when it is the provider. */
+  service: string | null;
+}
+
+const ENDPOINT_REFUSAL_REASONS: ReadonlyArray<DockerEndpointRefusalReason> = ['sencho', 'provider', 'invalid_label', 'unresolved'];
+
+/**
+ * The Docker endpoint guard's refusal, carried by a 409 with the
+ * bounded code and reason. Returns the operator text and the reason so the UI
+ * can offer the safe replacement path for the same node, stack and provider
+ * instead of silently retrying the refused operation.
+ */
+export const dockerEndpointRefusal = (rawBody: string, status?: number): DockerEndpointRefusal | null => {
+  if (status !== 409) return null;
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (!isRecord(parsed) || parsed.code !== DOCKER_ENDPOINT_PROTECTED_CODE) return null;
+    const message = typeof parsed.error === 'string' && parsed.error.trim()
+      ? parsed.error
+      : 'This operation would cut the Docker connection Sencho is using, so it was refused.';
+    const reason = ENDPOINT_REFUSAL_REASONS.find(candidate => candidate === parsed.reason) ?? null;
+    return { message, reason, service: typeof parsed.service === 'string' && parsed.service ? parsed.service : null };
+  } catch {
+    return null;
   }
 };
 

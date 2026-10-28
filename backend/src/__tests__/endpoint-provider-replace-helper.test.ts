@@ -207,6 +207,31 @@ describe('replaceProvider', () => {
     expect(f.created).toEqual([]);
   });
 
+  it('recreates only the provider when the plan is provider-scoped, and still waits for the ack', async () => {
+    const f = staged(fake({ onSleep: ackAt(20_000) }));
+    const outcome = await replaceProvider(plan({ scope: 'provider' }), f.deps);
+    expect(outcome).toEqual({ operationId: OP, ok: true });
+    expect(f.composeCalls).toEqual([
+      ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '60', 'socket-proxy'],
+    ]);
+    expect(f.log).toContain('Sencho stays running; waiting for it to reconnect through the new Docker endpoint');
+    // The phase marker is durable and written before the ack window opens, so a
+    // Sencho that stayed alive knows when to verify.
+    expect(f.files.get(helperFiles.recreated(HELPER_DATA_DIR, OP))).toMatchObject({ operationId: OP });
+    expect(f.files.get(outcomePath)).toEqual({ operationId: OP, ok: true });
+  });
+
+  it('restores the provider-only replacement when Sencho does not confirm Docker access', async () => {
+    const f = staged(fake());
+    const outcome = await replaceProvider(plan({ scope: 'provider' }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { restored: true, error: null } });
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+    expect(f.composeCalls).toEqual([
+      ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '60', 'socket-proxy'],
+    ]);
+  });
+
   it('accepts an ack that arrives late but inside the deadline', async () => {
     const f = staged(fake({ onSleep: ackAt(170_000) }));
     expect((await replaceProvider(plan(), f.deps)).ok).toBe(true);

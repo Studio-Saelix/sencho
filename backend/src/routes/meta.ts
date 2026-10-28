@@ -43,6 +43,7 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
   // A bounded code (update_failed or an endpoint_provider_* outcome), never the error text.
   const updateError = selfUpdate.getLastErrorCode();
   const pin = await selfUpdate.getPinInfo({ cacheOnly: true });
+  const completedAt = ImageOperationService.getInstance().getEndpointProviderCompletedAt();
   const updateBlocked = pin ? isRepinBlocked(pin.pinKind) : false;
   const runningRef = SelfIdentityService.getInstance().getBuildInfo().imageRef;
   res.json({
@@ -63,5 +64,8 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
     // A boolean only: tells the hub a Docker endpoint replacement is still being
     // verified, so a restart alone is not read as a completed update.
     ...(ImageOperationService.getInstance().isEndpointProviderPending() ? { endpointProviderPending: true } : {}),
+    // A timestamp only: lets the hub complete a remote Reapply that replaced
+    // just the Docker endpoint, where the Sencho process never restarted.
+    ...(completedAt ? { endpointProviderCompletedAt: completedAt } : {}),
   });
 });

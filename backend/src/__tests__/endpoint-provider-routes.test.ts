@@ -24,7 +24,7 @@ let ImageOperationService: typeof import('../services/ImageOperationService').Im
 
 const ONLINE = (over: Partial<RemoteMeta> = {}): RemoteMeta => ({
   version: '0.83.0',
-  capabilities: ['stacks', 'self-update', 'endpoint-provider-replace'],
+  capabilities: ['stacks', 'self-update', 'endpoint-provider-replace', 'endpoint-provider-only'],
   startedAt: 1,
   updateError: null,
   online: true,
@@ -110,7 +110,39 @@ describe('POST /api/system/reapply-compose and /update with replaceEndpointProvi
     const { claimReapply } = mockLocalSelfUpdate();
     const res = await request(app).post('/api/system/reapply-compose').set('Authorization', adminAuth).send({ replaceEndpointProvider: true });
     expect(res.status).toBe(202);
-    expect(claimReapply).toHaveBeenCalledWith({ replaceEndpointProvider: true });
+    expect(claimReapply).toHaveBeenCalledWith({ replace: true, only: false });
+  });
+
+  it('accepts the provider-only choice on Reapply and passes both flags', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const res = await request(app).post('/api/system/reapply-compose').set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(202);
+    expect(claimReapply).toHaveBeenCalledWith({ replace: true, only: true });
+    expect(res.body.message).toContain('Sencho keeps running');
+  });
+
+  it('rejects endpointProviderOnly without replaceEndpointProvider', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const res = await request(app).post('/api/system/reapply-compose').set('Authorization', adminAuth).send({ endpointProviderOnly: true });
+    expect(res.status).toBe(400);
+    expect(claimReapply).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-boolean endpointProviderOnly', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const res = await request(app).post('/api/system/reapply-compose').set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: 'yes' });
+    expect(res.status).toBe(400);
+    expect(claimReapply).not.toHaveBeenCalled();
+  });
+
+  it('refuses provider-only on an image update, which always recreates Sencho', async () => {
+    const { claimUpdate } = mockLocalSelfUpdate();
+    const res = await request(app).post('/api/system/update').set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(400);
+    expect(claimUpdate).not.toHaveBeenCalled();
   });
 
   it('answers 409 with the reason when the provider cannot be replaced', async () => {
@@ -146,10 +178,10 @@ describe('POST /api/system/reapply-compose and /update with replaceEndpointProvi
 
 describe('GET /api/system/endpoint-provider', () => {
   it('returns the option for an admin', async () => {
-    vi.spyOn(SelfUpdateService.getInstance(), 'getEndpointProviderOption').mockResolvedValue({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1' });
+    vi.spyOn(SelfUpdateService.getInstance(), 'getEndpointProviderOption').mockResolvedValue({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', providerOnly: true, project: 'stack' });
     const res = await request(app).get('/api/system/endpoint-provider').set('Authorization', adminAuth);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1' });
+    expect(res.body).toEqual({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', providerOnly: true, project: 'stack' });
   });
 
   it('is refused to a viewer', async () => {
@@ -164,11 +196,20 @@ describe('Fleet local node', () => {
     vi.spyOn(versionCheck, 'getLatestVersion').mockResolvedValue('0.99.0');
     const reapply = await request(app).post(`/api/fleet/nodes/${localNodeId}/reapply-compose`).set('Authorization', adminAuth).send({ replaceEndpointProvider: true });
     expect(reapply.status).toBe(202);
-    expect(claimReapply).toHaveBeenCalledWith({ replaceEndpointProvider: true });
+    expect(claimReapply).toHaveBeenCalledWith({ replace: true, only: false });
     FleetUpdateTrackerService.getInstance().delete(localNodeId);
     const update = await request(app).post(`/api/fleet/nodes/${localNodeId}/update`).set('Authorization', adminAuth).send({ replaceEndpointProvider: true });
     expect(update.status).toBe(202);
     expect(claimUpdate).toHaveBeenCalledWith(expect.objectContaining({ replaceEndpointProvider: true }));
+  });
+
+  it('dispatches a provider-only Reapply with both flags', async () => {
+    const { claimReapply } = mockLocalSelfUpdate();
+    const res = await request(app).post(`/api/fleet/nodes/${localNodeId}/reapply-compose`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(202);
+    expect(claimReapply).toHaveBeenCalledWith({ replace: true, only: true });
+    expect(res.body.message).toContain('Sencho keeps running');
   });
 
   it('leaves no tracker behind when the provider claim is refused', async () => {
@@ -209,6 +250,35 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
     expect(calls.find(call => call.url.endsWith('/api/system/update'))?.body).toMatchObject({ replaceEndpointProvider: true });
   });
 
+  it('refuses a provider-only Reapply to a node that cannot leave Sencho running', async () => {
+    const { calls } = mockRemote(ONLINE({ capabilities: ['stacks', 'self-update', 'endpoint-provider-replace'] }));
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('endpoint_provider_unavailable');
+    expect(calls).toEqual([]);
+  });
+
+  it('reports provider-only unsupported for a node whose option answer cannot prove it', async () => {
+    const { respond } = mockRemote(ONLINE({ capabilities: ['stacks', 'self-update', 'endpoint-provider-replace'] }));
+    respond.status = 200;
+    respond.body = { state: 'available', service: 'socket-proxy', containerName: 'c', project: 'stack', providerOnly: true };
+    const res = await request(app).get(`/api/fleet/nodes/${proxyNodeId}/endpoint-provider`).set('Authorization', adminAuth);
+    expect(res.body).toEqual({ state: 'available', service: 'socket-proxy', containerName: 'c', project: 'stack', providerOnly: false });
+  });
+
+  it('forwards a provider-only Reapply with both flags', async () => {
+    const { calls } = mockRemote(ONLINE());
+    const res = await request(app).post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`).set('Authorization', adminAuth)
+      .send({ replaceEndpointProvider: true, endpointProviderOnly: true });
+    expect(res.status).toBe(202);
+    expect(calls.find(call => call.url.endsWith('/api/system/reapply-compose'))?.body).toEqual({
+      replaceEndpointProvider: true,
+      endpointProviderOnly: true,
+    });
+    expect(res.body.message).toContain('Sencho keeps running');
+  });
+
   it('omits the flag for a plain remote Reapply', async () => {
     const { calls } = mockRemote(ONLINE());
     await request(app).post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`).set('Authorization', adminAuth).send({});
@@ -235,9 +305,9 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
   it('reads the option from the node, and reports unsupported for an older node', async () => {
     const { respond } = mockRemote(ONLINE());
     respond.status = 200;
-    respond.body = { state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1' };
+    respond.body = { state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', project: 'stack', providerOnly: true };
     const res = await request(app).get(`/api/fleet/nodes/${proxyNodeId}/endpoint-provider`).set('Authorization', adminAuth);
-    expect(res.body).toEqual({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1' });
+    expect(res.body).toEqual({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', providerOnly: true, project: 'stack' });
 
     vi.restoreAllMocks();
     mockRemote(ONLINE({ capabilities: ['self-update'] }));
@@ -286,6 +356,29 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
     expect((await remoteStatus()).updateStatus).toBe('completed');
   });
 
+  it('completes a provider-only reapply from the node completion stamp while the process stays up', async () => {
+    // The remote's process start time never changes: only the endpoint stamp does.
+    mockRemote(ONLINE({ startedAt: 1, endpointProviderCompletedAt: Date.now() }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration'),
+      startedAt: Date.now() - 30_000,
+      previousEndpointProviderCompletedAt: null,
+    });
+    expect((await remoteStatus()).updateStatus).toBe('completed');
+  });
+
+  it('does not complete a provider-only reapply before the stamp moves', async () => {
+    mockRemote(ONLINE({ startedAt: 1, endpointProviderCompletedAt: 1_000 }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration'),
+      startedAt: Date.now() - 30_000,
+      previousEndpointProviderCompletedAt: 1_000,
+    });
+    expect((await remoteStatus()).updateStatus).toBe('updating');
+  });
+
   it.each([
     ['endpoint_provider_restored', 'restored its previous Docker endpoint container'],
     ['endpoint_provider_recovery_required', 'could not restore the previous container'],
@@ -320,5 +413,18 @@ describe('GET /api/meta', () => {
   it('omits the pending flag when nothing is pending', async () => {
     const res = await request(app).get('/api/meta');
     expect(res.body).not.toHaveProperty('endpointProviderPending');
+  });
+
+  it('exposes the endpoint completion stamp so the hub can finish a provider-only reapply', async () => {
+    const operations = ImageOperationService.getInstance() as unknown as { endpointProviderCompletedAt: number | null };
+    operations.endpointProviderCompletedAt = 1_700_000_000_000;
+    const res = await request(app).get('/api/meta');
+    operations.endpointProviderCompletedAt = null;
+    expect(res.body.endpointProviderCompletedAt).toBe(1_700_000_000_000);
+  });
+
+  it('omits the completion stamp when no replacement has finished', async () => {
+    const res = await request(app).get('/api/meta');
+    expect(res.body).not.toHaveProperty('endpointProviderCompletedAt');
   });
 });
