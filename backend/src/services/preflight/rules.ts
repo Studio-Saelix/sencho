@@ -3,6 +3,7 @@ import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
 import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
+import { describeComposeVersionSkew } from '../../helpers/composeVersionSkew';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -14,6 +15,7 @@ export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warni
 export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
   'healthcheck-inherited',
   'docker-socket-proxy-client',
+  'compose-version-mismatch',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
@@ -756,6 +758,30 @@ const nodeStateUnavailable: PreflightRule = {
   },
 };
 
+const composeVersionMismatch: PreflightRule = {
+  id: 'compose-version-mismatch',
+  run(ctx) {
+    // No node snapshot means no container set to judge, and an unreadable
+    // running version means the comparison cannot be made at all.
+    if (!ctx.nodeStateAvailable) return [];
+    const skew = ctx.composeVersionSkew;
+    if (!skew || skew.services.length === 0) return [];
+    const single = skew.services.length === 1;
+    return [{
+      ruleId: 'compose-version-mismatch',
+      severity: 'info',
+      title: 'Created by another Docker Compose version',
+      message: `${describeComposeVersionSkew(skew)}. This node deploys with Docker Compose ${skew.runningVersion}, `
+        + `which can record a container's configuration or image differently, so the next deploy or update can recreate `
+        + `${single ? 'it' : 'them'} even if nothing in the file changed. After that, deploys from this node leave `
+        + `${single ? 'that container' : 'those containers'} running, unless another Compose version deploys the stack again.`,
+      remediation: 'Deploy this stack from one place. If it holds Sencho or the Docker socket proxy Sencho uses, Sencho '
+        + `refuses the deploy; recreate ${single ? 'that container' : 'those containers'} once from the host with `
+        + `Docker Compose ${skew.runningVersion} while Sencho is idle.`,
+    }];
+  },
+};
+
 const externalNetworkMissing: PreflightRule = {
   id: 'external-network-missing',
   run(ctx) {
@@ -1141,6 +1167,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   healthcheckInconsistent,
   deploySwarmOnly,
   nodeStateUnavailable,
+  composeVersionMismatch,
   externalNetworkMissing,
   externalVolumeMissing,
   newNetwork,

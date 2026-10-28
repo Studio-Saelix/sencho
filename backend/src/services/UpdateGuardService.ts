@@ -3,6 +3,12 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeDoctorService } from './ComposeDoctorService';
+import { ComposeService } from './ComposeService';
+import {
+  COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+  composeVersionContainerFromLabels,
+  findComposeVersionSkew,
+} from '../helpers/composeVersionSkew';
 import { UpdatePreviewService, isMovingTag, filterPreviewForService, buildDetectionDisabledPreview } from './UpdatePreviewService';
 import { ImageUpdateService } from './ImageUpdateService';
 import { buildEffectiveServiceModel, type EffectiveServiceModelResult } from './effectiveServiceModel';
@@ -17,6 +23,7 @@ import {
   backupSlotSignal,
   buildRollbackItems,
   buildServicesSignal,
+  composeVersionSignal,
   containersSignal,
   describeRollbackManagedInputs,
   storedComposeCoverage,
@@ -99,6 +106,7 @@ export class UpdateGuardService {
         const mounts = (inspect.Mounts ?? []).map(m =>
           m.Type === 'volume' ? `volume ${m.Name ?? 'unnamed'}` : `${m.Type} ${m.Source ?? ''}`.trim(),
         );
+        const compose = composeVersionContainerFromLabels(info.Labels);
         return {
           name,
           state: inspect.State?.Status ?? info.State ?? 'unknown',
@@ -107,6 +115,9 @@ export class UpdateGuardService {
           hasHealthcheck: isDockerHealthcheckActive(inspect.Config?.Healthcheck?.Test),
           restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
           mounts,
+          service: compose.service,
+          composeVersion: compose.composeVersion,
+          oneOff: compose.oneOff,
         };
       }),
     );
@@ -172,6 +183,16 @@ export class UpdateGuardService {
     ];
     if (serviceName) {
       signals.push(serviceSignal(this.resolveServiceMembership(model, serviceName)));
+    } else if (containers !== 'error') {
+      // Stack-scope only: a service-scoped update force-recreates the selected
+      // service and leaves the others alone, so the version of its siblings is
+      // not this verdict's business. When the container probe failed, its own
+      // signal already says the state could not be read.
+      const runningVersion = await this.collect('compose version', stackName, () =>
+        withTimeout(ComposeService.getInstance(nodeId).composeVersion(), COMPOSE_VERSION_PROBE_TIMEOUT_MS, 'readiness compose version'));
+      signals.push(composeVersionSignal(runningVersion === 'error'
+        ? 'error'
+        : findComposeVersionSkew(containers, runningVersion)));
     }
 
     const advisories = serviceName

@@ -27,6 +27,7 @@ const {
   mockFsSize,
   mockBuildEffectiveServiceModel,
   mockGetGitSource,
+  mockComposeVersion,
 } = vi.hoisted(() => ({
   mockListContainers: vi.fn(),
   mockGetContainer: vi.fn(),
@@ -40,6 +41,7 @@ const {
   mockFsSize: vi.fn(),
   mockBuildEffectiveServiceModel: vi.fn(),
   mockGetGitSource: vi.fn(),
+  mockComposeVersion: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', () => ({
@@ -55,6 +57,10 @@ vi.mock('../services/DockerController', () => ({
 
 vi.mock('../services/ComposeDoctorService', () => ({
   ComposeDoctorService: { getInstance: () => ({ getLatest: mockGetLatest }) },
+}));
+
+vi.mock('../services/ComposeService', () => ({
+  ComposeService: { getInstance: () => ({ composeVersion: mockComposeVersion }) },
 }));
 
 vi.mock('../services/UpdatePreviewService', async (importOriginal) => ({
@@ -129,6 +135,7 @@ const inspectResult = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetGlobalSettings.mockReturnValue({ host_disk_limit: '90' });
+  mockComposeVersion.mockResolvedValue('5.6.0');
   // Sensible defaults for the rollback-readiness inputs (only computeRollbackReadiness reads these).
   mockGetBackupEnvSummary.mockResolvedValue({ exists: true, envPresent: true, keys: ['DB_HOST'] });
   mockEnvExists.mockResolvedValue(true);
@@ -180,6 +187,32 @@ describe('UpdateGuardService.probeContainers', () => {
 
     await expect(UpdateGuardService.getInstance().probeContainers(0, 'app')).rejects.toThrow('daemon hiccup');
   });
+
+  it('maps the Compose labels, treating an empty label as absent', async () => {
+    mockListContainers.mockResolvedValue([
+      {
+        Id: 'aaa',
+        Names: ['/app-web-1'],
+        State: 'running',
+        Labels: {
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.version': '2.38.1',
+          'com.docker.compose.oneoff': 'True',
+        },
+      },
+      {
+        Id: 'bbb',
+        Names: ['/app-db-1'],
+        State: 'running',
+        Labels: { 'com.docker.compose.service': '', 'com.docker.compose.version': '' },
+      },
+    ]);
+    mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
+
+    const probes = await UpdateGuardService.getInstance().probeContainers(0, 'app');
+    expect(probes[0]).toMatchObject({ service: 'web', composeVersion: '2.38.1', oneOff: true });
+    expect(probes[1]).toMatchObject({ service: null, composeVersion: null, oneOff: false });
+  });
 });
 
 describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
@@ -224,6 +257,78 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
     expect(report.verdict).toBe('ready');
   });
+
+  /** Every input other than the Compose version answers healthy. */
+  function healthyCollaborators(containers: unknown[] = [], composeVersion: string | null = '5.6.0') {
+    mockGetLatest.mockReturnValue({ activeStatus: 'pass' });
+    mockGetOpenDriftFindings.mockReturnValue([]);
+    mockListContainers.mockResolvedValue(containers);
+    mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
+    mockGetPreview.mockResolvedValue({
+      stack_name: 'app',
+      images: [],
+      build_services: [],
+      summary: {
+        has_update: false, primary_image: null, current_tag: null, next_tag: null,
+        semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+        has_build_services: false, rebuild_available: false, check_status: 'ok', verification_failed: false, verification_error: null,
+      },
+      rollback_target: null,
+      changelog: null,
+    });
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 42 }]);
+    mockComposeVersion.mockResolvedValue(composeVersion);
+  }
+
+  const labeled = (service: string, version: string) => ({
+    Id: `${service}-1`,
+    Names: [`/app-${service}-1`],
+    State: 'running',
+    Labels: {
+      'com.docker.compose.service': service,
+      'com.docker.compose.version': version,
+    },
+  });
+
+  it('shows the Compose version as ok when every container matches', async () => {
+    healthyCollaborators([labeled('web', '5.6.0')]);
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+    const signal = report.signals.find(s => s.id === 'compose_version');
+    expect(signal?.status).toBe('ok');
+    expect(report.verdict).toBe('ready');
+  });
+
+  it('warns, without blocking, when a container was created by another version', async () => {
+    healthyCollaborators([labeled('web', '2.38.1'), labeled('db', '2.38.1')]);
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+    const signal = report.signals.find(s => s.id === 'compose_version');
+    expect(signal?.status).toBe('warning');
+    expect(signal?.detail).toContain('db and web were created by Docker Compose 2.38.1');
+    expect(report.verdict).toBe('ready_with_warnings');
+  });
+
+  it('reports an informational unknown when the version probe rejects, and still returns', async () => {
+    healthyCollaborators([labeled('web', '2.38.1')]);
+    mockComposeVersion.mockRejectedValue(new Error('compose hung'));
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+    const signal = report.signals.find(s => s.id === 'compose_version');
+    expect(signal?.status).toBe('unknown');
+    expect(signal?.affectsVerdict).toBe(false);
+    expect(report.verdict).toBe('ready');
+  });
+
+  it('reports an informational unknown when the version probe never answers, and still returns', async () => {
+    healthyCollaborators([labeled('web', '2.38.1')]);
+    mockComposeVersion.mockReturnValue(new Promise(() => {}));
+    // The probe is wrapped in the guard's own bounded wait; the report returns
+    // when that fires rather than hanging on Compose.
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+    const signal = report.signals.find(s => s.id === 'compose_version');
+    expect(signal?.status).toBe('unknown');
+    expect(signal?.affectsVerdict).toBe(false);
+    expect(report.verdict).toBe('ready');
+  }, 10_000);
 });
 
 describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
@@ -275,6 +380,14 @@ describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
     // update_preview signal is derived from the filtered summary (recomputed for 'web' only).
     const previewSig = report.signals.find(s => s.id === 'update_preview');
     expect(previewSig?.status).toBe('ok');
+  });
+
+  it('omits the Compose version signal, which belongs to a full-stack update', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.signals.some(s => s.id === 'compose_version')).toBe(false);
   });
 
   it('throws SingleServiceUpdateReadinessError for a single-service stack', async () => {

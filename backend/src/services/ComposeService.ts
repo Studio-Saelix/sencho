@@ -69,10 +69,19 @@ import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import {
   DockerEndpointProtectedError,
   evaluateDockerEndpointGuard,
+  listNodeContainers,
   type DockerEndpointRefusal,
   type EndpointMutation,
   type LocalImageLookup,
 } from '../helpers/dockerEndpointGuard';
+import {
+  COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+  composeVersionContainerFromLabels,
+  describeComposeVersionSkew,
+  findComposeVersionSkew,
+  type ComposeVersionContainer,
+} from '../helpers/composeVersionSkew';
+import { withTimeout } from '../utils/withTimeout';
 import type { NotificationCategory } from './NotificationService';
 
 /** True when a generation capture recorded an invocation object (prefix may be empty). */
@@ -188,9 +197,6 @@ const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
 const EMPTY_ENV_FILE = '/dev/null';
-
-/** `docker compose version --short` is a local command and must answer quickly; a hung one must not stall a deploy's guard. */
-const COMPOSE_VERSION_TIMEOUT_MS = 5_000;
 
 /** The error line of `docker compose config` stderr: Compose prints warnings (`level=warning`, `WARN`) before the failure. */
 function renderErrorLine(stderr: string): string {
@@ -391,13 +397,57 @@ export class ComposeService {
    * otherwise call unchanged; null when it cannot be read. The same binary is
    * spawned as for a deploy, so a bundle, wrapper, or PATH difference is seen.
    */
-  private async composeVersion(): Promise<string | null> {
+  public async composeVersion(): Promise<string | null> {
     try {
-      const stdout = await this.captureCompose(['version', '--short'], this.baseDir, COMPOSE_VERSION_TIMEOUT_MS);
+      const stdout = await this.captureCompose(['version', '--short'], this.baseDir, COMPOSE_VERSION_PROBE_TIMEOUT_MS);
       return stdout.trim() || null;
     } catch (error) {
-      console.warn('[ComposeService] compose version unavailable for the Docker endpoint guard:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      console.warn('[ComposeService] compose version unavailable:', sanitizeForLog(getErrorMessage(error, 'unknown')));
       return null;
+    }
+  }
+
+  /**
+   * Explain, in the live deploy output, that containers another `docker compose`
+   * version created can be recreated even though nothing changed. Written just
+   * before Compose runs `up`, after the endpoint guard has allowed the
+   * operation. Best-effort and bounded: a failure or timeout writes nothing and
+   * never delays the operation past the caps.
+   */
+  private async noteComposeVersionSkew(
+    stackName: string,
+    operation: 'deploy' | 'update',
+    sendOutput: (data: string) => void,
+  ): Promise<void> {
+    try {
+      const listed = await withTimeout(
+        listNodeContainers(this.nodeId, stackName),
+        COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+        'compose version notice container list',
+      );
+      // Nothing to explain for a first deploy, and no reason to probe the
+      // version when no container exists to be recreated.
+      if (listed.stack.length === 0) return;
+      const running = await withTimeout(
+        this.composeVersion(),
+        COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+        'compose version notice probe',
+      );
+      const containers: ComposeVersionContainer[] = listed.stack
+        .map(container => composeVersionContainerFromLabels(container.Labels));
+      const skew = findComposeVersionSkew(containers, running);
+      if (!skew || skew.services.length === 0) return;
+      const possessive = skew.services.length === 1 ? 'its' : 'their';
+      sendOutput(
+        `=== Docker Compose ${skew.runningVersion} runs this ${operation}; ${describeComposeVersionSkew(skew)}, `
+        + `and can be recreated even if ${possessive} configuration is unchanged ===\n`,
+      );
+    } catch (error) {
+      // A notice must never fail or delay the deploy it explains.
+      console.warn(
+        '[ComposeService] Compose version notice unavailable for %s; the %s continues:',
+        sanitizeForLog(stackName), operation, sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
     }
   }
 
@@ -1654,6 +1704,10 @@ export class ComposeService {
           } else {
             args = await this.authoredComposeArgs(stackName, upAction, stackDir);
           }
+          // The notice runs before the gates are superseded: a crash inside this
+          // bounded, best-effort check must not leave a running workload with its
+          // gate already retired.
+          await this.noteComposeVersionSkew(stackName, 'deploy', sendOutput);
           // End the gates from any earlier run here, after the arguments and the
           // registry auth have resolved and immediately before the compose up
           // replaces the containers they are observing, so neither a refused
@@ -2687,6 +2741,10 @@ export class ComposeService {
       await this.withRegistryAuth(async (env) => {
         sendOutput('=== Recreating containers ===\n');
         const args = await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']);
+        // Before the gates are superseded: a crash inside this bounded,
+        // best-effort check must not leave a running workload with its gate
+        // already retired.
+        await this.noteComposeVersionSkew(stackName, 'update', sendOutput);
         // End the gates from any earlier run here, for the same reason as the
         // deploy path: after the arguments and the registry auth have resolved,
         // and immediately before the compose up replaces the containers they are
