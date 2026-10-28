@@ -62,7 +62,7 @@ export interface ImageOperation {
   failureCode?: FailureCode;
   /** Operator-facing reason for a failure, when one is known. */
   failureDetail?: string;
-  /** Whether a failed Docker endpoint replacement put the previous container back. */
+  /** Whether a failed replacement restored the previous container and Sencho then confirmed it reaches Docker through it. */
   rollback: { attempted: false } | { attempted: true; restored: boolean; error: string | null };
   preflightFingerprint?: string;
   /** Set when the operation also recreates the container carrying this node's Docker API. */
@@ -445,7 +445,7 @@ export class ImageOperationService {
       console.error('[ImageOperation] Docker endpoint outcome watch failed:', error);
       const current = await this.getCurrentOperation().catch(() => null);
       if (current && current.operationId === operation.operationId && NON_TERMINAL_STATES.includes(current.state)) {
-        const detail = `Replacing the Docker endpoint "${operation.endpointProvider?.service ?? 'the Docker endpoint'}" failed while Sencho was waiting for the helper: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that the Docker endpoint runs and that Sencho reaches Docker, then retry.`;
+        const detail = `Replacing the Docker endpoint "${operation.endpointProvider?.service ?? 'the Docker endpoint'}" failed while Sencho was waiting for or applying the helper's outcome: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that the Docker endpoint runs and that Sencho reaches Docker, then retry.`;
         SelfUpdateService.getInstance().recordUpdateFailure(detail, 'endpoint_provider_recovery_required');
         await this.fail(current, 'endpoint_provider_recovery_required', detail)
           .catch(writeError => console.error('[ImageOperation] Could not persist the Docker endpoint failure:', writeError));
@@ -702,8 +702,9 @@ export class ImageOperationService {
       console.log(`[ImageOperation] Docker endpoint "${service}" replaced and verified`);
       return;
     }
-    const rollbackAttempted = outcome?.rollback.attempted === true;
-    const helperRestored = rollbackAttempted && outcome.rollback.restored === true;
+    const rollback = outcome?.rollback;
+    const rollbackAttempted = rollback?.attempted === true;
+    const helperRestored = rollback?.attempted === true && rollback.restored === true;
     let restored = helperRestored;
     const provider = operation.endpointProvider;
     // The helper proved the restored container runs. Whoever is finalizing can
@@ -732,15 +733,15 @@ export class ImageOperationService {
       detail = `Replacing the Docker endpoint "${service}" failed: ${cause} The previous "${service}" container was restored and Sencho reaches Docker again. Fix the Compose configuration of "${service}", then run Reapply again.`;
     } else if (helperRestored) {
       detail = `Replacing the Docker endpoint "${service}" failed: ${cause} The previous "${service}" container was restored, but Sencho could not reach Docker through it (${restoreDetail ?? 'no detail'}). Check that service and its host socket on that node. ${recoveryHint}`;
-    } else if (rollbackAttempted) {
-      detail = `Replacing the Docker endpoint "${service}" failed: ${cause} The previous container could not be restored${outcome?.rollback.error ? ` (${outcome.rollback.error})` : ''}. ${recoveryHint}`;
+    } else if (rollback?.attempted) {
+      detail = `Replacing the Docker endpoint "${service}" failed: ${cause} The previous container could not be restored${rollback.error ? ` (${rollback.error})` : ''}. ${recoveryHint}`;
     } else if (outcome) {
       detail = `Replacing the Docker endpoint "${service}" did not start: ${cause} The previous "${service}" container was not touched by the helper. Check the Compose configuration and the helper log in the Sencho data directory under ${helperLogPath}, then try again.`;
     } else {
       detail = `The replacement helper did not report an outcome in time, so Sencho cannot confirm whether "${service}" was replaced or restored. Check that service and its host socket on that node. The helper log is in the Sencho data directory under ${helperLogPath}.`;
     }
-    current.rollback = outcome && rollbackAttempted
-      ? { attempted: true, restored, error: outcome.rollback.error }
+    current.rollback = rollback?.attempted
+      ? { attempted: true, restored, error: rollback.error }
       : { attempted: false };
     SelfUpdateService.getInstance().recordUpdateFailure(detail, failureCode);
     console.error('[ImageOperation] Docker endpoint replacement failed:', detail);

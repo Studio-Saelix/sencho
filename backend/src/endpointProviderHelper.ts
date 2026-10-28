@@ -4,94 +4,11 @@
  * It loads only Dockerode and the helper module, never the Sencho app.
  * See helpers/endpointProviderReplace.ts for the sequence.
  */
-import { execFile } from 'child_process';
 import fs from 'fs/promises';
-import Docker from 'dockerode';
-import {
-  HELPER_DATA_DIR,
-  HELPER_SOCKET_PATH,
-  errorText,
-  helperFiles,
-  replaceProvider,
-  stageProviderReplacement,
-  type ContainerSnapshot,
-  type HelperDeps,
-  type ProviderReplacePlan,
-} from './helpers/endpointProviderReplace';
-import { handoffOwner, writeHandoffJson } from './helpers/handoffFile';
+import { HELPER_DATA_DIR, errorText, helperFiles, replaceProvider, stageProviderReplacement, type ProviderOutcome, type ProviderReplacePlan } from './helpers/endpointProviderReplace';
+import { buildDeps } from './helpers/endpointProviderDeps';
 
 const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDeps {
-  const docker = new Docker({ socketPath: HELPER_SOCKET_PATH });
-  // The project name is passed explicitly: a project deployed under a name
-  // other than its directory would otherwise be rendered as a new project and
-  // get a second proxy instead of the replacement.
-  const projectFlags = ['-p', plan.project, ...plan.configFiles.flatMap(file => ['-f', file])];
-  // The helper runs as root; hand the files it publishes to the application
-  // uid so a Sencho running as SENCHO_USER can read the phase marker and
-  // outcome. Every handoff file, including the rollback snapshot, stays 0600
-  // and is owned by that user.
-  const owner = handoffOwner(process.env, typeof process.getuid === 'function' ? process.getuid() : null);
-  const deps: HelperDeps = {
-    docker: {
-      ping: async () => { await docker.ping(); },
-      inspect: async (id) => {
-        try {
-          return await docker.getContainer(id).inspect() as unknown as ContainerSnapshot;
-        } catch (error) {
-          if ((error as { statusCode?: number }).statusCode === 404) return null;
-          throw error;
-        }
-      },
-      serviceContainers: async (project, service) => {
-        const found = await docker.listContainers({
-          all: true,
-          filters: { label: [`com.docker.compose.project=${project}`, `com.docker.compose.service=${service}`] },
-        });
-        return found.map(container => container.Id);
-      },
-      remove: async (id) => { await docker.getContainer(id).remove({ force: true }); },
-      create: async (options) => (await docker.createContainer(options as Docker.ContainerCreateOptions)).id,
-      connect: async (network, id, endpoint) => {
-        await docker.getNetwork(network).connect({ Container: id, EndpointConfig: endpoint });
-      },
-      start: async (id) => { await docker.getContainer(id).start(); },
-      pruneDanglingImages: async () => { await docker.pruneImages({ filters: { dangling: ['true'] } }); },
-    },
-    compose: (args) => new Promise(resolve => {
-      execFile('docker', ['compose', ...projectFlags, ...args], {
-        cwd: plan.workingDir,
-        env: { ...process.env, DOCKER_HOST: `unix://${HELPER_SOCKET_PATH}` },
-        timeout: 10 * 60_000,
-        maxBuffer: 20 * 1024 * 1024,
-      }, (error, stdout, stderr) => {
-        resolve({ ok: !error, output: error ? `${stderr}`.trim() || errorText(error) : `${stdout}` });
-      });
-    }),
-    readJson: async (path) => {
-      try {
-        return JSON.parse(await fs.readFile(path, 'utf8'));
-      } catch {
-        return null;
-      }
-    },
-    writeJson: (path, value) => writeHandoffJson(path, value, owner),
-    removeFile: (path) => fs.rm(path, { force: true }),
-    copyFile: (from, to) => fs.copyFile(from, to),
-    sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
-    now: () => Date.now(),
-    log: (message) => {
-      const line = `${new Date().toISOString()} ${message}\n`;
-      process.stderr.write(line);
-      if (logFile) void fs.appendFile(logFile, line).catch(() => undefined);
-    },
-  };
-  if (!owner && (process.getuid?.() ?? -1) === 0) {
-    deps.log('handoff files will be root-owned: no usable SENCHO_HANDOFF_UID/GID was passed, so a non-root Sencho cannot read them');
-  }
-  return deps;
-}
 
 async function main(): Promise<number> {
   const [mode, operationId] = process.argv.slice(2);
@@ -110,16 +27,18 @@ async function main(): Promise<number> {
     const outcome = await replaceProvider(plan, deps);
     return outcome.ok ? 0 : 1;
   } catch (error) {
-    // An unexpected throw leaves the endpoint in an unknown state: record that
+    // `replaceProvider` handles every post-replacement exception itself, so a
+    // throw here is before the provider was touched. Record that honestly
     // instead of letting Sencho wait out its deadline for a verdict.
-    deps.log(`helper failed: ${errorText(error)}`);
-    await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, operationId), {
+    const outcome: ProviderOutcome = {
       operationId,
       ok: false,
       phase: 'provider',
-      error: `The replacement helper stopped unexpectedly: ${errorText(error)}`,
-      rollback: { restored: false, error: 'not attempted' },
-    });
+      error: `The replacement helper could not start the replacement: ${errorText(error)}`,
+      rollback: { attempted: false },
+    };
+    deps.log(`helper failed: ${errorText(error)}`);
+    await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, operationId), outcome);
     return 1;
   }
 }

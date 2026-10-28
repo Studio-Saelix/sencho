@@ -329,9 +329,11 @@ describe('replaceProvider', () => {
       ok: false,
       phase: 'provider',
       error: expect.stringContaining('read-only'),
-      rollback: { attempted: false, restored: false, error: null },
+      rollback: { attempted: false },
     });
     expect(failing.composeCalls).toEqual([]);
+    expect(failing.removed).toEqual([]);
+    expect(failing.created).toEqual([]);
   });
 
   it.each(['provider', 'stack'] as const)(
@@ -437,6 +439,8 @@ describe('replaceProvider', () => {
     expect(outcome).toMatchObject({ ok: false, phase: 'verify', error: expect.stringContaining('EIO'), rollback: { attempted: true, restored: true } });
     expect(f.composeCalls).toContainEqual(['up', '-d', '--no-deps', '--force-recreate', 'sencho']);
     expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.files.has(helperFiles.recreated(HELPER_DATA_DIR, OP))).toBe(false);
+    expect(f.removedFiles).toContain(helperFiles.recreated(HELPER_DATA_DIR, OP));
   });
 });
 
@@ -476,8 +480,14 @@ describe('parseOutcome', () => {
   });
 
   it('keeps a replacement that never reached rollback as not attempted', () => {
-    expect(parseOutcome({ operationId: OP, ok: false, error: 'x', rollback: { attempted: false, restored: false, error: null } }, OP)).toEqual({
-      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: false, restored: false, error: null },
+    expect(parseOutcome({ operationId: OP, ok: false, error: 'x', rollback: { attempted: false } }, OP)).toEqual({
+      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: false },
+    });
+  });
+
+  it('recognises the legacy explicit "not attempted" marker', () => {
+    expect(parseOutcome({ operationId: OP, ok: false, error: 'x', rollback: { restored: false, error: 'not attempted' } }, OP)).toEqual({
+      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: false },
     });
   });
 });

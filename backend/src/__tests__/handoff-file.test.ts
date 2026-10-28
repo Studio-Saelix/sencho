@@ -3,8 +3,10 @@
  * Sencho that runs as SENCHO_USER, while staying owner-only. The helper is
  * given the application uid/gid and chowns each file before its final rename.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { handoffOwner, writeHandoffJson, type HandoffFileSystem } from '../helpers/handoffFile';
+import { buildDeps } from '../helpers/endpointProviderDeps';
+import type { ProviderReplacePlan } from '../helpers/endpointProviderReplace';
 
 describe('handoffOwner', () => {
   it('uses the application ids when the helper runs as root and both are present', () => {
@@ -62,12 +64,18 @@ describe('writeHandoffJson', () => {
     expect(calls[0]).toMatchObject({ call: 'write', extra: '600', data: JSON.stringify({ id: 1 }) });
     expect(calls[0].path).toMatch(/rollback\.json\.\d+\.tmp$/);
     expect(calls[1]).toMatchObject({ call: 'chmod', extra: '600' });
+    expect(calls[1].path).toMatch(/rollback\.json\.\d+\.tmp$/);
     expect(calls[2]).toMatchObject({ call: 'chown', extra: '1000:1001' });
+    expect(calls[2].path).toMatch(/rollback\.json\.\d+\.tmp$/);
     expect(calls[3]).toMatchObject({ call: 'rename', extra: expect.stringMatching(/rollback\.json$/) });
+    expect(calls[3].path).toMatch(/rollback\.json\.\d+\.tmp$/);
     expect(calls[4]).toMatchObject({ call: 'write', extra: '600' });
     expect(calls[5]).toMatchObject({ call: 'chmod', extra: '600' });
+    expect(calls[5].path).toMatch(/outcome\.json\.\d+\.tmp$/);
     expect(calls[6]).toMatchObject({ call: 'chown', extra: '1000:1001' });
+    expect(calls[6].path).toMatch(/outcome\.json\.\d+\.tmp$/);
     expect(calls[7]).toMatchObject({ call: 'rename', extra: expect.stringMatching(/outcome\.json$/) });
+    expect(calls[7].path).toMatch(/outcome\.json\.\d+\.tmp$/);
   });
 
   it('stays owner-only and skips chown when no owner was passed', async () => {
@@ -76,5 +84,45 @@ describe('writeHandoffJson', () => {
     expect(calls.map(call => call.call)).toEqual(['write', 'chmod', 'rename']);
     expect(calls[0]).toMatchObject({ extra: '600' });
     expect(calls[1]).toMatchObject({ extra: '600' });
+  });
+});
+
+describe('helper wiring', () => {
+  const plan: ProviderReplacePlan = {
+    schemaVersion: 1,
+    operationId: '3f2b8c1e-5a4d-4e7f-9b2a-1c3d5e7f9a0b',
+    mode: 'reapply',
+    project: 'stack',
+    workingDir: '/srv/stack',
+    configFiles: ['/srv/stack/compose.yaml'],
+    providerService: 'socket-proxy',
+    senchoService: 'sencho',
+    providerContainerId: 'proxy-id',
+    composeCopy: null,
+    pruneOnUpdate: false,
+    providerReadySeconds: 60,
+    ackSeconds: 180,
+  };
+
+  it('writes the helper handoff files through the application owner from the environment', async () => {
+    vi.stubEnv('SENCHO_HANDOFF_UID', '1000');
+    vi.stubEnv('SENCHO_HANDOFF_GID', '1001');
+    const calls: string[] = [];
+    const ops: HandoffFileSystem = {
+      writeFile: async (path, _data, options) => { calls.push(`write ${path} ${options.mode.toString(8)}`); },
+      chmod: async (path, mode) => { calls.push(`chmod ${path} ${mode.toString(8)}`); },
+      chown: async (path, uid, gid) => { calls.push(`chown ${path} ${uid}:${gid}`); },
+      rename: async (from, to) => { calls.push(`rename ${from} ${to}`); },
+    };
+    try {
+      const deps = buildDeps(plan, null, ops, 0);
+      await deps.writeJson('/app/data/endpoint-provider/op/outcome.json', { ok: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(calls.some(call => /^write .*\.tmp 600$/.test(call))).toBe(true);
+    expect(calls.some(call => /^chmod .*\.tmp 600$/.test(call))).toBe(true);
+    expect(calls.some(call => /^chown .*\.tmp 1000:1001$/.test(call))).toBe(true);
+    expect(calls.some(call => /^rename .*\.tmp .*outcome\.json$/.test(call))).toBe(true);
   });
 });

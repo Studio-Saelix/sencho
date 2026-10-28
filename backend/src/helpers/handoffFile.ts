@@ -20,9 +20,9 @@ export interface HandoffFileSystem {
  *
  * The replacement helper runs as root even when Sencho itself runs as
  * `SENCHO_USER`. A root-owned `0600` phase marker or outcome cannot be read by
- * the application, so every file it writes (including the rollback snapshot)
- * is handed to the application uid while staying mode `0600` and private to
- * that user.
+ * the application, so every handoff JSON file it writes (including the rollback
+ * snapshot) is handed to the application uid while staying mode `0600` and
+ * private to that user.
  */
 export function handoffOwner(env: NodeJS.ProcessEnv, helperUid: number | null | undefined): HandoffOwner | null {
   if (helperUid !== 0) return null;
@@ -57,4 +57,20 @@ export async function writeHandoffJson(
   await ops.chmod(temporary, 0o600);
   if (owner) await ops.chown(temporary, owner.uid, owner.gid);
   await ops.rename(temporary, filePath);
+}
+
+/** A writeJson-shaped function for the helper's handoff files. */
+export type HandoffWriter = (filePath: string, value: unknown) => Promise<void>;
+
+/**
+ * Binds the environment's application uid/gid to a handoff writer. The helper
+ * uses this so the ownership decision lives in one tested place.
+ */
+export function createHandoffWriter(
+  env: NodeJS.ProcessEnv,
+  helperUid: number | null | undefined,
+  ops: HandoffFileSystem = fs,
+): HandoffWriter {
+  const owner = handoffOwner(env, helperUid);
+  return (filePath, value) => writeHandoffJson(filePath, value, owner, ops);
 }

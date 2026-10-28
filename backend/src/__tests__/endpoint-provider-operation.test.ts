@@ -233,6 +233,8 @@ describe('execute (the process that spawns the helper)', () => {
     });
     expect(operation?.failureDetail).not.toContain('was restored');
     expect(docker.listContainers).not.toHaveBeenCalled();
+    expect(selfUpdate.getLastErrorCode()).toBe('update_failed');
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
   });
 
   it('does not claim a stack-scope restore reaches Docker when this process still cannot', async () => {
@@ -264,8 +266,10 @@ describe('execute (the process that spawns the helper)', () => {
     await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 2_000 });
     const operation = await service.getCurrentOperation();
     expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
-    expect(operation?.failureDetail).toContain('waiting for the helper');
+    expect(operation?.failureDetail).toContain('waiting for or applying the helper');
     expect(service.isEndpointProviderPending()).toBe(false);
+    expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_recovery_required');
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
     await expect(service.claimComposeReapply({ replace: true })).resolves.toEqual({ ok: true });
   });
 
@@ -415,26 +419,27 @@ describe('bounded verification', () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
       expect(ack).toMatchObject({ operationId, ok: false });
     }, { timeout: 2_000 });
-    // The helper then restores the container and reports its own failure.
+    // The helper then reports that its restore failed while Sencho was still
+    // waiting on the stalled request.
     await writeOutcome(operationId, {
       ok: false,
       phase: 'verify',
       error: 'Sencho did not answer',
-      rollback: { restored: true, error: null },
+      rollback: { attempted: true, restored: false, error: 'the new proxy did not start' },
     });
 
     await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
     const operation = await service.getCurrentOperation();
-    // The helper restored the container, but the connectivity claim cannot be
-    // checked while requests stall: recovery required, never a clean restore.
     expect(operation).toMatchObject({
       failureCode: 'endpoint_provider_recovery_required',
-      rollback: { attempted: true, restored: false, error: null },
+      rollback: { attempted: true, restored: false, error: 'the new proxy did not start' },
     });
     // The helper's own verdict was consumed, not replaced by a timeout message.
     expect(operation?.failureDetail).toContain('Sencho did not answer');
     expect(service.isEndpointProviderPending()).toBe(false);
-    expect(docker.resetDockerConnection).toHaveBeenCalled();
+    // Entry reset plus at least one timeout reset: the stalled client is dropped,
+    // not merely abandoned.
+    expect(docker.resetDockerConnection.mock.calls.length).toBeGreaterThanOrEqual(2);
     // The terminal verdict released the claim.
     await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
   });
@@ -542,6 +547,25 @@ describe('reconcileOnStartup (the new process)', () => {
       rollback: { attempted: true, restored: false },
     });
     expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
+  it('applies the marker gate to a claimed Update as well: no marker, no ack, recovery required', async () => {
+    mockAvailableProvider();
+    const service = fastTimings();
+    await service.claimCommunityUpdate({ replaceEndpointProvider: true });
+    const operation = (await service.getCurrentOperation())!;
+    const raw = JSON.parse(await fs.readFile(path.join(tmpDir, 'image-operation-current.json'), 'utf8'));
+    raw.state = 'recreating';
+    await fs.writeFile(path.join(tmpDir, 'image-operation-current.json'), JSON.stringify(raw));
+    const docker = mockDocker({ health: 'healthy' });
+    await service.reconcileOnStartup();
+    await expect(fs.access(handoff(operation.operationId, 'ack'))).rejects.toThrow();
+    expect(docker.resetDockerConnection).not.toHaveBeenCalled();
+    expect(await service.getCurrentOperation()).toMatchObject({
+      kind: 'community_update',
+      state: 'failed',
+      failureCode: 'endpoint_provider_recovery_required',
+    });
   });
 
   it('does not answer or succeed after a restart alone: no marker, no verdict means recovery required', async () => {
