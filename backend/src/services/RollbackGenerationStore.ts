@@ -12,8 +12,9 @@ import { createHash, randomUUID } from 'crypto';
 import { constants as fsConstants, promises as fsPromises } from 'fs';
 import path from 'path';
 import { CryptoService } from './CryptoService';
-import { FileSystemService } from './FileSystemService';
+import { FileSystemService, isModeApplicationError, type DeclarationSetPublication } from './FileSystemService';
 import { isValidStackName } from '../utils/validation';
+import { sanitizeForLog } from '../utils/safeLog';
 import {
   ROLLBACK_GENERATION_SCHEMA_VERSION,
   type ResolvedRollbackInventory,
@@ -31,6 +32,22 @@ const GENERATION_JSON = 'generation.json';
 const FILES_DIR = 'files';
 const PRE_RESTORE_DIR = 'pre-restore';
 const RESTORE_INTENT_FILE = 'restore-intent.json';
+
+/**
+ * Declaration-set brackets of restore transactions that have rewritten the
+ * live files and not yet been committed or reverted, by node, stack, and
+ * generation. A restore is a transaction: the layers are rewritten first, and
+ * the Git side (the applied file list the mesh declaration reader follows)
+ * is restored only after compose and the health probe. Between the two, the
+ * files and the list disagree, so the declaration stays unknown until the
+ * transaction ends. In memory like the brackets themselves: after a restart
+ * nothing counts as published.
+ */
+const pendingRestoreBrackets = new Map<string, DeclarationSetPublication>();
+
+function restoreBracketKey(nodeId: number, stackName: string, generationId: string): string {
+  return `${nodeId}\0${stackName}\0${generationId}`;
+}
 const GIT_MANIFEST_SNAPSHOT = 'git-manifest.v1.json';
 const PRE_RESTORE_INDEX = 'index.json';
 const PRE_RESTORE_BLOBS = 'blobs';
@@ -40,6 +57,13 @@ interface PreRestoreIndexEntry {
   state: 'present' | 'absent' | 'link';
   blobId?: string;
   mode?: number | null;
+  /**
+   * Owner and group of the preimage. A revert hands the file back to them, so
+   * the group bits it publishes are judged against the preimage's group and
+   * not against whatever the restore left on the live file.
+   */
+  uid?: number;
+  gid?: number;
   encrypted?: boolean;
   /**
    * Raw readlink value, for state 'link' (a managed path only unlinked, so the
@@ -123,7 +147,7 @@ async function writePrivate(target: string, data: string | Buffer): Promise<void
 async function readSnapshotBytes(
   fh: import('fs/promises').FileHandle,
   rel: string,
-): Promise<{ bytes: Buffer; mode: number }> {
+): Promise<{ bytes: Buffer; mode: number; uid: number; gid: number }> {
   const st = await fh.stat();
   if (!st.isFile()) {
     throw Object.assign(
@@ -131,7 +155,7 @@ async function readSnapshotBytes(
       { code: 'DIRECTORY_COLLISION' },
     );
   }
-  return { bytes: await fh.readFile(), mode: st.mode & 0o777 };
+  return { bytes: await fh.readFile(), mode: st.mode & 0o777, uid: st.uid, gid: st.gid };
 }
 
 function assertSafeGenerationId(generationId: string): void {
@@ -306,9 +330,13 @@ export class RollbackGenerationStore {
         }
 
         let fileMode: number | null = null;
+        let fileOwner: { uid: number; gid: number } | undefined;
         try {
           const st = await fsPromises.lstat(realPath);
-          if (st.isFile()) fileMode = st.mode & 0o777;
+          if (st.isFile()) {
+            fileMode = st.mode & 0o777;
+            if (process.platform !== 'win32') fileOwner = { uid: st.uid, gid: st.gid };
+          }
         } catch (e) {
           console.warn(
             `[RollbackGenerationStore] Could not read mode for ${relativePath}:`,
@@ -370,6 +398,7 @@ export class RollbackGenerationStore {
           sensitivity: inv.sensitivity,
           encrypted: encrypt,
           mode: fileMode,
+          ...(fileOwner ?? {}),
         });
       }
 
@@ -522,11 +551,18 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     if (!intentPath.startsWith(genResolved + path.sep)) return false;
+    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
     let intentRaw: string;
     try {
       intentRaw = await fsPromises.readFile(intentPath, 'utf8');
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        // No intent means the transaction already ended: a commit that failed
+        // after dropping it still leaves files and Git side in agreement.
+        this.settleRestoreBracket(bracketKey, true);
+        return false;
+      }
+      this.settleRestoreBracket(bracketKey, false);
       throw e;
     }
 
@@ -534,16 +570,37 @@ export class RollbackGenerationStore {
     try {
       intent = JSON.parse(intentRaw) as RollbackRestoreIntent;
     } catch (e) {
+      this.settleRestoreBracket(bracketKey, false);
       throw new Error(
         `Corrupt restore-intent.json for generation ${generationId}: ${(e as Error).message}`,
         { cause: e },
       );
     }
 
-    await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
-    await this.restoreGitSideStateFromIntent(stackName, intent);
-    await fsPromises.rm(intentPath, { force: true });
+    try {
+      await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
+      await this.restoreGitSideStateFromIntent(stackName, intent);
+      await fsPromises.rm(intentPath, { force: true });
+    } catch (e) {
+      this.settleRestoreBracket(bracketKey, false);
+      throw e;
+    }
+    this.settleRestoreBracket(bracketKey, true);
     return true;
+  }
+
+  /** Whether a restore of this generation has rewritten the live files and not yet been committed or reverted by this process. */
+  static isRestoreInFlight(nodeId: number, stackName: string, generationId: string): boolean {
+    return pendingRestoreBrackets.has(restoreBracketKey(nodeId, stackName, generationId));
+  }
+
+  /** End a restore transaction's bracket: whole when its files and Git side agree, unknown otherwise. */
+  private static settleRestoreBracket(key: string, whole: boolean): void {
+    const publication = pendingRestoreBrackets.get(key);
+    if (!publication) return;
+    pendingRestoreBrackets.delete(key);
+    if (whole) publication.complete();
+    else publication.abandon();
   }
 
   /**
@@ -561,11 +618,20 @@ export class RollbackGenerationStore {
     const genResolved = path.resolve(genDir);
     const intentPath = path.resolve(genResolved, RESTORE_INTENT_FILE);
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
+    // While the intent exists the transaction can still be reverted, so a
+    // failure to drop it leaves the bracket pending for that revert to settle.
     if (intentPath.startsWith(genResolved + path.sep)) {
       await fsPromises.rm(intentPath, { force: true });
     }
-    if (preRoot.startsWith(genResolved + path.sep)) {
-      await fsPromises.rm(preRoot, { recursive: true, force: true });
+    try {
+      if (preRoot.startsWith(genResolved + path.sep)) {
+        await fsPromises.rm(preRoot, { recursive: true, force: true });
+      }
+    } finally {
+      // With the intent gone the restored files and Git side agree whether or
+      // not the snapshot could be removed, so a failed cleanup must not hold
+      // the stack unknown.
+      this.settleRestoreBracket(restoreBracketKey(nodeId, stackName, generationId), true);
     }
   }
 
@@ -690,6 +756,7 @@ export class RollbackGenerationStore {
       content: Buffer;
       sensitivity: RollbackGenerationEntry['sensitivity'];
       mode: number | null;
+      owner: { uid: number; gid: number } | undefined;
     }> = [];
     for (const entry of presentByKey.values()) {
       restores.push({
@@ -697,6 +764,8 @@ export class RollbackGenerationStore {
         content: await this.readPresentEntryBytes(genDir, entry),
         sensitivity: entry.sensitivity,
         mode: entry.mode ?? null,
+        // Validated before the first write, like the pre-restore snapshot's.
+        owner: this.recordedWriteOwner(entry.relativePath, entry, 'Generation'),
       });
     }
 
@@ -762,18 +831,50 @@ export class RollbackGenerationStore {
         managedManifestBefore: transactionMeta.managedManifestBefore,
       };
     }
-    await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
-
+    // The restore rewrites several layers one at a time. The bracket keeps the
+    // mesh declaration reader from trusting the mixture; it ends with the
+    // restore transaction, whole when it is committed or reverted. It opens
+    // before the intent exists, so no reader of the intent (the periodic
+    // sweep) can see a restore that is not yet marked in flight.
+    const bracketKey = restoreBracketKey(nodeId, stackName, generationId);
+    const carried = pendingRestoreBrackets.get(bracketKey);
+    const publication = carried ?? fsSvc.beginDeclarationSetPublication(stackName);
+    pendingRestoreBrackets.set(bracketKey, publication);
+    try {
+      await fsPromises.writeFile(intentPath, JSON.stringify(intent), 'utf8');
+    } catch (e) {
+      // Nothing has been rewritten yet.
+      if (!carried) {
+        pendingRestoreBrackets.delete(bracketKey);
+        publication.skip();
+      }
+      throw e;
+    }
     try {
       for (const item of restores) {
-        await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
         const sensitive = item.sensitivity === 'high' || item.sensitivity === 'medium';
         // Sensitive content is always owner-only; other files restore captured mode.
         const targetMode = sensitive ? 0o600 : (item.mode ?? null);
-        if (targetMode === null || process.platform === 'win32') continue;
+        if (targetMode === null || process.platform === 'win32') {
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
+          continue;
+        }
+        // The mode goes through the writer with the bytes. Its group rule
+        // judges the bits against the owner and group the file had at
+        // capture, so a restore that cannot hand the file back to its group
+        // does not publish group access the file never had there, whether the
+        // live file was deleted, belongs to someone else, or was already
+        // moved to this process's group by a save or an earlier restore. A
+        // generation captured before the owner was kept falls back to the
+        // live file's. A mode applied by path afterwards would put the
+        // captured bits back whatever the group.
         try {
-          await fsSvc.chmodStackPath(stackName, item.relativePath, targetMode, scope);
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content, {
+            mode: targetMode,
+            ...(item.owner ? { owner: item.owner } : {}),
+          });
         } catch (e) {
+          if (!isModeApplicationError(e)) throw e;
           if (sensitive) {
             throw Object.assign(
               new Error(
@@ -783,9 +884,12 @@ export class RollbackGenerationStore {
             );
           }
           console.warn(
-            '[RollbackGenerationStore] Could not restore mode on entry:',
-            (e as Error).message,
+            `[RollbackGenerationStore] Could not restore mode on "${sanitizeForLog(item.relativePath)}":`,
+            sanitizeForLog((e as Error).message),
           );
+          // Nothing was published. The bytes still come back, with the mode
+          // the file already had.
+          await fsSvc.writeStackFile(stackName, item.relativePath, item.content);
         }
       }
 
@@ -806,6 +910,8 @@ export class RollbackGenerationStore {
         }
       }
 
+      // The bracket stays open: the Git side still has to be restored, and
+      // commitRestoreTransaction or a revert ends the transaction.
       // Leave restore-intent.json + pre-restore/ until commitRestoreTransaction
       // so a later policy/compose failure can still revert the managed set.
       return manifest;
@@ -814,7 +920,9 @@ export class RollbackGenerationStore {
         await this.revertFromPreRestoreSnapshot(nodeId, stackName, genResolved);
         await this.restoreGitSideStateFromIntent(stackName, intent);
         await fsPromises.rm(intentPath, { force: true });
+        this.settleRestoreBracket(bracketKey, true);
       } catch (revertErr) {
+        this.settleRestoreBracket(bracketKey, false);
         console.error(
           '[RollbackGenerationStore] Failed to revert interrupted restore:',
           (revertErr as Error).message,
@@ -1095,7 +1203,7 @@ export class RollbackGenerationStore {
         // the descriptor the check reads is the one the bytes come from.
         const fh = await fsPromises.open(realSrc, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
         try {
-          const { bytes, mode } = await readSnapshotBytes(fh, rel);
+          const { bytes, mode, uid, gid } = await readSnapshotBytes(fh, rel);
           const blobId = randomUUID();
           const blobPath = path.resolve(blobsRoot, blobId);
           if (!blobPath.startsWith(blobsRoot + path.sep)) continue;
@@ -1115,6 +1223,8 @@ export class RollbackGenerationStore {
             state: 'present',
             blobId,
             mode,
+            uid,
+            gid,
             encrypted,
             linkTarget,
           });
@@ -1142,17 +1252,33 @@ export class RollbackGenerationStore {
     stackName: string,
     genResolved: string,
   ): Promise<void> {
+    // Putting the preimage back rewrites layers one at a time, like the
+    // restore it undoes.
+    await FileSystemService.getInstance(nodeId).publishDeclarationSet(
+      stackName,
+      () => this.putBackPreRestoreSnapshot(nodeId, stackName, genResolved),
+      // Without a snapshot nothing was written.
+      (wrote) => (wrote ? 'whole' : 'untouched'),
+    );
+  }
+
+  /** Resolves true when the snapshot was applied, false when there was none to apply. */
+  private static async putBackPreRestoreSnapshot(
+    nodeId: number,
+    stackName: string,
+    genResolved: string,
+  ): Promise<boolean> {
     const preRoot = path.resolve(genResolved, PRE_RESTORE_DIR);
-    if (!preRoot.startsWith(genResolved + path.sep)) return;
+    if (!preRoot.startsWith(genResolved + path.sep)) return false;
     try {
       await fsPromises.access(preRoot);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw e;
     }
 
     const indexPath = path.resolve(preRoot, PRE_RESTORE_INDEX);
-    if (!indexPath.startsWith(preRoot + path.sep)) return;
+    if (!indexPath.startsWith(preRoot + path.sep)) return false;
 
     let index: PreRestoreIndex;
     try {
@@ -1178,6 +1304,16 @@ export class RollbackGenerationStore {
     const blobsRoot = path.resolve(preRoot, PRE_RESTORE_BLOBS);
     const fsSvc = FileSystemService.getInstance(nodeId);
     const scope = { protectedEnabled: false as const };
+
+    // Refuse a malformed recorded mode or owner before the first file is put
+    // back: a revert that stops at a bad entry halfway leaves the stack in a
+    // mixture that every retry hits again.
+    for (const entry of index.entries) {
+      const rel = posixRel(entry.relativePath);
+      if (!rel || entry.state !== 'present') continue;
+      this.preRestoreWriteMode(rel, entry.mode);
+      this.recordedWriteOwner(rel, entry, 'Pre-restore');
+    }
 
     for (const entry of index.entries) {
       const rel = posixRel(entry.relativePath);
@@ -1252,11 +1388,25 @@ export class RollbackGenerationStore {
       // permissions in one atomic promotion. A permission failure therefore
       // leaves the preimage untouched and this revert throwing, which keeps the
       // snapshot and restore-intent.json for a retry instead of reporting a
-      // compensation that only put the bytes back.
+      // compensation that only put the bytes back. The preimage's owner and
+      // group go with the mode: the live file already belongs to this process
+      // after a restore that could not hand it over, so its group would pass
+      // for the preimage's and put group bits back for a group that never held
+      // the file. Judged against the preimage, a process that cannot put the
+      // file back in its group publishes it without the group bits.
       const mode = this.preRestoreWriteMode(rel, entry.mode);
-      await fsSvc.writeStackFile(stackName, rel, buf, mode === undefined ? undefined : { mode });
+      const owner = this.recordedWriteOwner(rel, entry, 'Pre-restore');
+      await fsSvc.writeStackFile(
+        stackName,
+        rel,
+        buf,
+        mode === undefined && owner === undefined
+          ? undefined
+          : { ...(mode === undefined ? {} : { mode }), ...(owner ? { owner } : {}) },
+      );
     }
     await fsPromises.rm(preRoot, { recursive: true, force: true });
+    return true;
   }
 
   /**
@@ -1277,6 +1427,31 @@ export class RollbackGenerationStore {
       );
     }
     return process.platform === 'win32' ? undefined : recorded;
+  }
+
+  /**
+   * The owner and group to hand a restored or reverted file back to, or
+   * undefined when the record kept none (an index or manifest written before
+   * they were kept) or the platform has no POSIX owners, in which case the
+   * live file's own are carried over. A half-recorded or malformed pair is
+   * refused rather than guessed at, so a corrupt record cannot move a file to
+   * a group it never had.
+   */
+  private static recordedWriteOwner(
+    rel: string,
+    recorded: { uid?: number; gid?: number },
+    source: 'Pre-restore' | 'Generation',
+  ): { uid: number; gid: number } | undefined {
+    const { uid, gid } = recorded;
+    if (uid === undefined && gid === undefined) return undefined;
+    const valid = (id: unknown): id is number => Number.isInteger(id) && (id as number) >= 0 && (id as number) <= 0xffffffff;
+    if (!valid(uid) || !valid(gid)) {
+      throw Object.assign(
+        new Error(`${source} entry for "${rel}" has an invalid owner`),
+        { code: source === 'Pre-restore' ? 'PRE_RESTORE_INDEX_INVALID' : 'GENERATION_MANIFEST_INVALID' },
+      );
+    }
+    return process.platform === 'win32' ? undefined : { uid, gid };
   }
 
   /** Resolve a pre-restore blob id under blobsRoot; rejects traversal. */

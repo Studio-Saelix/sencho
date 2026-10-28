@@ -106,11 +106,12 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # docker/cli uses CalVer and ships vendor.mod instead of go.mod to avoid
 # SemVer compliance requirements. We copy vendor.mod -> go.mod, drop the
 # committed vendor tree, bump golang.org/x/net to v0.60.0, golang.org/x/text
-# to v0.42.0, google.golang.org/grpc to v1.83.2, and
-# github.com/moby/go-archive to v0.3.0, and build with -mod=mod so the patched
-# modules are resolved from the module proxy. x/net v0.53.0 is flagged for six
-# HIGH advisories (CVE-2026-25680, -25681, -27136, -39821, -42502, -42506;
-# x/net/html parsing and x/net/idna). x/net v0.55.0 is flagged for
+# to v0.42.0, google.golang.org/grpc to v1.83.2,
+# github.com/moby/go-archive to v0.3.0, and github.com/go-jose/go-jose/v4 to
+# v4.1.6, and build with -mod=mod so the patched modules are resolved from the
+# module proxy. x/net v0.53.0 is flagged for six HIGH advisories
+# (CVE-2026-25680, -25681, -27136, -39821, -42502, -42506; x/net/html parsing
+# and x/net/idna). x/net v0.55.0 is flagged for
 # CVE-2026-46600 (dnsmessage denial of service), and v0.58.0 for
 # CVE-2026-78669 (HTTP/2 SETTINGS-flood denial of service), fixed in v0.60.0,
 # whose minimum golang.org/x/text is v0.42.0. x/text v0.37.0 is flagged for
@@ -119,8 +120,8 @@ RUN if [ "$TARGETARCH" = "$BUILDARCH" ]; then \
 # CVE-2026-84304 (unauthenticated peer OOM via fragmented HTTP/2 DATA frames
 # buffered per-message). go-archive v0.2.0 is flagged for CVE-2026-17106
 # (HIGH), where a crafted tar archive can write outside the extraction
-# directory. go-jose v4.1.4 is flagged for CVE-2026-116587 (HIGH, denial of
-# service while parsing JWKs that contain RSA keys), fixed in v4.1.6.
+# directory. go-jose v4.1.4 is flagged for CVE-2026-116587 (HIGH), where
+# crafted RSA parameters in a JWK make key validation consume cubic CPU time.
 # Removing vendor/ keeps -mod=mod from reading the stale copy, and
 # avoids `go mod tidy` (which does not run cleanly against docker/cli's
 # vendor.mod manifest). This stage now fetches modules at build time rather

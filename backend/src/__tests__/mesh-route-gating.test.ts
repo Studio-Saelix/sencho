@@ -75,6 +75,7 @@ describe('mesh is not tier-gated', () => {
         { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/enable` },
         { method: 'post', path: () => `/api/mesh/nodes/${defaultNodeId}/disable` },
         { method: 'get', path: () => '/api/mesh/local-services/demo' },
+        { method: 'get', path: () => '/api/mesh/local-declared-services/demo' },
         { method: 'get', path: () => '/api/mesh/local-stacks' },
         { method: 'put', path: () => '/api/mesh/local-override/demo' },
         { method: 'delete', path: () => '/api/mesh/local-override/demo' },
