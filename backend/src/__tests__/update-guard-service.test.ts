@@ -132,6 +132,15 @@ const inspectResult = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/** A listed container the readiness probes see as part of the `app` stack. */
+const listed = (id: string, name: string, over: Record<string, unknown> = {}) => ({
+  Id: id,
+  Names: [`/${name}`],
+  State: 'running',
+  Labels: { 'com.docker.compose.project': 'app' },
+  ...over,
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetGlobalSettings.mockReturnValue({ host_disk_limit: '90' });
@@ -148,8 +157,8 @@ afterAll(() => {
 describe('UpdateGuardService.probeContainers', () => {
   it('skips a container that vanished between list and inspect (404)', async () => {
     mockListContainers.mockResolvedValue([
-      { Id: 'aaa', Names: ['/app-web-1'], State: 'running' },
-      { Id: 'bbb', Names: ['/app-db-1'], State: 'running' },
+      listed('aaa', 'app-web-1'),
+      listed('bbb', 'app-db-1'),
     ]);
     mockGetContainer.mockImplementation((id: string) => ({
       inspect: id === 'bbb'
@@ -164,7 +173,7 @@ describe('UpdateGuardService.probeContainers', () => {
 
   it('treats Test NONE as no effective healthcheck', async () => {
     mockListContainers.mockResolvedValue([
-      { Id: 'aaa', Names: ['/app-web-1'], State: 'running' },
+      listed('aaa', 'app-web-1'),
     ]);
     mockGetContainer.mockReturnValue({
       inspect: vi.fn().mockResolvedValue(inspectResult({
@@ -179,7 +188,7 @@ describe('UpdateGuardService.probeContainers', () => {
 
   it('propagates non-404 inspect failures so the whole signal degrades honestly', async () => {
     mockListContainers.mockResolvedValue([
-      { Id: 'aaa', Names: ['/app-web-1'], State: 'running' },
+      listed('aaa', 'app-web-1'),
     ]);
     mockGetContainer.mockReturnValue({
       inspect: vi.fn().mockRejectedValue(Object.assign(new Error('daemon hiccup'), { statusCode: 500 })),
@@ -190,22 +199,21 @@ describe('UpdateGuardService.probeContainers', () => {
 
   it('maps the Compose labels, treating an empty label as absent', async () => {
     mockListContainers.mockResolvedValue([
-      {
-        Id: 'aaa',
-        Names: ['/app-web-1'],
-        State: 'running',
+      listed('aaa', 'app-web-1', {
         Labels: {
+          'com.docker.compose.project': 'app',
           'com.docker.compose.service': 'web',
           'com.docker.compose.version': '2.38.1',
           'com.docker.compose.oneoff': 'True',
         },
-      },
-      {
-        Id: 'bbb',
-        Names: ['/app-db-1'],
-        State: 'running',
-        Labels: { 'com.docker.compose.service': '', 'com.docker.compose.version': '' },
-      },
+      }),
+      listed('bbb', 'app-db-1', {
+        Labels: {
+          'com.docker.compose.project': 'app',
+          'com.docker.compose.service': '',
+          'com.docker.compose.version': '',
+        },
+      }),
     ]);
     mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
 
@@ -237,7 +245,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
   it('produces a ready verdict from healthy collaborator outputs', async () => {
     mockGetLatest.mockReturnValue({ activeStatus: 'pass' });
     mockGetOpenDriftFindings.mockReturnValue([]);
-    mockListContainers.mockResolvedValue([{ Id: 'aaa', Names: ['/app-web-1'], State: 'running' }]);
+    mockListContainers.mockResolvedValue([listed('aaa', 'app-web-1')]);
     mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
     mockGetPreview.mockResolvedValue({
       stack_name: 'app',
@@ -286,6 +294,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     Names: [`/app-${service}-1`],
     State: 'running',
     Labels: {
+      'com.docker.compose.project': 'app',
       'com.docker.compose.service': service,
       'com.docker.compose.version': version,
     },
@@ -308,6 +317,46 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     expect(report.verdict).toBe('ready_with_warnings');
   });
 
+  it('finds the stack by working directory when its Compose project name differs', async () => {
+    // The directory is `app` but Compose runs under the project name
+    // `production` (a top-level `name:` key). A project-label-only lookup would
+    // see no containers and positively report matching versions.
+    const stackDir = path.join(mockState.composeDir, 'app');
+    const named = (service: string, version: string) => ({
+      Id: `production-${service}-1`,
+      Names: [`/production-${service}-1`],
+      State: 'running',
+      Labels: {
+        'com.docker.compose.project': 'production',
+        'com.docker.compose.project.working_dir': stackDir,
+        'com.docker.compose.service': service,
+        'com.docker.compose.version': version,
+      },
+    });
+    healthyCollaborators([
+      named('web', '2.38.1'),
+      // Another project whose service shares the name must not leak in.
+      {
+        Id: 'other-web-1',
+        Names: ['/other-web-1'],
+        State: 'running',
+        Labels: {
+          'com.docker.compose.project': 'other',
+          'com.docker.compose.project.working_dir': path.join(mockState.composeDir, 'other'),
+          'com.docker.compose.service': 'web',
+          'com.docker.compose.version': '2.38.1',
+        },
+      },
+    ]);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+    const signal = report.signals.find(s => s.id === 'compose_version');
+    expect(signal?.status).toBe('warning');
+    expect(signal?.detail).toContain('web was created by Docker Compose 2.38.1');
+    expect(report.signals.find(s => s.id === 'containers')?.detail).toContain('1 container');
+    expect(report.verdict).toBe('ready_with_warnings');
+  });
+
   it('reports an informational unknown when the version probe rejects, and still returns', async () => {
     healthyCollaborators([labeled('web', '2.38.1')]);
     mockComposeVersion.mockRejectedValue(new Error('compose hung'));
@@ -318,17 +367,36 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     expect(report.verdict).toBe('ready');
   });
 
-  it('reports an informational unknown when the version probe never answers, and still returns', async () => {
+  it('bounds a hung version probe inside the dialog deadline and keeps every other signal', async () => {
     healthyCollaborators([labeled('web', '2.38.1')]);
     mockComposeVersion.mockReturnValue(new Promise(() => {}));
-    // The probe is wrapped in the guard's own bounded wait; the report returns
-    // when that fires rather than hanging on Compose.
-    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
-    const signal = report.signals.find(s => s.id === 'compose_version');
-    expect(signal?.status).toBe('unknown');
-    expect(signal?.affectsVerdict).toBe(false);
-    expect(report.verdict).toBe('ready');
-  }, 10_000);
+    // A second network-backed input is slow too; both start together, so the
+    // version probe must not be appended after the others.
+    mockGetPreview.mockReturnValue(new Promise(() => {}));
+
+    vi.useFakeTimers();
+    try {
+      const pending = UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+      // The dialog aborts at 4,000 ms. Both hung inputs share the 3,000 ms
+      // readiness budget, so the report settles with 1,000 ms of transport
+      // margin.
+      await vi.advanceTimersByTimeAsync(3_000);
+      const report = await pending;
+
+      expect(report.signals.find(s => s.id === 'compose_version')).toMatchObject({
+        status: 'unknown',
+        affectsVerdict: false,
+      });
+      expect(report.signals.find(s => s.id === 'update_preview')).toMatchObject({
+        status: 'unknown',
+        affectsVerdict: false,
+      });
+      expect(report.signals.find(s => s.id === 'containers')?.status).toBe('ok');
+      expect(report.verdict).toBe('ready');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
@@ -362,8 +430,8 @@ describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
     mockFsSize.mockResolvedValue([{ mount: '/', use: 42 }]);
     mockListContainers.mockResolvedValue([
-      { Id: 'web1', Names: ['/web'], State: 'running' },
-      { Id: 'db1', Names: ['/db'], State: 'running' },
+      listed('web1', 'web', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'web' } }),
+      listed('db1', 'db', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'db' } }),
     ]);
     mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
   });
@@ -427,8 +495,12 @@ describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
   it('reports a sibling advisory without affecting the verdict', async () => {
     mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
     mockListContainers.mockResolvedValue([
-      { Id: 'web1', Names: ['/web'], State: 'running' },
-      { Id: 'db1', Names: ['/db'], State: 'exited', ExitCode: 1 },
+      listed('web1', 'web', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'web' } }),
+      listed('db1', 'db', {
+        State: 'exited',
+        ExitCode: 1,
+        Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'db' },
+      }),
     ]);
     mockGetContainer.mockImplementation((id: string) => ({
       inspect: vi.fn().mockResolvedValue(id === 'db1'

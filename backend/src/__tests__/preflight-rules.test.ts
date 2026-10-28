@@ -992,7 +992,19 @@ describe('compose-version-mismatch', () => {
     const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'proxy', createdBy: ['2.38.1'] }] } })), 'compose-version-mismatch');
     expect(f[0].message).toContain('proxy was created by Docker Compose 2.38.1');
     expect(f[0].message).toContain('can recreate it even if nothing in the file changed');
-    expect(f[0].remediation).toContain('recreate that container once');
+    expect(f[0].remediation).toContain('recreate the affected container once');
+  });
+
+  it('qualifies the refusal by whether a protected container would be recreated', () => {
+    // An unrelated service mismatches while the protected proxy is unchanged,
+    // so this deploy is permitted; the remediation must not claim a refusal
+    // merely because the stack holds Sencho or its proxy.
+    const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'web', createdBy: ['2.38.1'] }] } })), 'compose-version-mismatch');
+    expect(f).toHaveLength(1);
+    expect(f[0].remediation).toContain('only when it would recreate a protected container');
+    expect(f[0].remediation).toContain('leaves those containers unchanged goes through');
+    expect(f[0].remediation).toContain('recreate the affected container once');
+    expect(f[0].remediation).not.toContain('If it holds Sencho');
   });
 
   it('says a container that records no version', () => {
