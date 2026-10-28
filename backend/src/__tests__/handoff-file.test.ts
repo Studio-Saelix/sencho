@@ -99,9 +99,16 @@ describe('writeHandoffJson', () => {
         ? { uid: process.getuid(), gid: process.getgid() }
         : null;
       await writeHandoffJson(file, { ok: true }, owner);
-      const info = await fs.stat(file);
-      expect(info.mode & 0o777).toBe(0o600);
-      expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ ok: true });
+      // Stat and read through one descriptor: a path-based stat followed by a
+      // read is a time-of-check/time-of-use race and CodeQL rejects it.
+      const handle = await fs.open(file, 'r');
+      try {
+        const info = await handle.stat();
+        expect(info.mode & 0o777).toBe(0o600);
+        expect(JSON.parse(await handle.readFile('utf8'))).toEqual({ ok: true });
+      } finally {
+        await handle.close();
+      }
       expect(await fs.readdir(dir)).toEqual(['outcome.json']);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
