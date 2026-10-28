@@ -68,6 +68,11 @@ export function LocalUpdateConfirmDialog({
     const effectiveScope: EndpointProviderScope = endpointAvailable
       ? (scope === 'only' && !providerOnlyOffered ? 'with-sencho' : scope)
       : 'none';
+    // A handoff or the editor action asked for endpoint-only, but this node can
+    // only recreate the endpoint with Sencho. Do not leave the operator guessing
+    // why the scope moved: the preview now restarts Sencho.
+    const requestedOnlyUnavailable = isReapply && scope === 'only'
+      && endpointAvailable && !providerOnlyOffered;
 
     let kicker = 'LOCAL · UPDATE';
     if (isRemoteReapply) kicker = 'REMOTE · REAPPLY';
@@ -228,6 +233,12 @@ export function LocalUpdateConfirmDialog({
                         carrying Docker access for {nodeLabel}. Recreating replaces it even when its
                         configuration did not change.
                     </p>
+                    {requestedOnlyUnavailable ? (
+                        <p className="text-xs text-stat-subtitle">
+                            This node can recreate its Docker endpoint only together with Sencho, so the
+                            preview recreates both and restarts Sencho.
+                        </p>
+                    ) : null}
                 </div>
             ) : null}
             {!isReapply ? (

@@ -122,6 +122,12 @@ export class ImageOperationService {
   private stateWriteQueue: Promise<void> = Promise.resolve();
   /** True while this process runs or reconciles a Docker endpoint replacement. */
   private endpointProviderPending = false;
+  /**
+   * True only while startup is still reading the previous operation. The first
+   * /api/meta answer can arrive before that read resolves; reporting pending
+   * during it stops Fleet from treating the restart alone as completion.
+   */
+  private startupReconciling = false;
   /** Wall-clock time of the last verified Docker endpoint replacement in this process. */
   private endpointProviderCompletedAt: number | null = null;
   /**
@@ -365,7 +371,7 @@ export class ImageOperationService {
 
   /** True while a Docker endpoint replacement is running or being verified on this node. */
   public isEndpointProviderPending(): boolean {
-    return this.endpointProviderPending;
+    return this.endpointProviderPending || this.startupReconciling;
   }
 
   /**
@@ -378,7 +384,13 @@ export class ImageOperationService {
   }
 
   public async reconcileOnStartup(): Promise<void> {
-    const operation = await this.getCurrentOperation();
+    // Set before the first await: /api/meta may answer while the operation file
+    // is still being read, and a remote Reapply must not complete on the process
+    // start alone during that window. It clears as soon as the operation type
+    // is known; an endpoint replacement then holds endpointProviderPending.
+    this.startupReconciling = true;
+    const operation = await this.getCurrentOperation()
+      .finally(() => { this.startupReconciling = false; });
     if (!operation || !NON_TERMINAL_STATES.includes(operation.state)) return;
     if (operation.endpointProvider) {
       await this.reconcileEndpointProvider(operation, operation.endpointProvider);

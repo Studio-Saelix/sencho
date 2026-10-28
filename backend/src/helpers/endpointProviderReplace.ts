@@ -389,9 +389,6 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
       return await fail('verify', `Sencho could not use Docker through the new "${plan.providerService}": ${ack.detail ?? 'no detail'}`);
     }
 
-    if (plan.pruneOnUpdate) {
-      await deps.docker.pruneDanglingImages().catch(error => log(`dangling image prune failed: ${errorText(error)}`));
-    }
     const outcome: ProviderOutcome = { operationId: plan.operationId, ok: true };
     try {
       await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
@@ -399,6 +396,13 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
       // Sencho would wait out its deadline with no verdict. Treat an
       // unpublishable success as a verification failure so recovery runs.
       return await fail('verify', `The replacement was verified but its outcome could not be recorded: ${errorText(error)}`);
+    }
+    // Prune only after the success verdict is durable. The previous provider's
+    // image ID is the rollback target, and a mutable tag update can leave that
+    // image dangling; pruning before the outcome write would delete the very
+    // image a recovery needs if publishing the outcome then fails.
+    if (plan.pruneOnUpdate) {
+      await deps.docker.pruneDanglingImages().catch(error => log(`dangling image prune failed: ${errorText(error)}`));
     }
     log('replacement verified');
     return outcome;

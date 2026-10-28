@@ -33,7 +33,7 @@ describe('DockerEndpointProtectedDialog', () => {
   it('names the provider and opens the safe preview for the same node and service', async () => {
     option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
     const props = renderDialog();
-    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack replaces only that container/)).toBeInTheDocument();
+    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1 replaces only that container/)).toBeInTheDocument();
     expect(screen.getByText('KEEPS Sencho running')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/ }));
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
@@ -59,7 +59,11 @@ describe('DockerEndpointProtectedDialog', () => {
   it('offers nothing for Sencho itself and points at the reapply path', async () => {
     option({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
     const props = renderDialog({ reason: 'sencho', service: 'sencho' });
-    expect(await screen.findByText(/would stop the Sencho container itself/)).toBeInTheDocument();
+    const note = await screen.findByText(/would stop the Sencho container itself/);
+    expect(note).toBeInTheDocument();
+    // The node is named inside the sentences that need it, never appended as a
+    // dangling fragment after a complete remedy.
+    expect(note.textContent).not.toContain('edge-1');
     fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
     expect(props.onRecreate).not.toHaveBeenCalled();
   });

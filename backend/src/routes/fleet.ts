@@ -1272,21 +1272,41 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
         if (tracker?.status === 'updating') {
           const elapsed = Date.now() - tracker.startedAt;
+          const localUpdateError = node.type === 'local' ? SelfUpdateService.getInstance().getLastError() : null;
+          const endpointProviderCompleted = node.type === 'remote'
+            && isReapply
+            && remoteEndpointProviderCompletedAt !== null
+            && tracker.previousEndpointProviderCompletedAt !== undefined
+            && remoteEndpointProviderCompletedAt !== tracker.previousEndpointProviderCompletedAt;
 
           if (debug) {
             console.debug('[Fleet:debug] Polling update status for node', node.id, node.name, '- elapsed:', Math.round(elapsed / 1000) + 's', 'version:', version, 'wasOffline:', tracker.wasOffline, 'remoteOnline:', remoteOnline);
           }
 
-          if (elapsed > UPDATE_TIMEOUT_MS && !endpointProviderPending) {
+          // A verdict the node already published beats the elapsed-time bound.
+          // A Docker endpoint operation may legitimately run past five minutes
+          // while its pending flag suppresses the timeout; when it clears, the
+          // completion stamp or failure code must be read before the bound,
+          // otherwise a slow success or a specific failure becomes a timeout.
+          if (node.type === 'remote' && remoteUpdateError) {
+            if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
+            resolveTerminal(node, tracker, 'failed', describeRemoteUpdateError(remoteUpdateError));
+          } else if (endpointProviderCompleted) {
+            // Signal 0: a provider-only reapply verified its new Docker endpoint;
+            // Sencho was never restarted, so no process-start signal exists.
+            if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via endpoint replacement:', tracker.previousEndpointProviderCompletedAt, '->', remoteEndpointProviderCompletedAt);
+            updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
+          } else if (localUpdateError) {
+            if (debug) console.debug('[Fleet:debug] Local node', node.id, 'update failed:', localUpdateError);
+            resolveTerminal(node, tracker, 'failed', localUpdateError);
+            SelfUpdateService.getInstance().clearLastError();
+          } else if (elapsed > UPDATE_TIMEOUT_MS && !endpointProviderPending) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
             resolveTerminal(node, tracker, 'timeout', isReapply
               ? 'Node did not come back online within 5 minutes after reapply.'
               : UPDATE_TIMEOUT_MSG);
           } else if (node.type === 'remote') {
-            if (remoteUpdateError) {
-              if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
-              resolveTerminal(node, tracker, 'failed', describeRemoteUpdateError(remoteUpdateError));
-            } else if (!remoteOnline) {
+            if (!remoteOnline) {
               if (!tracker.wasOffline) {
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
                 updateTracker.set(node.id, { ...tracker, wasOffline: true });
@@ -1295,16 +1315,6 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               // The node is back but still verifying its new Docker endpoint; its
               // own verdict (updateError or the flag clearing) decides.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'is verifying its Docker endpoint replacement');
-            } else if (
-              isReapply &&
-              remoteEndpointProviderCompletedAt !== null &&
-              tracker.previousEndpointProviderCompletedAt !== undefined &&
-              remoteEndpointProviderCompletedAt !== tracker.previousEndpointProviderCompletedAt
-            ) {
-              // Signal 0: a provider-only reapply verified its new Docker endpoint;
-              // Sencho was never restarted, so no process-start signal exists.
-              if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via endpoint replacement:', tracker.previousEndpointProviderCompletedAt, '->', remoteEndpointProviderCompletedAt);
-              updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (!isReapply && isValidVersion(version) && version !== tracker.previousVersion) {
               // Signal 1: a valid, different version. Skipped for reapply because
               // the authored image/version is not expected to change.

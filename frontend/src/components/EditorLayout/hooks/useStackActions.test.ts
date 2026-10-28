@@ -2638,6 +2638,24 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
   });
 
+  it('binds a sidebar action handoff to the stack that was refused, not the selected file', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({
+      stackList: { selectedFile: 'selected.yml', stackStatuses: { 'other.yml': 'running' } as never },
+    });
+    await act(async () => {
+      await result.current.executeStackActionByFile('other.yml', 'deploy', 'deploy');
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      stackFile: 'other.yml',
+    }));
+  });
+
   it('opens reapply capture for eligible admin Save & Deploy on self-stack without posting deploy', async () => {
     vi.mocked(apiFetch).mockReset();
     const { result, overlayState } = setup({

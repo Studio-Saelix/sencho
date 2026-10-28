@@ -407,6 +407,20 @@ describe('replaceProvider', () => {
     expect(f.log).toContainEqual(expect.stringContaining('could not write the outcome file'));
   });
 
+  it('does not prune the rollback image before the success outcome is durable', async () => {
+    const f = staged(fake({ onSleep: ackAt(10_000) }));
+    const writeJson = f.deps.writeJson;
+    f.deps.writeJson = async (path, value) => {
+      if (path === outcomePath) throw new Error('ENOSPC: no space left on device');
+      await writeJson(path, value);
+    };
+    const outcome = await replaceProvider(plan({ scope: 'provider', pruneOnUpdate: true }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, rollback: { restored: true } });
+    // The snapshot's old image ID is the rollback target. Pruning before the
+    // verdict is durable would delete it and make that rollback impossible.
+    expect(f.pruned).toEqual([]);
+  });
+
   it('recovers when a verified success cannot publish its outcome', async () => {
     const f = staged(fake({ onSleep: ackAt(10_000) }));
     const writeJson = f.deps.writeJson;

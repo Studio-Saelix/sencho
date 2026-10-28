@@ -262,7 +262,13 @@ export default function EditorLayout() {
     isSelfStackSelected && isAdmin ? activeNode?.id ?? null : null,
     isSelfStackSelected && isAdmin,
   );
-  const canRecreateDockerEndpoint = canSaveAndReapply && selfEndpointProvider?.state === 'available';
+  // Only the endpoint-only action, so it is offered only when the node can
+  // actually leave Sencho running. A node with the older stack-scope answer
+  // would otherwise open a "Recreate Docker endpoint" preview that restarts
+  // Sencho.
+  const canRecreateDockerEndpoint = canSaveAndReapply
+    && selfEndpointProvider?.state === 'available'
+    && selfEndpointProvider.providerOnly === true;
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');

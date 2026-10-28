@@ -720,7 +720,13 @@ export function EditorView(props: EditorViewProps) {
                                                         </DropdownMenuItem>
                                                     )}
                                                     {onRecreateDockerEndpoint && (
-                                                        <DropdownMenuItem onClick={onRecreateDockerEndpoint} disabled={lifecycleBusy || !actionsReady}>
+                                                        <DropdownMenuItem
+                                                            onClick={onRecreateDockerEndpoint}
+                                                            disabled={lifecycleBusy || !actionsReady || hasUnsavedChanges()}
+                                                            title={hasUnsavedChanges()
+                                                                ? 'Save your changes first. To apply them with the endpoint, use Save & Reapply and choose the endpoint-only scope.'
+                                                                : 'Recreates the saved Docker endpoint configuration without saving the editor.'}
+                                                        >
                                                             <PlugZap className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                             Recreate Docker endpoint
                                                         </DropdownMenuItem>

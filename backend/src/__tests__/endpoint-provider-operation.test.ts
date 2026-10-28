@@ -486,6 +486,19 @@ describe('reconcileOnStartup (the new process)', () => {
     return { service, operationId: operation.operationId };
   }
 
+  it('reports pending while startup is still reading the previous operation', async () => {
+    const service = ImageOperationService.getInstance();
+    let release!: (value: null) => void;
+    vi.spyOn(service, 'getCurrentOperation').mockReturnValue(new Promise<null>(resolve => { release = resolve; }));
+    const reconcile = service.reconcileOnStartup();
+    // /api/meta can answer before the operation file is read. Without this the
+    // changed process start alone would complete a remote Reapply.
+    expect(service.isEndpointProviderPending()).toBe(true);
+    release(null);
+    await reconcile;
+    expect(service.isEndpointProviderPending()).toBe(false);
+  });
+
   it('answers the helper after Docker works through the new provider, and succeeds on its verdict', async () => {
     const { service, operationId } = await claimRecreating();
     mockDocker({ health: 'healthy' });

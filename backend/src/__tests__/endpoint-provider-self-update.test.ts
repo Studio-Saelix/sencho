@@ -120,6 +120,7 @@ describe('buildEndpointProviderHelperArgs', () => {
     hostBindMounts: context.hostBindMounts,
     imageId: 'sha256:running',
     composeWritable: false,
+    envFile: null,
     handoffOwner: null,
   };
 
@@ -165,6 +166,13 @@ describe('buildEndpointProviderHelperArgs', () => {
     const args = buildEndpointProviderHelperArgs({ ...input, mode: 'replace', handoffOwner: null });
     expect(args.some(arg => arg.startsWith('SENCHO_HANDOFF_'))).toBe(false);
   });
+
+  it('passes the Compose environment by file, never on the command line', () => {
+    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'stage', envFile: '/run/sencho/compose.env' });
+    expect(args).toContain('--env-file');
+    expect(args).toContain('/run/sencho/compose.env');
+    expect(args.join(' ')).not.toContain('SENCHO_HANDOFF_UID=');
+  });
 });
 
 describe('triggerComposeReapply with the Docker endpoint', () => {
@@ -205,6 +213,31 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     });
   });
 
+  it('hands the process environment to both helper runs and removes the private file afterwards', async () => {
+    process.env.SENCHO_ENDPOINT_TEST_TOKEN = 'compose-value';
+    const seen: string[] = [];
+    const files: string[] = [];
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      const index = args.indexOf('--env-file');
+      if (index !== -1) {
+        const file = args[index + 1];
+        files.push(file);
+        expect(fs.existsSync(file)).toBe(true);
+        seen.push(fs.readFileSync(file, 'utf8'));
+      }
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    try {
+      await service().triggerComposeReapply({ endpointProvider: request });
+      expect(seen.join('\n')).toContain('SENCHO_ENDPOINT_TEST_TOKEN=compose-value');
+      expect(files.length).toBeGreaterThanOrEqual(2);
+      for (const file of files) expect(fs.existsSync(file)).toBe(false);
+    } finally {
+      delete process.env.SENCHO_ENDPOINT_TEST_TOKEN;
+    }
+  });
+
   it('writes a provider-scoped plan when the operator chose endpoint-only', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p:2', previousImageId: 'sha256:old', previousImageRef: 'p:1' }), stderr: '' };
@@ -235,6 +268,7 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     const instance = service();
     await instance.triggerComposeReapply({ endpointProvider: request });
     expect(instance.getLastError()).toBe('Nothing was stopped. The host socket the Docker endpoint mounts does not show its container.');
+    expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
     expect(dockerCalls().some(args => args.includes('replace'))).toBe(false);
     expect(mockExecFile).not.toHaveBeenCalled();
   });
@@ -265,6 +299,21 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     const instance = service();
     await instance.triggerComposeReapply({ endpointProvider: request });
     expect(instance.getLastError()).toContain('Nothing was stopped. The replacement helper could not start: No such image');
+    expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
+  });
+
+  it('does not claim nothing stopped when the detached helper start is unconfirmed', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM', stderr: '' });
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    // The helper may have been created before its answer was lost. The outcome
+    // watcher decides instead of a false "nothing was stopped" failure.
+    expect(instance.getLastError()).toBeNull();
+    expect(instance.getLastErrorCode()).toBeNull();
   });
 
   it('keeps the Sencho-only Reapply on the attached helper with --no-deps', async () => {

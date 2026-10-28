@@ -59,6 +59,16 @@ describe('LocalUpdateConfirmDialog Docker endpoint option', () => {
     expect(screen.queryByRole('radio', { name: 'Endpoint only' })).not.toBeInTheDocument();
   });
 
+  it('says the preview restarts Sencho when endpoint-only was asked but unavailable', async () => {
+    answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: false, project: 'stack' });
+    const onConfirm = vi.fn();
+    render(<LocalUpdateConfirmDialog open mode="reapply" nodeId={4} allowEndpointProviderOnly initialScope="only" onOpenChange={vi.fn()} onConfirm={onConfirm} />);
+    expect(await screen.findByText(/can recreate its Docker endpoint only together with Sencho/)).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Sencho + endpoint' })).toBeChecked();
+    await userEvent.click(screen.getByText('confirm'));
+    expect(onConfirm).toHaveBeenCalledWith({ replaceEndpointProvider: true, endpointProviderOnly: false });
+  });
+
   it('does not offer endpoint-only for a Fleet reapply that recreates Sencho', async () => {
     answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
     render(<LocalUpdateConfirmDialog open mode="reapply" nodeId={4} onOpenChange={vi.fn()} onConfirm={vi.fn()} />);

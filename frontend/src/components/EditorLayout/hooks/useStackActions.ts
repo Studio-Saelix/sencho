@@ -503,7 +503,7 @@ export function useStackActions(options: UseStackActionsOptions) {
    * replacement path for the same node, stack and provider). Returns true when
    * the response was one of those refusals.
    */
-  const openProtectedRefusal = (rawBody: string, status?: number): boolean => {
+  const openProtectedRefusal = (rawBody: string, status?: number, stackFile = stackListState.selectedFile): boolean => {
     if (isSelfStackProtectedResponse(rawBody, status)) {
       overlayState.openSelfStackProtected();
       return true;
@@ -515,7 +515,9 @@ export function useStackActions(options: UseStackActionsOptions) {
         nodeId: activeNode?.id ?? null,
         nodeName: activeNode?.name ?? null,
         nodeType: activeNode ? (activeNode.type === 'local' ? 'local' : 'remote') : null,
-        stackFile: stackListState.selectedFile,
+        // A sidebar action can target a stack that is not the one loaded in the
+        // editor; bind the handoff to the stack that was actually refused.
+        stackFile,
       });
       return true;
     }
@@ -2796,7 +2798,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
-        if (openProtectedRefusal(errText, response.status)) {
+        if (openProtectedRefusal(errText, response.status, stackFile)) {
           return;
         }
         if (response.status === 409) {

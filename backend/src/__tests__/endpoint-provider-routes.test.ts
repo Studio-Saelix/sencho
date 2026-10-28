@@ -368,6 +368,27 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
     expect((await remoteStatus()).updateStatus).toBe('completed');
   });
 
+  it('completes a provider-only reapply that finishes after the update timeout', async () => {
+    // The node's own bounds can run past five minutes; while pending the hub
+    // waits, and once it clears, the completion stamp must beat the timeout.
+    mockRemote(ONLINE({ startedAt: 1, endpointProviderCompletedAt: Date.now() }));
+    const tracker = FleetUpdateTrackerService.getInstance();
+    tracker.set(proxyNodeId, {
+      ...tracker.create('updating', '0.83.0', 1, undefined, undefined, 'reapply_configuration'),
+      startedAt: Date.now() - 6 * 60_000,
+      previousEndpointProviderCompletedAt: null,
+    });
+    expect((await remoteStatus()).updateStatus).toBe('completed');
+  });
+
+  it('reports the node endpoint failure after the update timeout instead of a timeout', async () => {
+    mockRemote(ONLINE({ startedAt: 2, updateError: 'endpoint_provider_restored' }));
+    trackRemote(6 * 60_000);
+    const row = await remoteStatus();
+    expect(row.updateStatus).toBe('failed');
+    expect(row.error).toContain('restored its previous Docker endpoint container');
+  });
+
   it('does not complete a provider-only reapply before the stamp moves', async () => {
     mockRemote(ONLINE({ startedAt: 1, endpointProviderCompletedAt: 1_000 }));
     const tracker = FleetUpdateTrackerService.getInstance();
@@ -382,6 +403,7 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
   it.each([
     ['endpoint_provider_restored', 'restored its previous Docker endpoint container'],
     ['endpoint_provider_recovery_required', 'could not confirm that Sencho reaches Docker through the Docker endpoint'],
+    ['endpoint_provider_refused', 'refused to replace its Docker endpoint before anything stopped'],
     ['update_failed', 'reported that the operation failed'],
   ])('fails with an operator message for %s', async (code, message) => {
     mockRemote(ONLINE({ startedAt: 2, updateError: code }));

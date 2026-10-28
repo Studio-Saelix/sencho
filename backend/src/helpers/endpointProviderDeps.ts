@@ -16,13 +16,16 @@ import {
 } from './endpointProviderReplace';
 import { createHandoffWriter, handoffOwner, type HandoffFileSystem } from './handoffFile';
 
+/** Ceiling for one Docker API call made by the helper, so a hung socket cannot stall recovery. */
+export const HELPER_DOCKER_TIMEOUT_MS = 30_000;
+
 export function buildDeps(
   plan: ProviderReplacePlan,
   logFile: string | null,
   handoffFs: HandoffFileSystem = fs,
   helperUid: number | null = typeof process.getuid === 'function' ? process.getuid() : null,
 ): HelperDeps {
-  const docker = new Docker({ socketPath: HELPER_SOCKET_PATH });
+  const docker = new Docker({ socketPath: HELPER_SOCKET_PATH, timeout: HELPER_DOCKER_TIMEOUT_MS });
   // The project name is passed explicitly: a project deployed under a name
   // other than its directory would otherwise be rendered as a new project and
   // get a second proxy instead of the replacement.

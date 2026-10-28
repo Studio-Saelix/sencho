@@ -52,29 +52,29 @@ export function DockerEndpointProtectedDialog({
   let note: string;
   if (eligible) {
     const project = option?.state === 'available' && option.project ? ` in Compose project ${option.project}` : '';
-    note = `Recreating ${provider}${project} replaces only that container. Sencho keeps running and reconnects through the new one, and the rest of the stack is left alone. If the new container does not give Sencho Docker access, the previous one is restored.`;
+    note = `Recreating ${provider}${project} on ${nodeLabel} replaces only that container. Sencho keeps running and reconnects through the new one, and the rest of the stack is left alone. If the new container does not give Sencho Docker access, the previous one is restored.`;
   } else if (reason === 'sencho') {
     note = 'This operation would stop the Sencho container itself. Recreating the Docker endpoint is not the remedy; use Save & Reapply or Fleet node updates to recreate Sencho safely.';
   } else if (reason === 'invalid_label') {
     note = 'Sencho cannot tell which stack owns a container that carries its Docker connection, so there is no safe replacement to offer. Fix the Compose labels on the host, then try again.';
   } else if (reason === 'unresolved') {
-    note = 'Sencho could not identify the container carrying its Docker connection on this node, so there is no safe replacement to offer. Check the node connection in Fleet, then try again.';
+    note = `Sencho could not identify the container carrying its Docker connection on ${nodeLabel}, so there is no safe replacement to offer. Check the node connection in Fleet, then try again.`;
   } else if (contextMoved) {
     note = `The editor has moved to another stack or node since this was refused. Open ${nodeLabel} and select that stack to recreate its Docker endpoint.`;
   } else if (option?.state === 'unavailable') {
-    note = `This Docker endpoint cannot be recreated from here: ${option.reason}`;
+    note = `The Docker endpoint on ${nodeLabel} cannot be recreated from here: ${option.reason}`;
   } else if (option?.state === 'unsupported') {
-    note = 'This node runs a Sencho version that cannot recreate its Docker endpoint. Update the node first.';
+    note = `${nodeLabel} runs a Sencho version that cannot recreate its Docker endpoint. Update the node first.`;
   } else if (option?.state === 'available' && !providerOnly) {
-    note = 'This node runs a Sencho version that can only recreate its Docker endpoint together with Sencho. Update the node first to replace the endpoint on its own.';
+    note = `${nodeLabel} runs a Sencho version that can only recreate its Docker endpoint together with Sencho. Update the node first to replace the endpoint on its own.`;
   } else if (option?.state === 'none') {
-    note = 'This node reaches Docker without a container, so there is no Docker endpoint to recreate.';
+    note = `${nodeLabel} reaches Docker without a container, so there is no Docker endpoint to recreate.`;
   } else if (reason === 'provider' && !protectedProvider) {
     note = `The guard protected ${service ?? 'a container'} in this stack, and recreating the Docker endpoint would not change it. Recreate that service from the host (docker compose up -d) while Sencho is idle.`;
   } else if (!canRecreate) {
-    note = 'An admin who can reapply this node\'s Compose configuration can recreate the Docker endpoint safely.';
+    note = `An admin who can reapply ${nodeLabel}'s Compose configuration can recreate the Docker endpoint safely.`;
   } else {
-    note = 'No safe replacement is available for this node.';
+    note = `No safe replacement is available for ${nodeLabel}.`;
   }
 
   return (
@@ -97,10 +97,7 @@ export function DockerEndpointProtectedDialog({
       }}
     >
       <p className="text-sm text-stat-subtitle">{message}</p>
-      <p className="text-sm text-stat-subtitle pt-2">
-        {note} <span className="text-stat-value">{nodeLabel}</span>
-        {provider && eligible ? <> runs <code className="text-stat-value">{provider}</code>.</> : null}
-      </p>
+      <p className="text-sm text-stat-subtitle pt-2">{note}</p>
     </ConfirmModal>
   );
 }
