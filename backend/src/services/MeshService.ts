@@ -24,6 +24,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { safeRemoteFetch } from '../utils/outboundTarget';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
+import { composeFileEnvVarSelectsLayers } from '../utils/authoredComposeArgs';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import {
@@ -71,6 +72,160 @@ const REACHABLE_REASON: Record<DialFailureCode, string> = {
     no_target: 'proxy target missing',
     network_error: 'remote unreachable',
 };
+
+/**
+ * One service in a meshed stack, with the container ports the mesh routes.
+ * `running` is set by live inspection only: false means the service was
+ * observed solely as a stopped container, whose port list is empty because
+ * the bindings are gone, not because the service publishes nothing. It is
+ * absent on values read back from the saved snapshot and on responses from a
+ * peer that predates the field.
+ */
+export interface MeshStackService {
+    service: string;
+    ports: number[];
+    running?: boolean;
+}
+
+function isValidMeshPort(port: unknown): port is number {
+    return Number.isInteger(port) && (port as number) > 0 && (port as number) < 65536;
+}
+
+/**
+ * Read one service entry from a snapshot or a peer response. Returns null
+ * when the entry is not readable, so each boundary can decide whether to skip
+ * it (saved snapshot) or reject the whole answer (live peer).
+ * `rejectInvalidPorts` is for a live answer: one unreadable port value makes
+ * the entry unusable, rather than a service that publishes fewer ports.
+ */
+function toMeshStackService(value: unknown, rejectInvalidPorts = false): MeshStackService | null {
+    if (!value || typeof value !== 'object') return null;
+    const { service, ports, running } = value as { service?: unknown; ports?: unknown; running?: unknown };
+    if (typeof service !== 'string' || !Array.isArray(ports)) return null;
+    if (rejectInvalidPorts && !ports.every(isValidMeshPort)) return null;
+    return {
+        service,
+        ports: ports.filter(isValidMeshPort),
+        ...(typeof running === 'boolean' ? { running } : {}),
+    };
+}
+
+/**
+ * Parse the JSON column holding a mesh stack's last known services. Returns
+ * [] for missing or malformed values so a bad row never breaks the refresh.
+ */
+export function parseLastKnownServices(raw: string | null | undefined): MeshStackService[] {
+    if (!raw) return [];
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .map((entry) => toMeshStackService(entry))
+            .filter((svc): svc is MeshStackService => svc !== null);
+    } catch (err) {
+        // Without this the failure is invisible: the refresh would silently
+        // drop that stack's aliases, which is the exact symptom the
+        // last-known snapshot exists to prevent.
+        console.warn(
+            '[MeshService] parseLastKnownServices: discarding malformed value:',
+            sanitizeForLog((err as Error).message),
+        );
+        return [];
+    }
+}
+
+/**
+ * Reconcile a live observation with the saved snapshot so a service that is
+ * stopped, or temporarily absent mid-teardown, keeps the ports it previously
+ * held. A running service's port list is authoritative, so an empty one
+ * releases its ports. A stopped container reports no bindings at all, which
+ * makes its empty list missing information rather than a claim, so its saved
+ * ports carry forward while the stack still declares it.
+ *
+ * A saved service that is absent from the observation entirely is ambiguous:
+ * Docker may have removed the container a moment before recreating it, so
+ * stating "not there" is not evidence that the stack stopped claiming the
+ * port. The claim is released only when `declared` is a known declaration
+ * that no longer names the service, which is what an authored removal looks
+ * like. The same holds for a stopped container whose service has left the
+ * compose file: it is an orphan, not a claim. `declared` is null when the
+ * declaration could not be read, including on a peer that does not report
+ * one, and that unknown state keeps the claim. `running` is likewise absent
+ * on snapshots and on responses from a peer that predates the field, and
+ * keeps the saved ports too.
+ */
+function mergeObservedServices(
+    live: MeshStackService[],
+    lastKnown: MeshStackService[],
+    declared: ReadonlySet<string> | null,
+): MeshStackService[] {
+    const known = new Map(lastKnown.map((svc) => [svc.service, svc.ports]));
+    const observed = new Set(live.map((svc) => svc.service));
+    const merged = live.map((svc) => {
+        if (svc.ports.length > 0 || svc.running === true) {
+            return { service: svc.service, ports: svc.ports };
+        }
+        if (declared !== null && !declared.has(svc.service)) {
+            return { service: svc.service, ports: [] };
+        }
+        return { service: svc.service, ports: [...(known.get(svc.service) ?? [])] };
+    });
+    for (const svc of lastKnown) {
+        if (observed.has(svc.service)) continue;
+        if (declared !== null && !declared.has(svc.service)) continue;
+        merged.push({ service: svc.service, ports: [...svc.ports] });
+    }
+    return merged;
+}
+
+/**
+ * Parse a peer's inspection response. Unlike the saved snapshot, a live
+ * answer must be complete: one unreadable entry makes the whole answer an
+ * unusable observation, so the caller treats the node as unreachable and
+ * keeps the saved snapshot instead.
+ */
+function parseRemoteStackServices(value: unknown): MeshStackService[] | null {
+    if (!Array.isArray(value)) return null;
+    const services: MeshStackService[] = [];
+    for (const entry of value) {
+        const svc = toMeshStackService(entry, true);
+        if (!svc) return null;
+        services.push(svc);
+    }
+    return services;
+}
+
+/** A YAML mapping, as distinct from an array or a scalar. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * True for a compose file whose only content is whitespace, comments, or YAML
+ * document markers. Compose treats that as an empty layer. An explicit null
+ * scalar (`null`, `~`) also parses to null but is not a document Compose
+ * accepts, so the reader keeps the two apart.
+ */
+function isBlankComposeDocument(content: string): boolean {
+    for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed === '' || trimmed === '---' || trimmed === '...' || trimmed.startsWith('#')) continue;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * True for a Compose `services` value: a service name to definition mapping,
+ * where every definition is itself a mapping. Compose rejects a sequence or a
+ * scalar here, and the stack save route stores raw text, so such content can
+ * exist on disk. It says nothing about which services the stack still owns,
+ * so the declaration reader treats it as unknown rather than reading names
+ * off it.
+ */
+function isDeclaredServiceMap(value: unknown): value is Record<string, unknown> {
+    return isRecord(value) && Object.values(value).every(isRecord);
+}
 
 /**
  * Returns the static IPv4 address Sencho will pin itself to on the mesh
@@ -338,6 +493,34 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     private started = false;
     private aliasCache = new Map<string, MeshGlobalAlias>();
     private aliasByPort = new Map<number, MeshGlobalAlias>();
+    /**
+     * Ports claimed by any opted-in stack, including stopped stacks and
+     * stacks on unreachable nodes (from their last known services). The
+     * opt-in collision check uses this instead of `aliasByPort` so a port
+     * is never handed out twice while its owner is offline.
+     */
+    private reservedPorts = new Map<number, MeshGlobalAlias>();
+    /**
+     * Counts refresh starts. A run that began earlier can finish later, and
+     * its observation is then older than one already applied, so it must not
+     * persist or publish anything. See `runAliasRefresh`.
+     */
+    private refreshGeneration = 0;
+    /**
+     * The refresh holding the highest generation, which a superseded run waits
+     * for. It is assigned together with the generation, so the two always name
+     * the same run.
+     */
+    private latestAliasRefresh: Promise<void> = Promise.resolve();
+    /**
+     * Snapshots a refresh computed but could not store, by membership row id.
+     * The replay for an unreachable node reads the saved snapshot, and a stale
+     * one would drop the alias and reservation of a service that arrived since:
+     * the newer snapshot is replayed from here until a write succeeds. Row ids
+     * are never reused (AUTOINCREMENT), and the refresh drops the ids of rows
+     * that no longer exist.
+     */
+    private unpersistedSnapshots = new Map<number, string>();
     // Populated on pilot nodes via the D-1 override push. Central's
     // db.listMeshStacks() is authoritative on central; pilots have no
     // mesh_stacks rows (C-3 design), so the push payload carries the alias
@@ -1423,7 +1606,9 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * `handleAccept` then dispatches to the same-node fast path or the
      * cross-node bridge based
      * on the resolved alias's owner. Fleet-wide port collisions are
-     * blocked at opt-in time (`optInStack` checks `aliasByPort`), so
+     * blocked at opt-in time (`optInStack` checks `reservedPorts`, which
+     * is a superset of the live aliases: it also holds ports claimed by
+     * stopped stacks and by nodes that are currently offline), so
      * binding every alias port is unambiguous.
      */
     private async syncForwarderListeners(): Promise<void> {
@@ -1548,7 +1733,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
         }
         for (const port of newPorts) {
-            const existing = this.aliasByPort.get(port);
+            const existing = this.reservedPorts.get(port);
             if (existing) {
                 throw new MeshError(
                     'port_collision',
@@ -1557,8 +1742,21 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             }
         }
 
-        db.insertMeshStack(nodeId, stackName, actor);
+        const rowId = db.insertMeshStack(nodeId, stackName, actor);
         try {
+            // Seed the new membership from the observation opt-in already
+            // made. The refresh below re-inspects, but a Docker failure or a
+            // stop in between must not leave the membership with no saved
+            // ports and no reservation: the stack was accepted on the strength
+            // of that first observation, so it is the snapshot the replay and
+            // collision check need from the start. A failure to store it rolls
+            // the membership back like any other opt-in failure.
+            if (rowId !== null) {
+                db.setMeshStackLastKnownServices(
+                    rowId,
+                    JSON.stringify(services.map(({ service, ports }) => ({ service, ports }))),
+                );
+            }
             await this.refreshAliasCache();
             await this.syncForwarderListeners();
         } catch (error) {
@@ -1633,13 +1831,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
         const db = DatabaseService.getInstance();
         if (!db.isMeshStackEnabled(nodeId, stackName)) return;
+        // Remove the override first: a failed removal must leave the opt-in
+        // record untouched. Deleting it first and restoring on failure loses
+        // the saved services, the actor, the creation time, and the row
+        // identity that orders contested-port ownership.
+        await this.removeOverrideFromNode(nodeId, stackName);
         db.deleteMeshStack(nodeId, stackName);
-        try {
-            await this.removeOverrideFromNode(nodeId, stackName);
-        } catch (error) {
-            db.insertMeshStack(nodeId, stackName, actor);
-            throw error;
-        }
         try {
             await this.refreshAliasCache();
             await this.syncForwarderListeners();
@@ -1968,15 +2165,15 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         if (!isPathWithinBase(file, dir)) return;
         const db = DatabaseService.getInstance();
         const hadIntent = db.isMeshStackEnabled(localNodeId, stackName);
-        if (hadIntent) db.deleteMeshStack(localNodeId, stackName);
+        // Unlink first. A failed unlink keeps the record, including its saved
+        // services and row identity; deleting it first and reinserting on
+        // failure would silently reset both.
         try {
             await fs.unlink(file);
         } catch (error) {
-            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
-                if (hadIntent) db.insertMeshStack(localNodeId, stackName, null);
-                throw error;
-            }
+            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
         }
+        if (hadIntent) db.deleteMeshStack(localNodeId, stackName);
         if (this.pilotAliasOverlay.delete(stackName)) {
             try {
                 await this.refreshAliasCache();
@@ -2226,27 +2423,163 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
 
     // --- Alias aggregation ---
 
-    public async refreshAliasCache(): Promise<void> {
+    /**
+     * Re-derive the alias, port, and reservation caches from every opted-in
+     * stack, and persist the snapshots the replay needs. Resolves only once a
+     * refresh that started no earlier than this call has published: a caller
+     * goes on to write overrides from `aliasCache`, so it must not resume
+     * while the cache still describes the world from before its mutation.
+     * A call that a newer one supersedes shares that newer call's outcome,
+     * including its failure: nothing was published for it, so the caller must
+     * not carry on as if the cache were current.
+     */
+    public refreshAliasCache(): Promise<void> {
+        // The generation and the latest run are set in the same turn, before
+        // anything in the run can throw, so a failing run is still the newest
+        // one and the runs it supersedes wait for it.
+        const generation = ++this.refreshGeneration;
+        const run = this.runAliasRefresh(generation);
+        this.latestAliasRefresh = run;
+        return run;
+    }
+
+    private async runAliasRefresh(generation: number): Promise<void> {
         const t0 = Date.now();
         const db = DatabaseService.getInstance();
         const next = new Map<string, MeshGlobalAlias>();
         const portMap = new Map<number, MeshGlobalAlias>();
+        // A refresh that started earlier can finish later, and its answer then
+        // describes an older state of the world. The generation records the
+        // start order so a superseded run can be dropped before it persists or
+        // publishes.
         const stacks = db.listMeshStacks();
 
         // Inspect all stacks in parallel; each remote-node lookup involves an
         // HTTP fetch with its own 5 s AbortSignal. Sequential awaiting would
         // let one slow node stall the whole refresh, which is on a 60 s loop.
+        //
+        // A node that cannot be reached keeps its last known services: its
+        // aliases stay in every override (so a redeploy elsewhere does not
+        // drop its hostnames) and its ports stay reserved (so no other stack
+        // can claim them while it is away). A stack that is reachable but
+        // stopped publishes no aliases, yet keeps its ports reserved.
+        const reserved = new Map<number, MeshGlobalAlias>();
         const inspections = await Promise.allSettled(
             stacks.map(async (row) => {
                 const node = db.getNode(row.node_id);
                 if (!node) return null;
-                const services = await this.inspectStackServices(row.node_id, row.stack_name);
-                return { row, node, services };
+                const reach = { reachable: true };
+                const live = await this.inspectStackServices(row.node_id, row.stack_name, reach);
+                const { reachable } = reach;
+                const lastKnown = parseLastKnownServices(this.savedSnapshotOf(row));
+                // Docker reports no port bindings for a stopped container, and
+                // a container that is mid-removal is absent from the inventory
+                // entirely. Neither is evidence that the stack no longer
+                // claims the port, so the saved claim carries forward unless
+                // the stack's Compose declaration no longer names the service.
+                // A fully stopped stack still has a declaration worth reading,
+                // and an exited container can outlive its service's removal.
+                // Read it whenever a saved claim cannot be settled from the
+                // observation alone, so a running stack with nothing to
+                // release pays no extra round trip.
+                const needsDeclaration = reachable && lastKnown.some((svc) => {
+                    if (svc.ports.length === 0) return false;
+                    const observed = live.find((candidate) => candidate.service === svc.service);
+                    return !observed || (observed.ports.length === 0 && observed.running !== true);
+                });
+                const declared = needsDeclaration
+                    ? await this.inspectDeclaredServices(row.node_id, row.stack_name)
+                    : null;
+                const resolved = mergeObservedServices(live, lastKnown, declared);
+                // Only an observation that reached the node rewrites the
+                // snapshot, and a stopped stack rewrites it only when the
+                // declaration was readable enough to reconcile.
+                const snapshot = reachable && (live.length > 0 || declared !== null)
+                    ? JSON.stringify(resolved)
+                    : null;
+                const services = reachable ? live : lastKnown;
+                return { row, node, services, reservedServices: resolved, snapshot };
             }),
         );
-        for (const result of inspections) {
-            if (result.status !== 'fulfilled' || !result.value) continue;
-            const { row, node, services } = result.value;
+        // Nothing between this check and the cache assignments below awaits,
+        // so a newer refresh either started before this block and wins, or
+        // starts after it and is ordered behind it. A superseded run leaves
+        // both the database and the caches untouched, and hands its caller the
+        // newer run's outcome. That run read the membership after this one
+        // began, so it includes whatever the caller changed before asking. The
+        // newest run is never superseded, so the chain of waits ends and never
+        // loops back to itself.
+        if (generation !== this.refreshGeneration) {
+            this.logDiag('alias cache refresh superseded', { stacks: stacks.length, ms: Date.now() - t0 });
+            await this.latestAliasRefresh;
+            return;
+        }
+        const liveRowIds = new Set(stacks.map((row) => row.id));
+        for (const id of this.unpersistedSnapshots.keys()) {
+            if (!liveRowIds.has(id)) this.unpersistedSnapshots.delete(id);
+        }
+        for (let index = 0; index < inspections.length; index += 1) {
+            const result = inspections[index];
+            const row = stacks[index];
+            let node: NonNullable<ReturnType<typeof db.getNode>>;
+            let services: MeshStackService[];
+            let reservedServices: MeshStackService[];
+            let snapshot: string | null;
+            if (result.status === 'fulfilled' && result.value) {
+                ({ node, services, reservedServices, snapshot } = result.value);
+            } else {
+                // A rejected inspection is a failure to observe, exactly like an
+                // unreachable node. Replaying the saved snapshot keeps this
+                // stack's hostnames and reservations for the tick instead of
+                // dropping them because of one unexpected throw.
+                const savedNode = db.getNode(row.node_id);
+                if (!savedNode) continue;
+                node = savedNode;
+                console.warn(
+                    `[MeshService] alias refresh inspection failed for ${sanitizeForLog(row.stack_name)}; replaying saved services`,
+                );
+                services = parseLastKnownServices(this.savedSnapshotOf(row));
+                reservedServices = services;
+                snapshot = null;
+            }
+            // A snapshot an earlier tick could not store is tried again here,
+            // including on a tick that observed nothing, so the database
+            // catches up as soon as it can write.
+            const toStore = snapshot ?? this.unpersistedSnapshots.get(row.id) ?? null;
+            if (toStore !== null && toStore !== row.last_known_services) {
+                try {
+                    db.setMeshStackLastKnownServices(row.id, toStore);
+                    this.unpersistedSnapshots.delete(row.id);
+                } catch (err) {
+                    const firstFailure = !this.unpersistedSnapshots.has(row.id);
+                    this.unpersistedSnapshots.set(row.id, toStore);
+                    console.warn('[MeshService] failed to persist last known mesh services:', sanitizeForLog((err as Error).message));
+                    // Once per failing stretch, not once per 60 s tick.
+                    if (firstFailure) {
+                        this.logActivity({
+                            source: 'mesh', level: 'warn', type: 'forwarder.error',
+                            nodeId: row.node_id,
+                            message: `could not save the last known services of ${row.stack_name}; they are kept in memory and lost on restart`,
+                            details: { stackName: row.stack_name },
+                        });
+                    }
+                }
+            } else if (toStore !== null) {
+                this.unpersistedSnapshots.delete(row.id);
+            }
+            for (const svc of reservedServices) {
+                for (const port of svc.ports) {
+                    if (reserved.has(port)) continue;
+                    reserved.set(port, {
+                        host: `${svc.service}.${row.stack_name}.${node.name}.sencho`,
+                        nodeId: row.node_id,
+                        nodeName: node.name,
+                        stackName: row.stack_name,
+                        serviceName: svc.service,
+                        port,
+                    });
+                }
+            }
             for (const svc of services) {
                 const host = `${svc.service}.${row.stack_name}.${node.name}.sencho`;
                 for (const port of svc.ports) {
@@ -2273,14 +2606,27 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                 if (!portMap.has(alias.port)) portMap.set(alias.port, alias);
             }
         }
+        // A live alias is the routable owner, so it takes ownership back from
+        // a stopped stack that is only holding the port on last-known
+        // services. Without this a port collision error would name a stopped
+        // stack while inbound traffic actually goes to the live one.
+        for (const [port, alias] of portMap) {
+            reserved.set(port, alias);
+        }
         this.aliasCache = next;
         this.aliasByPort = portMap;
+        this.reservedPorts = reserved;
         this.logDiag('alias cache refreshed', {
             stacks: stacks.length,
             aliases: next.size,
             ports: portMap.size,
             ms: Date.now() - t0,
         });
+    }
+
+    /** The snapshot a replay starts from: the newest one computed, stored or not. */
+    private savedSnapshotOf(row: { id: number; last_known_services?: string | null }): string | null | undefined {
+        return this.unpersistedSnapshots.get(row.id) ?? row.last_known_services;
     }
 
     public async listAliases(): Promise<MeshGlobalAlias[]> {
@@ -2337,14 +2683,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const shapes: Record<string, MeshServiceNetworkShape> = {};
         try {
             const fsSvc = FileSystemService.getInstance(targetNodeId);
-            const baseDir = fsSvc.getBaseDir();
             for (const relFile of await this.resolveStackComposeFiles(fsSvc, stackName)) {
-                // The stack segment uses path.basename as defense-in-depth and
-                // the resolved path is re-checked against the base dir, so the
-                // form CodeQL's path-injection model recognizes stays at the
-                // read sink.
-                const composePath = path.join(baseDir, path.basename(stackName), relFile);
-                if (!isPathWithinBase(composePath, baseDir)) continue;
+                // Same containment, regular-file, and stability guard the
+                // declaration reader uses. One layer that cannot be read as a
+                // complete document is skipped rather than parsed as a partial
+                // service list.
                 let parsed: { services?: Record<string, unknown> } | null;
                 try {
                     // merge: true resolves YAML 1.1 merge keys (`<<: *anchor`).
@@ -2353,9 +2696,14 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     // `networks` through an anchor looks like it declares
                     // neither, so the override adds networks and extra_hosts
                     // to a service Compose refuses to start with them.
-                    parsed = YAML.parse(await fs.readFile(composePath, 'utf8'), { merge: true }) as { services?: Record<string, unknown> } | null;
+                    const layer = await fsSvc.readComposeLayer(stackName, relFile);
+                    parsed = YAML.parse(layer.content, { merge: true }) as { services?: Record<string, unknown> } | null;
                 } catch {
-                    continue;
+                    // One unreadable layer makes the union partial, and a
+                    // partial shape map would rewrite the override without the
+                    // services that layer declares. Unknown is the documented
+                    // contract, and the caller keeps its existing override.
+                    return {};
                 }
                 const services = parsed?.services && typeof parsed.services === 'object' ? parsed.services : null;
                 if (!services) continue;
@@ -2380,6 +2728,209 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
         }
         return shapes;
+    }
+
+    /**
+     * Read the service names the stack's Compose file(s) declare on a node.
+     * Returns null when the declaration cannot be established: a missing,
+     * unreadable, unsafe, or still-changing file, or one that does not parse.
+     * The alias refresh uses this to tell an authored removal from a container
+     * that is merely absent for a tick, so "unknown" must not read as "declares
+     * nothing".
+     */
+    private async readDeclaredServiceNames(stackName: string, nodeId: number): Promise<Set<string> | null> {
+        if (!isValidStackName(stackName)) return null;
+        const fsSvc = FileSystemService.getInstance(nodeId);
+        // Each layer is published on its own, so a Git apply or a rollback
+        // restore that is moving a service between layers shows a union that
+        // misses it until the last layer lands. The declaration is unknown
+        // while such an operation is open or was abandoned, and a read that an
+        // operation overlapped is discarded. The marker is taken before the
+        // file list is resolved: an operation that finished in between would
+        // otherwise pair the old list with the new files.
+        const setBefore = fsSvc.declarationSetEpoch(stackName);
+        if (setBefore === null) {
+            this.logDiag('compose declaration set is being rewritten', { stackName });
+            return null;
+        }
+        let relFiles: string[];
+        try {
+            const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+            // An explicit `-f` list is what Compose loads for a Git multi-file
+            // stack, so COMPOSE_FILE does not change it. A discovered chain is
+            // replaced by COMPOSE_FILE, which this reader does not follow: the
+            // files it would read are not the project's files, so the
+            // declaration is unknown rather than partial. The effective-anatomy
+            // renderer treats the same condition as unverifiable.
+            if (!(spec && spec.files.length > 0) && await composeFileEnvVarSelectsLayers(stackName, nodeId)) {
+                return null;
+            }
+            relFiles = await this.resolveStackComposeFiles(fsSvc, stackName);
+            // Compose auto-loads the hand-authored override beside a stack it
+            // discovers, so a service declared only there is part of the
+            // project and must count as declared. An explicit `-f` list,
+            // including a one-file Git spec, suppresses that discovery, so an
+            // override Compose does not load must not keep a removed
+            // service's claim alive.
+            if ((!spec || spec.files.length === 0) && relFiles.length === 1) {
+                const override = await fsSvc.getOverrideFilename(stackName);
+                if (override && !relFiles.includes(override)) relFiles = [...relFiles, override];
+            }
+        } catch (err) {
+            console.warn('[MeshService] readDeclaredServiceNames failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
+        if (relFiles.length === 0) return null;
+        const names = new Set<string>();
+        // Folders other than the stack's own that hold a layer's real file,
+        // reached through in-root links. A multi-file write brackets the
+        // folder it writes, so the declaration is whole only while none of
+        // these folders has a publication open or abandoned.
+        const sharedFolders = new Set<string>();
+        for (const relFile of relFiles) {
+            let parsed: unknown;
+            let content: string;
+            try {
+                // Every layer goes through the canonical containment and
+                // regular-file guard. A link out of the compose root, a special
+                // file, or a layer that changed mid-read is refused, and a
+                // refused layer keeps every saved claim.
+                const layer = await fsSvc.readComposeLayer(stackName, relFile);
+                // The declaration is the only evidence that releases a saved
+                // claim, and a file read from disk cannot say whether its
+                // writer has finished: an external save that pauses mid-write
+                // looks the same as one that completed, however long it has
+                // sat. Only a layer Sencho published whole, by rename, is
+                // known to be a finished document. Any other layer keeps every
+                // claim.
+                if (!layer.publishedBySencho) {
+                    this.logDiag('compose declaration layer not published by Sencho', { stackName, relFile });
+                    return null;
+                }
+                if (layer.ownerFolder !== null && layer.ownerFolder !== stackName) {
+                    sharedFolders.add(layer.ownerFolder);
+                }
+                content = layer.content;
+                parsed = YAML.parse(content, { merge: true });
+            } catch (err) {
+                this.logDiag('compose declaration layer unreadable', {
+                    stackName,
+                    relFile,
+                    message: (err as Error).message,
+                });
+                return null;
+            }
+            // An empty or comment-only document is a valid no-op Compose
+            // layer, so it contributes no names. An explicit null scalar
+            // (`null`, `~`) also parses to null but is not a document Compose
+            // accepts, so it stays unknown.
+            if (parsed === null || parsed === undefined) {
+                if (isBlankComposeDocument(content)) continue;
+                return null;
+            }
+            if (!isRecord(parsed)) return null;
+            // `include` pulls services in from other files this reader does
+            // not follow. The parsed map is then partial, and a partial
+            // declaration must not release anything.
+            if (parsed.include !== undefined) return null;
+            // `services` is optional in an auxiliary layer. A file that only
+            // adjusts networks or volumes is valid, and it contributes no
+            // service names to the union.
+            const declaredServices = parsed.services;
+            if (declaredServices === undefined) continue;
+            // Anything else is not Compose content. Reading names off an array
+            // would treat its indexes as services and release real claims.
+            if (!isDeclaredServiceMap(declaredServices)) return null;
+            for (const name of Object.keys(declaredServices)) {
+                if (/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) names.add(name);
+            }
+        }
+        if (fsSvc.declarationSetEpoch(stackName) !== setBefore) {
+            this.logDiag('compose declaration set changed while it was being read', { stackName });
+            return null;
+        }
+        // The clock check above covers a bracket that opened or closed during
+        // the read, and this one a bracket that was already open or abandoned
+        // when it began: a shared layer is whole only if its own folder is.
+        // A folder name that is not a stack folder cannot hold a bracket.
+        for (const folder of sharedFolders) {
+            let whole: boolean;
+            try {
+                whole = fsSvc.declarationSetEpoch(folder) !== null;
+            } catch (err) {
+                // Only a folder that cannot be a stack folder is exempt. Any
+                // other failure leaves the question open, which keeps claims.
+                const code = (err as NodeJS.ErrnoException).code;
+                if (code !== 'INVALID_STACK_NAME' && code !== 'INVALID_PATH') throw err;
+                whole = true;
+            }
+            if (!whole) {
+                this.logDiag('shared compose layer is being rewritten', { stackName, folder });
+                return null;
+            }
+        }
+        // A Compose stack declares at least one service. An empty union means
+        // no file contributed a readable services map, not that the stack
+        // stopped owning everything, so it is unknown rather than a release.
+        return names.size > 0 ? names : null;
+    }
+
+    /**
+     * Declared service names for a stack on THIS Sencho instance. Central
+     * reads this over the peer route while reconciling an alias refresh, so it
+     * asks the node that owns the compose file rather than guessing.
+     */
+    public async getLocalDeclaredServiceNames(stackName: string): Promise<string[] | null> {
+        const names = await this.readDeclaredServiceNames(stackName, NodeRegistry.getInstance().getDefaultNodeId());
+        return names ? Array.from(names) : null;
+    }
+
+    /**
+     * Ask the owning node which services a stack declares. Local nodes read
+     * the compose file directly; remote nodes use the same authenticated peer
+     * transport as the live inspection. Returns null when the node cannot
+     * answer, which the refresh treats as an unknown declaration and leaves
+     * the saved claims alone.
+     */
+    private async inspectDeclaredServices(nodeId: number, stackName: string): Promise<Set<string> | null> {
+        const node = DatabaseService.getInstance().getNode(nodeId);
+        if (!node) return null;
+        if (node.type !== 'remote') return this.readDeclaredServiceNames(stackName, nodeId);
+        try {
+            const res = await this.proxyFetch(
+                nodeId,
+                'GET',
+                `/api/mesh/local-declared-services/${encodeURIComponent(stackName)}`,
+                undefined,
+                5_000,
+            );
+            if (!res.ok) {
+                console.error(`[MeshService] inspectDeclaredServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return null;
+            }
+            const body = await res.json() as { declared?: unknown };
+            // A Compose project declares at least one service. An empty list
+            // is not a valid answer, and treating it as authoritative would
+            // free every saved claim on a peer that answered with an empty
+            // body. The local route never returns one; this guards the peer
+            // response boundary.
+            if (
+                !Array.isArray(body.declared)
+                || body.declared.length === 0
+                || !body.declared.every((name): name is string => typeof name === 'string')
+            ) {
+                console.error(`[MeshService] inspectDeclaredServices: malformed response from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return null;
+            }
+            return new Set(body.declared);
+        } catch (err) {
+            if (err instanceof MeshError && (err.code === 'no_target' || err.code === 'push_failed')) {
+                console.warn(`[MeshService] inspectDeclaredServices: unreachable node ${nodeId} (${sanitizeForLog(node.name)}): ${err.code}`);
+                return null;
+            }
+            console.error('[MeshService] inspectDeclaredServices failed:', sanitizeForLog((err as Error).message));
+            return null;
+        }
     }
 
     /**
@@ -2410,26 +2961,44 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * remote node must use {@link inspectStackServices}, which dispatches
      * via the HTTP proxy to the remote's `/api/mesh/local-services/:stack`.
      */
-    public async inspectLocalStackServices(stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+    public async inspectLocalStackServices(
+        stackName: string,
+        reach?: { reachable: boolean },
+    ): Promise<MeshStackService[]> {
         try {
             const docker = DockerController.getInstance().getDocker();
             const containers = await docker.listContainers({
                 all: true,
                 filters: { label: [`com.docker.compose.project=${stackName}`] },
             });
-            const byService = new Map<string, Set<number>>();
+            const byService = new Map<string, { ports: Set<number>; running: boolean }>();
             for (const c of containers) {
                 const svc = c.Labels?.['com.docker.compose.service'];
                 if (!svc) continue;
-                const ports = byService.get(svc) || new Set<number>();
-                for (const p of c.Ports || []) {
-                    if (p.PrivatePort) ports.add(p.PrivatePort);
+                const entry = byService.get(svc) ?? { ports: new Set<number>(), running: false };
+                // Only a running container holds live port bindings. An exited
+                // container can still carry PrivatePort metadata, and reading
+                // it as a binding would keep a stopped service's alias
+                // published instead of suspending it.
+                if (c.State === 'running') {
+                    entry.running = true;
+                    for (const p of c.Ports || []) {
+                        if (p.PrivatePort) entry.ports.add(p.PrivatePort);
+                    }
                 }
-                byService.set(svc, ports);
+                byService.set(svc, entry);
             }
-            return Array.from(byService.entries()).map(([service, ports]) => ({ service, ports: Array.from(ports) }));
+            return Array.from(byService.entries()).map(([service, entry]) => ({
+                service,
+                ports: Array.from(entry.ports),
+                running: entry.running,
+            }));
         } catch (err) {
             console.warn('[MeshService] inspectLocalStackServices failed:', sanitizeForLog((err as Error).message));
+            // A failed Docker inspection is not the same as a stopped stack:
+            // mark it so the alias refresh keeps the last known services
+            // instead of dropping the stack's hostnames on this tick.
+            if (reach) reach.reachable = false;
             return [];
         }
     }
@@ -2441,11 +3010,28 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
      * Sencho's `/api/mesh/local-services/:stackName` via the existing
      * `NodeRegistry.getProxyTarget` resolution chain because Dockerode is not
      * directly reachable for remote nodes by design.
+     *
+     * @param reach Optional out-parameter, set to `reachable: false` on every
+     *   path that could not determine the stack's live state: an offline
+     *   tunnel, a failed fetch, a non-2xx answer, or a failed local Docker
+     *   inspection. A node that answers successfully with an empty service
+     *   list is the opposite case, a reachable node whose stack is stopped.
+     *   The alias refresh keeps the last known services for the former, so
+     *   its hostnames survive into other nodes' overrides and its ports stay
+     *   claimed, instead of both being dropped on this tick.
      */
-    private async inspectStackServices(nodeId: number, stackName: string): Promise<Array<{ service: string; ports: number[] }>> {
+    private async inspectStackServices(
+        nodeId: number,
+        stackName: string,
+        reach?: { reachable: boolean },
+    ): Promise<MeshStackService[]> {
+        const unreachable = (): MeshStackService[] => {
+            if (reach) reach.reachable = false;
+            return [];
+        };
         const node = DatabaseService.getInstance().getNode(nodeId);
-        if (!node) return [];
-        if (node.type !== 'remote') return this.inspectLocalStackServices(stackName);
+        if (!node) return unreachable();
+        if (node.type !== 'remote') return this.inspectLocalStackServices(stackName, reach);
 
         try {
             const res = await this.proxyFetch(
@@ -2457,10 +3043,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
             if (!res.ok) {
                 console.error(`[MeshService] inspectStackServices: HTTP ${res.status} from node ${nodeId} (${sanitizeForLog(node.name)})`);
-                return [];
+                return unreachable();
             }
-            const body = await res.json() as { services?: Array<{ service: string; ports: number[] }> };
-            return body.services ?? [];
+            const body = await res.json() as { services?: unknown };
+            // A peer that cannot answer the question must say so. A missing
+            // array or an unreadable entry is not a stopped stack, and reading
+            // it as one would drop that stack's aliases for the tick.
+            const services = parseRemoteStackServices(body.services);
+            if (!services) {
+                console.error(`[MeshService] inspectStackServices: malformed response from node ${nodeId} (${sanitizeForLog(node.name)})`);
+                return unreachable();
+            }
+            return services;
         } catch (err) {
             // proxyFetch throws MeshError('no_target') when getProxyTarget
             // returns null (pilot tunnel offline, proxy bridge unreachable)
@@ -2469,10 +3063,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // not surface a stack trace for a node that is simply offline.
             if (err instanceof MeshError && (err.code === 'no_target' || err.code === 'push_failed')) {
                 console.warn(`[MeshService] inspectStackServices: unreachable node ${nodeId} (${sanitizeForLog(node.name)}): ${err.code}`);
-                return [];
+                return unreachable();
             }
             console.error('[MeshService] inspectStackServices remote unreachable:', sanitizeForLog((err as Error).message));
-            return [];
+            return unreachable();
         }
     }
 

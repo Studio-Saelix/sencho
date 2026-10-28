@@ -346,6 +346,9 @@ export class StackUpdateRecoveryService {
     for (const node of db.getNodes()) {
       for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
         if (!row.content_path) continue;
+        // A restore this process is still driving (compose up, the probe) owns
+        // its intent; reverting under it would split the files from the Git side.
+        if (RollbackGenerationStore.isRestoreInFlight(row.node_id, row.stack_name, row.content_path)) continue;
         try {
           const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
             row.node_id,
