@@ -36,6 +36,9 @@ describe('classifyDialError', () => {
         [upgradeFailure(401, { server: 'cloudflare' }), 'blocked_by_proxy'],
         [upgradeFailure(429, { 'cf-ray': 'abc' }), 'blocked_by_proxy'],
         [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' }), 'blocked_by_proxy'],
+        // A redirect with no destination says nothing about which hop sent it.
+        [upgradeFailure(302), 'refused_unverified'],
+        [upgradeFailure(307), 'refused_unverified'],
         [upgradeFailure(407, { server: 'nginx' }), 'blocked_by_proxy'],
         // Markerless 401/403/429: an older Sencho receiver emits its
         // credential refusals without a marker too, so the hop is unknown.
@@ -224,6 +227,7 @@ describe('loadMeshProxyDialConfig', () => {
         ['a block whose body is not a certificate', '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----'],
         ['a valid block followed by a truncated one', `${tls.rootCertificates[0]}\n-----BEGIN CERTIFICATE-----\nMIIB`],
         ['a stray end marker', `${tls.rootCertificates[0]}\n-----END CERTIFICATE-----`],
+        ['a valid certificate followed by a truncated private key', `${tls.rootCertificates[0]}\n-----BEGIN PRIVATE KEY-----\nMIIB`],
     ])('rejects %s as ca configuration', (_label, content) => {
         withCaFile(content, (file) => {
             expect(() => loadMeshProxyDialConfig({ SENCHO_MESH_PROXY_CA_FILE: file })).toThrow(MeshProxyDialConfigError);

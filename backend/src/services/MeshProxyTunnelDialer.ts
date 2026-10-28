@@ -621,6 +621,16 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
         if (senchoReason === 'tier') return { code: 'tier_denied', message: 'remote refused: license tier does not include mesh' };
         if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
         if (httpStatus >= 300 && httpStatus < 400) {
+            const location = headerValue(headers, 'location');
+            if (!location) {
+                // A redirect without a destination is not evidence of a
+                // login gateway; keep the hop unidentified like an unmarked
+                // 401/403 rather than blaming an access proxy.
+                return {
+                    code: 'refused_unverified',
+                    message: `redirected with HTTP ${httpStatus} without a Location header, so the destination is unknown`,
+                };
+            }
             return {
                 code: 'blocked_by_proxy',
                 message: cloudflare

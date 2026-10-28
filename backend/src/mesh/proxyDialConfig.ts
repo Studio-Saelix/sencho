@@ -126,13 +126,20 @@ function defaultTrustAnchors(): string[] {
  */
 function validateCaBundle(pem: string, source: string): void {
     const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-    const begins = pem.match(/-----BEGIN CERTIFICATE-----/g)?.length ?? 0;
-    const ends = pem.match(/-----END CERTIFICATE-----/g)?.length ?? 0;
+    // Every PEM block, not only certificates, has to be complete: a file with
+    // a valid certificate followed by a truncated private-key block is still
+    // corrupt and should not be cached as usable configuration.
+    const beginLabels = [...pem.matchAll(/-----BEGIN ([^-]+)-----/g)].map((match) => match[1].trim());
+    const endLabels = [...pem.matchAll(/-----END ([^-]+)-----/g)].map((match) => match[1].trim());
     if (blocks.length === 0) {
         throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} does not contain a PEM certificate`);
     }
-    if (blocks.length !== begins || blocks.length !== ends) {
-        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete PEM certificate block`);
+    if (
+        beginLabels.length !== endLabels.length
+        || beginLabels.some((label, index) => label !== endLabels[index])
+        || beginLabels.filter((label) => label === 'CERTIFICATE').length !== blocks.length
+    ) {
+        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete PEM block`);
     }
     for (const block of blocks) {
         try {

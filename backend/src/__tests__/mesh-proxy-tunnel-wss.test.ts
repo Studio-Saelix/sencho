@@ -46,7 +46,10 @@ interface WssPeer {
  * upgrade is refused with Sencho's rejection marker, as Cloudflare Access
  * would refuse before the request reaches Sencho.
  */
-async function startPeer(options: { require?: Record<string, string> } = {}): Promise<WssPeer> {
+async function startPeer(options: {
+    require?: Record<string, string>;
+    refusalHeaders?: Record<string, string>;
+} = {}): Promise<WssPeer> {
     const seen: http.IncomingHttpHeaders[] = [];
     const wss = new WebSocketServer({ noServer: true });
     const sockets = new Set<WebSocket>();
@@ -56,7 +59,10 @@ async function startPeer(options: { require?: Record<string, string> } = {}): Pr
         const missing = Object.entries(options.require ?? {})
             .find(([name, value]) => req.headers[name.toLowerCase()] !== value);
         if (missing) {
-            socket.end('HTTP/1.1 401 Unauthorized\r\nX-Sencho-Mesh-Reject: unauthorized\r\nContent-Length: 0\r\n\r\n');
+            const extraHeaders = Object.entries(options.refusalHeaders ?? {})
+                .map(([name, value]) => `${name}: ${value}\r\n`)
+                .join('');
+            socket.end(`HTTP/1.1 401 Unauthorized\r\n${extraHeaders}Content-Length: 0\r\n\r\n`);
             return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -158,16 +164,20 @@ describe('proxy-mode mesh WSS dial', () => {
         }
     });
 
-    it('reports auth_failed when the gateway refuses because no credential was configured', async () => {
-        const peer = await startPeer({ require: { 'x-gateway-key': 'needed' } });
+    it('fails when the gateway requires a credential that was not configured', async () => {
+        const peer = await startPeer({
+            require: { 'x-gateway-key': 'needed' },
+            // What Cloudflare Access returns when no service token is sent.
+            refusalHeaders: { Server: 'cloudflare', 'CF-RAY': 'test' },
+        });
         process.env.SENCHO_MESH_PROXY_CA_FILE = PRIVATE_CA_FILE;
         const dialer = MeshProxyTunnelDialer.resetForTest(0);
         const nodeId = addProxyNode('mesh-wss-no-header', peer.port);
         try {
             expect(await dialer.ensureBridge(nodeId)).toBeNull();
-            expect(dialer.getRecentFailure(nodeId)?.code).toBe('auth_failed');
-            // The refusal came from the gateway, so Sencho's request reached
-            // it but did not carry the header it wanted.
+            expect(dialer.getRecentFailure(nodeId)?.code).toBe('blocked_by_proxy');
+            // The gateway refused after the TLS handshake, and the request
+            // it received did not carry the header it wanted.
             expect(peer.seen[0]?.['x-gateway-key']).toBeUndefined();
             expect(peer.seen[0]?.authorization).toBe('Bearer test-token');
         } finally {
