@@ -288,7 +288,15 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/notifications?nodeId=${rn.id}`);
 
-        ws.onopen = () => { if (!active) { ws?.close(); } else { retryCount = 0; } };
+        ws.onopen = () => {
+          if (!active) { ws?.close(); return; }
+          retryCount = 0;
+          // Invalidations sent while this socket was down are gone. The local
+          // socket's connection event cannot say so for a remote node, and it
+          // must not be reused here: its disconnect edge reads as the local
+          // feed being down. The hub's node ID, not the remote's, names it.
+          window.dispatchEvent(new CustomEvent('sencho:node-notifications-open', { detail: { nodeId: rn.id } }));
+        };
 
         ws.onmessage = (event) => {
           try {

@@ -5,7 +5,7 @@ description: "The drift classes Sencho derives for every Git-managed stack and B
 
 Sencho reports drift in two layers. The **spatial** layer compares the effective Compose model against the containers running right now and is covered in [Drift Detection](/features/stack-drift). The **GitOps** layer compares what you intended against what Sencho has proven, accepted, and observed over time, for anything managed by a Git source or a [Blueprint](/features/blueprint-model).
 
-This page is the reference for that second layer: the classes it reports, the evidence each one rests on, and the policy that decides what happens after a class is reported.
+This page is the reference for that second layer: the classes it reports, the evidence each one rests on, and the policy that decides what happens after a class is reported. The vocabulary (generation, stage, authority step) is defined in the [GitOps overview](/features/gitops-overview).
 
 ## The seven classes
 
@@ -21,22 +21,26 @@ Every GitOps drift item carries a class. The class says which part of the chain 
 | **Rollout** | A required rollout target's observed artifact identity against the authorized rollout set. | A required target reports another identity. |
 | **Invocation** | The compose invocation a node recorded when the stack was applied, against the invocation that generation was applied with. | The node's compose file order, project name, project directory, or env file order is not the one it was given. |
 
-This is the model's vocabulary: the boundaries a drift item can fall into, and what each one would be measured against. A class appears only where Sencho holds the evidence for it and the rows prove a mismatch, so a class whose evidence is not held is absent rather than approximated. The table does not promise that every class is reported today; it says what each class means when it is.
+A class appears only where Sencho holds the evidence for it and the rows prove a mismatch. A class whose evidence is not held is absent rather than approximated, and [What Sencho cannot prove](#what-sencho-cannot-prove) lists the cases where a caveat appears in its place.
 
 The [Drift tab](/features/stack-drift) and the application sheet show the classes they have evidence for. The portfolio's drift summary counts them by class, and its attention queue names the ones that are waiting on you.
 
 ## Reading an item
 
-Each item is one line of comparison plus the facts you need to act on it. The drift row shows the class, the owner, the reason, and the expected identity beside the observed one.
+Each item is one line of comparison. The drift row shows the class, the owner, how old the evidence is, the reason, and the expected identity beside the observed one.
+
+<Frame caption="A drift item on the Drift tab of a Git source: the class, the component that derived it, the age of its evidence, the reason, and the expected generation beside an unknown observation.">
+  <img src="/images/gitops-drift-model/drift-row.png" alt="Drift tab of a Git source sheet with one item: a managed project chip, the owner GITPROJECTMANIFESTSERVICE, evidence 22M AGO, the reason that the applied managed project has no usable manifest, and expected generation 7f75337a to observed unknown" />
+</Frame>
 
 - **Class** names the part of the chain that diverged.
+- **Owner** names the component or evidence source that derived the item, such as the Git source service, the Blueprint reconciler, or the observed artifact identity. It tells you which part of Sencho made the comparison; the node it concerns is on the application's target cards.
+- **Evidence age** is when the evidence was recorded. An old observation is weaker proof than a new one, so the age travels with the item. An item derived from two pointers rather than a recorded observation reads **evidence undated**.
+- **Reason** says in one line what differs.
 - **Expected** is the identity Sencho was meant to run: a commit, a generation, an artifact set, an intent, or a health run.
 - **Observed** is what it found: the same kind of identity, or `unknown` when Sencho found nothing to compare.
-- **Reason** says in one line what differs.
-- **Owner** names the surface that owns the fix, so you know whether to go to the Git Source sheet, the Blueprint, or the node.
-- **Affected targets** names the nodes involved. A direct Git source has one; a Blueprint can have many.
-- **Freshness** is when the evidence was recorded, when the evidence carries a time. An old observation is weaker proof than a new one, so the timestamp travels with the item; an item derived from two pointers rather than a recorded observation has no timestamp to show.
-- **Action** is the one step that would resolve the item for the affected target, and only when that step is legal right now. A paused or failed node gets no action rather than one that cannot run.
+
+The step that resolves an item is not on the row. It is the action on the application's status, for example **Retry**, **Review update**, or **Authorize rollout**, and it is offered only when that step is legal right now. A paused or failed node gets no action rather than one that cannot run.
 
 ## When Sencho will not repair it
 
@@ -70,7 +74,7 @@ Where evidence is missing, the card says so. It never renders an empty compariso
 
 When a Blueprint is first applied, Sencho freezes the exact image identity it was approved at by resolving each image against its registry. If that resolution cannot reach the registry, the target has no approved identity to compare against and its drift reads as unverified rather than as agreement.
 
-For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The retry interval is yours to set under **Settings → GitOps**, and it has no effect while every target's identity is already resolved.
+For a Blueprint applied from stored content, Sencho retries that resolution on its own, so the target recovers on its own schedule instead of waiting for you to redeploy it. A caveat under the state names the condition while it lasts, and clears once the identity is provable. The interval is **Retry an unresolved image identity** under **Settings → GitOps**, 5 minutes by default, and it has no effect while every target's identity is already resolved. See the [Settings reference](/reference/settings).
 
 The retry resolves the images the Blueprint was approved at, not whatever compose happens to be in the stack directory at the time. If someone edits a file on the node directly, that change is drift to be reported, never an approved identity to be adopted.
 
@@ -88,7 +92,7 @@ Work in progress is not drift, and the classes above stay silent while it happen
 
 - a commit that has been fetched but not yet accepted, including one waiting on review
 - a placement or authorization decision that is still open
-- a rollout that is queued, canarying, batching, or waiting on its health verdict
+- a rollout that is queued, advancing target by target, or waiting on its health verdict
 - a manifest being written as part of an apply that has not landed on the node yet
 - a node that is deploying, interrupted, or recovering
 - a drift that Enforce is repairing on its current pass, which is why the Blueprint deployment row reads as correcting rather than drifted
@@ -130,37 +134,16 @@ Drift is derived from what Sencho has recorded, so missing evidence is never rou
 
 Each of those is listed as a caveat under the state it applies to, on the Drift tab and in the application sheet, saying what could not be proven. The per-service digest view says the same in its own words: a target with no per-service evidence on either side says nothing rather than showing an empty comparison that would read as agreement.
 
-## The policy domains
+## Which policy acts on a class
 
-A drift class reports; a policy decides. Each decision below is independent, and none of them authorizes another. Three of them answer the same question at three points in the chain: who is allowed to decide. The other two answer what happens after something has already gone wrong or already drifted.
+A drift class reports; a policy decides. Each policy is independent, and none authorizes another. They are defined together in the [GitOps overview](/features/gitops-overview#who-decides-each-step). The two that act after something has drifted:
 
-| Policy | Where it lives | What it governs |
-|---|---|---|
-| **Source policy** | Per Git source: Manual, Review only, Auto-write files, or Auto-deploy. | How far Sencho goes on its own after a fetch. Manual takes the source out of the cadence entirely, so nothing happens until you ask for a pull. Review only records the result and waits for you. A withdrawn stateful target always waits for you, whatever the source policy says. |
-| **Placement policy** | Per application, beside the placement approval. | Which placement changes are approved without you. **Operator approves each change** is the only option unless you choose **One stateless change at a time**, and that option approves exactly one stateless addition or one stateless removal, falling back to you with a stated reason for everything else. |
-| **Rollout authorization policy** | Per application. On an Inline Blueprint it sits beside the placement policy. On a Git-managed Blueprint it sits in the rollout overflow. | Which rollouts are authorized without you. On an Inline Blueprint it also decides whether a placement the placement policy already approved runs on the next tick. A rollout cannot start before its placement is approved. |
-| **Drift mode** | Per Blueprint: Observe, Suggest, or Enforce. | What happens when the Blueprint's own drift is detected: surface it, notify you, or redeploy it. |
-| **Health rollout policy** | Per application, beside the two above. | Whether a deploy must prove healthy before it is allowed to finish, and what a failure does next: observe, pause, retry once, stop, or roll back. |
+| Policy | What it decides |
+|---|---|
+| **Drift mode** (Observe, Suggest, Enforce) | What happens when a Blueprint's own drift is detected: surface it, notify you, or redeploy it |
+| **Health rollout policy** | Whether a deploy must prove healthy before it finishes, and what a failure does next. See [Health rollout policy](/features/health-rollout-policy) |
 
 Two rules keep them honest. A digest repair redeploys against the approved identity rather than pulling whatever the tag now points at, and a stateful change always re-enters operator confirmation, whatever the drift mode says.
-
-Every rollout freezes the policy snapshot it executes, and every placement approval carries the snapshot that decided it. That is why a policy edit changes what the next decision may do and nothing else: no standing approval is withdrawn, no generation is invalidated, and the card for work already in flight says which value it was actually decided under rather than the one configured now.
-
-The three "who decides" policies are recorded together as one snapshot, so no reader can reach a single value that appears to govern more than one of them.
-
-### What a new application starts on
-
-A new or newly adopted application waits for an operator at every step. That is
-the safe default for something with no history: nothing about it has yet proved
-that a node can take a generation, and the placement policy starts on operator
-review for the same reason.
-
-An application that already existed before these settings were introduced keeps
-what it was doing, and only that. If you adopt a Blueprint after the fact, or
-convert one twice, it starts on operator review rather than inheriting the
-behavior of applications that were around earlier. The setting is beside the
-rollout authorization action it governs, so turning it on is one click rather
-than a request.
 
 ## Related
 
@@ -168,11 +151,11 @@ than a request.
   <Card title="Drift Detection" icon="magnifying-glass" href="/features/stack-drift">
     The spatial layer: effective Compose model against the containers running now.
   </Card>
-  <Card title="Git Sources" icon="git-branch" href="/features/git-sources">
-    Where the source policy, commits, and acceptance live.
+  <Card title="GitOps overview" icon="route" href="/features/gitops-overview">
+    The chain from commit to container, and who decides each step.
   </Card>
   <Card title="Blueprints" icon="layers" href="/features/blueprint-model">
-    Who decides each step, drift modes, and digest drift on a fleet template.
+    Drift modes and digest drift on a fleet template.
   </Card>
   <Card title="GitOps portfolio" icon="chart-pie" href="/features/gitops-portfolio">
     Every application in one table, with drift by class and the attention queue.

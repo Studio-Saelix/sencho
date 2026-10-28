@@ -389,6 +389,12 @@ CREATE TABLE IF NOT EXISTS gitops_approvals (
   fingerprint TEXT NULL,
   blast_json TEXT NULL,
   policy_provenance_json TEXT NULL,
+  -- Present only on a source acceptance. Null means no confirmation object was
+  -- stored. A non-null placement pointer on that same row is still read as a
+  -- confirmation that must wait. A present object names the placement approval,
+  -- which may itself be null, and whether the confirmation allowed a rollout
+  -- to start.
+  source_confirmation_json TEXT NULL,
   actor TEXT NULL,
   created_at INTEGER NOT NULL,
   CHECK (

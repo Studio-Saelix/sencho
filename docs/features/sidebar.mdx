@@ -73,7 +73,7 @@ Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated 
 Each row gives you everything you need to read the stack at a glance, in a fixed column order:
 
 - **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` (green) means the stack is running with nothing crashed. `DN` (red) means the stack is stopped. `PT` (amber) means the stack is partially running: at least one container is up and at least one has crashed (exited with an error, died, or is restart-looping). Hover the `PT` pill to see the running/total container count, such as `3/5 running`. A stack whose only stopped container finished cleanly stays `UP`.
-- **Stack name** in mono type, truncated with an ellipsis when the row gets tight. Rows no longer render a per-row label swatch; a stack's labels are visible from the group it's sorted into (see [Groups](#groups) above) or from the row's **Labels** submenu.
+- **Stack name** in mono type, truncated with an ellipsis when the row gets tight. Rows carry no per-row label swatch; a stack's labels are visible from the group it's sorted into (see [Groups](#groups) above) or from the row's **Labels** submenu.
 - **Trailing indicator** in its own fixed-width slot at the far right of the name area, showing the highest-priority signal present:
   - Pulsing fuchsia dot: an image update is available. Hover for the "Update available" tooltip; when per-service status is known, the tooltip names the outdated service(s).
   - Muted circle-alert icon: the last registry check failed (registry unreachable, missing credentials, or rate-limited). Hover to read the failure reason.
@@ -101,7 +101,7 @@ Click rows to toggle their selection, or press <kbd>Ctrl</kbd>+<kbd>A</kbd> (<kb
 
 Right-click any stack (or open the kebab that appears on hover) for its context menu. Items are grouped by purpose:
 
-- **Inspect**: **Alerts**, **Auto-Heal**, **Check updates**, **Open App** (only appears when the stack is running and exposes a browser-reachable port), and **Mute** (admins only, on nodes that support notification suppression). Mute opens a submenu with **Mute notifications for this stack**, **Mute deploy success noise**, **Mute monitor alerts for this stack**, and **Manage stack mute rules**; see [Mute Rules](/features/alerts-notifications#mute-rules) for what each preset creates.
+- **Inspect**: **Alerts**, **Auto-Heal**, **Check updates**, **Open App** (when the stack is running and exposes a browser-reachable port, or the open stack has exactly one service URL), and **Mute** (admins only, on nodes that support notification suppression). Mute opens a submenu with **Mute notifications for this stack**, **Mute deploy success noise**, **Mute monitor alerts for this stack**, and **Manage stack mute rules**; see [Mute Rules](/features/alerts-notifications#mute-rules) for what each preset creates.
 - **Organize**: **Labels** opens a submenu listing every label on the node with a checkmark next to each one already assigned to this stack. Click any label to toggle it. The submenu also offers **New label** for inline creation (when you have edit permission and the node is under its label limit), **Manage labels...** to open the full label settings, and (admins only, on nodes that support notification suppression) a **Mute label…** submenu for quieting any label's notifications. See [Stack Labels](/features/stack-labels) for the full label workflow. Below the Labels entry: **Pin to top** or **Unpin**.
 - **Lifecycle**: **Deploy** (when stopped), **Stop**, **Restart**, **Update** (when running), **Take down** (stops the stack and removes its containers and compose-created networks while keeping compose files on disk; opens a confirmation), and **Schedule task** (admin only, opens the Schedules view with this stack pre-selected).
 - **Destructive**: **Delete** (only shown when you have permission to delete this stack).
@@ -185,8 +185,8 @@ Click the ticker in any other state to navigate directly to the linked view.
   <Accordion title="Keyboard shortcuts are not firing">
     Most shortcuts only fire when a stack row is selected in the sidebar (one row is highlighted); click a row and try again. <kbd>B</kbd>, <kbd>Ctrl</kbd>+<kbd>A</kbd>, and <kbd>Esc</kbd> are the exception and work without a selection. Every shortcut is blocked while a text input is focused or the global command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) is open.
   </Accordion>
-  <Accordion title="A stack row no longer shows its label as a colored dot">
-    Stack rows show only the status pill and name; per-row label dots were removed. To see or change a stack's labels, look at which group it's sorted into, or right-click the row (or use its kebab) and open the **Labels** submenu. See [Stack Labels](/features/stack-labels) for the full picture.
+  <Accordion title="A stack row shows no colored label dot">
+    Stack rows show only the status pill and name. To see or change a stack's labels, look at which group it's sorted into, or right-click the row (or use its kebab) and open the **Labels** submenu. See [Stack Labels](/features/stack-labels) for the full picture.
   </Accordion>
   <Accordion title="Mute is missing from a stack's context menu">
     Mute (and the label group header's mute kebab) only render for admins on nodes that support notification suppression. Sign in with an admin account, or update the node if it's running a version that predates notification suppression.

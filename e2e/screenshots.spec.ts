@@ -396,7 +396,7 @@ test.describe('resources prune confirm docs screenshot', () => {
 
     await loginAs(page);
     await page.getByRole('button', { name: /resources/i }).click();
-    await page.getByRole('button', { name: /Prune Unused Images/ }).click();
+    await page.getByRole('button', { name: 'Prune unused' }).click();
     const pruneDialog = page.getByRole('alertdialog').filter({ hasText: 'Prune Sencho-managed images' });
     await expect(pruneDialog).toBeVisible();
     await expect(pruneDialog.getByText('ghcr.io/example/app:latest')).toBeVisible();

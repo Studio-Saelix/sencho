@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -32,6 +33,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { isFullySyntheticHoldImage } from '../utils/senchoRollbackHold';
+import { mapWithConcurrency } from '../utils/mapWithConcurrency';
 import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
@@ -68,6 +70,32 @@ const COMPOSE_FILE_NAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml'
 /** Cached mapping from compose `name:` field to stack directory name. TTL-based to avoid re-parsing YAML on every poll. */
 const PROJECT_NAME_CACHE_TTL_MS = 60_000;
 const PROJECT_NAME_CACHE_KEY = 'project-name-map';
+
+/** The fields of the typed `docker df` sections that the Resources figures read. */
+interface DfVolumeEntry {
+  Name?: string;
+  Labels?: Record<string, string> | null;
+  UsageData?: { RefCount?: number; Size?: number } | null;
+}
+/** A volume's measured size; the daemon reports -1 when it has not measured it. */
+function measuredVolumeSize(usage: { Size?: number } | null | undefined): number {
+  return typeof usage?.Size === 'number' && usage.Size > 0 ? usage.Size : 0;
+}
+
+interface DfContainerEntry {
+  ImageID?: string;
+  Labels?: Record<string, string> | null;
+}
+
+/**
+ * `shared-size` makes the image listing report each image's SharedSize (the
+ * bytes it shares with other images) instead of -1. dockerode's options type
+ * predates the parameter, but it forwards unknown keys as query parameters.
+ */
+const LIST_IMAGES_WITH_SHARED_SIZE: Docker.ListImagesOptions & { 'shared-size': boolean } = {
+  all: false,
+  'shared-size': true,
+};
 /** How long a resolved container StartedAt stays fresh before re-inspecting. */
 const STARTED_AT_CACHE_TTL_MS = 20_000;
 /** Cap on concurrent inspect() calls when resolving StartedAt in bulk. */
@@ -131,6 +159,12 @@ export function isContainerFailed(state: string, status: string | undefined): bo
 export interface BulkStackInfo {
   status: 'running' | 'exited' | 'unknown' | 'partial';
   mainPort?: number;
+  /**
+   * Compose service label of the running container that supplied `mainPort`.
+   * The port is direct runtime evidence, so this names its owner without
+   * guessing from the saved model.
+   */
+  mainPortService?: string;
   /** Unix seconds of the oldest running container's last start (approximates stack uptime). */
   runningSince?: number;
   /** Running container count for the stack (set when the stack has containers). */
@@ -295,6 +329,28 @@ export interface LabelInventoryRow {
   inspectFailed: boolean;
 }
 
+/**
+ * How the Docker endpoint guard treats a stop. `batch-checked` skips the guard,
+ * for a caller that has just checked the whole batch with
+ * `assertNoDockerEndpointContainers` and must not pay for every check twice.
+ */
+export interface StopContainerOptions {
+  endpointGuard?: 'batch-checked';
+}
+
+/**
+ * How the Docker endpoint guard treats a restart: `batch-checked` as for a
+ * stop, or `allow-provider-restart`, which runs the guard but lets a restart of
+ * the Docker endpoint provider itself through. For Auto-Heal, which restarts an
+ * unhealthy proxy on purpose: bouncing it is the fix. The owner of a namespace
+ * the provider or Sencho runs in, a labeled container, and a mislabeled one are
+ * still refused. One field rather than two flags, so the two intents cannot be
+ * combined into a silent full bypass.
+ */
+export interface RestartContainerOptions {
+  endpointGuard?: 'batch-checked' | 'allow-provider-restart';
+}
+
 class DockerController {
   private static readonly SYSTEM_NETWORKS = new Set(['bridge', 'host', 'none']);
   /**
@@ -341,8 +397,13 @@ class DockerController {
    * janitor alert), not "what a prune frees".
    */
   public async getDiskUsage(opts?: { excludeHeldImages: boolean }) {
-    const df = await this.docker.df();
+    return this.computeDiskUsage(await this.docker.df(), opts);
+  }
 
+  private async computeDiskUsage(
+    df: Awaited<ReturnType<Docker['df']>>,
+    opts?: { excludeHeldImages: boolean },
+  ) {
     const reclaimableContainers = (items: any[]) => {
       if (!items || !Array.isArray(items)) return { bytes: 0, count: 0 };
       // Count only the containers `docker container prune` will actually
@@ -403,10 +464,7 @@ class DockerController {
     const reclaimableVolumes = (items: any[]) => {
       if (!items || !Array.isArray(items)) return { bytes: 0, count: 0 };
       const reclaimable = items.filter(i => i.UsageData?.RefCount === 0);
-      const bytes = reclaimable.reduce((acc, item) => {
-        const size = item.UsageData?.Size || 0;
-        return acc + size;
-      }, 0);
+      const bytes = reclaimable.reduce((acc, item) => acc + measuredVolumeSize(item.UsageData), 0);
       return { bytes, count: reclaimable.length };
     };
 
@@ -696,6 +754,67 @@ class DockerController {
   }
 
   /**
+   * One section of `docker system df`. The daemon computes only the section
+   * asked for (API 1.42+; an older daemon ignores the filter and answers in
+   * full). Volumes and containers return in milliseconds, but the image
+   * section takes tens of seconds on a containerd image store, so a caller that
+   * needs only volume usage or container sizes must not pay for it.
+   */
+  private dfSection<T>(type: 'volume' | 'container'): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.docker.modem.dial(
+        { path: '/system/df?', method: 'GET', options: { type }, statusCodes: { 200: true, 500: 'server error' } },
+        (err: Error | null, data: unknown) => {
+          if (err) return reject(err);
+          // A web server on the daemon port answers with HTML (a string or Buffer).
+          if (data === null || typeof data !== 'object' || Buffer.isBuffer(data)) {
+            return reject(new Error('Unexpected response to the Docker df request'));
+          }
+          resolve(this.validateApiData<T>(data));
+        },
+      );
+    });
+  }
+
+  /** Volume usage (RefCount/Size) from the volume section only; null on failure, like safeDfSnapshot. */
+  private async safeVolumeDfSnapshot(): Promise<{
+    Volumes?: Array<{ Name?: string; UsageData?: { RefCount?: number; Size?: number } }>;
+  } | null> {
+    try {
+      return await this.dfSection('volume');
+    } catch (e) {
+      console.warn('[DockerController] Volume usage unavailable:', sanitizeForLog(getErrorMessage(e, String(e))));
+      return null;
+    }
+  }
+
+  /**
+   * Volume usage by name, or an error when it cannot be read. Prune planning,
+   * managed prune and the managed estimate all need it, and an unreadable
+   * state must surface instead of reading as "no volumes to prune".
+   */
+  private async volumeUsageOrThrow(): Promise<Map<string, { refCount: number; size: number }>> {
+    const snapshot = await this.safeVolumeDfSnapshot();
+    if (!snapshot) throw new Error('Volume usage is unavailable, so volumes cannot be evaluated');
+    return DockerController.mapVolumeUsageFromDf(snapshot);
+  }
+
+  /**
+   * Per-image SharedSize from a `shared-size` image listing, or null when any
+   * image's SharedSize is missing or -1 (unknown), so the caller can fall back to df.
+   */
+  private static sharedSizesFromListing(
+    images: Array<{ Id: string; SharedSize?: number }>,
+  ): Map<string, number> | null {
+    const sizes = new Map<string, number>();
+    for (const img of images) {
+      if (typeof img.SharedSize !== 'number' || img.SharedSize < 0) return null;
+      sizes.set(img.Id, img.SharedSize);
+    }
+    return sizes;
+  }
+
+  /**
    * Returns the `docker df` snapshot, or null if the call fails. The
    * destructive prune path uses this for a `LayersSize` before/after delta;
    * the estimate path uses it for a SharedSize lookup. Null on failure lets
@@ -708,7 +827,8 @@ class DockerController {
   } | null> {
     try {
       return await this.docker.df();
-    } catch {
+    } catch (e) {
+      console.warn('[DockerController] docker df unavailable:', sanitizeForLog(getErrorMessage(e, String(e))));
       return null;
     }
   }
@@ -730,7 +850,7 @@ class DockerController {
       if (typeof refCount !== 'number') continue;
       m.set(vol.Name, {
         refCount,
-        size: typeof vol.UsageData?.Size === 'number' ? vol.UsageData.Size : 0,
+        size: measuredVolumeSize(vol.UsageData),
       });
     }
     return m;
@@ -780,7 +900,7 @@ class DockerController {
     if (target === 'volumes') {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
-      const volumeUsage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot());
+      const volumeUsage = await this.volumeUsageOrThrow();
       const prunable = rawVolumes.filter((v: any) => {
         const usage = volumeUsage.get(v.Name);
         // Missing from df: unknown usage; do not prune.
@@ -928,7 +1048,7 @@ class DockerController {
     if (target === 'volumes') {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
-      const volumeUsage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot());
+      const volumeUsage = await this.volumeUsageOrThrow();
       const prunable = rawVolumes.filter((v: any) => {
         const usage = volumeUsage.get(v.Name);
         if (!usage || usage.refCount !== 0) return false;
@@ -1046,7 +1166,9 @@ class DockerController {
     const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
     const resolvedBase = path.resolve(COMPOSE_DIR);
 
-    const allContainers = await this.docker.listContainers({ all: true, size: true }) as Array<{
+    // `size: true` makes the daemon compute every container's writable layer,
+    // which only the containers target reports.
+    const allContainers = await this.docker.listContainers({ all: true, size: ordered.includes('containers') }) as Array<{
       Id: string;
       Names?: string[];
       State?: string;
@@ -1084,13 +1206,10 @@ class DockerController {
       }
     }
 
-    // Volume usage (RefCount/Size) must come from docker.df(); listVolumes
-    // returns UsageData: null on real daemons.
-    const dfSnapshot = await this.safeDfSnapshot();
-    const volumeUsage = DockerController.mapVolumeUsageFromDf(dfSnapshot);
-    const sharedSizes = DockerController.mapSharedSizesFromDf(dfSnapshot);
-
     if (ordered.includes('volumes')) {
+      // Volume usage (RefCount/Size) must come from docker df; listVolumes
+      // returns UsageData: null on real daemons.
+      const volumeUsage = await this.volumeUsageOrThrow();
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes = (this.validateApiData<{ Volumes?: Array<{
         Name: string;
@@ -1137,23 +1256,31 @@ class DockerController {
           networksInUse.add(netName);
         }
       }
-      for (const net of rawNetworks) {
-        if (DockerController.SYSTEM_NETWORKS.has(net.Name)) continue;
-        if (selfIdentity.isOwnNetwork(net.Id) || selfIdentity.isOwnNetwork(net.Name)) continue;
-        if (networksInUse.has(net.Name) || networksInUse.has(net.Id)) continue;
-        // Belt-and-braces: inspect when list summary did not expose attachments.
+      const candidates = rawNetworks.filter((net) =>
+        !DockerController.SYSTEM_NETWORKS.has(net.Name)
+        && !selfIdentity.isOwnNetwork(net.Id)
+        && !selfIdentity.isOwnNetwork(net.Name)
+        && !networksInUse.has(net.Name)
+        && !networksInUse.has(net.Id));
+      // Belt-and-braces: re-check every candidate with an inspect, since the
+      // list summary may not expose attachments. Inspects run concurrently; a daemon with many networks otherwise pays
+      // one round trip per network before the preview can open.
+      const idle = await mapWithConcurrency(candidates, 8, async (net) => {
         try {
           const inspected = await this.docker.getNetwork(net.Id).inspect() as {
             Containers?: Record<string, unknown>;
           };
-          if (inspected.Containers && Object.keys(inspected.Containers).length > 0) continue;
+          return inspected.Containers && Object.keys(inspected.Containers).length > 0 ? null : net;
         } catch (e) {
           console.warn(
             `[buildPrunePlan] Skipping network ${sanitizeForLog(net.Name)}: inspect failed:`,
             sanitizeForLog(e instanceof Error ? e.message : String(e)),
           );
-          continue;
+          return null;
         }
+      });
+      for (const net of idle) {
+        if (!net) continue;
         const stack = DockerController.resolveContainerStack(
           net.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
         );
@@ -1208,16 +1335,24 @@ class DockerController {
       const plannedContainerIds = new Set(
         items.filter((i) => i.target === 'containers').map((i) => i.id),
       );
-      const rawImages = await this.docker.listImages({ all: false }) as Array<{
+      const rawImages = await this.docker.listImages(LIST_IMAGES_WITH_SHARED_SIZE) as Array<{
         Id: string;
         RepoTags?: string[] | null;
         RepoDigests?: string[] | null;
         Labels?: Record<string, string>;
         Size?: number;
+        SharedSize?: number;
         VirtualSize?: number;
         Containers?: number;
         Created?: number;
       }>;
+      // The listing carries the same SharedSize as the image section of df,
+      // which is far slower. Fall back to df only when the daemon leaves it unknown.
+      let sharedSizes = DockerController.sharedSizesFromListing(rawImages);
+      if (!sharedSizes) {
+        console.warn('[DockerController] Image listing has no shared sizes; using the slower docker df');
+        sharedSizes = DockerController.mapSharedSizesFromDf(await this.safeDfSnapshot());
+      }
       const { repoKeys } = buildManagedImageRepoSet(managedContainers, rawImages);
       // An image becomes free only when every container that references it is
       // also in this plan (not merely when any planned container uses it).
@@ -1549,7 +1684,11 @@ class DockerController {
     if (!vol) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume no longer exists' };
     }
-    const usage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot()).get(item.id);
+    const usageSnapshot = await this.safeVolumeDfSnapshot();
+    if (!usageSnapshot) {
+      return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume usage unavailable' };
+    }
+    const usage = DockerController.mapVolumeUsageFromDf(usageSnapshot).get(item.id);
     if (!usage || usage.refCount !== 0) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume is in use' };
     }
@@ -1757,51 +1896,122 @@ class DockerController {
     }
   }
 
+  /**
+   * Reclaimable images: unused images, minus rollback-held ones (a prune
+   * refuses them), counting the bytes no other image shares. This is a lower
+   * bound: layers shared only among unused images are not counted, though a
+   * prune of all of them frees those too. The prune plan uses the same
+   * arithmetic, so the two figures agree. If the held state cannot be read
+   * the figure is 0, as in getDiskUsage.
+   */
+  private async reclaimableImagesFromListing(
+    images: Array<{ Id: string; Size?: number; SharedSize?: number; Containers?: number }>,
+  ): Promise<{ bytes: number; count: number }> {
+    const { readHeldImageLookup } = await import('./recoveryHeldImages');
+    const held = readHeldImageLookup(this.nodeId);
+    if (held.unknown) {
+      console.warn('[DockerController] Held image state unreadable; reporting no reclaimable images');
+      return { bytes: 0, count: 0 };
+    }
+    const unused = images.filter((img) => (img.Containers ?? 0) === 0 && !held.isHeld(img.Id));
+    if (DockerController.sharedSizesFromListing(unused) !== null) {
+      return {
+        bytes: unused.reduce((acc, img) => acc + Math.max(0, (img.Size ?? 0) - (img.SharedSize ?? 0)), 0),
+        count: unused.length,
+      };
+    }
+    // The daemon did not report shared sizes: take the exact but slow figure.
+    console.warn('[DockerController] Image listing has no shared sizes; using the slower docker df');
+    const exact = await this.computeDiskUsage(await this.docker.df(), { excludeHeldImages: true });
+    return { bytes: exact.reclaimableImages, count: exact.reclaimableImageCount };
+  }
+
   public async getDiskUsageClassified(knownStackNames: string[]): Promise<{
     reclaimableImages: number;
     reclaimableContainers: number;
     reclaimableVolumes: number;
-    reclaimableBuildCache: number;
     reclaimableImageCount: number;
     reclaimableContainerCount: number;
     reclaimableVolumeCount: number;
-    reclaimableBuildCacheCount: number;
     managedImageBytes: number;
     unmanagedImageBytes: number;
     managedVolumeBytes: number;
     unmanagedVolumeBytes: number;
   }> {
-    const [base, classified] = await Promise.all([
-      // Exclude rollback-held images so the banner/treemap figure matches
-      // what a prune can actually free (see getDiskUsage docs).
-      this.getDiskUsage({ excludeHeldImages: true }),
-      this.getClassifiedResources(knownStackNames),
+    // The usual path avoids the image section of `docker df`: it takes tens of
+    // seconds on a containerd image store, and a `shared-size` image listing
+    // carries the same per-image SharedSize. Only when the daemon leaves shared
+    // sizes unknown does the reclaimable-images figure fall back to a full df.
+    // Real daemons return UsageData: null from listVolumes, so volume bytes
+    // come from the volume df section.
+    const [rawImages, dfVolumes, dfContainers, projectToStack] = await Promise.all([
+      this.docker.listImages(LIST_IMAGES_WITH_SHARED_SIZE),
+      this.dfSection<{ Volumes?: DfVolumeEntry[] }>('volume'),
+      this.dfSection<{ Containers?: DfContainerEntry[] }>('container'),
+      DockerController.resolveProjectNameMap(knownStackNames),
     ]);
+    const images = this.validateApiData<Array<{
+      Id: string;
+      RepoTags?: string[] | null;
+      Size?: number;
+      SharedSize?: number;
+      Containers?: number;
+    }>>(rawImages);
 
-    const managedImageBytes = classified.images
-      .filter(i => i.managedStatus === 'managed')
-      .reduce((acc, i) => acc + i.Size, 0);
-    const unmanagedImageBytes = classified.images
-      .filter(i => i.managedStatus === 'unmanaged')
-      .reduce((acc, i) => acc + i.Size, 0);
+    // Containers and volumes: the same arithmetic as getDiskUsage, on a df
+    // object that carries only those two sections.
+    const sections = await this.computeDiskUsage(
+      { Containers: dfContainers.Containers, Volumes: dfVolumes.Volumes },
+    );
 
-    // Volume disk usage: query raw volumes for UsageData (not available in classified resources)
-    const rawVolumeData = await this.docker.listVolumes();
-    const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
-    const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
+    const reclaimableImages = await this.reclaimableImagesFromListing(images);
+
     const knownSet = new Set(knownStackNames);
+    const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
+    const resolvedBase = path.resolve(COMPOSE_DIR);
 
-    const isVolumeManaged = (v: any): boolean =>
-      !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack);
+    const managedImageIds = new Set<string>();
+    for (const c of dfContainers.Containers ?? []) {
+      if (!c.ImageID) continue;
+      if (DockerController.resolveContainerStack(c.Labels ?? undefined, projectToStack, knownSet, absDirToStack, resolvedBase)) {
+        managedImageIds.add(c.ImageID);
+      }
+    }
 
-    const managedVolumeBytes = rawVolumes
-      .filter(isVolumeManaged)
-      .reduce((acc: number, v: any) => acc + (v.UsageData?.Size ?? 0), 0);
-    const unmanagedVolumeBytes = rawVolumes
-      .filter((v: any) => !isVolumeManaged(v))
-      .reduce((acc: number, v: any) => acc + (v.UsageData?.Size ?? 0), 0);
+    // Same classification as getClassifiedResources: an image counts toward
+    // the managed or external total only while a container uses it.
+    let managedImageBytes = 0;
+    let unmanagedImageBytes = 0;
+    for (const img of images) {
+      if (img.Containers === 0 || isFullySyntheticHoldImage(img.RepoTags ?? [])) continue;
+      const size = img.Size ?? 0;
+      if (managedImageIds.has(img.Id)) managedImageBytes += size;
+      else unmanagedImageBytes += size;
+    }
 
-    return { ...base, managedImageBytes, unmanagedImageBytes, managedVolumeBytes, unmanagedVolumeBytes };
+    let managedVolumeBytes = 0;
+    let unmanagedVolumeBytes = 0;
+    for (const vol of dfVolumes.Volumes ?? []) {
+      const size = measuredVolumeSize(vol.UsageData);
+      const managed = DockerController.resolveProjectLabel(
+        vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+      );
+      if (managed) managedVolumeBytes += size;
+      else unmanagedVolumeBytes += size;
+    }
+
+    return {
+      reclaimableImages: reclaimableImages.bytes,
+      reclaimableContainers: sections.reclaimableContainers,
+      reclaimableVolumes: sections.reclaimableVolumes,
+      reclaimableImageCount: reclaimableImages.count,
+      reclaimableContainerCount: sections.reclaimableContainerCount,
+      reclaimableVolumeCount: sections.reclaimableVolumeCount,
+      managedImageBytes,
+      unmanagedImageBytes,
+      managedVolumeBytes,
+      unmanagedVolumeBytes,
+    };
   }
 
   public async removeImage(id: string) {
@@ -2449,7 +2659,11 @@ class DockerController {
           const mainPort = selectMainWebPort(
             container.Ports as { PrivatePort?: number; PublicPort?: number; Type?: string }[],
           );
-          if (mainPort) result[stackDir].mainPort = mainPort;
+          if (mainPort) {
+            result[stackDir].mainPort = mainPort;
+            const service = (container as { Labels?: Record<string, unknown> }).Labels?.['com.docker.compose.service'];
+            if (typeof service === 'string' && service.length > 0) result[stackDir].mainPortService = service;
+          }
         }
       } else if (isContainerFailed(container.State, container.Status)) {
         counts.failed += 1;
@@ -2986,8 +3200,42 @@ class DockerController {
     }
   }
 
+  /**
+   * Refuses to stop, restart, or remove the container that carries this node's Docker
+   * API (the socket proxy Sencho reaches Docker through, or Sencho itself on a
+   * stop). The Docker endpoint guard is imported lazily: it reads container and
+   * identity state through this class.
+   */
+  private async assertNotDockerEndpointContainer(
+    containerId: string,
+    action: 'stop' | 'restart',
+    options?: RestartContainerOptions,
+  ): Promise<void> {
+    if (options?.endpointGuard === 'batch-checked') return;
+    const { evaluateDockerEndpointContainer } = await import('../helpers/dockerEndpointGuard');
+    const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker, {
+      allowProvider: options?.endpointGuard === 'allow-provider-restart',
+    });
+    if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * Checks every container before any of them is touched, so a batch that
+   * contains the Docker endpoint container is refused whole rather than stopping
+   * its siblings first and failing on the one that matters.
+   */
+  public async assertNoDockerEndpointContainers(
+    containerIds: string[],
+    action: 'stop' | 'restart',
+  ): Promise<void> {
+    for (const id of containerIds) {
+      await this.assertNotDockerEndpointContainer(id, action);
+    }
+  }
+
   // State-safe: silently ignores 304 "already stopped" errors
-  public async stopContainer(containerId: string) {
+  public async stopContainer(containerId: string, options?: StopContainerOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'stop', options);
     try {
       const container = this.docker.getContainer(containerId);
       await container.stop();
@@ -3000,7 +3248,8 @@ class DockerController {
     }
   }
 
-  public async restartContainer(containerId: string) {
+  public async restartContainer(containerId: string, options?: RestartContainerOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
     const container = this.docker.getContainer(containerId);
     await container.restart();
   }
@@ -3042,15 +3291,22 @@ class DockerController {
 
   public async removeContainers(containerIds: string[]) {
     if (isDebugEnabled()) console.debug('[Resources:debug] removeContainers', { count: containerIds.length });
-    const results = [];
+    const results: Array<{ id: string; success: boolean; error?: string; refused?: true }> = [];
     for (const id of containerIds) {
       try {
+        // Removal is a stop that cannot be undone: the Docker endpoint container is refused.
+        await this.assertNotDockerEndpointContainer(id, 'stop');
         const container = this.docker.getContainer(id);
         await container.remove({ force: true });
         results.push({ id, success: true });
       } catch (error: any) {
         console.error('Failed to remove container %s:', sanitizeForLog(id), sanitizeForLog(error.message));
-        results.push({ id, success: false, error: error.message });
+        results.push({
+          id,
+          success: false,
+          error: error.message,
+          ...(error instanceof DockerEndpointProtectedError ? { refused: true as const } : {}),
+        });
       }
     }
     return results;

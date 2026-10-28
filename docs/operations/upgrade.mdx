@@ -42,9 +42,17 @@ Sencho handles all schema changes internally. When the application starts, it ch
 - **Encryption of node API tokens** stored in plaintext (registry credentials are always stored encrypted, so they need no migration)
 - **SSO and RBAC setup** for single sign-on provider config and role-based access
 - **Obsolete column cleanup**, removing unused SSH/TLS configuration columns no longer read or written by the current schema
+- **GitOps history** tables and a default retention window of 30 days, set under **Settings → GitOps**, after which older entries are pruned
+- **Account preferences**: explicit appearance and navigation choices already saved in a browser are copied to your account when you first sign in there, and follow you to other browsers
 - **Blueprint rollout approval** columns (`approval_status`, intent fingerprint, and blast JSON). Existing Blueprints start **pending**. Automatic reconciliation and enforcement pause until an admin opens **Apply now**, reviews the rollout preview, and confirms. New installs behave the same way for each Blueprint until the first confirmation.
 
 You never need to run SQL commands, migration scripts, or any manual database operations.
+
+---
+
+## Behind a reverse proxy
+
+Sencho trusts forwarded client addresses and schemes only from the peers listed in `SENCHO_TRUSTED_PROXY_CIDRS`. Set it to your proxy before exposing Sencho through it. Without it, every client behind the proxy shares one sign-in rate limit, and a few failed sign-ins lock out everyone for 15 minutes. See [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup), and [Clients share one rate-limit bucket](/operations/troubleshooting#clients-share-one-rate-limit-bucket-behind-a-reverse-proxy) if that is already happening.
 
 ---
 
@@ -67,7 +75,7 @@ See the [Backup & Restore guide](/operations/backup) for full backup procedures.
 If you prefer to control exactly which version you run, pin the image tag in your `docker-compose.yml`:
 
 ```yaml
-image: saelix/sencho:0.96.0
+image: saelix/sencho:0.98.0
 ```
 
 Fleet can update semver pins directly from the [Node updates](/features/remote-updates) sheet: it rewrites the tag to the selected release before recreating the container. Digest pins and compose values that use variable interpolation must be changed manually before Fleet can update the node.
@@ -82,16 +90,18 @@ Check [GitHub Releases](https://github.com/studio-saelix/sencho/releases) for av
 
 ## Version policy
 
-Sencho follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`):
+Sencho has not reached 1.0 yet. Until then, a compatible change ships as the next patch of the current line, and a patch can carry a new feature. This is a deliberate departure from strict [Semantic Versioning](https://semver.org/), stated here so nothing about it is a surprise: a `0.N.x` release can add a screen, a setting, or an endpoint.
 
-| Change type | Version bump | Example |
-|-------------|-------------|---------|
-| Bug fixes, performance improvements | Patch | 0.38.0 → 0.38.1 |
-| New features | Minor | 0.38.x → 0.39.0 |
-| Breaking changes | Major | 0.x.y → 1.0.0 |
+| Change | Version | Example |
+|--------|---------|---------|
+| Fixes, performance and security improvements, and compatible new features | Next patch | 0.N.3 → 0.N.4 |
+| An announced compatibility change that cannot ship as a patch | Next minor | 0.N.x → 0.(N+1).0 |
+| General availability | 1.0.0 | 0.N.x → 1.0.0 |
 
 <Note>
-  While the version is below 1.0, minor releases (0.x.0) may occasionally include breaking changes. These are always documented in the release notes. Once Sencho reaches 1.0, breaking changes will only occur in major releases.
+  A release that changes compatibility says so in its release notes, with the upgrade and rollback steps. After 1.0, ordinary Semantic Versioning applies: new features arrive in minor releases, and breaking changes only in major releases.
 </Note>
+
+To receive features only when you choose, pin an exact version as described in [Pinning a specific version](#pinning-a-specific-version).
 
 Breaking changes are marked with `BREAKING CHANGE` in the [release notes](https://github.com/studio-saelix/sencho/releases). Subscribe to the repository's releases to be notified of new versions.

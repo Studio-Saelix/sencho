@@ -289,6 +289,32 @@ describe('restoreTargetToGeneration on a remote node', () => {
     expect(config.headers[PROXY_SCOPED_STACK_ACTIONS_HEADER]).toContain('stack:deploy');
   });
 
+  it('carries back the decision the node allowed the restore on', async () => {
+    const nodeId = insertNode('remote', 'https://remote.example.com:1852');
+    const app = remoteApp(nodeId);
+    const policyEvidence = {
+      policy: { id: 3, name: 'prod-gate' },
+      bypassed: false,
+      evidence: { outcome: 'allow', summary: 'scanner unavailable', records: [], applications: [] },
+    };
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 200,
+      data: { message: 'rolled back', gitopsGenerationId: 'gen-restore', policyEvidence },
+    });
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome).toEqual({ ok: true, policyEvidence });
+  });
+
   it('carries the node refusal code and message back', async () => {
     const nodeId = insertNode('remote', 'https://remote.example.com:1852');
     const app = remoteApp(nodeId);
@@ -444,12 +470,87 @@ describe('restoreTargetToGeneration on a remote node', () => {
   });
 });
 
+describe('restoreTargetToGeneration on a local node', () => {
+  it('refuses a restore that would recreate the container carrying the Docker connection, before touching the stack', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const nodeId = DatabaseService.getInstance().getNodes().find(node => node.type === 'local')!.id;
+    const { app: seeded } = seedApplication({ nodeIds: [nodeId], stackName: 'bp-stack' });
+    const app = GitOpsStore.getInstance().getApplication(seeded.id)!;
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-1', gitops_generation_id: 'gen-restore' } as never);
+    const compensate = vi.spyOn(recovery, 'compensateWithCandidateOutcome');
+    const evaluate = vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    });
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(evaluate).toHaveBeenCalledWith('bp-stack', { kind: 'update' });
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'docker_endpoint_protected',
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      failureClass: 'pre_mutation',
+    });
+    expect(compensate).not.toHaveBeenCalled();
+    expect(restoreFailureMutated(outcome as { code: string; failureClass?: 'pre_mutation' })).toBe(false);
+  });
+
+  it('classifies a refusal raised inside the restore as nothing moved, with the node\'s own failure class', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    const nodeId = DatabaseService.getInstance().getNodes().find(node => node.type === 'local')!.id;
+    const { app: seeded } = seedApplication({ nodeIds: [nodeId], stackName: 'bp-stack-2' });
+    const app = GitOpsStore.getInstance().getApplication(seeded.id)!;
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const recovery = StackUpdateRecoveryService.getInstance();
+    vi.spyOn(recovery, 'getCurrent').mockReturnValue({ id: 'rec-2', gitops_generation_id: 'gen-restore' } as never);
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+    vi.spyOn(recovery, 'compensateWithCandidateOutcome').mockRejectedValue(
+      Object.assign(
+        new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }),
+        { failureClass: 'pre_mutation' },
+      ),
+    );
+
+    const outcome = await restoreTargetToGeneration({
+      app,
+      stackName: 'bp-stack-2',
+      nodeId,
+      generationId: 'gen-restore',
+      actor: 'operator',
+      role: 'admin',
+      scopedActions: ['stack:deploy'],
+    });
+
+    expect(outcome).toEqual({
+      ok: false,
+      code: 'docker_endpoint_protected',
+      error: 'carries the Docker connection',
+      failureClass: 'pre_mutation',
+    });
+  });
+});
+
 describe('restoreFailureMutated', () => {
   it.each([
     ['NO_RECOVERY_POINT', undefined, false],
     ['RECOVERY_POINT_MISMATCH', undefined, false],
     ['STACK_NOT_FOUND', undefined, false],
     ['self_stack_protected', undefined, false],
+    ['docker_endpoint_protected', undefined, false],
     ['PERMISSION_DENIED', undefined, false],
     // A busy stack means another operation is moving it right now, so the
     // refusal cannot prove the target is unchanged.

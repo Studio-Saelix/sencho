@@ -29,6 +29,7 @@ beforeEach(() => {
     const svc = MeshService.getInstance() as unknown as {
         aliasCache: Map<string, unknown>;
         aliasByPort: Map<number, unknown>;
+        reservedPorts: Map<number, unknown>;
         activity: unknown[];
         activeStreams: Map<number, unknown>;
         routeErrorMap: Map<string, unknown>;
@@ -41,6 +42,7 @@ beforeEach(() => {
     };
     svc.aliasCache = new Map();
     svc.aliasByPort = new Map();
+    svc.reservedPorts = new Map();
     svc.activity = [];
     svc.activeStreams = new Map();
     svc.routeErrorMap = new Map();
@@ -109,11 +111,15 @@ describe('MeshService.optInStack', () => {
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
     });
 
-    it('restores opt-in authority when target override removal is rejected', async () => {
+    it('keeps the opt-in record when target override removal is rejected', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
         db.insertMeshStack(localNodeId, 'busy-stack', 'setup');
+        const busyRow = db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack');
+        if (!busyRow) throw new Error('missing mesh row for busy-stack');
+        db.setMeshStackLastKnownServices(busyRow.id, JSON.stringify([{ service: 'db', ports: [5432] }]));
+        const before = db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack');
         vi.spyOn(svc, 'removeOverrideFromNode').mockRejectedValue(
             new Error('HTTP 500: another operation is already in progress'),
         );
@@ -122,6 +128,9 @@ describe('MeshService.optInStack', () => {
             .rejects.toThrow('another operation is already in progress');
 
         expect(db.isMeshStackEnabled(localNodeId, 'busy-stack')).toBe(true);
+        // The failed removal must not re-create the row: the saved services,
+        // actor, creation time, and id all have to survive for the next refresh.
+        expect(db.listMeshStacks(localNodeId).find((r) => r.stack_name === 'busy-stack')).toEqual(before);
     });
 
     it('serializes concurrent opt-out requests for the same node', async () => {
@@ -1143,6 +1152,27 @@ describe('MeshService.getDeclaredStackServices (BUG-1)', () => {
         writeStackFile('no-services', 'version: "3.9"\n');
         const names = await svc.getDeclaredStackServices('no-services');
         expect(names).toEqual({});
+    });
+
+    it.skipIf(process.platform === 'win32')('returns no shapes when one layer of the chain cannot be read', async () => {
+        // A partial union would rewrite the mesh override without the services
+        // that layer declares. Unknown keeps the existing override instead.
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const stack = 'partial-shapes-stack';
+        writeStackFile(stack, 'services:\n  web:\n    image: nginx\n');
+        const outside = path.join(process.env.COMPOSE_DIR as string, '..', 'outside-shapes');
+        fsSync.mkdirSync(outside, { recursive: true });
+        fsSync.writeFileSync(path.join(outside, 'extra.yaml'), 'services:\n  db:\n    image: busybox\n', 'utf8');
+        fsSync.symlinkSync(
+            path.join(outside, 'extra.yaml'),
+            path.join(process.env.COMPOSE_DIR as string, stack, 'extra.yaml'),
+        );
+        vi.spyOn(db, 'getGitSource').mockReturnValue({
+            applied_deploy_spec: { files: ['compose.yaml', 'extra.yaml'], contextDir: null },
+        } as unknown as ReturnType<typeof DatabaseService.prototype.getGitSource>);
+
+        expect(await svc.getDeclaredStackServices(stack)).toEqual({});
     });
 
     it('reports each service network shape so the override keeps default and skips network_mode', async () => {

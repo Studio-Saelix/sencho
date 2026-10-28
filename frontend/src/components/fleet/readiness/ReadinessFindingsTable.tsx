@@ -26,7 +26,8 @@ import type { DismissedFinding } from '@/lib/findingDismissals';
 import { describeDismissal } from './describeDismissal';
 
 const HEAD = 'text-[10px] uppercase tracking-[0.18em]';
-const FILTER_CLASS = 'w-[200px] [&>button]:!bg-background';
+const PRIMARY_ACTION = 'h-auto min-h-7 max-w-[min(8rem,100%)] whitespace-normal px-2 py-1 text-right text-xs leading-tight';
+const FILTER_CLASS = 'w-[200px] [&>button]:!bg-control';
 const PAGE_SIZE = 25;
 
 /** The canonical verdict a finding restates, in that verdict's own surface's words. */
@@ -208,7 +209,7 @@ export function ReadinessFindingsTable({
   const onlyDismissedHere = visible.length === 0 && dismissedItems.length > 0;
 
   return (
-    <section aria-label="Readiness findings" className="space-y-2">
+    <section aria-label="Readiness findings" className="min-w-0 space-y-2">
       <div className="flex items-baseline justify-between gap-3">
         <h3 className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">findings</h3>
         <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">
@@ -217,16 +218,19 @@ export function ReadinessFindingsTable({
       </div>
       <FindingsFilterBar filter={filter} domains={domains} nodes={nodes} onChange={onFilterChange} />
       <div className="overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
-        <Table>
+        {/* Fixed layout from md up. Stack and domain leave the row below 2xl
+            and sit on the finding. Until then the other columns take a share
+            of the pane, so a narrow fleet pane cannot push the verb off-screen. */}
+        <Table className="md:table-fixed">
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className={cn(HEAD, 'w-8')} aria-label="Severity" />
+              <TableHead className={cn(HEAD, 'w-14')} aria-label="Severity" />
               <TableHead className={HEAD}>Finding</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Node</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Stack</TableHead>
-              <TableHead className={cn(HEAD, 'max-md:hidden')}>Domain</TableHead>
-              <TableHead className={HEAD}>State</TableHead>
-              <TableHead className={cn(HEAD, 'text-right')}>Action</TableHead>
+              <TableHead className={cn(HEAD, 'max-md:hidden md:w-[22%] 2xl:w-[11rem]')}>Node</TableHead>
+              <TableHead className={cn(HEAD, 'hidden 2xl:table-cell 2xl:w-[9rem]')}>Stack</TableHead>
+              <TableHead className={cn(HEAD, 'hidden 2xl:table-cell 2xl:w-[8.5rem]')}>Domain</TableHead>
+              <TableHead className={cn(HEAD, 'md:w-[14%] 2xl:w-[9.5rem]')}>State</TableHead>
+              <TableHead className={cn(HEAD, 'text-right md:w-[32%] 2xl:w-[17rem]')}>Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -298,48 +302,50 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
   const domain = domainMeta(finding.domain);
   const DomainIcon = domain.icon;
   const remediation = codeRemediation(finding.code);
+  const stackAndDomain = [finding.stack, domain.label].filter(Boolean).join(' / ');
 
   return (
     <TableRow className={cn('transition-colors hover:bg-muted/30', TONE_ROW[state.tone])}>
       <TableCell className="align-top">
         <span aria-hidden className={cn('mt-1 inline-block h-2 w-2 rounded-full', TONE_DOT[state.tone])} />
       </TableCell>
-      <TableCell className="align-top">
-        <div className="min-w-[240px] max-w-[420px]">
+      <TableCell className="min-w-0 overflow-hidden align-top">
+        <div className="min-w-0 max-w-[420px] break-words max-md:min-w-[240px]">
           <span className="text-xs font-medium text-stat-value">
             {codeCopy(finding.code)}
             {finding.count > 1 && <span className="ml-1.5 font-mono text-[10px] tabular-nums text-stat-subtitle">×{finding.count}</span>}
           </span>
           {finding.detail && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{finding.detail}</span>}
           {remediation && <span className="mt-0.5 block text-[11px] leading-snug text-stat-subtitle">{remediation}</span>}
-          {/* The scope columns are hidden on a phone, so the row names it inline. */}
+          {/* Scope columns that are hidden at this width are named here, once. */}
           <span className="mt-0.5 hidden font-mono text-[10px] text-stat-subtitle max-md:block">
-            {[nodeName, finding.stack].filter(Boolean).join(' / ')}
+            {[nodeName, stackAndDomain].filter(Boolean).join(' / ')}
+          </span>
+          <span className="mt-0.5 hidden font-mono text-[10px] text-stat-subtitle md:block 2xl:hidden">
+            {stackAndDomain}
           </span>
         </div>
       </TableCell>
-      <TableCell className="align-top font-mono text-xs max-md:hidden">
-        <span className="block max-w-[160px] truncate">{nodeName}</span>
+      <TableCell className="overflow-hidden align-top font-mono text-xs max-md:hidden">
+        <span className="block truncate" title={nodeName}>{nodeName}</span>
       </TableCell>
-      <TableCell className="align-top font-mono text-xs max-md:hidden">
+      <TableCell className="hidden overflow-hidden align-top font-mono text-xs 2xl:table-cell">
         {finding.stack
-          ? <span className="block max-w-[160px] truncate">{finding.stack}</span>
+          ? <span className="block truncate" title={finding.stack}>{finding.stack}</span>
           : <span className="text-[11px] text-stat-icon">--</span>}
       </TableCell>
-      <TableCell className="align-top max-md:hidden">
-        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] text-stat-subtitle">
-          <DomainIcon className="h-3.5 w-3.5" strokeWidth={1.5} />
-          {domain.label}
+      <TableCell className="hidden overflow-hidden align-top 2xl:table-cell">
+        <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-stat-subtitle">
+          <DomainIcon className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} />
+          <span className="truncate">{domain.label}</span>
         </span>
       </TableCell>
-      <TableCell className="align-top">
-        <span className="flex flex-wrap gap-1">
-          <span className={cn('whitespace-nowrap rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4', chip.tone)}>
-            {chip.label}
-          </span>
+      <TableCell className="overflow-hidden align-top">
+        <span className={cn('inline-block max-w-full whitespace-normal rounded-md border px-1.5 py-0.5 font-mono text-[10px] leading-4', chip.tone)}>
+          {chip.label}
         </span>
       </TableCell>
-      <TableCell className="text-right align-top">
+      <TableCell className="min-w-0 overflow-hidden text-right align-top [&>div]:flex-wrap">
         <FindingRowActions
           dismissPolicy={finding.dismissPolicy ?? 'none'}
           canDismiss={canDismiss}
@@ -351,7 +357,7 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
             <BusyButton
               variant="ghost"
               size="sm"
-              className="h-auto min-h-7 max-w-[8rem] whitespace-normal px-2 py-1 text-right text-xs leading-tight text-brand hover:text-brand"
+              className={cn(PRIMARY_ACTION, 'text-brand hover:text-brand')}
               pending={verb.busy}
               aria-label={`${verb.label}: ${codeCopy(finding.code)}`}
               onClick={verb.run}
@@ -362,7 +368,8 @@ function FindingRow({ finding, nodeName, action, onOpen, verb, canDismiss, dismi
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 whitespace-nowrap px-2 text-xs text-stat-subtitle hover:text-stat-value"
+              className={cn(PRIMARY_ACTION, 'text-stat-subtitle hover:text-stat-value')}
+              aria-label={`${action}: ${codeCopy(finding.code)}`}
               onClick={() => onOpen(finding)}
             >
               {action}

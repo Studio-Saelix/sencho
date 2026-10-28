@@ -14,8 +14,10 @@ interface UseImageScanOptions {
  * Triggers a Trivy scan for an image and polls until it finishes, then refreshes
  * the image-summaries and reports the completed scan id. A new scan supersedes
  * any in-flight poll, and the poll is abandoned (server-side scan keeps running)
- * on unmount. Mirrors the Resources image-scan flow so the Security Images tab
- * can scan without re-implementing it.
+ * on unmount or `cancelScan`. Shared by the Resources and Security image tables.
+ * `force` re-scans even when a recent result exists (the default); pass false
+ * for a first scan that may reuse one. Pass `undefined` for `scanners` to use
+ * the server's default scanner set.
  */
 export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
   const [scanningRef, setScanningRef] = useState<string | null>(null);
@@ -23,8 +25,11 @@ export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  /** Stops following the in-flight scan (the scan itself keeps running server-side). */
+  const cancelScan = useCallback(() => abortRef.current?.abort(), []);
+
   const scanImage = useCallback(
-    async (imageRef: string, scanners: ScannerKind[]) => {
+    async (imageRef: string, scanners: ScannerKind[] | undefined, { force = true }: { force?: boolean } = {}) => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -34,7 +39,7 @@ export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
       try {
         const res = await apiFetch('/security/scan', {
           method: 'POST',
-          body: JSON.stringify({ imageRef, force: true, scanners }),
+          body: JSON.stringify({ imageRef, force, scanners }),
           signal,
         });
         // Check the HTTP status before parsing: a non-JSON error body (e.g. a
@@ -110,5 +115,5 @@ export function useImageScan({ onComplete, onSummaries }: UseImageScanOptions) {
     [onComplete, onSummaries],
   );
 
-  return { scanningRef, scanImage };
+  return { scanningRef, scanImage, cancelScan };
 }

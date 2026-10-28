@@ -65,6 +65,15 @@ export interface ComposeInputEntry {
   sourcePath: string | null;
   /** Stack-relative path after materialization; null when not copied. */
   materializedPath: string | null;
+  /**
+   * Raw host spelling for a host-form declaration, when one was given. Host
+   * references have a null `sourcePath`, but a bind mount or build input can
+   * name a path inside the deployed stack through an absolute or `..`
+   * spelling. Rollback ownership resolves this spelling against the live stack
+   * so an unmanaged declaration still protects the path it names. Absent for
+   * ordinary and dynamic inputs.
+   */
+  hostSourcePath?: string | null;
   role: InputRole;
   dependencyKind: InputDependencyKind;
   ownership: InputOwnership;

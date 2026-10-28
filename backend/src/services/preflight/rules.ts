@@ -1066,6 +1066,7 @@ const reverseProxyUndocumented: PreflightRule = {
     const findings: PreflightFinding[] = [];
     for (const svc of ctx.model.services) {
       if (effectiveIntent(ctx, svc.name) === 'reverse-proxy') continue;
+      if (svc.hasServiceUrl) continue;
       const hasRpLabel = svc.labelKeys.some(k => {
         const lk = k.toLowerCase();
         return REVERSE_PROXY_LABEL_HINTS.some(h => lk === h || lk.startsWith(`${h}.`));

@@ -3,7 +3,7 @@
  *
  * Covers the navigation contract the surface promises (first-class launcher
  * entry, direct URL), the masthead-led render, the shared filter row
- * (collapsible search + combobox filters), and the phone layout. The suite
+ * (collapsible search + the Filters popover), and the phone layout. The suite
  * does not assert portfolio contents: CI starts from a fresh database, so the
  * meaningful assertions here are structural while row-level classification is
  * pinned by the backend unit suites.
@@ -32,22 +32,22 @@ test.describe('GitOps workplace', () => {
     await expect(page.getByText('APPLICATIONS', { exact: true })).toBeVisible();
   });
 
-  test('combobox filters narrow the list and reset through the same control', async ({ page }) => {
+  test('the filters popover narrows the list and resets through the same control', async ({ page }) => {
     await loginAs(page);
     await page.goto('/nodes/local/gitops');
     await waitForShellReady(page);
 
-    // The shared Combobox trigger carries role="combobox" (an author-named
-    // widget role), so target it by role plus its visible label text.
-    const attentionFilter = page.locator('button[role="combobox"]').filter({ hasText: 'All applications' });
-    await expect(attentionFilter).toBeVisible({ timeout: 10_000 });
-    await attentionFilter.click();
-    await page.getByRole('button', { name: 'Attention required' }).click();
+    // Anchored: once a filter is set, the "Clear filters" button also matches a plain name.
+    const filters = page.getByRole('button', { name: /^Filters/ });
+    await expect(filters).toBeVisible({ timeout: 10_000 });
+    await filters.click();
+    const popover = page.locator('[role="dialog"]');
+    await popover.getByRole('button', { name: 'Attention required' }).click();
     await expect(page).toHaveURL(/attention=1/);
+    await expect(filters).toContainText('1');
 
     // Resetting through the same control returns the question to the whole set.
-    await page.locator('button[role="combobox"]').filter({ hasText: 'Attention required' }).click();
-    await page.getByRole('button', { name: 'All applications' }).click();
+    await popover.getByRole('group', { name: 'Attention' }).getByRole('button', { name: 'All', exact: true }).click();
     await expect(page).not.toHaveURL(/attention=1/);
   });
 

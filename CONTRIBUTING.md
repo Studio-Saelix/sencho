@@ -62,7 +62,7 @@ Sencho and Studio Saelix names and logos are trademarks. AGPLv3 does not grant t
 ## Pull Request Process
 
 - All PRs target `main`
-- Fill in the pull request template (summary, type of change, testing performed).
+- Fill in the pull request template (summary, type of change, compatibility, testing performed).
 - The CLA Assistant check must pass. First-time contributors are prompted to sign [CLA.md](CLA.md).
 - Ensure CI passes before requesting review
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages, and make the PR title one too. Squash-merging uses the title as the commit subject, so a title that is not a conventional commit drops the change from the release notes entirely.
@@ -71,7 +71,31 @@ Sencho and Studio Saelix names and logos are trademarks. AGPLv3 does not grant t
 - Add tests for new functionality
 - Keep PRs focused: one feature or fix per PR
 - Do not include secrets, tokens, credentials, or real hostnames/IPs in the diff, commits, or PR description.
-- Do not edit `CHANGELOG.md` directly. It is generated from conventional-commit subjects by release-please. To correct or add context to an entry after the change is merged, add a `BEGIN_COMMIT_OVERRIDE` block to that PR's body and let the next release-please run regenerate the notes from it.
+- Do not edit `CHANGELOG.md`, `.release-please-manifest.json`, or a package version directly. release-please owns all three. To correct or add context to an entry after the change is merged, add a `BEGIN_COMMIT_OVERRIDE` block to that PR's body and let the next release-please run regenerate the notes from it. An override is read like a commit, so it must not introduce a marker below either.
+- Do not write `!` before the colon in a commit subject or the pull request title, a `BREAKING CHANGE:` or `BREAKING-CHANGE:` footer, or a `Release-As:` line unless the change is approved for a version transition.
+- If your pull request depends on another one, say so in the body and merge it only after the dependency has merged.
+
+## Versioning
+
+Sencho is pre-1.0. While the version is `0.98.x`, a compatible change ships as the next patch, and a patch can carry a feature. That is a deliberate deviation from strict semver, stated plainly so nobody has to guess: `0.98.1` may add a screen, a setting, or an endpoint.
+
+| Change | Version |
+|---|---|
+| `feat:`, `fix:`, `perf:`, `security:`, `revert:` | next patch (`0.98.N`) |
+| `feat!:` or a `BREAKING CHANGE:` footer, approved by a maintainer | next minor (`0.99.0`) |
+| `Release-As: 1.0.0`, approved by a maintainer | `1.0.0` |
+
+A maintainer approves a version transition by applying the `version-transition-approved` label to the pull request. Without that label, the pull request fails the `Version transition is approved` check and cannot merge. After `1.0.0` these pre-1.0 rules stop applying on their own and ordinary semver resumes.
+
+The operator-facing version of this policy is in the [upgrade guide](https://docs.sencho.io/operations/upgrade#version-policy).
+
+Merging to `main` is the release decision: your change ships in the next patch. Keep unfinished work on its branch. If it has to land early, it must be off by default, with no migration and no change to any common path.
+
+An open, draft, or failing pull request never blocks a release. A release stops only for a confirmed severe problem that is already on `main`, and the remedy is to fix or revert it, not to hold the release.
+
+If `main` is unsafe and a production fix cannot wait for the next patch, cut a `release/0.98` branch from the latest tag at that moment, run release-please against that branch, and retire the branch once the fix is out. Nothing is automated for this path; it exists so the normal single-line flow does not have to be bent under pressure.
+
+Do not put a version number or a milestone name in code, documentation, or UI text. The version lives in `.release-please-manifest.json`, `CHANGELOG.md`, and the release notes.
 
 ## Reporting Bugs
 

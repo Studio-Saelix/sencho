@@ -138,8 +138,11 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
-beforeEach(() => {
+beforeEach(async () => {
     vi.restoreAllMocks();
+    // The deploy path's Docker endpoint check renders the stack's Compose config; these tests are not about it.
+    const { ComposeService } = await import('../services/ComposeService');
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM blueprint_deployments').run();
     db.prepare('DELETE FROM blueprints').run();

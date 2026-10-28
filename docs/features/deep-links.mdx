@@ -53,7 +53,7 @@ Sencho encodes env file selection in the `?env=` query on the Env tab only:
 
 - **Default file omitted:** when the stack's first env file is selected (usually `.env`), the URL is `/env` with no query parameter.
 - **Non-default files use basenames only:** `?env=.env.prod`, never a server filesystem path.
-- **Legacy bookmarks:** older links that used an absolute path in `?env=` still open the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
+- **Absolute paths are accepted:** a link whose `?env=` holds an absolute path opens the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
 - **Unknown basenames:** if `?env=` does not match any file on the stack, Sencho opens the default env file.
 - **No env files:** a stack with no env file at all opens the Env tab with an empty editor; saving creates the environment file Compose reads.
 

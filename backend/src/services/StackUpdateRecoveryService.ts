@@ -61,6 +61,7 @@ import { getBackupBaseDir, RollbackGenerationStore } from './RollbackGenerationS
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidStackName } from '../utils/validation';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 
 export type { StackRecoveryReplicaCapture, StackRecoveryServiceCapture } from './recoveryServicesJson';
 export { parseServicesJsonStrict } from './recoveryServicesJson';
@@ -345,6 +346,9 @@ export class StackUpdateRecoveryService {
     for (const node of db.getNodes()) {
       for (const row of db.listStackUpdateRecoveryGenerationsForNode(node.id)) {
         if (!row.content_path) continue;
+        // A restore this process is still driving (compose up, the probe) owns
+        // its intent; reverting under it would split the files from the Git side.
+        if (RollbackGenerationStore.isRestoreInFlight(row.node_id, row.stack_name, row.content_path)) continue;
         try {
           const reverted = await RollbackGenerationStore.reconcileInterruptedRestore(
             row.node_id,
@@ -1158,8 +1162,10 @@ export class StackUpdateRecoveryService {
 
     let filesRestored = false;
     try {
-      // Eligibility (integrity + held images + security posture) before mutation.
-      const integrityVerdict = await assessGenerationEligibility(row);
+      // Eligibility (integrity + held images) before mutation. The security
+      // posture is decided by the policy gate below, which carries the caller's
+      // bypass and reports the decision.
+      const integrityVerdict = await assessGenerationEligibility(row, { deferSecurityPosture: true });
       if (integrityVerdict === 'prohibited') {
         throw Object.assign(
           new Error('Rollback is prohibited for this generation'),
@@ -1186,26 +1192,28 @@ export class StackUpdateRecoveryService {
         );
       }
 
-      const context = await resolveRestoreContext(row);
-      const restoredManifest = await context.restoreFromContext(transactionMeta);
-      filesRestored = true;
-
       // Evaluate current policy against the exact held images rollback will launch
-      // (opaque tags / image ids), not the restored authored moving tags.
-      const restoredInvocation = restoredManifest?.invocation ?? null;
+      // (opaque tags / image ids), not the restored authored moving tags. This runs
+      // before any file moves, so a refusal changes nothing.
       const gate = await enforcePolicyForImageRefs(row.stack_name, row.node_id, heldRefs, {
         bypass: policyOptions?.bypass ?? false,
         actor: policyOptions?.actor ?? 'recovery-compensate',
         ip: policyOptions?.ip,
         auditMethod: policyOptions?.auditMethod ?? 'POST',
         auditPath: policyOptions?.auditPath ?? '/api/stacks/rollback',
+        onAllowed: policyOptions?.onAllowed,
       });
       if (!gate.ok) {
         throw Object.assign(
-          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback')),
-          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations },
+          new Error(describePolicyBlock(gate.policy, gate.violations, 'rollback', gate.evidence)),
+          { code: 'ROLLBACK_PROHIBITED', policy: gate.policy, violations: gate.violations, evidence: gate.evidence },
         );
       }
+
+      const context = await resolveRestoreContext(row);
+      const restoredManifest = await context.restoreFromContext(transactionMeta);
+      filesRestored = true;
+      const restoredInvocation = restoredManifest?.invocation ?? null;
 
       if (!row.override_path) {
         throw new Error('Recovery generation has no override path');
@@ -1292,18 +1300,19 @@ export class StackUpdateRecoveryService {
       // before that leaves the previous workload provably intact. The same
       // classification rides the error to the rollback caller (this node's
       // stack route, or the hub restoring through it): this catch is the only
-      // place that knows, and a code such as ROLLBACK_PROHIBITED is thrown on
-      // both sides of the file move.
+      // place that knows, and a code does not say it on its own
+      // (RECOVERY_PROBE_FAILED is thrown only after the files moved).
       //
       // A failed restore's own revert counts as movement even before this
       // function saw a clean return: the live files may be a mix of the
       // generation and the pre-restore snapshot, so the failure has to hold.
       const revertFailed = (error as { restoreRevertFailed?: unknown }).restoreRevertFailed === true;
-      const failureClass = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
-      gitopsRecovery?.failed(failureClass);
-      if (typeof error === 'object' && error !== null) {
-        Object.assign(error, { failureClass });
-      }
+      let failureClass: 'pre_mutation' | 'post_mutation' = filesRestored || revertFailed ? 'post_mutation' : 'pre_mutation';
+      // Whether the live files are back as they were before this restore began.
+      // With nothing restored there is nothing to revert; with files restored,
+      // only a completed revert counts, and a restore without a generation
+      // content path has none.
+      let filesRevertedClean = !filesRestored;
       if (filesRestored && generationContentPath) {
         try {
           await RollbackGenerationStore.reconcileInterruptedRestore(
@@ -1311,6 +1320,7 @@ export class StackUpdateRecoveryService {
             row.stack_name,
             generationContentPath,
           );
+          filesRevertedClean = true;
         } catch (revertErr) {
           console.error(
             '[StackUpdateRecovery] Failed to revert files after compensation error: %s',
@@ -1318,7 +1328,20 @@ export class StackUpdateRecoveryService {
           );
         }
       }
+      // The Docker endpoint guard refused the restore's compose up before it ran,
+      // and the files are back where they were: nothing moved, and the recovery
+      // point is still intact for a restore from the host, so it is neither
+      // marked recovery_required nor flattened into a failed restore.
+      const refusedBeforeAnyMovement = isDockerEndpointProtectedError(error) && !revertFailed && filesRevertedClean;
+      if (refusedBeforeAnyMovement) failureClass = 'pre_mutation';
+      gitopsRecovery?.failed(failureClass);
+      if (typeof error === 'object' && error !== null) {
+        Object.assign(error, { failureClass });
+      }
       if (code === 'ROLLBACK_PROHIBITED') {
+        throw error;
+      }
+      if (refusedBeforeAnyMovement) {
         throw error;
       }
       console.error(

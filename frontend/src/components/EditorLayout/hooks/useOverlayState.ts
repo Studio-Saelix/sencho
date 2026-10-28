@@ -11,6 +11,8 @@ type DiffPreview = {
   original: string;
   modified: string;
   fileName: string;
+  /** When set, confirm runs this instead of the editor's active-tab save. */
+  onConfirm?: () => Promise<void>;
 };
 
 type PolicyBlock = {
@@ -82,13 +84,16 @@ export function useOverlayState() {
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
   // Parallel to pendingUnsavedLoad: options for the deferred stack load after
   // the unsaved-changes dialog. Cleared on cancel and on node-switch paths
-  // (which use NODE_SWITCH_PENDING_TOKEN and never carry load options).
+  // (which use NODE_SWITCH_PENDING_TOKEN and never carry load options; a
+  // destination queued for the switch rides on pendingLeaveAction instead).
   const [pendingLoadOptions, setPendingLoadOptions] = useState<LoadFileOptions | null>(null);
   const [pendingUnsavedNode, setPendingUnsavedNode] = useState<Node | null>(null);
   // A deferred "leave the dirty editor" navigation (back to the list, Home, a
-  // bottom-tab / hamburger destination). Wrapped in an object so the state
-  // setter is not mistaken for a functional update. Runs after the user
-  // confirms the unsaved-changes dialog. See useStackActions.attemptLeaveEditor.
+  // bottom-tab / hamburger destination, browser back or forward) or the resume
+  // step of a node switch parked with its destination (see useNodeViewQueue).
+  // Wrapped in an object so the state setter is not mistaken for a functional
+  // update. Runs after the user confirms the unsaved-changes dialog. See
+  // useStackActions.attemptLeaveEditor and attemptPopstateNavigation.
   const [pendingLeaveAction, setPendingLeaveAction] = useState<{
     run: () => void;
     onCancel?: () => void;

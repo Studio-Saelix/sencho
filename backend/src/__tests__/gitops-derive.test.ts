@@ -1488,6 +1488,173 @@ describe('gitops derivation', () => {
     expect(projection.availableActions).toContain('suspend');
   });
 
+  describe('retry after a failed health verdict', () => {
+    // Each case owns its application, generation, and stack, so health runs
+    // (keyed by node and stack) and the shared database never leak between them.
+    let seq = 0;
+    const fixture = () => {
+      seq += 1;
+      return { appId: `app-health-retry-${seq}`, genId: `gen-health-retry-${seq}`, stackName: `health-retry-${seq}-web` };
+    };
+    type Fixture = ReturnType<typeof fixture>;
+
+    const run = (f: Fixture, id: string, over: Partial<Parameters<DatabaseService['insertHealthGateRun']>[0]> = {}) => ({
+      id: `${f.appId}-${id}`,
+      node_id: 1,
+      stack_name: f.stackName,
+      trigger_action: 'deploy' as const,
+      status: 'failed' as const,
+      reason: 'container exited',
+      window_seconds: 30,
+      containers_json: '[]',
+      started_at: 10,
+      ended_at: 20,
+      created_by: 'tester',
+      target_scope: 'stack' as const,
+      service_name: null,
+      failure_source: null,
+      deployed_generation_id: f.genId,
+      ...over,
+    });
+
+    const seed = (
+      f: Fixture,
+      appOverrides: Partial<GitOpsApplicationRow> = {},
+      targetOverrides: Partial<ReturnType<typeof emptyTargetRow>> = {},
+    ) => {
+      const store = GitOpsStore.getInstance();
+      store.insertGeneration(gen(f.genId, f.appId));
+      store.insertApplication(rawApp(f.appId, {
+        stack_name: f.stackName,
+        accepted_generation_id: f.genId,
+        desired_commit_sha: 'abc123',
+        ...appOverrides,
+      }));
+      store.upsertTarget({
+        ...emptyTargetRow(f.appId, 1, 1),
+        desired_generation_id: f.genId,
+        applied_generation_id: f.genId,
+        deployed_generation_id: f.genId,
+        ...targetOverrides,
+      });
+    };
+
+    const projectionFor = (f: Fixture, healthDisabled = false) => {
+      const projection = projectApplication(f.appId, healthDisabled);
+      if (projection.targetMode === 'not_applicable') throw new Error('expected application');
+      return projection;
+    };
+
+    it('offers retry when the applied generation failed its stack health gate', () => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      const projection = projectionFor(f);
+      // The source facet is still the settled one: this is the case no source status covered.
+      expect(projection.facets.source.status).toBe('application_generation_accepted');
+      expect(projection.availableActions).toContain('retry');
+      expect(projection.availableActions).toContain('suspend');
+    });
+
+    it('stops offering retry while health gates are off, because a retry would not clear the verdict', () => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      const { availableActions } = projectionFor(f, true);
+      expect(availableActions).not.toContain('retry');
+      expect(availableActions).toContain('suspend');
+    });
+
+    it.each([
+      ['a passed verdict', { status: 'passed' as const }],
+      ['an observing run', { status: 'observing' as const, ended_at: null }],
+      ['a verdict bound to another generation', { deployed_generation_id: 'gen-old' }],
+      ['a service-scoped run', { target_scope: 'service' as const, service_name: 'web' }],
+    ])('does not offer retry for %s', (_label, over) => {
+      const f = fixture();
+      seed(f);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'run', over));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry when no health run exists', () => {
+      const f = fixture();
+      seed(f);
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry once a newer passing run follows the failure', () => {
+      const f = fixture();
+      seed(f);
+      const db = DatabaseService.getInstance();
+      db.insertHealthGateRun(run(f, 'failed'));
+      db.insertHealthGateRun(run(f, 'passed', { status: 'passed', started_at: 30, ended_at: 40 }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry when the target carries another failure', () => {
+      const f = fixture();
+      seed(f, {}, { failure_stage: 'deploy' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry before the applied pointer reaches the accepted generation', () => {
+      const f = fixture();
+      seed(f, {}, { applied_generation_id: null, deployed_generation_id: null });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it.each([
+      ['suspended', { suspended_at: 10 }],
+      ['interrupted', { interruption_stage: 'deploy_started' as const }],
+      ['mid-deploy', { active_operation_stage: 'deploy_started' as const }],
+      ['capturing a recovery', { recovery_phase: 'capturing' as const }],
+      ['recovering', { recovery_phase: 'failed' as const }],
+    ])('does not offer retry while the source is %s', (_label, appOverrides) => {
+      const f = fixture();
+      seed(f, appOverrides);
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('still offers retry once a recovery has settled', () => {
+      const f = fixture();
+      seed(f, { recovery_phase: 'complete' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).toContain('retry');
+    });
+
+    it('does not offer retry for a target on a node other than the default one', () => {
+      // retry() reads only the default node's target, so a failed run elsewhere
+      // would take its fetch arm: the sheet must not promise a deploy resume.
+      const f = fixture();
+      seed(f, {}, { node_id: 2 });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed', { node_id: 2 }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry for a tombstoned target', () => {
+      const f = fixture();
+      seed(f, {}, { target_status: 'tombstoned' });
+      DatabaseService.getInstance().insertHealthGateRun(run(f, 'failed'));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+
+    it('does not offer retry for a failed run that is older than a newer service-scoped pass', () => {
+      const f = fixture();
+      seed(f);
+      const db = DatabaseService.getInstance();
+      db.insertHealthGateRun(run(f, 'older-stack-failure'));
+      db.insertHealthGateRun(run(f, 'newer-stack-pass', { status: 'passed', started_at: 30, ended_at: 40 }));
+      db.insertHealthGateRun(run(f, 'newer-service-failure', {
+        target_scope: 'service', service_name: 'web', started_at: 50, ended_at: 60,
+      }));
+      expect(projectionFor(f).availableActions).not.toContain('retry');
+    });
+  });
+
   it('does not offer controller actions on Blueprint applications', () => {
     const store = GitOpsStore.getInstance();
     store.insertApplication(rawApp('app-bp-ctrl', {

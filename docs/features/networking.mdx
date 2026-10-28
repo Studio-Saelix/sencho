@@ -59,7 +59,7 @@ Dismissed findings stay counted: the masthead and the posture word still include
 
 ## Resources and cleanup
 
-Day-to-day network cleanup stays on [Resources](/features/resources): **Quick Clean → Prune Dead Networks** removes unused networks that are safe to prune under the scope you choose. The Resources page also links here when you need the full inventory or topology view.
+Day-to-day network cleanup stays on [Resources](/features/resources): **⋯ → Prune unused networks** removes unused networks that are safe to prune under the scope you choose. The Resources page also links here when you need the full inventory or topology view.
 
 ## Deep links and search
 
@@ -73,7 +73,7 @@ Day-to-day network cleanup stays on [Resources](/features/resources): **Quick Cl
     The node must expose the Compose Networking capability. Older remote agents that have not been updated show a lock card instead of the operator page. Update the node to the current Sencho version and try again.
   </Accordion>
   <Accordion title="I expected network list or topology under Resources">
-    Network inventory, topology, inspect, and findings moved to this page. Resources still handles images, volumes, unmanaged containers, reclaim, and **Prune Dead Networks**. Pick **Networking** from the top navigation to find them.
+    Network inventory, topology, inspect, and findings moved to this page. Resources still handles images, volumes, external containers, reclaim, and **Prune unused networks**. Pick **Networking** from the top navigation to find them.
   </Accordion>
   <Accordion title="Findings mention a stack that failed to render">
     Sencho compares live Docker state against each stack's effective Compose model. When `docker compose config` fails for a stack, that stack is listed under render failures on the overview and related findings may be incomplete until the Compose file is fixed.

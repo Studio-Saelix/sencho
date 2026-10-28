@@ -37,7 +37,11 @@ interface CheckedResult {
   applied: boolean;
   result: 'applied' | 'rejected' | 'policy_blocked' | 'stale_observation';
   healthGateId: string | null;
+  /** Why the target's Docker endpoint guard refused the update, on a `rejected` result. */
+  endpointRefusal?: string;
 }
+
+const ENDPOINT_REFUSAL_MAX_LENGTH = 1000;
 
 function checkedResult(value: unknown, stack: string): CheckedResult | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -46,7 +50,13 @@ function checkedResult(value: unknown, stack: string): CheckedResult | null {
     || !['applied', 'rejected', 'policy_blocked', 'stale_observation'].includes(String(body.result))
     || (body.healthGateId !== null && typeof body.healthGateId !== 'string')
     || body.applied !== (body.result === 'applied')) return null;
-  return { contractVersion: 1, stack, applied: body.applied, result: body.result as CheckedResult['result'], healthGateId: body.healthGateId };
+  const endpointRefusal = body.result === 'rejected' && typeof body.endpointRefusal === 'string'
+    ? body.endpointRefusal.replace(/\s+/g, ' ').trim().slice(0, ENDPOINT_REFUSAL_MAX_LENGTH)
+    : '';
+  return {
+    contractVersion: 1, stack, applied: body.applied, result: body.result as CheckedResult['result'], healthGateId: body.healthGateId,
+    ...(endpointRefusal ? { endpointRefusal } : {}),
+  };
 }
 
 /** Uses checked execution only when both machine contracts are live on the target. */
@@ -101,6 +111,8 @@ export class AutoUpdateRemoteCoordinator {
         if (attempt === 0) continue;
         return `Stack "${stack}": observation changed twice; skipped auto-update.`;
       }
+      // A refusal fails the run for this stack, with the target's reason, so it is not mistaken for a skipped update.
+      if (result.endpointRefusal) return `Stack "${stack}" failed: ${result.endpointRefusal}`;
       if (!response.ok || !result.applied) return `Stack "${stack}": ${result.result}; skipped auto-update.`;
       const verification = await awaitHubPostUpdateVerification({
         nodeId: input.nodeId, stack, targetResponse: { status: response.status, body: result }, caller: 'coordinator', transport: input.scanner,

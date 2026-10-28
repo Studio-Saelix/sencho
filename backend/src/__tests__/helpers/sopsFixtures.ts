@@ -20,22 +20,27 @@ export async function buildSopsAgeDocument(args: {
   values: Record<string, string>;
   identity: string;
   recipient: string;
+  /** Additional recipients the same file key is wrapped for, beside `recipient`. */
+  extraRecipients?: string[];
 }): Promise<string> {
   const fileKey = crypto.randomBytes(32);
   const lines = Object.entries(args.values).map(
     ([key, value]) => `${key}: ${sopsEncField(value, fileKey, `${key}:`)}`,
   );
-  const indentedEnc = (await armorAgeFileKey(fileKey, args.recipient))
-    .split('\n')
-    .map((line) => `        ${line}`)
-    .join('\n');
+  const ageEntries = await Promise.all(
+    [args.recipient, ...(args.extraRecipients ?? [])].map(async (recipient) => {
+      const enc = (await armorAgeFileKey(fileKey, recipient))
+        .split('\n')
+        .map((line) => `        ${line}`)
+        .join('\n');
+      return `    - recipient: ${recipient}\n      enc: |\n${enc}`;
+    }),
+  );
 
   return `${lines.join('\n')}
 sops:
   age:
-    - recipient: ${args.recipient}
-      enc: |
-${indentedEnc}
+${ageEntries.join('\n')}
   mac: ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
   version: 3.9.0
 `;
@@ -45,18 +50,24 @@ export async function buildSopsAgeDotenvDocument(args: {
   values: Record<string, string>;
   identity: string;
   recipient: string;
+  /** Additional recipients the same file key is wrapped for, beside `recipient`. */
+  extraRecipients?: string[];
 }): Promise<string> {
   const fileKey = crypto.randomBytes(32);
   const lines = Object.entries(args.values).map(
     ([key, value]) => `${key}=${sopsEncField(value, fileKey, `${key}:`)}`,
   );
-  const escapedEnc = (await armorAgeFileKey(fileKey, args.recipient)).replace(/\n/g, '\\n');
+  const ageLines = (await Promise.all(
+    [args.recipient, ...(args.extraRecipients ?? [])].map(async (recipient, index) => {
+      const escapedEnc = (await armorAgeFileKey(fileKey, recipient)).replace(/\n/g, '\\n');
+      return `sops_age__list_${index}__map_recipient=${recipient}\nsops_age__list_${index}__map_enc=${escapedEnc}`;
+    }),
+  )).join('\n');
 
   return `${lines.join('\n')}
 sops_mac=ENC[AES256_GCM,data:abc,iv:abc,tag:abc,type:str]
 sops_version=3.9.0
-sops_age__list_0__map_recipient=${args.recipient}
-sops_age__list_0__map_enc=${escapedEnc}
+${ageLines}
 `;
 }
 

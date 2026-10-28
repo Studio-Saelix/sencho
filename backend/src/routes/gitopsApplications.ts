@@ -48,12 +48,15 @@ import {
   type RolloutRollbackTargetResult,
 } from '../services/gitops/rolloutRecovery';
 import { placementEffectCompatible } from '../services/gitops/store';
-import { prepareAcceptedGitManagedGeneration } from '../services/gitops/gitManagedMaterialization';
 import {
-  dispatchPreparedGitManagedGeneration,
-  GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON,
-} from '../services/gitops/gitManagedHandoff';
+  CONFIRMATION_STALE,
+  driftSentence,
+  parseSourceConfirmation,
+  sourceConfirmationDrift,
+} from '../services/gitops/sourceConfirmation';
+import { formatOperatorSentences, runBoundedGitManagedPostAccept } from '../services/gitops/boundedPostAccept';
 import { GitOpsTransitions, GitOpsTransitionError } from '../services/gitops/transitions';
+import { SourceController } from '../services/gitops/SourceController';
 import { targetRestoreInFlight } from '../services/gitops/recoveryClaim';
 import { newGitOpsId } from '../services/gitops/directApplication';
 import { HEALTH_ROLLOUT_POLICIES, isHealthRolloutPolicy } from '../services/gitops/healthPolicy';
@@ -67,8 +70,10 @@ import {
   buildAcceptedGeneration,
   ensureRolloutAuthorization,
   frozenStrategyFor,
+  gitManagedDispatchWarranted,
   holdBlockedRolloutDispatch,
 } from '../services/gitops/handoff';
+import { dispatchPreparedGitManagedGeneration } from '../services/gitops/gitManagedHandoff';
 import { GitSourceService } from '../services/GitSourceService';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
@@ -813,84 +818,75 @@ gitopsApplicationsRouter.get('/:id', async (req: Request, res: Response): Promis
 });
 
 /**
- * Bound the wait on post-acceptance preparation.
+ * Operator pull for a Git-managed Blueprint.
  *
- * The acceptance is already committed when this runs, so a slow registry must
- * not hold the request open until a proxy times out and the operator reads a
- * failure for work that actually landed. The underlying preparation keeps
- * running and the reconciler retries it either way; on timeout the response
- * says so rather than pretending the acceptance failed.
- */
-const PREPARE_TIMEOUT_MS = 15_000;
-
-async function prepareAcceptanceWithinTimeout(
-  applicationId: string,
-  generationId: string,
-  actor: string | null,
-): Promise<Awaited<ReturnType<typeof prepareAcceptedGitManagedGeneration>>> {
-  const fallback = {
-    materialized: false,
-    artifact: 'none' as const,
-    note: 'preparation is still running; the rollout becomes authorizable when it completes',
-  };
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
-    void prepareAcceptedGitManagedGeneration({ applicationId, generationId, actor, trigger: 'manual' })
-      .then((prepared) => {
-        clearTimeout(timer);
-        resolve(prepared);
-      })
-      .catch((err: unknown) => {
-        clearTimeout(timer);
-        console.error('[GitOps authority] Source preparation failed:', err);
-        resolve(fallback);
-      });
-  });
-}
-
-/**
- * Bound the wait on the post-acceptance dispatch.
+ * Stages a candidate through the controller's fetch. A manual or review
+ * policy waits for source/accept. An automatic policy accepts on its own,
+ * inside the controller, the same way a poll does. `authority` is that
+ * settlement: fetched only, held, accepted, or a rollout that was started.
+ * Preparation and a sequential rollout do not hold the response open after
+ * acceptance. When either is still running, the result says so and the work
+ * continues. A deadline is not a failed pull. A started rollout is not a
+ * finished one.
+ * The grant is exact stack:edit on the source stack: the person who could
+ * pull that stack before the Blueprint claimed it.
  *
- * A sequential rollout can take minutes across the frozen targets, so the
- * request must not hold it open. The dispatch keeps running in the background;
- * the response reports it as not yet started, and the application view carries
- * the progress and any hold.
+ * An automatic source can record the commit from this one request, so it
+ * carries the confirmation naming the approved placement and the rollout
+ * consequence the operator read. A manual or review source only fetches, so
+ * it asks for nothing.
  */
-async function dispatchAcceptanceWithinTimeout(
-  applicationId: string,
-  generationId: string,
-  actor: string | null,
-): Promise<Awaited<ReturnType<typeof dispatchPreparedGitManagedGeneration>>> {
-  const fallback = {
-    status: 'skipped' as const,
-    reason: 'the rollout is starting; watch the application for progress',
-  };
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(fallback), PREPARE_TIMEOUT_MS);
-    void dispatchPreparedGitManagedGeneration({ applicationId, generationId, actor: actor ?? 'operator', trigger: 'manual' })
-      .then((handoff) => {
-        clearTimeout(timer);
-        resolve(handoff);
-      })
-      .catch((err: unknown) => {
-        clearTimeout(timer);
-        console.error('[GitOps authority] Source dispatch failed:', err);
-        resolve(fallback);
-      });
-  });
-}
-
-/** Join the accept route's note fragments as sentences, or null when there are none. */
-function joinAcceptNotes(parts: Array<string | null>): string | null {
-  const sentences = parts
-    .filter((part): part is string => part !== null && part.trim().length > 0)
-    .map((part) => {
-      const trimmed = part.trim();
-      const capitalized = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
-      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+gitopsApplicationsRouter.post('/:id/source/fetch', async (req: Request, res: Response): Promise<void> => {
+  const target = resolveAuthorityTarget(req, res);
+  if (!target) return;
+  const sourceStack = target.application.configured_source_stack_name ?? target.application.stack_name;
+  if (!sourceStack) {
+    res.status(409).json({
+      error: 'This Blueprint has no Git source to pull.',
+      code: 'no_source_identity',
     });
-  return sentences.length > 0 ? sentences.join(' ') : null;
-}
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', sourceStack)) return;
+  let confirmation = null;
+  if (target.application.source_policy === 'automatic') {
+    const parsed = parseSourceConfirmation((req.body ?? {})?.confirmation);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error, code: 'CONFIRM_REQUIRED' });
+      return;
+    }
+    confirmation = parsed.confirmation;
+  }
+  try {
+    const fetched = await SourceController.getInstance().requestFetch(
+      target.application.id,
+      actorFromRequest(req) ?? 'unknown',
+      confirmation ?? undefined,
+    );
+    if (fetched.status === 'refused') {
+      res.status(409).json({ error: fetched.error, code: fetched.code });
+      return;
+    }
+    const authority = fetched.authority;
+    res.json({
+      outcome: fetched.result.outcome,
+      reason: fetched.result.reason,
+      nextAction: fetched.result.nextAction,
+      commitSha: fetched.result.commitSha ?? null,
+      candidateGenerationId: fetched.candidateGenerationId,
+      authority: {
+        status: authority.status,
+        rollout: authority.status === 'accepted' ? authority.rollout : null,
+        note: authority.status === 'held' || authority.status === 'accepted'
+          ? formatOperatorSentences([authority.note])
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error('[GitOps authority] Source fetch failed:', error);
+    res.status(500).json({ error: 'Failed to pull the source' });
+  }
+});
 
 /**
  * Record an operator source acceptance for the waiting candidate generation.
@@ -900,6 +896,12 @@ function joinAcceptNotes(parts: Array<string | null>): string | null {
  * the generation the caller reviewed; the transition refuses anything that is
  * no longer the current candidate, so a stale review cannot accept different
  * content than it named.
+ *
+ * It also echoes the placement approval and the rollout consequence the
+ * confirmation named, because the generation is only half of what this route
+ * decides: an acceptance under automatic rollout authorization can put that
+ * content on a node. Those are checked before the acceptance commits, and again
+ * in the handoff, where preparation has had time to move them.
  */
 gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:create')) return;
@@ -910,6 +912,17 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
     res.status(400).json({ error: 'generationId is required', code: 'CONFIRM_REQUIRED' });
     return;
   }
+  const parsedConfirmation = parseSourceConfirmation((req.body ?? {}).confirmation);
+  if (!parsedConfirmation.ok) {
+    res.status(400).json({ error: parsedConfirmation.error, code: 'CONFIRM_REQUIRED' });
+    return;
+  }
+  const confirmation = parsedConfirmation.confirmation;
+  const drift = sourceConfirmationDrift(target.application, confirmation);
+  if (drift) {
+    res.status(409).json({ error: driftSentence(drift), code: CONFIRMATION_STALE });
+    return;
+  }
   const actor = actorFromRequest(req);
   try {
     GitOpsTransitions.getInstance().sourceAccepted({
@@ -918,52 +931,40 @@ gitopsApplicationsRouter.post('/:id/source/accept', async (req: Request, res: Re
       artifactSetId: newGitOpsId(),
       sourceAcceptanceId: newGitOpsId(),
       authority: 'operator',
+      // Recorded on the acceptance. A later re-drive and a restart read this
+      // stored claim, not the request body that is gone by then.
+      confirmation,
       envelope: { operationId: newGitOpsId(), actor, trigger: 'manual', at: Date.now() },
     });
   } catch (error) {
     if (error instanceof GitOpsTransitionError) {
-      res.status(409).json({ error: error.message, code: 'SOURCE_ACCEPTANCE_REFUSED' });
+      res.status(409).json({
+        error: error.message,
+        code: error.code === CONFIRMATION_STALE ? CONFIRMATION_STALE : 'SOURCE_ACCEPTANCE_REFUSED',
+      });
       return;
     }
     console.error('[GitOps authority] Source acceptance failed:', error);
     res.status(500).json({ error: 'Failed to accept the source revision' });
     return;
   }
-  // The acceptance stands even when this follow-up is incomplete. Materialize
-  // the accepted generation and resolve its artifact set so the operator's next
-  // step (approve placement, authorize rollout) acts on a prepared generation;
-  // both steps are idempotent and the reconciler retries them, so a failure is
-  // reported as a note rather than undoing the acceptance. The wait is bounded:
-  // a slow registry must not hold an already-committed acceptance open.
-  const prepared = await prepareAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // The same handoff the automatic paths use: under an automatic rollout policy
-  // it authorizes and starts the rollout, under a manual policy it skips and
-  // the operator authorizes. A durable refusal is held by the handoff. The wait
-  // is bounded: a sequential rollout must not hold the request open.
-  //
-  // The configured Automatic policy is the authority for starting the rollout,
-  // exactly as it is for the SourceController's automatic acceptance: the
-  // acceptance is `stack:create`, and the policy (which someone with deploy
-  // configured) decides that the rollout starts. The authorize, pause, resume
-  // and policy routes keep `stack:deploy`, because those are operator
-  // decisions, and the reconciler completes a skipped handoff within a tick.
-  const handoff = await dispatchAcceptanceWithinTimeout(target.application.id, generationId, actor);
-  // Both can have something to say; neither may hide the other. A skipped
-  // handoff is surfaced too: its reason is what tells the operator whether the
-  // rollout is starting, waiting for authorization, paused, or held, instead of
-  // a plain "accepted" that reads the same in every case. The one exception is
-  // the unresolved-artifact skip: when the preparation did not resolve the
-  // identity, its own note already says so, and repeating it reads as noise.
-  const handoffNote = handoff.status === 'dispatched'
-    || (prepared.artifact !== 'resolved' && handoff.reason === GIT_MANAGED_ARTIFACT_UNRESOLVED_REASON)
-    ? null
-    : handoff.reason;
+  // Acceptance has committed. Each follow-up step answers within its own
+  // deadline and keeps running when that deadline wins. The rollout
+  // authorization policy decides whether the handoff starts a rollout.
+  // Accept source is stack:create. Authorize, pause, resume, and the policy
+  // routes stay on stack:deploy, because those are operator decisions.
+  const settled = await runBoundedGitManagedPostAccept({
+    applicationId: target.application.id,
+    generationId,
+    actor,
+    trigger: 'manual',
+  });
   res.json({
     ok: true,
-    materialized: prepared.materialized,
-    artifactResolved: prepared.artifact === 'resolved',
-    dispatched: handoff.status === 'dispatched',
-    note: joinAcceptNotes([prepared.note, handoffNote]),
+    materialized: settled.materialized,
+    artifactResolved: settled.artifactResolved,
+    dispatched: settled.dispatched,
+    note: settled.acceptNote,
   });
 });
 
@@ -1473,12 +1474,89 @@ gitopsApplicationsRouter.post('/:id/rollout/health-policy', async (req: Request,
   res.json({ ok: true, policy });
 });
 
+function resumedNote(reason: string | null, fallback: string): string {
+  if (!reason) return fallback;
+  const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+  return `The rollout is resumed. ${sentence}`;
+}
+
+/** Why an automatic resume cannot hand off yet. A missing Blueprint is not a delayed start. */
+function automaticResumeBlockedNote(app: GitOpsApplicationRow): string {
+  const blueprint = app.blueprint_id !== null
+    ? DatabaseService.getInstance().getBlueprint(app.blueprint_id)
+    : undefined;
+  if (!blueprint?.enabled) {
+    return 'The rollout is resumed. The Blueprint is not enabled, so the automatic policy cannot start it.';
+  }
+  if (app.accepted_generation_id) {
+    const latest = GitOpsStore.getInstance().latestRolloutAuthorizationForAcceptedGeneration(
+      app.id,
+      app.accepted_generation_id,
+    );
+    if (latest && latest.withdrawn_at !== null) {
+      return 'The rollout is resumed, but that authorization was withdrawn; authorize the rollout to start it again.';
+    }
+  }
+  return 'The rollout is resumed. The automatic policy will start it once this generation is ready to roll out.';
+}
+
+/**
+ * What an application-wide resume can do when no rollout is authorized.
+ *
+ * Unpausing does not mint authority. A manual policy still needs Authorize.
+ * An automatic policy starts only from a state the reconciler would hand off,
+ * and it starts now: waiting for the next pass is what left a resumed rollout
+ * sitting after the response had already said it would start.
+ */
+async function resumeWithoutLiveAuthorization(
+  app: GitOpsApplicationRow,
+  actor: string | null,
+): Promise<{ dispatched: boolean; note: string | null }> {
+  const store = GitOpsStore.getInstance();
+  const rollbackPending = store.listTargets(app.id).some(
+    (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
+  );
+  if (rollbackPending) {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but a target has an unfinished rollback; finish the rollback and resume again.',
+    };
+  }
+  if (app.rollout_authorization_policy !== 'automatic') {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.',
+    };
+  }
+  if (!app.placement_approval_ref) {
+    return {
+      dispatched: false,
+      note: 'The rollout is resumed, but no placement is approved, so the automatic policy cannot start it.',
+    };
+  }
+  if (!app.accepted_generation_id || !gitManagedDispatchWarranted(app)) {
+    return { dispatched: false, note: automaticResumeBlockedNote(app) };
+  }
+  const handoff = await dispatchPreparedGitManagedGeneration({
+    applicationId: app.id,
+    generationId: app.accepted_generation_id,
+    actor: actor ?? 'operator',
+    trigger: 'manual',
+  });
+  if (handoff.status === 'dispatched') return { dispatched: true, note: null };
+  return {
+    dispatched: false,
+    note: resumedNote(handoff.reason, 'The rollout is resumed; the automatic policy did not start it.'),
+  };
+}
+
 /**
  * Resume a paused rollout and continue the queue when one is still authorized.
  *
  * Unpausing is the decision; continuing is the executor's answer. A resume
- * with no live authorization reports that nothing started rather than
- * minting authority the operator never granted.
+ * with no live authorization does not mint one for a manual policy. An
+ * automatic policy hands off immediately when the accepted generation is
+ * ready, and otherwise says why it cannot.
  */
 gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: Response): Promise<void> => {
   const target = resolveAuthorityTarget(req, res);
@@ -1529,20 +1607,31 @@ gitopsApplicationsRouter.post('/:id/rollout/resume', async (req: Request, res: R
   const app = store.getApplication(target.application.id) ?? target.application;
   const binding = store.currentAuthorizationBinding(app);
   if (!binding) {
-    // A resumed rollout with no authorization has nothing to dispatch, and an
-    // unfinished rollback would be deployed over if the operator authorized
-    // next. Name both, and do not tell an Automatic operator to authorize when
-    // the reconciler will start it on its own.
-    const automatic = app.rollout_authorization_policy === 'automatic';
-    const rollbackPending = store.listTargets(app.id).some(
-      (target) => target.target_status === 'active' && target.health_stop_reason === 'rollback_pending',
-    );
-    const note = rollbackPending
-      ? 'The rollout is resumed, but a target has an unfinished rollback; finish the rollback and resume again.'
-      : automatic
-        ? 'The rollout is resumed; the automatic policy will start it shortly.'
+    // A target resume only clears that target. It does not release the
+    // application's confirmation, and it must not mint a fleet rollout.
+    if (nodeId !== null) {
+      const note = app.rollout_authorization_policy === 'automatic'
+        ? 'The target is resumed. No rollout is authorized yet; the automatic policy starts one when this generation is ready.'
         : 'The rollout is resumed, but no live authorization exists; authorize the rollout to start it.';
-    res.json({ ok: true, dispatched: false, note });
+      res.json({ ok: true, dispatched: false, note });
+      return;
+    }
+    try {
+      const continued = await resumeWithoutLiveAuthorization(app, actorFromRequest(req));
+      res.json({ ok: true, dispatched: continued.dispatched, note: continued.note });
+    } catch (error) {
+      // The pause is already cleared. A failure to start must not turn that into
+      // a failed resume; the reconciler retries an automatic policy that is ready.
+      console.error(
+        '[GitOps authority] Automatic resume handoff failed:',
+        sanitizeForLog(error instanceof Error ? error.message : String(error)),
+      );
+      res.json({
+        ok: true,
+        dispatched: false,
+        note: 'The rollout is resumed, but the automatic policy could not start it. It will try again.',
+      });
+    }
     return;
   }
   const genRow = store.getGeneration(binding.acceptedGenerationId);
@@ -1806,7 +1895,14 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      return { nodeId, status: 'restored', mutationPossible: false, failureClass: 'pre_mutation', settleMissed: false };
+      return {
+        nodeId,
+        status: 'restored',
+        mutationPossible: false,
+        failureClass: 'pre_mutation',
+        settleMissed: false,
+        ...(outcome.policyEvidence ? { policyEvidence: outcome.policyEvidence } : {}),
+      };
     } catch (error) {
       console.error(
         '[GitOps authority] Restore succeeded but its completion could not be recorded:',
@@ -2031,6 +2127,11 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     ok: !failedAny,
     // The mutation classification decides application state; it is not part of
     // the per-target result an operator reads.
-    results: results.map(({ nodeId, status, error }) => ({ nodeId, status, error })),
+    results: results.map(({ nodeId, status, error, policyEvidence }) => ({
+      nodeId,
+      status,
+      error,
+      ...(policyEvidence ? { policyEvidence } : {}),
+    })),
   });
 });

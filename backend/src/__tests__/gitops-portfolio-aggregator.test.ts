@@ -152,6 +152,7 @@ function liveProjectionFixture(input: {
     applicationId: input.applicationId,
     lifecycleStatus: 'active',
     stackName: input.stackName,
+    configuredSourceStackName: input.stackName,
     blueprintId: null,
     rolloutGenerationId: input.rolloutGenerationId,
     approvals: {
@@ -160,6 +161,7 @@ function liveProjectionFixture(input: {
       rolloutAuthorizationRef: null,
       legacyCombinedApprovalRef: null,
     },
+    approvedRolloutScope: { status: 'unapproved' },
     facets: input.facets,
     targets: [],
     drift: [],
