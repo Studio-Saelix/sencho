@@ -18,6 +18,7 @@ import {
   type HelperDeps,
   type ProviderReplacePlan,
 } from './helpers/endpointProviderReplace';
+import { handoffOwner, writeHandoffJson } from './helpers/handoffFile';
 
 const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -70,11 +71,14 @@ function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDep
         return null;
       }
     },
-    writeJson: async (path, value) => {
-      const temporary = `${path}.${process.pid}.tmp`;
-      await fs.writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-      await fs.rename(temporary, path);
-    },
+    // The helper runs as root; hand the files it publishes to the application
+    // uid so a Sencho running as SENCHO_USER can read the phase marker and
+    // outcome (the files stay 0600).
+    writeJson: (path, value) => writeHandoffJson(
+      path,
+      value,
+      handoffOwner(process.env, typeof process.getuid === 'function' ? process.getuid() : null),
+    ),
     copyFile: (from, to) => fs.copyFile(from, to),
     sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
     now: () => Date.now(),

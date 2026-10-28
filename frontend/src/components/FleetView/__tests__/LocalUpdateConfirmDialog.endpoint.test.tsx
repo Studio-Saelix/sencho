@@ -87,6 +87,27 @@ describe('LocalUpdateConfirmDialog Docker endpoint option', () => {
     expect(onConfirm).toHaveBeenCalledWith({ replaceEndpointProvider: false, endpointProviderOnly: false });
   });
 
+  it.each([
+    ['local', undefined],
+    ['remote', 'remote'],
+  ] as Array<[string, 'remote' | undefined]>)('submits a checked Update checkbox for the %s node', async (_label, nodeType) => {
+    answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
+    const onConfirm = vi.fn();
+    render(<LocalUpdateConfirmDialog open nodeType={nodeType} nodeId={1} onOpenChange={vi.fn()} onConfirm={onConfirm} />);
+    await userEvent.click(await screen.findByRole('checkbox'));
+    await userEvent.click(screen.getByText('confirm'));
+    expect(onConfirm).toHaveBeenCalledWith({ replaceEndpointProvider: true, endpointProviderOnly: false });
+  });
+
+  it('submits an unchecked remote Update without the provider', async () => {
+    answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
+    const onConfirm = vi.fn();
+    render(<LocalUpdateConfirmDialog open nodeType="remote" nodeId={1} onOpenChange={vi.fn()} onConfirm={onConfirm} />);
+    await screen.findByRole('checkbox');
+    await userEvent.click(screen.getByText('confirm'));
+    expect(onConfirm).toHaveBeenCalledWith({ replaceEndpointProvider: false, endpointProviderOnly: false });
+  });
+
   it('forgets the choice when the dialog is cancelled', async () => {
     answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
     const onConfirm = vi.fn();
@@ -136,6 +157,18 @@ describe('LocalUpdateConfirmDialog Docker endpoint option', () => {
   it('does not ask without a node', () => {
     render(<LocalUpdateConfirmDialog open onOpenChange={vi.fn()} onConfirm={vi.fn()} />);
     expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses endpoint-only copy for a remote Reapply instead of claiming a restart', async () => {
+    answer({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
+    render(<LocalUpdateConfirmDialog open mode="reapply" nodeType="remote" nodeId={4} nodeName="edge-1" allowEndpointProviderOnly onOpenChange={vi.fn()} onConfirm={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('radio', { name: 'Endpoint only' }));
+    const body = screen.getByText(/Recreates only/);
+    expect(body.textContent).toContain('socket-proxy');
+    expect(body.textContent).toContain('edge-1');
+    expect(body.textContent).toContain('Sencho keeps running');
+    expect(body.textContent).not.toMatch(/restart/i);
+    expect(screen.getByText('KEEPS Sencho running')).toBeInTheDocument();
   });
 
   it('uses remote copy for a remote update', () => {

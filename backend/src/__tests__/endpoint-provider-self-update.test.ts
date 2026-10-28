@@ -149,6 +149,21 @@ describe('buildEndpointProviderHelperArgs', () => {
     expect(buildEndpointProviderHelperArgs({ ...input, mode: 'replace' })).toContain('/srv/stack:/srv/stack:ro');
     expect(buildEndpointProviderHelperArgs({ ...input, mode: 'replace', composeWritable: true })).toContain('/srv/stack:/srv/stack:rw');
   });
+
+  it('hands the application uid/gid to the root helper so it can publish readable files', () => {
+    const args = buildEndpointProviderHelperArgs({
+      ...input,
+      mode: 'replace',
+      handoffOwner: { uid: 1001, gid: 1002 },
+    });
+    expect(args).toContain('SENCHO_HANDOFF_UID=1001');
+    expect(args).toContain('SENCHO_HANDOFF_GID=1002');
+  });
+
+  it('omits the owner when the runtime has no process ids', () => {
+    const args = buildEndpointProviderHelperArgs({ ...input, mode: 'replace', handoffOwner: null });
+    expect(args.some(arg => arg.startsWith('SENCHO_HANDOFF_'))).toBe(false);
+  });
 });
 
 describe('triggerComposeReapply with the Docker endpoint', () => {

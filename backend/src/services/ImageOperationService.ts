@@ -87,6 +87,34 @@ function plainText(text: string): string {
 
 const NON_TERMINAL_STATES: ReadonlyArray<ImageOperationState> = ['pending_pull', 'pulling', 'patching', 'recreating'];
 
+/** A Docker request that accepted the connection but did not answer before its bound. */
+class DockerRequestTimeoutError extends Error {}
+
+/**
+ * Races one Docker request against a finite bound. A proxy that accepts TCP but
+ * never answers must not defeat the verification deadline: the caller drops the
+ * cached client on this error, which closes the stalled socket.
+ */
+function withRequestTimeout<T>(request: Promise<T>, milliseconds: number, label: string): Promise<T> {
+  const bound = Math.max(1, Math.floor(milliseconds));
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new DockerRequestTimeoutError(`${label} did not answer within ${bound} ms`)),
+      bound,
+    );
+    request.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class ImageOperationService {
   private static instance: ImageOperationService;
   private claimed = false;
@@ -104,6 +132,8 @@ export class ImageOperationService {
    */
   public endpointProviderTimings = {
     pollMs: 2_000,
+    /** Ceiling for one Docker request (ping, list, inspect) inside a verification loop. */
+    requestMs: 10_000,
     verifyMs: 90_000,
     outcomeMs: 180_000,
     watchMs: (PROVIDER_READY_SECONDS * 2 + PROVIDER_ACK_SECONDS + 120) * 1000,
@@ -414,20 +444,47 @@ export class ImageOperationService {
   }
 
   /**
-   * In the new process after Sencho was recreated: check Docker through the
-   * new provider, answer the helper (its ack), then wait for the helper's
-   * verdict. Only a positive verdict marks the operation succeeded.
+   * In the new process after Sencho was recreated: wait for the helper's
+   * durable marker proving the provider exists, check Docker through it,
+   * answer the helper (its ack), then wait for the helper's verdict. Only a
+   * positive verdict marks the operation succeeded.
+   *
+   * Without the marker the old provider may still be the one answering, so
+   * nothing is verified or acknowledged: startup after an operation that never
+   * reached its helper ends in recovery-required, not success.
    */
   private async reconcileEndpointProvider(operation: ImageOperation, provider: OperationEndpointProvider): Promise<void> {
     this.endpointProviderPending = true;
     this.setLocalTracker(operation, 'updating');
-    let outcome = await this.readProviderOutcome(operation);
-    if (!outcome) {
-      const ack = await this.verifyDockerThroughProvider(operation, provider);
-      await this.writeProviderAck(operation, ack);
-      outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.outcomeMs);
+    try {
+      let outcome = await this.readProviderOutcome(operation);
+      if (!outcome) {
+        const phase = await this.waitForProviderPhase(operation, this.endpointProviderTimings.outcomeMs);
+        if (phase.kind === 'outcome') {
+          outcome = phase.outcome;
+        } else if (phase.kind === 'recreated') {
+          const ack = await this.verifyDockerThroughProvider(operation, provider);
+          await this.writeProviderAck(operation, ack);
+          outcome = await this.waitForProviderOutcome(operation, this.endpointProviderTimings.outcomeMs);
+        }
+        // `timeout`: neither marker nor verdict, so the old provider must not be
+        // acknowledged as the replacement. The absent outcome below is terminal.
+      }
+      await this.finalizeEndpointProvider(operation, outcome);
+    } catch (error) {
+      // An unexpected throw must not leave the node "verifying" forever with the
+      // operation stuck non-terminal and Fleet suppressing its timeout.
+      console.error('[ImageOperation] Docker endpoint startup reconcile failed:', error);
+      const current = await this.getCurrentOperation().catch(() => null);
+      if (current && current.operationId === operation.operationId && NON_TERMINAL_STATES.includes(current.state)) {
+        const detail = `Replacing the Docker endpoint "${provider.service}" failed while Sencho was verifying it: ${plainText(getErrorMessage(error, 'unexpected error'))}. Check that "${provider.service}" runs and that Sencho reaches Docker, then retry.`;
+        SelfUpdateService.getInstance().recordUpdateFailure(detail, 'endpoint_provider_recovery_required');
+        await this.fail(current, 'endpoint_provider_recovery_required', detail).catch(() => undefined);
+        this.setLocalTracker(current, 'failed', detail);
+      }
+    } finally {
+      this.endpointProviderPending = false;
     }
-    await this.finalizeEndpointProvider(operation, outcome);
   }
 
   /**
@@ -526,16 +583,26 @@ export class ImageOperationService {
     for (;;) {
       try {
         const docker = DockerController.getInstance().getDocker();
-        await docker.ping();
-        const containers = await docker.listContainers({
+        await this.boundedDockerCall(
+          'Docker ping',
+          deadline,
+          // dockerode forwards an abortSignal to ping, but its type has no options overload.
+          signal => (docker.ping as unknown as (options: { abortSignal: AbortSignal }) => Promise<unknown>)({ abortSignal: signal }),
+        );
+        const containers = await this.boundedDockerCall('Docker container list', deadline, signal => docker.listContainers({
           all: true,
+          abortSignal: signal,
           filters: { label: [`com.docker.compose.project=${provider.project}`, `com.docker.compose.service=${provider.service}`] },
-        });
+        }));
         const running = containers.find(container => container.State === 'running');
         if (!running) {
           detail = `"${provider.service}" is not running`;
         } else {
-          const health = (await docker.getContainer(running.Id).inspect()).State?.Health?.Status;
+          const health = (await this.boundedDockerCall(
+            'Docker inspect',
+            deadline,
+            signal => docker.getContainer(running.Id).inspect({ abortSignal: signal }),
+          )).State?.Health?.Status;
           if (!health || health === 'healthy') return { operationId: operation.operationId, ok: true, detail: null };
           detail = `"${provider.service}" healthcheck is ${health}`;
         }
@@ -544,6 +611,38 @@ export class ImageOperationService {
       }
       if (Date.now() >= deadline) return { operationId: operation.operationId, ok: false, detail };
       await new Promise(resolve => setTimeout(resolve, this.endpointProviderTimings.pollMs));
+    }
+  }
+
+  /**
+   * Runs one Docker request with the remaining verification budget as its
+   * ceiling. The abort signal destroys a request that accepted the connection
+   * but never answered, and the cached client is dropped so the next attempt
+   * dials a new connection.
+   */
+  private async boundedDockerCall<T>(
+    label: string,
+    deadline: number,
+    call: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const remaining = deadline - Date.now();
+    const timeoutMs = Math.min(Math.max(1, remaining), this.endpointProviderTimings.requestMs);
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await withRequestTimeout(call(controller.signal), timeoutMs, label);
+    } catch (error) {
+      // The abort can reject the request before the race's own timer runs; report
+      // and treat both as the same bounded timeout.
+      if (controller.signal.aborted) {
+        DockerController.getInstance().resetDockerConnection();
+        throw error instanceof DockerRequestTimeoutError
+          ? error
+          : new DockerRequestTimeoutError(`${label} did not answer within ${timeoutMs} ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(abortTimer);
     }
   }
 
@@ -592,11 +691,12 @@ export class ImageOperationService {
     const helperRestored = outcome?.rollback.restored === true;
     let restored = helperRestored;
     const provider = operation.endpointProvider;
-    // The helper proved the restored container runs. In an in-place (provider
-    // scoped) replacement this process is still alive, so it can also prove
-    // Sencho reaches Docker through it: the claim is only made when that holds.
+    // The helper proved the restored container runs. Whoever is finalizing can
+    // also prove Sencho reaches Docker through it: the process that stayed
+    // alive for an endpoint-only replace, or the restarted process for a shared
+    // one. Scope does not decide whether the connectivity claim is checked.
     let restoreDetail: string | null = null;
-    if (helperRestored && provider && provider.scope === 'provider') {
+    if (helperRestored && provider) {
       const reachable = await this.verifyDockerThroughProvider(operation, provider, this.endpointProviderTimings.recoveryMs);
       if (!reachable.ok) {
         restored = false;

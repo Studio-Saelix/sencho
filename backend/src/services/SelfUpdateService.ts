@@ -209,8 +209,13 @@ export function buildEndpointProviderHelperArgs(input: {
   hostBindMounts: ReadonlyArray<HostMount>;
   imageId: string;
   composeWritable: boolean;
+  /** Application uid/gid that must read the helper's marker and outcome files. */
+  handoffOwner?: { uid: number; gid: number } | null;
 }): string[] {
-  const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable } = input;
+  const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable, handoffOwner } = input;
+  const ownerArgs = handoffOwner
+    ? ['-e', `SENCHO_HANDOFF_UID=${handoffOwner.uid}`, '-e', `SENCHO_HANDOFF_GID=${handoffOwner.gid}`]
+    : [];
   const mountArgs: string[] = [
     '-v', `${socketSource}:${HELPER_SOCKET_PATH}`,
     '-v', `${workingDir}:${workingDir}:${composeWritable ? 'rw' : 'ro'}`,
@@ -230,6 +235,7 @@ export function buildEndpointProviderHelperArgs(input: {
     // over a run of minutes it would report the helper unhealthy and alert.
     '--no-healthcheck',
     '-e', `DOCKER_HOST=unix://${HELPER_SOCKET_PATH}`,
+    ...ownerArgs,
     '--entrypoint', 'node',
     ...mountArgs,
     '-w', workingDir,
@@ -242,6 +248,16 @@ export function buildEndpointProviderHelperArgs(input: {
 export const PROVIDER_READY_SECONDS = 60;
 /** Seconds the helper waits for the new Sencho to confirm Docker access through the new provider. */
 export const PROVIDER_ACK_SECONDS = 180;
+
+/**
+ * This process's uid/gid, passed to the root helper so the marker and outcome
+ * it writes are readable when Sencho runs as `SENCHO_USER`. Null on a platform
+ * without process ids; the helper then leaves the files root-owned.
+ */
+function processHandoffOwner(): { uid: number; gid: number } | null {
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') return null;
+  return { uid: process.getuid(), gid: process.getgid() };
+}
 
 /**
  * Build the `docker run` argv for the self-update helper container. Pure and
@@ -843,6 +859,9 @@ class SelfUpdateService {
       hostBindMounts: ctx.hostBindMounts,
       imageId: ctx.runningImageId!,
       composeWritable: composeCopy !== null,
+      // The helper runs as root; the app may run as SENCHO_USER, so its
+      // marker and outcome files must be handed back to this process's uid.
+      handoffOwner: processHandoffOwner(),
     };
 
     try {

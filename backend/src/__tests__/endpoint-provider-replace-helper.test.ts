@@ -322,6 +322,95 @@ describe('replaceProvider', () => {
     expect(outcome).toMatchObject({ ok: false, phase: 'provider', error: expect.stringContaining('read-only') });
     expect(failing.composeCalls).toEqual([]);
   });
+
+  it.each(['provider', 'stack'] as const)(
+    'restores the snapshot when publishing the recreation marker fails after the %s-scope replacement',
+    async (scope) => {
+      const f = staged(fake());
+      const writeJson = f.deps.writeJson;
+      f.deps.writeJson = async (path, value) => {
+        if (path === helperFiles.recreated(HELPER_DATA_DIR, OP)) throw new Error('ENOSPC: no space left on device');
+        await writeJson(path, value);
+      };
+      const outcome = await replaceProvider(plan({ scope }), f.deps);
+      expect(outcome).toMatchObject({
+        ok: false,
+        phase: 'verify',
+        error: expect.stringContaining('ENOSPC'),
+        rollback: { restored: true, error: null },
+      });
+      expect(f.removed).toEqual(['new-proxy-id']);
+      expect(f.created).toHaveLength(1);
+      expect(f.created[0]).toMatchObject({ name: 'stack-socket-proxy-1', Image: 'sha256:previous' });
+      expect(f.files.get(outcomePath)).toMatchObject({ ok: false, rollback: { restored: true } });
+      expect(f.composeCalls.some(args => args.includes('sencho'))).toBe(false);
+    },
+  );
+
+  it('restores the snapshot when the marker fails after a repin copy was applied', async () => {
+    const f = staged(fake());
+    f.files.set('/app/data/.sencho-compose-patch', 'patched');
+    const writeJson = f.deps.writeJson;
+    f.deps.writeJson = async (path, value) => {
+      if (path === helperFiles.recreated(HELPER_DATA_DIR, OP)) throw new Error('ENOSPC: no space left on device');
+      await writeJson(path, value);
+    };
+    const outcome = await replaceProvider(plan({
+      mode: 'update',
+      composeCopy: { stagedPath: '/app/data/.sencho-compose-patch', targetPath: '/srv/stack/compose.yaml' },
+    }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { restored: true } });
+    expect(f.files.get('/srv/stack/compose.yaml')).toBe('patched');
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+  });
+
+  it('restores the snapshot when the failure outcome cannot be written', async () => {
+    const f = staged(fake());
+    const writeJson = f.deps.writeJson;
+    f.deps.writeJson = async (path, value) => {
+      if (path === outcomePath) throw new Error('ENOSPC: no space left on device');
+      await writeJson(path, value);
+    };
+    const outcome = await replaceProvider(plan({ scope: 'provider', ackSeconds: 10 }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { restored: true, error: null } });
+    // Recovery does not depend on the verdict file: the old container is back.
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+    expect(f.files.has(outcomePath)).toBe(false);
+    expect(f.log).toContainEqual(expect.stringContaining('could not write the outcome file'));
+  });
+
+  it('recovers when a verified success cannot publish its outcome', async () => {
+    const f = staged(fake({ onSleep: ackAt(10_000) }));
+    const writeJson = f.deps.writeJson;
+    f.deps.writeJson = async (path, value) => {
+      if (path === outcomePath) throw new Error('ENOSPC: no space left on device');
+      await writeJson(path, value);
+    };
+    const outcome = await replaceProvider(plan({ scope: 'provider' }), f.deps);
+    expect(outcome).toMatchObject({
+      ok: false,
+      phase: 'verify',
+      error: expect.stringContaining('could not be recorded'),
+      rollback: { restored: true, error: null },
+    });
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+  });
+
+  it('restores the snapshot when reading the ack throws after the replacement', async () => {
+    const f = staged(fake());
+    const readJson = f.deps.readJson;
+    f.deps.readJson = async (path) => {
+      if (path === ackPath) throw new Error('EIO: read failed');
+      return readJson(path);
+    };
+    const outcome = await replaceProvider(plan({ scope: 'provider', ackSeconds: 10 }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', error: expect.stringContaining('EIO'), rollback: { restored: true } });
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+  });
 });
 
 describe('createOptionsFromSnapshot', () => {

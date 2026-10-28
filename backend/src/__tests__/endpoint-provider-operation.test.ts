@@ -40,7 +40,7 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 function fastTimings() {
   const service = ImageOperationService.getInstance();
-  service.endpointProviderTimings = { pollMs: 5, verifyMs: 60, outcomeMs: 200, watchMs: 200, recoveryMs: 20 };
+  service.endpointProviderTimings = { pollMs: 5, requestMs: 20, verifyMs: 60, outcomeMs: 200, watchMs: 200, recoveryMs: 20 };
   return service;
 }
 
@@ -63,11 +63,21 @@ async function writeOutcome(operationId: string, outcome: Record<string, unknown
 }
 
 /** A Docker that answers through the new provider, with the provider running and the given health. */
-function mockDocker(options: { ping?: () => Promise<unknown>; running?: boolean; health?: string } = {}) {
+interface MockDockerOptions {
+  ping?: () => Promise<unknown>;
+  listContainers?: () => Promise<unknown>;
+  inspect?: () => Promise<unknown>;
+  running?: boolean;
+  health?: string;
+}
+
+function mockDocker(options: MockDockerOptions = {}) {
   const docker = {
     ping: options.ping ?? (async () => 'OK'),
-    listContainers: vi.fn(async () => (options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }])),
-    getContainer: () => ({ inspect: async () => ({ State: { Health: options.health ? { Status: options.health } : undefined } }) }),
+    listContainers: vi.fn(options.listContainers ?? (async () => (options.running === false ? [] : [{ Id: 'new-proxy', State: 'running' }]))),
+    getContainer: () => ({
+      inspect: options.inspect ?? (async () => ({ State: { Health: options.health ? { Status: options.health } : undefined } })),
+    }),
   };
   const resetDockerConnection = vi.fn();
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
@@ -167,6 +177,7 @@ describe('execute (the process that spawns the helper)', () => {
   it('records a provider-phase failure the helper restored while this process still runs', async () => {
     const selfUpdate = mockAvailableProvider();
     const service = fastTimings();
+    mockDocker();
     await service.claimComposeReapply({ replace: true });
     const operationId = (await service.getCurrentOperation())!.operationId;
     vi.spyOn(selfUpdate, 'triggerComposeReapply').mockImplementation(async () => {
@@ -196,6 +207,35 @@ describe('execute (the process that spawns the helper)', () => {
       rollback: { attempted: false },
       failureDetail: expect.stringContaining('docker compose up -d socket-proxy'),
     });
+  });
+
+  it('does not claim a stack-scope restore reaches Docker when this process still cannot', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    mockDocker({ ping: async () => { throw new Error('connect ECONNREFUSED'); } });
+    await service.claimComposeReapply({ replace: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
+    await service.executeClaimedComposeReapply();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    const operation = await service.getCurrentOperation();
+    expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
+    expect(operation?.failureDetail).toContain('was restored, but Sencho could not reach Docker through it');
+  });
+
+  it('checks restored connectivity for a shared Update too, not only Reapply', async () => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerUpdate').mockResolvedValue(undefined);
+    const service = fastTimings();
+    mockDocker({ ping: async () => { throw new Error('connect ECONNREFUSED'); } });
+    await service.claimCommunityUpdate({ replaceEndpointProvider: true });
+    const operation = (await service.getCurrentOperation())!;
+    expect(operation.endpointProvider).toMatchObject({ scope: 'stack' });
+    await writeOutcome(operation.operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
+    await service.executeClaimedCommunityUpdate();
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'));
+    expect((await service.getCurrentOperation())?.failureCode).toBe('endpoint_provider_recovery_required');
   });
 });
 
@@ -307,11 +347,53 @@ describe('provider-only reapply (Sencho stays running)', () => {
   });
 });
 
+describe('bounded verification', () => {
+  const never = () => new Promise<never>(() => {});
+
+  it.each([
+    ['ping', { ping: never }],
+    ['container list', { listContainers: never }],
+    ['inspect', { inspect: never }],
+  ] as Array<[string, MockDockerOptions]>)('settles the operation when %s never answers and the helper reports a failed restore', async (_label, dockerOptions) => {
+    const selfUpdate = mockAvailableProvider();
+    vi.spyOn(selfUpdate, 'triggerComposeReapply').mockResolvedValue(undefined);
+    const service = fastTimings();
+    service.endpointProviderTimings = { pollMs: 5, requestMs: 15, verifyMs: 50, outcomeMs: 200, watchMs: 200, recoveryMs: 30 };
+    mockDocker(dockerOptions);
+    await service.claimComposeReapply({ replace: true, only: true });
+    const operationId = (await service.getCurrentOperation())!.operationId;
+    await service.executeClaimedComposeReapply();
+    await writeRecreatedMarker(operationId);
+    // The bounded verification gives up and answers the helper negatively while
+    // the outcome is still unpublished.
+    await vi.waitFor(async () => {
+      const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
+      expect(ack).toMatchObject({ operationId, ok: false });
+    }, { timeout: 2_000 });
+    // The helper then restores the container and reports its own failure.
+    await writeOutcome(operationId, {
+      ok: false,
+      phase: 'verify',
+      error: 'Sencho did not answer',
+      rollback: { restored: true, error: null },
+    });
+
+    await vi.waitFor(async () => expect((await service.getCurrentOperation())?.state).toBe('failed'), { timeout: 3_000 });
+    const operation = await service.getCurrentOperation();
+    // The helper restored the container, but the connectivity claim cannot be
+    // checked while requests stall: recovery required, never a clean restore.
+    expect(operation).toMatchObject({ failureCode: 'endpoint_provider_recovery_required' });
+    expect(service.isEndpointProviderPending()).toBe(false);
+    // The terminal verdict released the claim.
+    await expect(service.claimComposeReapply({ replace: true, only: true })).resolves.toEqual({ ok: true });
+  });
+});
+
 describe('reconcileOnStartup (the new process)', () => {
-  async function claimRecreating() {
+  async function claimRecreating(scope: 'stack' | 'provider' = 'stack') {
     mockAvailableProvider();
     const service = fastTimings();
-    await service.claimComposeReapply({ replace: true });
+    await service.claimComposeReapply({ replace: true, only: scope === 'provider' });
     const operation = (await service.getCurrentOperation())!;
     // Persist the state the old process left: recreating, provider recorded.
     const raw = JSON.parse(await fs.readFile(path.join(tmpDir, 'image-operation-current.json'), 'utf8'));
@@ -323,6 +405,7 @@ describe('reconcileOnStartup (the new process)', () => {
   it('answers the helper after Docker works through the new provider, and succeeds on its verdict', async () => {
     const { service, operationId } = await claimRecreating();
     mockDocker({ health: 'healthy' });
+    await writeRecreatedMarker(operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
@@ -338,17 +421,60 @@ describe('reconcileOnStartup (the new process)', () => {
     await expect(fs.access(path.dirname(handoff(operationId, 'ack')))).rejects.toThrow();
   });
 
-  it('does not mark success from a restart alone: no verdict means recovery required', async () => {
-    const { service } = await claimRecreating();
-    mockDocker();
+  it('does not answer or succeed after a restart alone: no marker, no verdict means recovery required', async () => {
+    const { service, operationId } = await claimRecreating();
+    const docker = mockDocker();
     await service.reconcileOnStartup();
+    await expect(fs.access(handoff(operationId, 'ack'))).rejects.toThrow();
+    expect(docker.resetDockerConnection).not.toHaveBeenCalled();
     expect(await service.getCurrentOperation()).toMatchObject({ state: 'failed', failureCode: 'endpoint_provider_recovery_required' });
     expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed', error: expect.stringContaining('could not be restored') });
   });
 
+  it.each(['stack', 'provider'] as const)(
+    'refuses to acknowledge the old provider before the %s-scope recreation marker exists',
+    async (scope) => {
+      const { service, operationId } = await claimRecreating(scope);
+      service.endpointProviderTimings = { ...service.endpointProviderTimings, outcomeMs: 5_000 };
+      // The old provider still answers perfectly, which is exactly why startup
+      // must not accept it as proof of a replacement.
+      let replaced = false;
+      const docker = mockDocker({
+        health: 'healthy',
+        ping: async () => {
+          if (replaced) throw new Error('connect ECONNREFUSED');
+          return 'OK';
+        },
+      });
+      const reconcile = service.reconcileOnStartup();
+      await new Promise(resolve => setTimeout(resolve, 60));
+      await expect(fs.access(handoff(operationId, 'ack'))).rejects.toThrow();
+      expect(docker.resetDockerConnection).not.toHaveBeenCalled();
+
+      // The helper installs a running proxy that denies Docker access; only now
+      // may Sencho verify it, answer, and report a failed replacement.
+      replaced = true;
+      await writeRecreatedMarker(operationId);
+      await vi.waitFor(async () => {
+        const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
+        expect(ack).toMatchObject({ operationId, ok: false });
+      });
+      await writeOutcome(operationId, {
+        ok: false,
+        phase: 'verify',
+        error: 'Sencho could not use Docker through the new proxy',
+        rollback: { restored: true, error: null },
+      });
+      await reconcile;
+      expect(await service.getCurrentOperation()).toMatchObject({ state: 'failed', failureCode: 'endpoint_provider_recovery_required' });
+      expect(service.isEndpointProviderPending()).toBe(false);
+    },
+  );
+
   it('answers negatively when Docker does not answer through the new provider', async () => {
     const { service, operationId } = await claimRecreating();
     mockDocker({ ping: async () => { throw new Error('(HTTP code 403) unexpected - <html><body><h1>403 Forbidden</h1>\nRequest forbidden by administrative rules.\n</body></html>\n'); } });
+    await writeRecreatedMarker(operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
@@ -356,7 +482,9 @@ describe('reconcileOnStartup (the new process)', () => {
     });
     await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
     await reconcile;
-    expect(await service.getCurrentOperation()).toMatchObject({ state: 'failed', failureCode: 'endpoint_provider_restored' });
+    // Docker is unreachable in this fixture, so the restored container cannot be
+    // confirmed reachable either: that is a recovery state, not a clean restore.
+    expect(await service.getCurrentOperation()).toMatchObject({ state: 'failed', failureCode: 'endpoint_provider_recovery_required' });
   });
 
   it.each([
@@ -366,6 +494,7 @@ describe('reconcileOnStartup (the new process)', () => {
   ])('answers negatively when the new provider is %s', async (_label, docker, detail) => {
     const { service, operationId } = await claimRecreating();
     mockDocker(docker);
+    await writeRecreatedMarker(operationId);
     const reconcile = service.reconcileOnStartup();
     await vi.waitFor(async () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
@@ -384,6 +513,18 @@ describe('reconcileOnStartup (the new process)', () => {
       rollback: { attempted: true, restored: false, error: 'image gone' },
     });
     expect(docker.listContainers).not.toHaveBeenCalled();
+  });
+
+  it('reports a stack-scope restore as clean only after checking Docker through it', async () => {
+    const { service, operationId } = await claimRecreating();
+    mockDocker();
+    await writeOutcome(operationId, { ok: false, phase: 'verify', error: 'Sencho could not use Docker', rollback: { restored: true, error: null } });
+    await service.reconcileOnStartup();
+    expect(await service.getCurrentOperation()).toMatchObject({
+      failureCode: 'endpoint_provider_restored',
+      rollback: { attempted: true, restored: true, error: null },
+    });
+    expect((await service.getCurrentOperation())?.failureDetail).toContain('was restored and Sencho reaches Docker again');
   });
 
   it('ignores a verdict written for another operation', async () => {

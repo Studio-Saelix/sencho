@@ -80,10 +80,25 @@ export function LocalUpdateConfirmDialog({
     const providerProject = endpointOption?.state === 'available' ? endpointOption.project : null;
 
     let body: ReactNode;
-    if (isRemoteUpdate) {
+    if (isReapply && effectiveScope === 'only' && providerService) {
         body = (
             <p className="text-sm text-stat-subtitle">
-                Pulls Sencho {versionLabel} on this node and restarts it. Fleet tracks reconnection.
+                Recreates only <code className="text-stat-value">{providerService}</code> in
+                Compose project {providerProject ? <code className="text-stat-value">{providerProject}</code> : 'the authored project'} on <span className="text-stat-value">{nodeLabel}</span>.
+                Sencho keeps running and reconnects through the new container. Other services are
+                not recreated, and no newer Sencho version is selected. If the new container does
+                not give Sencho working Docker access, the previous one is restored.
+            </p>
+        );
+    } else if (isReapply && effectiveScope === 'with-sencho' && providerService) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Recreates <code className="text-stat-value">{providerService}</code> from its current
+                Compose configuration and image, then recreates Sencho. Other services are left
+                alone. If the new container does not give Sencho working Docker access, the previous
+                one is restored. {isRemoteReapply
+                    ? 'Fleet tracks reconnection.'
+                    : 'The dashboard briefly disconnects and reconnects automatically.'}
             </p>
         );
     } else if (isRemoteReapply) {
@@ -95,27 +110,18 @@ export function LocalUpdateConfirmDialog({
             </p>
         );
     } else if (isReapply) {
-        body = effectiveScope === 'only' && providerService ? (
-            <p className="text-sm text-stat-subtitle">
-                Recreates only <code className="text-stat-value">{providerService}</code> in
-                Compose project {providerProject ? <code className="text-stat-value">{providerProject}</code> : 'the authored project'} on <span className="text-stat-value">{nodeLabel}</span>.
-                Sencho keeps running and reconnects through the new container. Other services are
-                not recreated, and no newer Sencho version is selected. If the new container does
-                not give Sencho working Docker access, the previous one is restored.
-            </p>
-        ) : effectiveScope === 'with-sencho' && providerService ? (
-            <p className="text-sm text-stat-subtitle">
-                Recreates <code className="text-stat-value">{providerService}</code> from its current
-                Compose configuration and image, then recreates Sencho. Other services are left
-                alone. If the new container does not give Sencho working Docker access, the previous
-                one is restored. The dashboard briefly disconnects and reconnects automatically.
-            </p>
-        ) : (
+        body = (
             <p className="text-sm text-stat-subtitle">
                 Recreates this Sencho service from its current Compose configuration.
                 No newer Sencho version is selected, and Sencho will not rewrite the
                 configured image reference. The dashboard may briefly disconnect and
                 reconnects automatically when the restart completes.
+            </p>
+        );
+    } else if (isRemoteUpdate) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Pulls Sencho {versionLabel} on this node and restarts it. Fleet tracks reconnection.
             </p>
         );
     } else if (isDevUpdate) {
@@ -186,9 +192,14 @@ export function LocalUpdateConfirmDialog({
             hint={isReapply && effectiveScope === 'only' ? 'KEEPS Sencho running' : undefined}
             confirmDisabled={isReapply && initialScope === 'only' && !endpointAvailable}
             onConfirm={() => {
+                // Update derives the request from its checkbox; Reapply from the
+                // segmented scope control. Mixing them silently dropped a checked
+                // Update replacement.
                 const choice: UpdateConfirmChoice = {
-                    replaceEndpointProvider: effectiveScope !== 'none',
-                    endpointProviderOnly: effectiveScope === 'only',
+                    replaceEndpointProvider: isReapply
+                        ? effectiveScope !== 'none'
+                        : endpointAvailable && replaceEndpointProvider,
+                    endpointProviderOnly: isReapply && effectiveScope === 'only',
                 };
                 setReplaceEndpointProvider(false);
                 setScopeChoice(null);

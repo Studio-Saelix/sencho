@@ -281,6 +281,18 @@ async function readAck(plan: ProviderReplacePlan, deps: HelperDeps): Promise<Pro
  * decides the outcome from Sencho's ack. Writes exactly one outcome file.
  */
 export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDeps): Promise<ProviderOutcome> {
+  /**
+   * The outcome file is the only signal Sencho has. Losing it cannot undo a
+   * recovery that already ran, so a failed write is logged rather than turned
+   * into an exception the outer catch could report as "not attempted".
+   */
+  const publishOutcome = async (outcome: ProviderOutcome): Promise<void> => {
+    try {
+      await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+    } catch (error) {
+      deps.log(`could not write the outcome file: ${errorText(error)}`);
+    }
+  };
   const fail = async (phase: ProviderPhase, error: string): Promise<ProviderOutcome> => {
     deps.log(`${phase} failed: ${error}; restoring the previous Docker endpoint`);
     const rollbackError = await restoreProvider(plan, deps);
@@ -292,7 +304,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
       error,
       rollback: { restored: rollbackError === null, error: rollbackError },
     };
-    await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+    await publishOutcome(outcome);
     return outcome;
   };
 
@@ -311,53 +323,80 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
         error: `Failed to write the updated compose file: ${errorText(error)}`,
         rollback: { restored: true, error: null },
       };
-      await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+      await publishOutcome(outcome);
       return outcome;
     }
   }
 
-  deps.log(`recreating ${plan.providerService}`);
-  const provider = await deps.compose([
-    'up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', String(plan.providerReadySeconds), plan.providerService,
-  ]);
-  if (!provider.ok) return fail('provider', `Recreating "${plan.providerService}" failed: ${trimOutput(provider.output)}`);
+  let recreated = false;
+  try {
+    deps.log(`recreating ${plan.providerService}`);
+    const provider = await deps.compose([
+      'up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', String(plan.providerReadySeconds), plan.providerService,
+    ]);
+    if (!provider.ok) return await fail('provider', `Recreating "${plan.providerService}" failed: ${trimOutput(provider.output)}`);
+    recreated = true;
 
-  // Durable phase marker: the replacement exists now, so a process that stayed
-  // running may verify Docker through it and answer. Without this the ack could
-  // be written before the old container was ever replaced.
-  await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
-    operationId: plan.operationId,
-    at: deps.now(),
-  });
+    // Durable phase marker: the replacement exists now, so a process that stayed
+    // running may verify Docker through it and answer. Without this the ack could
+    // be written before the old container was ever replaced. A write failure is
+    // itself a reason to recover: the helper cannot announce the new provider.
+    await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
+      operationId: plan.operationId,
+      at: deps.now(),
+    });
 
-  if (plan.scope === 'provider') {
-    deps.log('Sencho stays running; waiting for it to reconnect through the new Docker endpoint');
-  } else {
-    deps.log(`recreating ${plan.senchoService}`);
-    const sencho = await deps.compose(['up', '-d', '--no-deps', '--force-recreate', plan.senchoService]);
-    if (!sencho.ok) return fail('sencho', `Recreating "${plan.senchoService}" failed: ${trimOutput(sencho.output)}`);
-  }
+    if (plan.scope === 'provider') {
+      deps.log('Sencho stays running; waiting for it to reconnect through the new Docker endpoint');
+    } else {
+      deps.log(`recreating ${plan.senchoService}`);
+      const sencho = await deps.compose(['up', '-d', '--no-deps', '--force-recreate', plan.senchoService]);
+      if (!sencho.ok) return await fail('sencho', `Recreating "${plan.senchoService}" failed: ${trimOutput(sencho.output)}`);
+    }
 
-  const deadline = deps.now() + plan.ackSeconds * 1000;
-  let ack: ProviderAck | null = null;
-  while (!ack && deps.now() < deadline) {
-    ack = await readAck(plan, deps);
-    if (!ack) await deps.sleep(ACK_POLL_MS);
-  }
-  if (!ack) {
-    return fail('verify', `Sencho did not confirm Docker access through the new "${plan.providerService}" within ${plan.ackSeconds} seconds.`);
-  }
-  if (!ack.ok) {
-    return fail('verify', `Sencho could not use Docker through the new "${plan.providerService}": ${ack.detail ?? 'no detail'}`);
-  }
+    const deadline = deps.now() + plan.ackSeconds * 1000;
+    let ack: ProviderAck | null = null;
+    while (!ack && deps.now() < deadline) {
+      ack = await readAck(plan, deps);
+      if (!ack) await deps.sleep(ACK_POLL_MS);
+    }
+    if (!ack) {
+      return await fail('verify', `Sencho did not confirm Docker access through the new "${plan.providerService}" within ${plan.ackSeconds} seconds.`);
+    }
+    if (!ack.ok) {
+      return await fail('verify', `Sencho could not use Docker through the new "${plan.providerService}": ${ack.detail ?? 'no detail'}`);
+    }
 
-  if (plan.pruneOnUpdate) {
-    await deps.docker.pruneDanglingImages().catch(error => deps.log(`dangling image prune failed: ${errorText(error)}`));
+    if (plan.pruneOnUpdate) {
+      await deps.docker.pruneDanglingImages().catch(error => deps.log(`dangling image prune failed: ${errorText(error)}`));
+    }
+    const outcome: ProviderOutcome = { operationId: plan.operationId, ok: true };
+    try {
+      await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
+    } catch (error) {
+      // Sencho would wait out its deadline with no verdict. Treat an
+      // unpublishable success as a verification failure so recovery runs.
+      return await fail('verify', `The replacement was verified but its outcome could not be recorded: ${errorText(error)}`);
+    }
+    deps.log('replacement verified');
+    return outcome;
+  } catch (error) {
+    // Every exception after the provider was recreated goes through the same
+    // recovery as a failed compose step, and never depends on a handoff write
+    // succeeding. Before the replacement there is nothing to restore.
+    if (recreated) {
+      return await fail('verify', `The replacement helper stopped unexpectedly: ${errorText(error)}`);
+    }
+    const outcome: ProviderOutcome = {
+      operationId: plan.operationId,
+      ok: false,
+      phase: 'provider',
+      error: `The replacement helper stopped unexpectedly: ${errorText(error)}`,
+      rollback: { restored: true, error: null },
+    };
+    await publishOutcome(outcome);
+    return outcome;
   }
-  const outcome: ProviderOutcome = { operationId: plan.operationId, ok: true };
-  await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, plan.operationId), outcome);
-  deps.log('replacement verified');
-  return outcome;
 }
 
 export function errorText(error: unknown): string {
