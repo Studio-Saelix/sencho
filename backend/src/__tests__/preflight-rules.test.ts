@@ -1001,8 +1001,9 @@ describe('compose-version-mismatch', () => {
     // merely because the stack holds Sencho or its proxy.
     const f = ids(runRules(ctx({ composeVersionSkew: { runningVersion: '5.6.0', services: [{ service: 'web', createdBy: ['2.38.1'] }] } })), 'compose-version-mismatch');
     expect(f).toHaveLength(1);
-    expect(f[0].remediation).toContain('only when it would recreate a protected container');
-    expect(f[0].remediation).toContain('leaves those containers unchanged goes through');
+    expect(f[0].remediation).toContain('Sencho refuses a deploy that would recreate a protected container');
+    expect(f[0].remediation).toContain('A deploy that leaves those containers unchanged goes through');
+    expect(f[0].remediation).toContain('an update of a stack that holds one is always refused');
     expect(f[0].remediation).toContain('recreate the affected container once');
     expect(f[0].remediation).not.toContain('If it holds Sencho');
   });

@@ -94,7 +94,13 @@ export class UpdateGuardService {
     // same containers as the guard, Compose Doctor, and the deploy notice. A
     // container with no id cannot be inspected and is no evidence either way.
     const { stack } = await listNodeContainers(nodeId, stackName);
-    const candidates = stack.filter((info): info is ListedContainer & { Id: string } => typeof info.Id === 'string');
+    // Docker supplies an id for every listed container. One without it cannot
+    // be inspected, so fail closed rather than judge a partial set and call the
+    // remaining containers a matching version.
+    const candidates = stack.filter((info): info is ListedContainer & { Id: string } => typeof info.Id === 'string' && info.Id !== '');
+    if (candidates.length !== stack.length) {
+      throw new Error(`A container in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`);
+    }
     const scoped = serviceName ? filterContainersByComposeService(candidates, serviceName) : candidates;
     const probes = await Promise.all(
       scoped.map(async (info): Promise<ContainerProbe | null> => {

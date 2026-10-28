@@ -48,7 +48,22 @@ vi.mock('../services/DockerController', () => ({
   default: {
     getInstance: () => ({
       getDocker: () => ({
-        listContainers: mockListContainers,
+        // Docker applies `filters.label` in the engine. Model that here so a
+        // regression to a project-label-only lookup cannot pass on a fixture
+        // that returns every container regardless of the filter it supplied.
+        listContainers: async (options?: { filters?: { label?: string[] } }) => {
+          const listed = await mockListContainers(options) as Array<{ Labels?: Record<string, string> }>;
+          const labels = options?.filters?.label ?? [];
+          if (labels.length === 0) return listed;
+          return listed.filter(container => labels.every((label) => {
+            const at = label.indexOf('=');
+            const key = at === -1 ? label : label.slice(0, at);
+            const value = at === -1 ? undefined : label.slice(at + 1);
+            return value === undefined
+              ? container.Labels?.[key] !== undefined
+              : container.Labels?.[key] === value;
+          }));
+        },
         getContainer: mockGetContainer,
       }),
     }),
@@ -357,6 +372,22 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     expect(report.verdict).toBe('ready_with_warnings');
   });
 
+  it('does not report a matching version when a listed stack container cannot be inspected', async () => {
+    // A container with no id (a proxy that omitted it) makes the container set
+    // incomplete; the readiness report must not fall back to a positive
+    // "everything matches" from the containers it could inspect.
+    healthyCollaborators([
+      labeled('web', '5.6.0'),
+      { Names: ['/app-db-1'], State: 'running', Labels: { 'com.docker.compose.project': 'app' } },
+    ]);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+
+    expect(report.signals.find(s => s.id === 'compose_version')).toBeUndefined();
+    expect(report.signals.find(s => s.id === 'containers')).toMatchObject({ status: 'unknown', affectsVerdict: true });
+    expect(report.verdict).toBe('unknown');
+  });
+
   it('reports an informational unknown when the version probe rejects, and still returns', async () => {
     healthyCollaborators([labeled('web', '2.38.1')]);
     mockComposeVersion.mockRejectedValue(new Error('compose hung'));
@@ -376,11 +407,14 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
 
     vi.useFakeTimers();
     try {
-      const pending = UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
+      let settled = false;
+      const pending = UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app')
+        .finally(() => { settled = true; });
       // The dialog aborts at 4,000 ms. Both hung inputs share the 3,000 ms
       // readiness budget, so the report settles with 1,000 ms of transport
-      // margin.
+      // margin. Fail fast when it has not settled, instead of hanging an await.
       await vi.advanceTimersByTimeAsync(3_000);
+      expect(settled).toBe(true);
       const report = await pending;
 
       expect(report.signals.find(s => s.id === 'compose_version')).toMatchObject({

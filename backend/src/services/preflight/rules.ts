@@ -775,10 +775,10 @@ const composeVersionMismatch: PreflightRule = {
         + `which can record a container's configuration or image differently, so the next deploy or update can recreate `
         + `${single ? 'it' : 'them'} even if nothing in the file changed. After that, deploys from this node leave `
         + `${single ? 'that container' : 'those containers'} running, unless another Compose version deploys the stack again.`,
-      remediation: 'Deploy this stack from one place. Sencho refuses a deploy or update only when it would recreate a '
-        + 'protected container: its own, the Docker socket proxy it uses, or a dependency of theirs. A deploy or update '
-        + 'that leaves those containers unchanged goes through. '
-        + `If it would recreate one, recreate ${single ? 'the affected container' : 'the affected containers'} once from the `
+      remediation: 'Deploy this stack from one place. Sencho refuses a deploy that would recreate a protected container: '
+        + 'its own, the Docker socket proxy it uses, or a dependency of theirs. A deploy that leaves those containers '
+        + 'unchanged goes through; an update of a stack that holds one is always refused, because a pull can replace it. '
+        + `If a deploy would recreate one, recreate ${single ? 'the affected container' : 'the affected containers'} once from the `
         + `host with Docker Compose ${skew.runningVersion} while Sencho is idle.`,
     }];
   },
