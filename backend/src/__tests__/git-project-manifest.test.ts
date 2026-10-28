@@ -1175,6 +1175,71 @@ describe('detach crash recovery', () => {
     });
 });
 
+describe('detach recovery declaration set bracket', () => {
+    async function stagedTwoLayerDetach(stackName: string) {
+        const svc = GitProjectManifestService.getInstance();
+        const original = Buffer.from('services:\n  web:\n    image: nginx:old\n');
+        const originalAux = Buffer.from('services:\n  db:\n    image: pg:old\n');
+        writeStackFile(stackName, 'compose.yaml', original.toString('utf8'));
+        writeStackFile(stackName, 'aux.yaml', originalAux.toString('utf8'));
+        await svc.writeManifest(stackName, buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'aux.yaml', role: 'compose-override' }),
+        ]));
+        await svc.prepareDetachRecovery(stackName, REPO.repo_url, REPO.branch, [
+            { path: 'compose.yaml', existed: true, content: original },
+            { path: 'aux.yaml', existed: true, content: originalAux },
+        ]);
+        writeStackFile(stackName, 'compose.yaml', 'changed\n');
+        writeStackFile(stackName, 'aux.yaml', 'changed\n');
+        expect(await svc.stageManagedAreaForDetach(stackName)).toBe(true);
+        return { svc, fsSvc: FileSystemService.getInstance() };
+    }
+
+    it('is open while the snapshot layers are written back and whole afterwards', async () => {
+        const stackName = 'detach-bracket-open';
+        const { svc, fsSvc } = await stagedTwoLayerDetach(stackName);
+        const seen: Array<number | null> = [];
+        const realWrite = FileSystemService.prototype.writeStackFile;
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(function (this: FileSystemService, ...args: Parameters<typeof realWrite>) {
+            seen.push(fsSvc.declarationSetEpoch(stackName));
+            return realWrite.apply(this, args);
+        });
+        try {
+            await svc.rollbackStagedDetach(stackName, REPO.repo_url, REPO.branch);
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(seen.length).toBeGreaterThan(0);
+        expect(seen.every((epoch) => epoch === null)).toBe(true);
+        expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays unknown when the snapshot cannot be written back in full', async () => {
+        const stackName = 'detach-bracket-partial';
+        const { svc, fsSvc } = await stagedTwoLayerDetach(stackName);
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValue(new Error('simulated disk failure'));
+        try {
+            await expect(svc.rollbackStagedDetach(stackName, REPO.repo_url, REPO.branch)).rejects.toThrow('simulated disk failure');
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+    });
+
+    it('does not make an abandoned mixture whole when it finds nothing to restore', async () => {
+        const svc = GitProjectManifestService.getInstance();
+        const fsSvc = FileSystemService.getInstance();
+        const stackName = 'detach-bracket-nothing';
+        stackDir(stackName);
+        fsSvc.beginDeclarationSetPublication(stackName).abandon();
+
+        expect(await svc.recoverInterruptedDetach(stackName, REPO.repo_url, REPO.branch)).toBe(false);
+
+        expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
+    });
+});
+
 describe('FileSystemService interaction', () => {
     it('promotion invalidates the stack file roots', async () => {
         const svc = GitProjectManifestService.getInstance();
@@ -1193,6 +1258,89 @@ describe('FileSystemService interaction', () => {
         await svc.promoteGeneration(stackName, { sha: 'invalidate', candidateRelPath: candidateRel, manifest, priorManifest: null, adoptExistingMaterializedPaths: 'all' });
         expect(readStackFile(stackName, 'compose.yaml')).toBe('v2\n');
         expect(await FileSystemService.getInstance().getStackContent(stackName)).toBe('v2\n');
+    });
+});
+
+describe('promoteGeneration declaration set bracket', () => {
+    async function twoFilePromotion(stackName: string) {
+        const svc = GitProjectManifestService.getInstance();
+        writeStackFile(stackName, 'compose.yaml', 'PRIOR\n');
+        writeStackFile(stackName, 'aux.yaml', 'PRIOR-AUX\n');
+        const prior = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml' }),
+            managedEntry({ materializedPath: 'aux.yaml', role: 'compose-override' }),
+        ]);
+        const priorRel = 'generations/applied-prior';
+        const priorAbs = path.join(tmpDir, 'git-managed', '1', stackName, priorRel);
+        fs.mkdirSync(priorAbs, { recursive: true });
+        fs.writeFileSync(path.join(priorAbs, 'compose.yaml'), 'PRIOR\n');
+        fs.writeFileSync(path.join(priorAbs, 'aux.yaml'), 'PRIOR-AUX\n');
+        prior.generation.appliedDir = priorRel;
+        await svc.writeManifest(stackName, prior);
+        const clone = makeClone({ 'compose.yaml': 'NEW\n', 'aux.yaml': 'NEW-AUX\n' });
+        const candidateRel = await svc.buildCandidate(
+            stackName,
+            'bracket',
+            clone,
+            [{ srcRel: 'compose.yaml', destRel: 'compose.yaml' }, { srcRel: 'aux.yaml', destRel: 'aux.yaml' }],
+            [],
+            BOUNDS,
+        );
+        const next = buildManifest(stackName, [
+            managedEntry({ materializedPath: 'compose.yaml', contentSha256: 'x' }),
+            managedEntry({ materializedPath: 'aux.yaml', role: 'compose-override', contentSha256: 'y' }),
+        ], prior);
+        const promote = () => svc.promoteGeneration(stackName, { sha: 'bracket', candidateRelPath: candidateRel, manifest: next, priorManifest: prior });
+        return { promote, fsSvc: FileSystemService.getInstance() };
+    }
+
+    it('is open while the layers are rewritten and whole once the promotion commits', async () => {
+        const stackName = 'bracket-promote';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        const seen: Array<number | null> = [];
+        const realSave = FileSystemService.prototype.saveStackContent;
+        const realWrite = FileSystemService.prototype.writeStackFile;
+        vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockImplementation(function (this: FileSystemService, ...args: Parameters<typeof realSave>) {
+            seen.push(fsSvc.declarationSetEpoch(stackName));
+            return realSave.apply(this, args);
+        });
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockImplementation(function (this: FileSystemService, ...args: Parameters<typeof realWrite>) {
+            seen.push(fsSvc.declarationSetEpoch(stackName));
+            return realWrite.apply(this, args);
+        });
+        try {
+            expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+            await promote();
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(seen).toEqual([null, null]);
+        expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('is whole again when a failed promotion restores the previous generation', async () => {
+        const stackName = 'bracket-restored';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValueOnce(new Error('simulated disk failure'));
+        try {
+            await expect(promote()).rejects.toMatchObject({ phase: 'restored' });
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(fsSvc.declarationSetEpoch(stackName)).not.toBeNull();
+    });
+
+    it('stays unknown when a failed promotion cannot restore the previous generation', async () => {
+        const stackName = 'bracket-stuck';
+        const { promote, fsSvc } = await twoFilePromotion(stackName);
+        vi.spyOn(console, 'error').mockImplementation(() => { /* silence the recovery log */ });
+        vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockRejectedValue(new Error('simulated disk failure'));
+        try {
+            await expect(promote()).rejects.toMatchObject({ phase: 'recovery_required' });
+        } finally {
+            vi.restoreAllMocks();
+        }
+        expect(fsSvc.declarationSetEpoch(stackName)).toBeNull();
     });
 });
 

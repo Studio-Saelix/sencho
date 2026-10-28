@@ -1,0 +1,348 @@
+/**
+ * Evidence availability: what the deploy gate may do when it cannot prove a
+ * target is safe.
+ *
+ * Sits on the Security Policies tab beside the honor-suppressions toggle,
+ * because it configures the same gate from the other side: that toggle says what
+ * counts as a finding, this one says what to do when there is no finding to
+ * count. The active default is stated on every row rather than left implicit,
+ * so "why was this allowed" is answerable from the screen.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { toast } from '@/components/ui/toast-store';
+import { apiFetch } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
+import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
+
+type Outcome = 'allow' | 'warn' | 'block';
+
+interface EvidencePolicy {
+  scannerUnavailable: Outcome;
+  scanFailure: Outcome;
+  candidateUnproven: Outcome;
+  isDefault: boolean;
+}
+
+/**
+ * The subset the PUT accepts, and only partially: `isDefault` is server-computed
+ * and read-only, so it must not be sendable, while any single field may be saved
+ * on its own.
+ */
+type WritableEvidencePolicy = Partial<Omit<EvidencePolicy, 'isDefault'>>;
+
+interface EvidencePolicyResponse {
+  policy: EvidencePolicy;
+  defaults: EvidencePolicy;
+  outcomes: Outcome[];
+}
+
+const OUTCOME_OPTIONS: SegmentedControlOption<Outcome>[] = [
+  { value: 'allow', label: 'Allow' },
+  { value: 'warn', label: 'Warn' },
+  { value: 'block', label: 'Block' },
+];
+
+const VALID_OUTCOMES: readonly string[] = ['allow', 'warn', 'block'];
+
+const isOutcome = (v: unknown): v is Outcome => typeof v === 'string' && VALID_OUTCOMES.includes(v);
+
+function parsePolicy(value: unknown): EvidencePolicy | null {
+  if (!value || typeof value !== 'object') return null;
+  const q = value as Partial<EvidencePolicy>;
+  if (
+    !isOutcome(q.scannerUnavailable) ||
+    !isOutcome(q.scanFailure) ||
+    !isOutcome(q.candidateUnproven) ||
+    typeof q.isDefault !== 'boolean'
+  ) {
+    return null;
+  }
+  return q as EvidencePolicy;
+}
+
+/**
+ * Validate the read at the network boundary. This panel is rendered inside the
+ * Policies tab, so a throw here takes the whole tab down; and a node behind the
+ * proxy can legitimately answer with a shape this build does not know. Both are
+ * "could not read", which the caller already knows how to say.
+ *
+ * The read carries the shipped defaults alongside the active values on purpose:
+ * the UI has to state the default, so it cannot render without them.
+ */
+function parseEvidencePolicyResponse(body: unknown): EvidencePolicyResponse | null {
+  if (!body || typeof body !== 'object') return null;
+  const raw = body as Partial<EvidencePolicyResponse>;
+  const policy = parsePolicy(raw.policy);
+  const defaults = parsePolicy(raw.defaults);
+  if (!policy || !defaults) return null;
+  return {
+    policy,
+    defaults,
+    outcomes: [...VALID_OUTCOMES] as Outcome[],
+  };
+}
+
+/** One row: what it decides, and what the shipped default does. */
+function PolicyRow({
+  label,
+  help,
+  value,
+  defaultValue,
+  disabled,
+  busy,
+  onChange,
+}: {
+  label: string;
+  help: string;
+  value: Outcome;
+  defaultValue: Outcome;
+  disabled: boolean;
+  busy: boolean;
+  onChange: (next: Outcome) => void;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label className="text-sm">{label}</Label>
+        <SegmentedControl
+          value={value}
+          options={OUTCOME_OPTIONS}
+          onChange={onChange}
+          disabled={disabled || busy}
+          ariaLabel={label}
+          className="ml-auto"
+        />
+      </div>
+      <p className="text-xs text-muted-foreground mt-1">{help}</p>
+      {value !== defaultValue && (
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Changed from the default ({defaultValue}).
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * `nodeId` is the node this panel displays, and every request it makes (the
+ * mount read, the retry, each save, the read-back after an unconfirmed save) is
+ * pinned to it. The default targeting reads the active node from shared browser
+ * storage, which another tab can change while this one stays mounted on the old
+ * node: a write would then land on the node the other tab chose while the toast
+ * named the one on screen.
+ */
+export function EvidencePolicyPanel({ nodeId, nodeName }: { nodeId: number; nodeName?: string }) {
+  const { isAdmin } = useAuth();
+  const [state, setState] = useState<EvidencePolicyResponse | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  // False once the panel has gone (it remounts on a node switch).
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  /**
+   * `isCancelled` lets a caller skip updating a panel that has gone: the panel
+   * is keyed by node id, so every node switch unmounts it, and a late reply must
+   * not set state on the instance that is leaving. The request itself is pinned
+   * to this panel's node either way. The retry button passes nothing, because a
+   * click that is still in flight when the panel goes only sets state on the
+   * unmounted instance. Resolves true only when a policy was read and is now shown.
+   */
+  const load = useCallback(async (isCancelled?: () => boolean): Promise<boolean> => {
+    try {
+      const res = await apiFetch('/security/evidence-policy', { nodeId });
+      if (!res.ok) throw new Error(`Failed to load (${res.status})`);
+      const data = parseEvidencePolicyResponse(await res.json());
+      if (isCancelled?.()) return false;
+      if (!data) throw new Error('unreadable policy payload');
+      setState(data);
+      setLoadFailed(false);
+      return true;
+    } catch (err) {
+      if (isCancelled?.()) return false;
+      console.error('Failed to load the evidence policy:', err);
+      setLoadFailed(true);
+      return false;
+    }
+  }, [nodeId]);
+
+  useEffect(() => {
+    const guard = { cancelled: false };
+    void load(() => guard.cancelled);
+    return () => {
+      guard.cancelled = true;
+    };
+  }, [load]);
+
+  /**
+   * The retry's own in-flight state, so a second click cannot fire a second
+   * request. The button disabling on it is what tells the operator their click
+   * landed: `load` sets `loadFailed` back to false on success, so without this
+   * the card would stay on screen for the length of the request looking
+   * untouched and a rapid second click would read as a dead control.
+   */
+  const retry = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await load();
+    } finally {
+      setRetrying(false);
+    }
+  }, [load, retrying]);
+
+  const save = useCallback(
+    // Only the writable fields. `EvidencePolicy` also carries `isDefault`, which
+    // the server's unknown-field check rejects, so it must not be sendable here.
+    async (patch: WritableEvidencePolicy) => {
+      setBusy(true);
+      try {
+        const res = await apiFetch('/security/evidence-policy', {
+          method: 'PUT',
+          nodeId,
+          body: JSON.stringify(patch),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err?.error || 'Failed to update the evidence policy');
+        }
+        // The write answers with the resolved policy alone, not the whole read
+        // envelope, so it is parsed on its own terms.
+        const policy = parsePolicy(await res.json().then((b) => (b as { policy?: unknown })?.policy).catch((parseErr) => {
+          console.error('The evidence policy save was accepted but its answer could not be parsed:', parseErr);
+          return null;
+        }));
+        if (!policy) {
+          // The node accepted the write but did not answer in a shape this build
+          // can read, so what it now enforces is unknown. Read it back rather than
+          // leave the old value on screen as if the save had not happened. When
+          // that read fails too, no value is on screen to check, so the message
+          // says the result is unknown instead of sending the operator to one.
+          // The read-back goes to the node that was saved, like every other
+          // request here. When the panel has gone meanwhile (the operator moved
+          // to another node) the answer has nowhere to be shown, so the message
+          // names the node and sends the operator to its settings instead.
+          const readBack = await load(() => !aliveRef.current);
+          if (!aliveRef.current) {
+            const where = nodeName ? ` on ${nodeName}` : '';
+            throw new Error(`The node accepted the change${where} but did not confirm it. Open its Evidence availability settings to check the value.`);
+          }
+          throw new Error(readBack
+            ? 'The node accepted the change but did not confirm it. Check the value shown.'
+            : 'The node accepted the change but did not confirm it, and its policy could not be read back. What it enforces now is unknown.');
+        }
+        setState((prev) => (prev ? { ...prev, policy } : prev));
+        toast.success(nodeName ? `Evidence policy updated on ${nodeName}` : 'Evidence policy updated');
+      } catch (err) {
+        toast.error((err as Error)?.message || 'Failed to update the evidence policy');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load, nodeId, nodeName],
+  );
+
+  if (loadFailed) {
+    return (
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
+        <Label className="text-sm">Evidence availability</Label>
+        <p className="text-xs text-muted-foreground mt-1">
+          The policy could not be read, so what this node currently enforces is unknown here. Deploys
+          are unaffected: the gate keeps applying whatever this node has stored, and only a
+          failure to read that too would fall back to the shipped defaults, which allow a deploy when
+          the scanner is missing and block one whose scan failed.
+        </p>
+        <button
+          type="button"
+          onClick={() => void retry()}
+          disabled={retrying}
+          className="mt-2 text-xs underline underline-offset-2 disabled:cursor-default disabled:no-underline"
+        >
+          {retrying ? 'Retrying…' : 'Try again'}
+        </button>
+      </div>
+    );
+  }
+
+  if (!state) {
+    // Layout-matched placeholder rather than a blank pane, so the panel does not
+    // pop into existence or shift the tab when the policy arrives. Sized to the
+    // loaded card: a title block, three label/control rows, and the helper line.
+    return (
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-3 w-72 mt-2" />
+        <div className="mt-4 space-y-4">
+          {[0, 1, 2].map((row) => (
+            <div key={row} className="flex flex-wrap items-center justify-between gap-2">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-7 w-40 rounded-md ml-auto" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const { policy, defaults } = state;
+  const disabled = !isAdmin;
+
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-4 py-3 space-y-4">
+      <div>
+        <Label className="text-sm">Evidence availability</Label>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          What a deploy gate may do when it cannot prove the images are safe. Each row shows the
+          active setting and the shipped default.
+          {nodeName ? ` These settings belong to ${nodeName}, not to the whole fleet.` : ''}
+        </p>
+      </div>
+
+      <PolicyRow
+        label="Scanner unavailable"
+        help={`When the vulnerability scanner is not installed or not responding on this node. Default: ${defaults.scannerUnavailable}.`}
+        value={policy.scannerUnavailable}
+        defaultValue={defaults.scannerUnavailable}
+        disabled={disabled}
+        busy={busy}
+        onChange={(next) => void save({ scannerUnavailable: next })}
+      />
+
+      <PolicyRow
+        label="Scan failed"
+        help="When a scan was started for an image and did not finish. Default: block."
+        value={policy.scanFailure}
+        defaultValue={defaults.scanFailure}
+        disabled={disabled}
+        busy={busy}
+        onChange={(next) => void save({ scanFailure: next })}
+      />
+
+      <PolicyRow
+        label="Candidate not evaluated"
+        help="When an image a Git-managed source is about to accept cannot be evaluated. This path has no person in the loop, so it is held by default even if you allow a failed scan above. Default: block."
+        value={policy.candidateUnproven}
+        defaultValue={defaults.candidateUnproven}
+        disabled={disabled}
+        busy={busy}
+        onChange={(next) => void save({ candidateUnproven: next })}
+      />
+
+      {!isAdmin && (
+        <p className="text-xs text-muted-foreground">
+          These settings are read-only for your role.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default EvidencePolicyPanel;

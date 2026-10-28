@@ -1,0 +1,259 @@
+---
+title: Serve Sencho Over HTTPS and Enroll a Pilot Agent
+sidebarTitle: Serve over HTTPS, enroll a Pilot agent
+description: Give the hub a certificate from your own CA, set its public URL, enroll a Pilot agent on another host, and confirm the agent's credentials never cross the network in clear text.
+---
+
+Say your Sencho hub runs at `sencho.internal.example.com`, and a VPS called `edge-02` on another network will join it as a Pilot agent. The agent dials the hub, so everything it sends travels across the internet: the one-time enrollment token it presents on its first connection, and the long-lived tunnel token it presents on every reconnect. Over `http://`, both cross the network in clear text.
+
+This tutorial makes the hub listen with HTTPS on its own port, using a certificate from a small certificate authority you create. You set the public URL so the enrollment file points at `https://`, enroll `edge-02`, and then check from three places that the connection is verified and the credentials are not readable on the wire.
+
+It does not cover putting a reverse proxy in front of Sencho, which is [Put Sencho Behind Caddy and Keep Real Client Addresses](/tutorials/run-sencho-behind-a-reverse-proxy). It does not cover nodes in Distributed API Proxy mode, or moving an agent you already enrolled over `http://` to `https://`; that is [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance). The general Pilot enrollment walkthrough, without TLS, is [Enroll a Remote Node](/tutorials/enroll-a-remote-node).
+
+## Prerequisites
+
+- The `admin` role on the hub. Adding a node and opening the Recovery page both need it.
+- The hub running from a Compose file laid out as in the [Quickstart](/getting-started/quickstart), on a host where you can run `openssl` and `docker compose`.
+- A DNS name that resolves to the hub from the second host, with TCP port `1852` reachable. This tutorial uses `sencho.internal.example.com`; replace it everywhere. If agents will dial a raw IP address instead of a name, add an `IP:` entry to the certificate's alternative names in step 1.
+- A second host with Docker and the Compose plugin, able to make outbound connections to the hub's port `1852`. This tutorial calls it `edge-02`.
+
+<Steps>
+  <Step title="Create a certificate authority and a hub certificate">
+    Agents verify the hub's certificate against the name they dial, so the certificate needs a Subject Alternative Name for that name. A certificate with only a Common Name fails verification. Pick the tab that matches where your certificate comes from.
+
+    <Tabs>
+      <Tab title="Private CA">
+        On the hub host, next to the Sencho `docker-compose.yml`, create a certificate authority named `Home Lab CA` and sign a certificate for the hub with it:
+
+        ```bash
+        mkdir certs && cd certs
+
+        openssl genrsa -out ca.key 4096
+        openssl req -x509 -new -key ca.key -sha256 -days 825 \
+          -subj "/CN=Home Lab CA" -out ca.pem
+
+        openssl genrsa -out privkey.pem 2048
+        openssl req -new -key privkey.pem \
+          -subj "/CN=sencho.internal.example.com" -out hub.csr
+
+        cat > san.cnf <<'CNF'
+        subjectAltName = DNS:sencho.internal.example.com
+        basicConstraints = CA:FALSE
+        keyUsage = digitalSignature, keyEncipherment
+        extendedKeyUsage = serverAuth
+        CNF
+
+        openssl x509 -req -in hub.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+          -days 397 -sha256 -extfile san.cnf -out fullchain.pem
+        ```
+
+        Check the result:
+
+        ```bash
+        openssl verify -CAfile ca.pem fullchain.pem
+        ```
+
+        It prints `fullchain.pem: OK`. The hub needs `ca.pem`, `fullchain.pem`, and `privkey.pem`. Move `ca.key` somewhere safe and off the hub: it can sign certificates for any name, and Sencho never reads it.
+      </Tab>
+      <Tab title="Publicly trusted">
+        If a public certificate authority such as Let's Encrypt issued your certificate, copy its certificate chain to `certs/fullchain.pem` and its private key to `certs/privkey.pem`. You do not need `ca.pem`: agents verify the hub against their system trust store, so leave `SENCHO_TLS_CA_FILE` out in step 2.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Mount the certificate and set the public URL">
+    Edit the hub's `docker-compose.yml`. Add the certificate files as read-only mounts, and add four environment variables: `SENCHO_PUBLIC_URL`, the certificate and key paths, and the CA file.
+
+    ```yaml
+    services:
+      sencho:
+        image: saelix/sencho:latest
+        container_name: sencho
+        restart: unless-stopped
+        ports:
+          - "1852:1852"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - /opt/compose:/opt/compose
+          - sencho_data:/app/data
+          - ./certs/fullchain.pem:/app/certs/fullchain.pem:ro
+          - ./certs/privkey.pem:/app/certs/privkey.pem:ro
+          - ./certs/ca.pem:/app/certs/ca.pem:ro
+        environment:
+          - COMPOSE_DIR=/opt/compose
+          - SENCHO_PUBLIC_URL=https://sencho.internal.example.com:1852
+          - SENCHO_TLS_CERT_FILE=/app/certs/fullchain.pem
+          - SENCHO_TLS_KEY_FILE=/app/certs/privkey.pem
+          - SENCHO_TLS_CA_FILE=/app/certs/ca.pem
+
+    volumes:
+      sencho_data:
+    ```
+
+    Each variable does one job:
+
+    - `SENCHO_TLS_CERT_FILE` and `SENCHO_TLS_KEY_FILE` make Sencho listen with HTTPS on port `1852`. Set both or neither: with only one, Sencho refuses to start instead of falling back to HTTP.
+    - `SENCHO_PUBLIC_URL` is the address the enrollment file gives the agent. Without it, Sencho uses the address you had open in the browser, which a host on another network may not be able to reach. Use the name on the certificate.
+    - `SENCHO_TLS_CA_FILE` lets Sencho hand the CA to agents at enrollment, and lets the container's own health check trust the certificate. Leave it out for a publicly trusted certificate.
+
+    <Warning>
+      After this step the hub answers only HTTPS on port `1852`. A client that uses `http://` gets an empty reply. An agent whose `SENCHO_PRIMARY_URL` starts with `http://` cannot connect and logs `[Pilot] Tunnel error: socket hang up`. Change that URL to `https://` and recreate the agent, as described under [Native TLS on the control instance](/getting-started/configuration#native-tls-on-the-control-instance).
+    </Warning>
+
+    Recreate the container and read its log:
+
+    ```bash
+    docker compose up -d
+    docker logs sencho 2>&1 | grep "Server running"
+    ```
+
+    The log line reads `Server running on https://0.0.0.0:1852`. After the health check's start period, `docker ps` shows the container as `healthy`. If it shows `unhealthy`, read why:
+
+    ```bash
+    docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' sencho
+    ```
+
+    `unable to verify the first certificate` means the check could not trust the issuer, which for a private CA is a missing or unreadable `SENCHO_TLS_CA_FILE`. A name that does not match the certificate's alternative names fails the same check.
+
+    Then confirm both sides of the listener from the hub host:
+
+    ```bash
+    curl --cacert certs/ca.pem https://sencho.internal.example.com:1852/api/health
+    curl http://sencho.internal.example.com:1852/api/health
+    ```
+
+    The first prints `{"status":"ok", ...}`. The second fails with `curl: (52) Empty reply from server`.
+  </Step>
+  <Step title="Sign in over HTTPS and read the environment check">
+    Open `https://sencho.internal.example.com:1852` and sign in. With a private CA, your browser shows a certificate warning until you add `ca.pem` to its trust store, which your operating system or browser documents; this tutorial does not cover it.
+
+    Click your avatar in the top-right and choose **Settings**. Under **Operations**, pick **Recovery** and scroll to **Environment**. The **TLS** row reads `Reached over HTTPS.` with an **OK** mark.
+
+    <Frame>
+      <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/environment-tls-https.png" alt="Environment checks on the Recovery page showing Path mapping, TLS, and Disk space rows, each marked OK, with the TLS row reading Reached over HTTPS." />
+    </Frame>
+
+    This row describes the connection your browser made to the hub, not any agent's. The checks after step 6 cover the agent.
+  </Step>
+  <Step title="Add the node">
+    Under **Infrastructure**, pick **Nodes**, then click **Add node**. Set **Name** to `edge-02`. Leave **Type** as **Remote** and **Mode** as **Pilot Agent**. Keep `/opt/docker/sencho` in **Compose Directory**, or enter the absolute path on `edge-02` where its stacks live. The agent mounts that same path inside its container.
+
+    <Frame>
+      <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/add-node-filled.png" alt="Add remote node dialog with Name set to edge-02, Type set to Remote, Mode set to Pilot Agent, and Compose Directory set to /opt/docker/sencho, with Cancel and Add node buttons." />
+    </Frame>
+
+    Click **Add node**.
+  </Step>
+  <Step title="Save the two enrollment files on edge-02">
+    The **Enroll the pilot agent** dialog opens. Because the hub listens with HTTPS and `SENCHO_PUBLIC_URL` is set, the generated file's `SENCHO_PRIMARY_URL` starts with `https://`. Because `SENCHO_TLS_CA_FILE` is set, the dialog adds **Step 1b**, the CA certificate, and the file mounts it into the agent and sets `SENCHO_PILOT_CA_FILE`.
+
+    <Frame>
+      <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/enroll-dialog-ca.png" alt="Enroll the pilot agent dialog. Step 1 shows a compose file whose SENCHO_PRIMARY_URL starts with https, with a bind mount of sencho-hub-ca.pem and SENCHO_PILOT_CA_FILE set. Step 1b shows the hub CA certificate with a Copy CA file button. Step 2 shows docker compose up -d. The footer reads Expires 14m from now, with Copy compose file and Done buttons." />
+    </Frame>
+
+    On `edge-02`, create a directory such as `~/sencho-agent` and save two files in it, side by side:
+
+    - **Step 1** as `compose.yaml`. **Copy compose file** copies it.
+    - **Step 1b** as `sencho-hub-ca.pem`. **Copy CA file** copies it. The compose file mounts it by the relative path `./sencho-hub-ca.pem`, so it has to sit next to `compose.yaml`.
+
+    Then run Step 2's command in that directory:
+
+    ```bash
+    docker compose up -d
+    ```
+
+    The enrollment token in the file is valid for **15 minutes and works once**. It is the first of the two credentials the agent sends over the connection, and it travels inside TLS.
+
+    <Note>
+      With a publicly trusted certificate and no `SENCHO_TLS_CA_FILE`, the dialog has no **Step 1b**, and the generated file has no CA mount and no `SENCHO_PILOT_CA_FILE`. Save `compose.yaml` and run Step 2.
+    </Note>
+  </Step>
+  <Step title="Watch the tunnel connect">
+    On `edge-02`, read the agent's log:
+
+    ```bash
+    docker logs sencho-agent 2>&1 | grep "\[Pilot\]"
+    ```
+
+    Two lines mean the first connection worked: `[Pilot] Tunnel connected to https://sencho.internal.example.com:1852`, then `[Pilot] Enrollment complete; long-lived token persisted.` The second line is the agent swapping the one-time token for a long-lived tunnel token, which it stores on its data volume and uses for every reconnect.
+
+    Back on the hub, close the dialog with **Done** and reload the **Nodes** page. The table does not refresh by itself, so the `edge-02` row can still read `tunnel (waiting)` until you reload. After the reload it reads `tunnel (seen just now)` with **Status** **Online**.
+
+    <Frame>
+      <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/nodes-table-online.png" alt="Nodes table with the Local row and an edge-02 row. edge-02 is Remote, Pilot Agent, with Endpoint tunnel (seen just now) and an Online status." />
+    </Frame>
+  </Step>
+</Steps>
+
+## Verify it worked
+
+Check from three places, because the node showing Online only proves a connection exists, not that it is protected.
+
+**The hub's node switcher.** Click the switcher at the top of the sidebar. `edge-02` is listed under **Connected** with an `AGENT` kicker and a `SEEN` time that counts from the agent's last connection.
+
+<Frame>
+  <img src="/images/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent/node-switcher-edge-02.png" alt="Node switcher popover headed Connected, listing Local with LOCAL V0.98.1 and a star, and edge-02 with AGENT and SEEN 4M AGO, with a Manage nodes link at the bottom." />
+</Frame>
+
+**The certificate, from `edge-02`.** In the directory holding `sencho-hub-ca.pem`, ask the hub for its certificate and tell `openssl` which CA to trust:
+
+```bash
+openssl s_client -connect sencho.internal.example.com:1852 \
+  -servername sencho.internal.example.com \
+  -CAfile sencho-hub-ca.pem </dev/null 2>&1 | grep "Verify return code"
+```
+
+It prints `Verify return code: 0 (ok)`. Run it again without `-CAfile` and the code is `21 (unable to verify the first certificate)`. The system trust store does not know your CA, so only an agent given `sencho-hub-ca.pem` accepts the hub. Then try plain HTTP:
+
+```bash
+curl http://sencho.internal.example.com:1852/api/health
+```
+
+It fails with `curl: (52) Empty reply from server`. There is no unencrypted path to the hub on this port. For a publicly trusted certificate, drop `-CAfile`; the code is `0 (ok)` against the system trust store.
+
+**The wire, from `edge-02`.** Capture the agent's traffic while it reconnects. On every reconnect the agent presents its stored tunnel token in an `Authorization: Bearer` header. Install `tcpdump` first if the host lacks it.
+
+```bash
+sudo timeout 25 tcpdump -i any -nn -s0 -w tunnel.pcap 'tcp port 1852' &
+sleep 3 && docker restart sencho-agent
+wait
+sudo tcpdump -nn -A -r tunnel.pcap | grep -c -E 'Authorization|Bearer|eyJ'
+```
+
+The last command prints `0`: the capture holds the TLS handshake and encrypted records, and nothing in it matches a header name or the `eyJ` that begins every Sencho token. The same search does find the header in a capture of a plain HTTP request that carries one, so a `0` is a real result. Delete `tunnel.pcap` afterwards.
+
+Registry credentials the hub stores for private images use the same tunnel. Sencho also seals them to each node's own key, and a node that cannot seal gets them only over a connection like this one. See [Private Registries](/features/private-registries) for the delivery rules.
+
+## If something goes wrong
+
+The most likely first-time snag is starting the agent without `sencho-hub-ca.pem` next to `compose.yaml`, usually because the Step 1b file was saved in another directory. Docker then creates an empty directory named `sencho-hub-ca.pem` in its place, and the agent restarts in a loop, logging this on every attempt:
+
+```
+[Pilot] Failed to read SENCHO_PILOT_CA_FILE: EISDIR: illegal operation on a directory, read
+```
+
+The node stays at `tunnel (waiting)`. Remove the directory, save the PEM from **Step 1b** under that name, and recreate the container:
+
+```bash
+sudo rmdir sencho-hub-ca.pem
+# save the CA certificate as sencho-hub-ca.pem, then:
+docker compose up -d --force-recreate
+```
+
+If 15 minutes have not passed, the agent enrolls with the token already in the file. If they have, open **Edit node** on the `edge-02` row, click **Regenerate enrollment token**, and save the new `compose.yaml` and CA file.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Native TLS on the control instance" icon="lock" href="/getting-started/configuration#native-tls-on-the-control-instance">
+    The variables, the certificate requirements, and moving an enrolled agent to HTTPS.
+  </Card>
+  <Card title="Pilot Agent" icon="satellite-dish" href="/features/pilot-agent">
+    The credential lifecycle, TLS trust model, and self-signed certificate setup for the tunnel.
+  </Card>
+  <Card title="Enroll a Remote Node" icon="sitemap" href="/tutorials/enroll-a-remote-node">
+    The same enrollment over HTTP on a private network, and how to verify it in the Fleet view.
+  </Card>
+  <Card title="Put Sencho Behind Caddy" icon="shield" href="/tutorials/run-sencho-behind-a-reverse-proxy">
+    Terminate HTTPS in a reverse proxy instead of in Sencho.
+  </Card>
+</CardGroup>

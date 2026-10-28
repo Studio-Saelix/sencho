@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { SENCHO_NAVIGATE_EVENT } from '@/lib/events';
 import { PolicyBlockDialog, type PolicyBlockPayload } from '../PolicyBlockDialog';
 
-const payload: PolicyBlockPayload = {
+const publicPayload: PolicyBlockPayload = {
   error: 'blocked',
   policy: { id: 1, name: 'prod-gate', maxSeverity: 'CRITICAL', blockOnSeverity: 0, blockOnKev: 1, blockOnFixable: 1 },
   violations: [
@@ -10,10 +12,375 @@ const payload: PolicyBlockPayload = {
   ],
 };
 
+describe('PolicyBlockDialog evidence', () => {
+  const unavailablePayload: PolicyBlockPayload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: '(scanner unavailable)', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'The vulnerability scanner is not available on this node' },
+    ],
+    evidence: {
+      outcome: 'block',
+      summary: 'Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block',
+      applications: [
+        { source: 'scanner_availability', state: 'unavailable', outcome: 'block', rule: 'security_scanner_unavailable=block' },
+      ],
+    },
+  };
+
+  const renderDialog = (p: PolicyBlockPayload) =>
+    render(<PolicyBlockDialog open payload={p} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+
+  it('says the block was not a proven vulnerability', () => {
+    renderDialog(unavailablePayload);
+    // The distinction the whole change exists for: absent evidence must never
+    // read as a proven finding.
+    expect(screen.getByText(/not stopped by a proven vulnerability/i)).toBeInTheDocument();
+  });
+
+  it('names the evidence state and the setting that produced the refusal', () => {
+    renderDialog(unavailablePayload);
+    // The sentence is split across inline spans, so match the assembled row text.
+    // The modal portals to document.body, so read it there rather than off the
+    // render container.
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('Scanner availability: unavailable, blocked by the Scanner unavailable setting, set to block'))).toBe(true);
+  });
+
+  it('shows no raw source or rule identifier anywhere in the dialog', () => {
+    // The class behind the raw-identifier defect: the violation row, the
+    // summary and the evidence lines are three places the gate's vocabulary can
+    // leak. Whatever a payload carries, the screen shows operator wording.
+    renderDialog(unavailablePayload);
+    const text = document.body.textContent ?? '';
+    expect(text).not.toMatch(/scanner_availability|security_scanner_unavailable|security_scan_failure/);
+    expect(text).not.toMatch(/\w=(allow|warn|block)\b/);
+  });
+
+  it('never says a state "was failed"', () => {
+    renderDialog({
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [{ source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', reason: 'The scan did not complete' }],
+        applications: [
+          { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.27' },
+        ],
+      },
+    });
+    const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
+    expect(text).toContain('Vulnerability scan for nginx:1.27: failed, blocked by the Scan failed setting, set to block');
+    expect(text).not.toMatch(/was failed|was unavailable/);
+  });
+
+  it('spells every outcome rather than appending a suffix', () => {
+    const warned: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'warn',
+        summary: 'x',
+        applications: [
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'warn', rule: 'security_scan_failure=warn' },
+        ],
+      },
+    };
+    renderDialog(warned);
+    const text = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '').join(' ');
+    expect(text).toContain('too old, warned about by the Scan failed setting, set to warn');
+    expect(text).not.toContain('warnd');
+    expect(text).not.toContain('allowd');
+  });
+
+  it('asks the shell to open the settings, then closes the dialog', async () => {
+    const onClose = vi.fn();
+    const onOpenSettings = vi.fn(() => true);
+    render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={onOpenSettings} canBypass={false} canEditSettings bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
+    expect(screen.getByText(/belongs to the node that ran this deploy/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Opened first, so the explanation is never dismissed without a destination.
+    expect(onOpenSettings.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0]);
+  });
+
+  it('keeps the explanation on screen when the settings could not be opened', async () => {
+    const onClose = vi.fn();
+    const onOpenSettings = vi.fn(() => false);
+    render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={onOpenSettings} canBypass={false} canEditSettings bypassing={false} onClose={onClose} onBypass={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not navigate by itself: the shell decides which node and surface the settings open on', async () => {
+    const navigate = vi.fn();
+    window.addEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    try {
+      render(<PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+      await userEvent.click(screen.getByRole('button', { name: /Open Evidence availability/i }));
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(SENCHO_NAVIGATE_EVENT, navigate);
+    }
+  });
+
+  it('offers no link to someone who cannot change the setting, and says who can', () => {
+    // The Evidence availability card is read-only for a non-admin, so a button
+    // that closes the dialog and opens it would be a dead end.
+    renderDialog(unavailablePayload);
+    expect(screen.queryByRole('button', { name: /Open Evidence availability/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/An administrator can change it under Evidence availability/i)).toBeInTheDocument();
+  });
+
+  it('shows no evidence section for a genuine policy match', () => {
+    // A proven match needs no availability explanation, and adding one would
+    // dilute the case that actually matters.
+    renderDialog(publicPayload);
+    expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it('shows no evidence section on an older control payload with no evidence field', () => {
+    renderDialog({ ...publicPayload, evidence: undefined });
+    expect(screen.queryByText(/Evidence unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it('claims the whole block was a scan failure only when it was', () => {
+    // The gate: "the deploy was blocked because the images above could not be
+    // evaluated" is a claim about the entire block. On a payload where an image
+    // matched on the merits, evaluation is not why the deploy stopped, and the
+    // sentence would send the operator to fix something that was fine. Reverting
+    // the gate must fail here.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [...unavailablePayload.violations, publicPayload.violations[0]],
+    };
+    const { unmount } = render(
+      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+    );
+    expect(screen.queryByText(/blocked because the images above could not be evaluated/i)).not.toBeInTheDocument();
+    // And the replacement still tells the operator the failed image needs
+    // resolving, so the gate does not cost them the recovery path.
+    expect(screen.getByText(/Some images could not be evaluated\./i)).toBeInTheDocument();
+    expect(screen.getByText(/the counts above do not cover them/i)).toBeInTheDocument();
+    expect(screen.getByText(/deploy again/i)).toBeInTheDocument();
+    unmount();
+
+    // On an evidence-only payload the sentence is the whole account of the block,
+    // so it has to be there.
+    render(
+      <PolicyBlockDialog open payload={unavailablePayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+    );
+    expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
+  });
+
+  it('does not claim the scan failed when it completed and evaluation threw', () => {
+    // A completed scan whose policy evaluation threw is an evaluation failure.
+    // The row says so; a banner saying the scan did not complete beside it sends
+    // the operator to the scanner and contradicts the row.
+    const evaluationFailed: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: Date.now(), reason: 'Policy evaluation failed: boom' },
+        ],
+        applications: [],
+      },
+    };
+    renderDialog(evaluationFailed);
+    expect(screen.getByText('Policy evaluation failed: boom')).toBeInTheDocument();
+    expect(screen.queryByText(/scan did not complete/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/blocked because the images above could not be evaluated/i)).toBeInTheDocument();
+    // No rule was applied, so no setting governs this block and none is offered.
+    expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be obtained/i)).not.toBeInTheDocument();
+  });
+
+  it('does not offer the settings when a genuine match sits beside an evaluation failure', () => {
+    const mixed: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'redis:7', severity: 'CRITICAL', criticalCount: 2, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 11 },
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'nginx:1.27', collectedAt: Date.now(), reason: 'Policy evaluation failed: boom' },
+        ],
+        applications: [],
+      },
+    };
+    renderDialog(mixed);
+    expect(screen.getByText(/evidence that could not be checked/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your settings say what to do/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
+  });
+
+  it('does not offer the settings when the only applied rule allowed', () => {
+    const allowedPlusFailure: PolicyBlockPayload = {
+      error: 'blocked',
+      policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+      violations: [
+        { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 12, error: 'Policy evaluation failed: boom' },
+      ],
+      evidence: {
+        outcome: 'allow',
+        summary: 'x',
+        records: [
+          { source: 'vulnerability_scan', state: 'failed', target: 'redis:7', collectedAt: Date.now(), reason: 'scan crashed' },
+        ],
+        applications: [{ source: 'vulnerability_scan', state: 'failed', target: 'redis:7', outcome: 'allow', rule: 'security_scan_failure=allow' }],
+      },
+    };
+    renderDialog(allowedPlusFailure);
+    expect(screen.queryByText(/belongs to the node that ran this deploy/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/stopped because the images could not be evaluated/i)).toBeInTheDocument();
+  });
+
+  it('explains both problems when one image is stale and its findings incomplete', () => {
+    // Regression: the de-duplication keyed only on source:target, so the second
+    // problem on the same image was silently dropped from the dialog.
+    const both: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [
+          {
+            source: 'vulnerability_scan',
+            state: 'stale',
+            target: 'nginx:1.27',
+            collectedAt: Date.now() - 9 * 86_400_000,
+            reason: 'The scan is 9 day(s) old, past the configured 7 day limit',
+          },
+          {
+            source: 'vulnerability_scan',
+            state: 'partial',
+            target: 'nginx:1.27',
+            collectedAt: Date.now() - 9 * 86_400_000,
+            reason: 'The stored findings do not cover every vulnerability in this scan',
+          },
+        ],
+        applications: [
+          {
+            source: 'vulnerability_scan',
+            state: 'stale',
+            outcome: 'block',
+            rule: 'security_scan_failure=block',
+            target: 'nginx:1.27',
+          },
+        ],
+      },
+    };
+    renderDialog(both);
+    const rows = [...document.body.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    expect(rows.some((t) => t.includes('the Scan failed setting'))).toBe(true);
+    expect(rows.some((t) => t.includes('incomplete'))).toBe(true);
+  });
+
+  it('gives every row a distinct key when one image has several problems', () => {
+    const multi: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        records: [],
+        applications: [
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_scan_failure=allow', target: 'a:1' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'allow', rule: 'security_scan_failure=allow', target: 'b:1' },
+        ],
+      },
+    };
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      renderDialog(multi);
+      // Two images, two rows, and no duplicate-key complaint. Asserting on the
+      // specific warning rather than blanket silence, so an unrelated error is
+      // not swallowed and still fails the run.
+      expect(document.body.querySelectorAll('li').length).toBe(2);
+      const keyWarnings = errSpy.mock.calls.filter((args) => /same key|duplicate key/i.test(String(args[0])));
+      expect(keyWarnings).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('does not claim the block was not a vulnerability when a genuine violation is also present', () => {
+    // A payload can carry both. The gap is still worth naming, but the sentence
+    // is a claim about the whole block and would be false here.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [
+        ...unavailablePayload.violations,
+        publicPayload.violations[0],
+      ],
+    };
+    renderDialog(mixed);
+    expect(screen.queryByText(/not stopped by a proven vulnerability/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/also affected by missing evidence/i)).toBeInTheDocument();
+    // The gap is still explained rather than dropped.
+    expect(screen.getAllByText(/the Scanner unavailable setting/).length).toBeGreaterThan(0);
+  });
+
+  it('names no violating image when every violation is an evidence gap', () => {
+    // For an evidence block the violating row is a placeholder, not an image, so
+    // "the following image triggered the block" would be false.
+    renderDialog(unavailablePayload);
+    expect(screen.queryByText(/triggered the block/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/No image was found to match those conditions/i)).toBeInTheDocument();
+  });
+
+  it('still names the violating images when there is a genuine match', () => {
+    renderDialog(publicPayload);
+    expect(screen.getByText(/triggered the block/i)).toBeInTheDocument();
+  });
+
+  it('counts only the genuine matches on a mixed payload', () => {
+    // The evidence placeholder did not trigger anything on the merits, so
+    // counting it would overstate how many images matched.
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      violations: [...unavailablePayload.violations, publicPayload.violations[0]],
+    };
+    renderDialog(mixed);
+    // One genuine match, so the singular form: the evidence placeholder beside it
+    // must not be counted as a second violating image.
+    expect(screen.getByText(/The following image triggered the block/)).toBeInTheDocument();
+    expect(screen.queryByText(/2 images triggered the block/)).not.toBeInTheDocument();
+  });
+
+  it('omits current evidence from the explanation', () => {
+    const mixed: PolicyBlockPayload = {
+      ...unavailablePayload,
+      evidence: {
+        outcome: 'block',
+        summary: 'x',
+        applications: [
+          { source: 'vulnerability_scan', state: 'current', outcome: 'allow', rule: 'nothing' },
+          { source: 'vulnerability_scan', state: 'stale', outcome: 'block', rule: 'security_scan_failure=block' },
+        ],
+      },
+    };
+    renderDialog(mixed);
+    expect(screen.getByText(/the Scan failed setting/)).toBeInTheDocument();
+    expect(screen.queryByText(/state was current/)).not.toBeInTheDocument();
+  });
+});
+
 describe('PolicyBlockDialog', () => {
   it('describes the active inputs (KEV + fixable, not the severity threshold)', () => {
     render(
-      <PolicyBlockDialog open payload={payload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     const desc = screen.getAllByText(/known-exploited CVE \(KEV\)/i);
     expect(desc.length).toBeGreaterThan(0);
@@ -22,7 +389,7 @@ describe('PolicyBlockDialog', () => {
 
   it('renders a reason badge per matched input on the violation row', () => {
     render(
-      <PolicyBlockDialog open payload={payload} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={publicPayload} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getByText('KEV')).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
@@ -41,14 +408,16 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={mixed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={mixed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The matched row keeps its counts and reason badges.
     expect(screen.getByText(/1 KEV/)).toBeInTheDocument();
     expect(screen.getByText('Fixable')).toBeInTheDocument();
-    // The failed row shows its reason under the could-not-be-scanned label.
+    // The failed row shows its reason under the unevaluated label. The label is
+    // the same one the mixed-payload banner uses in sentence case, so it is
+    // matched exactly rather than by a loose regex.
     expect(screen.getByText(/Pre-flight scan failed: timeout/i)).toBeInTheDocument();
-    expect(screen.getByText(/could not be scanned/i)).toBeInTheDocument();
+    expect(screen.getByText('Could not be evaluated')).toBeInTheDocument();
     // The recovery hint appears once for the whole list, not per failed row.
     expect(screen.getAllByText(/deploy again/i)).toHaveLength(1);
   });
@@ -62,11 +431,11 @@ describe('PolicyBlockDialog', () => {
       ],
     };
     render(
-      <PolicyBlockDialog open payload={failed} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={failed} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     // The actual failure reason is shown, not an unexplained "0 critical 0 high".
     expect(screen.getByText(/Pre-flight scan failed: trivy crashed/i)).toBeInTheDocument();
-    expect(screen.getByText(/could not be scanned/i)).toBeInTheDocument();
+    expect(screen.getByText('Could not be evaluated')).toBeInTheDocument();
     // A recovery hint points the operator at the fix-and-retry path.
     expect(screen.getByText(/deploy again/i)).toBeInTheDocument();
   });
@@ -78,8 +447,79 @@ describe('PolicyBlockDialog', () => {
       violations: [{ imageRef: 'redis:7', severity: 'HIGH', criticalCount: 0, highCount: 1, kevCount: 0, fixableCount: 0, reasons: [], scanId: 2 }],
     };
     render(
-      <PolicyBlockDialog open payload={legacy} stackName="web" canBypass={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
+      <PolicyBlockDialog open payload={legacy} stackName="web" action="deploy" onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />,
     );
     expect(screen.getAllByText(/severity at or above HIGH/i).length).toBeGreaterThan(0);
+  });
+});
+
+describe('PolicyBlockDialog names the operation it blocked', () => {
+  const evidenceOnly: PolicyBlockPayload = {
+    error: 'blocked',
+    policy: { id: 1, name: 'prod-gate', maxSeverity: 'HIGH', blockOnSeverity: 1, blockOnKev: 0, blockOnFixable: 0 },
+    violations: [
+      { imageRef: 'nginx:1.27', severity: 'UNKNOWN', criticalCount: 0, highCount: 0, kevCount: 0, fixableCount: 0, reasons: [], scanId: 0, error: 'Pre-flight scan failed: timeout' },
+    ],
+    evidence: {
+      outcome: 'block',
+      summary: 'Vulnerability scan: failed, blocked by the Scan failed setting, set to block',
+      applications: [
+        { source: 'vulnerability_scan', state: 'failed', outcome: 'block', rule: 'security_scan_failure=block', target: 'nginx:1.27' },
+      ],
+    },
+  };
+
+  const renderFor = (action: 'deploy' | 'update' | 'rollback', bypassing = false) =>
+    render(<PolicyBlockDialog open payload={evidenceOnly} stackName="web" action={action} onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={bypassing} onClose={vi.fn()} onBypass={vi.fn()} />);
+
+  it.each([
+    ['deploy', 'Deploy blocked by security policy', 'Deploy anyway', 'Deploying…', 'deploy again', 'This deploy was not stopped'],
+    ['update', 'Update blocked by security policy', 'Update anyway', 'Updating…', 'update again', 'This update was not stopped'],
+    ['rollback', 'Rollback blocked by security policy', 'Roll back anyway', 'Rolling back…', 'roll back again', 'This rollback was not stopped'],
+  ] as const)('words a %s block for that operation', (action, title, bypass, busy, again, notStopped) => {
+    const { unmount } = renderFor(action);
+    expect(screen.getByRole('heading', { name: title })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: bypass })).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`${notStopped} by a proven vulnerability`))).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`${again}, or bypass`))).toBeInTheDocument();
+    unmount();
+
+    renderFor(action, true);
+    expect(screen.getByRole('button', { name: busy })).toBeDisabled();
+  });
+
+  it('never calls a rollback a deploy in the title, the button, or the explanation', () => {
+    renderFor('rollback');
+    const modalText = document.body.textContent ?? '';
+    expect(modalText).not.toMatch(/Deploy blocked|Deploy anyway|[Dd]eploys?\b/);
+    expect(modalText).toMatch(/blocks rollbacks on/);
+  });
+
+  it('words the mixed-payload explanation for the operation too', () => {
+    const mixed: PolicyBlockPayload = {
+      ...evidenceOnly,
+      violations: [
+        { imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 0, kevCount: 0, fixableCount: 0, reasons: ['severity'], scanId: 1 },
+        ...evidenceOnly.violations,
+      ],
+    };
+    render(<PolicyBlockDialog open payload={mixed} stackName="web" action="update" onOpenSettings={vi.fn(() => true)} canBypass canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    expect(screen.getByText(/This update was also affected by missing evidence/)).toBeInTheDocument();
+    expect(screen.getByText(/Resolve the failure and update again/)).toBeInTheDocument();
+  });
+});
+
+describe('PolicyBlockDialog lead sentence', () => {
+  // The screen-reader description repeats the sentence, so a join defect in the
+  // visible paragraph hides behind a document-wide match. Read the paragraph.
+  it.each([
+    ['deploy', 'deploys'],
+    ['update', 'updates'],
+    ['rollback', 'rollbacks'],
+  ] as const)('separates "%s" from the conditions in the visible paragraph', (action, plural) => {
+    render(<PolicyBlockDialog open payload={publicPayload} stackName="web" action={action} onOpenSettings={vi.fn(() => true)} canBypass={false} canEditSettings={false} bypassing={false} onClose={vi.fn()} onBypass={vi.fn()} />);
+    const lead = [...document.body.querySelectorAll('p')].find((el) => el.textContent?.startsWith('Policy prod-gate') && el.querySelector('span'));
+    expect(lead).toBeDefined();
+    expect(lead?.textContent).toMatch(new RegExp(`^Policy prod-gate blocks ${plural} on `));
   });
 });

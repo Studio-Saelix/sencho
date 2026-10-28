@@ -5,7 +5,7 @@ import { useFleetPolling } from '../useFleetPolling';
 import type { NodeUpdateStatus } from '../../types';
 
 function updating(status: NodeUpdateStatus['updateStatus']): NodeUpdateStatus[] {
-  return [{ nodeId: 1, name: 'n', type: 'remote', version: '1', latestVersion: '1', updateAvailable: false, updateStatus: status }];
+  return [{ nodeId: 1, name: 'n', type: 'remote', version: '1', latestVersion: '1', online: true, updateAvailable: false, updateStatus: status }];
 }
 
 beforeEach(() => vi.useFakeTimers());

@@ -118,3 +118,31 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
     expect(stacks).not.toContain('retryable');
   });
 });
+
+describe('POST /api/templates/deploy when the rollback teardown is refused', () => {
+  it('keeps the stack files, because containers may still be running, and reports no rollback', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'carries the Docker connection' }),
+    );
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'refused-down',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'refused-down', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(false);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).toContain('refused-down');
+  });
+});

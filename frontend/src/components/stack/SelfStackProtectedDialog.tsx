@@ -1,10 +1,17 @@
-import { Ship } from 'lucide-react';
+import { RefreshCw, Ship } from 'lucide-react';
 import { ConfirmModal } from '@/components/ui/modal';
 
 interface SelfStackProtectedDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** When true, the primary action routes to Fleet node updates. */
+  /**
+   * Present only for a caller who can reapply: confirming reapplies Sencho from
+   * its current Compose configuration. The handler is async, which keeps the
+   * dialog open until it closes it, so a confirmation it cannot act on yet (the
+   * node is not ready) stays open and can be retried.
+   */
+  onReapply?: () => Promise<void>;
+  /** When true (and the caller cannot reapply), the primary action routes to Fleet node updates. */
   canOpenFleetUpdates: boolean;
   onOpenFleetUpdates?: () => void;
 }
@@ -12,9 +19,39 @@ interface SelfStackProtectedDialogProps {
 export function SelfStackProtectedDialog({
   open,
   onOpenChange,
+  onReapply,
   canOpenFleetUpdates,
   onOpenFleetUpdates,
 }: SelfStackProtectedDialogProps) {
+  if (onReapply) {
+    return (
+      <ConfirmModal
+        open={open}
+        onOpenChange={onOpenChange}
+        kicker="SELF STACK"
+        title="Reapply Sencho"
+        confirmLabel={
+          <>
+            <RefreshCw className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+            Reapply &amp; restart
+          </>
+        }
+        onConfirm={onReapply}
+      >
+        <p className="text-sm text-stat-subtitle">
+          This stack is the running Sencho instance, so anything that would stop
+          or recreate it (Deploy, Update, Stop, Take down, Delete, Rollback) is
+          blocked on it. Reapply recreates Sencho from its current Compose
+          configuration. Compose may also recreate a service it lists in
+          depends_on (a Docker socket proxy in the same project, for example).
+          No newer version is selected and the configured image reference is
+          not rewritten. The dashboard briefly disconnects and reconnects
+          automatically when the restart completes.
+        </p>
+      </ConfirmModal>
+    );
+  }
+
   return (
     <ConfirmModal
       open={open}

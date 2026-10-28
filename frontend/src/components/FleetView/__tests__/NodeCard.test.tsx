@@ -143,6 +143,7 @@ describe('NodeCard', () => {
 
   const updateAvailableStatus = {
     nodeId: 2, name: 'Edge', type: 'remote' as const, version: '1.0.0', latestVersion: '1.1.0',
+    online: true,
     updateAvailable: true, updateStatus: null,
   };
 
@@ -150,6 +151,41 @@ describe('NodeCard', () => {
     useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
     render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
     expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
+  });
+
+  it('shows no Update available pill on an unreachable node', () => {
+    render(<NodeCard {...baseProps(offlineNode())} updateStatus={{ ...updateAvailableStatus, online: false }} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+  });
+
+  it('shows no Pinned pill on an unreachable node', () => {
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Pinned')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Skipped pill beside Offline on an unreachable node with a skipped version', () => {
+    render(
+      <NodeCard
+        {...baseProps(offlineNode())}
+        updateStatus={{ ...updateAvailableStatus, online: false, updateAvailable: false, skipActive: true, skippedVersion: '1.1.0' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Offline')).toBeInTheDocument();
+    expect(screen.getByText('Skipped')).toBeInTheDocument();
+    expect(screen.queryByText('Update available')).not.toBeInTheDocument();
+  });
+
+  it('keeps Update available on a reachable node', () => {
+    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+    expect(screen.getByText('Update available')).toBeInTheDocument();
   });
 
   it('hides the update button and shows Pinned when updateBlocked', () => {

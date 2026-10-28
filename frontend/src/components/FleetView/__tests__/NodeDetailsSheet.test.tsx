@@ -62,6 +62,7 @@ function registryNode(overrides: Partial<Node> = {}): Node {
 
 const UPDATE_STATUS: NodeUpdateStatus = {
   nodeId: 2, name: 'Edge', type: 'remote', version: '1.2.0', latestVersion: '1.2.0',
+  online: true,
   updateAvailable: false, updateStatus: null, imageChannel: 'community', imagePinKind: 'semver',
 };
 
@@ -184,6 +185,13 @@ describe('NodeDetailsSheet', () => {
     render(<NodeDetailsSheet {...baseProps({ updateStatus: undefined })} />);
     const updateStatusLabel = screen.getByText('Update status');
     const updateStatusField = updateStatusLabel.parentElement as HTMLElement;
+    expect(within(updateStatusField).getByText('Unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
+  });
+
+  it('renders Update status as Unknown when the node could not be reached', () => {
+    render(<NodeDetailsSheet {...baseProps({ updateStatus: { ...UPDATE_STATUS, online: false, version: null } })} />);
+    const updateStatusField = screen.getByText('Update status').parentElement as HTMLElement;
     expect(within(updateStatusField).getByText('Unknown')).toBeInTheDocument();
     expect(screen.queryByText('Up to date')).not.toBeInTheDocument();
   });
