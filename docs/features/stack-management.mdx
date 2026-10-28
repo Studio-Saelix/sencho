@@ -373,6 +373,18 @@ For deploy progress, error surfacing, atomic backups, and rollback, see [Atomic 
 
 If a deploy policy is configured, Sencho checks it before the deploy runs. When a policy is violated, a dialog lists the triggered rules and blocks the deploy. Admin users see a **Deploy anyway** button to override the block. See [Deploy Enforcement](/features/deploy-enforcement) for configuring policies.
 
+### Containers created by another Compose version
+
+Docker Compose decides whether a container is out of date by comparing the configuration and image it computes with the values recorded in the container when it was created. Those recorded values are not identical between Compose versions: a version can normalize a bind mount or record an image digest differently from the one that created the container. When that happens, the first deploy or update from this node **can recreate containers whose Compose file did not change**, and later deploys from the same node leave them running again.
+
+Sencho cannot make another Compose version's computation match its own, so it explains the one-time recreate instead:
+
+- **Compose Doctor** adds a note, *Created by another Docker Compose version*, naming the affected services and the versions involved. The note never affects All Clear.
+- The **update readiness** dialog shows a **Compose version** row in warning state, so the verdict becomes *ready with warnings* at most.
+- The **deploy output** carries a line naming the affected services before Compose starts recreating them.
+
+The lasting fix is to deploy a stack from one place. A stack that holds Sencho or the Docker socket proxy Sencho uses is a special case: Sencho refuses a deploy or update that would recreate those containers, and the same refusal names the host-side recreate that clears the version label. See [Updating the proxy](/operations/self-hosting#updating-the-proxy).
+
 ## Controlling a running stack
 
 The stack header groups actions by frequency of use. The most common action is the filled cyan button on the left, everyday secondaries sit next to it, and destructive or occasional actions are tucked behind the **More actions** overflow.

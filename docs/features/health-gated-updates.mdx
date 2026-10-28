@@ -30,6 +30,7 @@ The verdict is computed from signals Sencho already tracks, so the check is fast
 - **Local build services**: any service built from a local Dockerfile instead of pulled from a registry. The update rebuilds these from source, which depends on the local Dockerfile context and can take longer than a plain pull; this signal never blocks the verdict.
 - **Rollback backup**: whether a backup slot exists and how old it is. A missing backup is only a note, because the update itself creates a fresh one when it starts.
 - **Node disk**: disk usage near or above the node's alert threshold warns you before a large pull fills the disk.
+- **Compose version**: containers in the stack that were created by a different Docker Compose version than the one this update runs. They can be recreated even where nothing changed, so this row warns while leaving the update unblocked. It appears for a full-stack update only, and reads as unknown, without affecting the verdict, when the version cannot be read.
 
 Admins also see whether a [fleet snapshot](/features/fleet-backups) covers this stack and can tick **Create a fleet snapshot before updating** to capture one as part of proceeding. If the snapshot fails, the update does not start.
 
@@ -40,7 +41,7 @@ On stacks with more than one Compose service, you can also open readiness for a 
 When the selected service is build-backed and has no registry update, the proceed button reads **Rebuild** instead of **Update**. A per-service update badge appears only when a registry update is confirmed for that service.
 
 <Frame>
-  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog with a review required verdict, showing signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup and Node disk, the fleet snapshot row, and the Cancel and Update now buttons" />
+  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog with a ready with warnings verdict, showing signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup, Node disk, Compose version and Fleet snapshot, the create a fleet snapshot checkbox, and the Cancel and Update now buttons" />
 </Frame>
 
 ## The post-update health gate
