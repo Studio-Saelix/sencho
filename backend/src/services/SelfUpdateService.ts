@@ -9,6 +9,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import {
   ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS,
   ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
   HELPER_DATA_DIR,
   HELPER_SOCKET_PATH,
@@ -31,6 +32,7 @@ import {
 
 export {
   ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS,
   ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
   PROVIDER_ACK_SECONDS,
   PROVIDER_READY_SECONDS,
@@ -992,7 +994,18 @@ class SelfUpdateService {
       // mutated the endpoint. Anything else may be running: the watcher decides.
       const state = await this.replacementHelperState(helperName, env);
       if (state === 'created') {
-        await execFileAsync('docker', ['rm', '-f', helperName], { env, timeout: 15_000 }).catch(() => undefined);
+        // Only a confirmed removal makes "nothing was stopped" true. If the
+        // removal fails, a start may still be in flight; keep the claim and let
+        // the outcome watcher decide instead of releasing it under a helper.
+        try {
+          await execFileAsync('docker', ['rm', '-f', helperName], { env, timeout: 15_000 });
+        } catch (removeError) {
+          console.warn(
+            '[SelfUpdate] The replacement helper could not be removed after a failed start; waiting for its outcome:',
+            getErrorMessage(removeError, 'docker rm failed'),
+          );
+          return;
+        }
         this.refuseReplacementHelperStart(error);
         return;
       }

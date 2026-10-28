@@ -2386,7 +2386,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     try {
       const r = await apiFetch(
         `/stacks/${stackName}/services/${encodeURIComponent(serviceName)}/${action}`,
-        { method: 'POST' },
+        { method: 'POST', nodeId: opNodeId },
       );
       if (!r.ok) {
         const rawBody = await r.text();

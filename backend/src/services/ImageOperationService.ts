@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import SelfUpdateService, {
   ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
+  ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS,
   ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS,
   SELF_UPDATE_PULL_TIMEOUT_MS,
 } from './SelfUpdateService';
@@ -157,7 +158,8 @@ export class ImageOperationService {
      * verdict. It covers the claim's staging plus the helper's whole permitted
      * lifetime; the claim is never released while the helper can still mutate.
      */
-    outcomeMs: SELF_UPDATE_PULL_TIMEOUT_MS + ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
+    outcomeMs: SELF_UPDATE_PULL_TIMEOUT_MS + ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS
+      + ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
     /**
      * How long the process that spawned the helper waits. It must outlast the
      * helper's compose commands, ack wait and rollback, not only its marker.
@@ -604,7 +606,7 @@ export class ImageOperationService {
     // pull. The window starts at the claim, so it includes whichever applies.
     const pullAllowance = operation.kind === 'community_update' ? SELF_UPDATE_PULL_TIMEOUT_MS : 0;
     const remaining = started + pullAllowance + ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS
-      + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000 - now;
+      + ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS + ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000 - now;
     return now + Math.max(0, Math.min(configured, remaining));
   }
 

@@ -39,7 +39,7 @@ afterEach(async () => {
     requestMs: 10_000,
     verifyMs: 90_000,
     outcomeMs: selfUpdateModule.SELF_UPDATE_PULL_TIMEOUT_MS + selfUpdateModule.ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS
-      + selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
+      + selfUpdateModule.ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS + selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS + 60_000,
     watchMs: selfUpdateModule.ENDPOINT_PROVIDER_HELPER_MAX_LIFETIME_MS,
     recoveryMs: 15_000,
   };

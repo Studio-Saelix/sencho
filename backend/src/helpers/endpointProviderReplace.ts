@@ -36,6 +36,8 @@ export const HELPER_DOCKER_TIMEOUT_MS = 30_000;
 export const HELPER_COMPOSE_TIMEOUT_MS = 10 * 60_000;
 /** Ceiling for the attached staging helper (it validates, pulls, and snapshots). */
 export const ENDPOINT_PROVIDER_STAGE_TIMEOUT_MS = 10 * 60_000;
+/** Ceilings for the create/start handoff in Sencho: create 60 s, inspect 15 s, start 30 s, inspect 15 s. */
+export const ENDPOINT_PROVIDER_LAUNCH_TIMEOUT_MS = 60_000 + 15_000 + 30_000 + 15_000;
 /**
  * How long the detached helper may still mutate the endpoint, from spawn to
  * final exit. It bounds every Compose command, the ack wait and a rollback

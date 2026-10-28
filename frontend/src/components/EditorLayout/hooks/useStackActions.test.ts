@@ -2987,6 +2987,9 @@ describe('useStackActions.getStackMenuVisibility', () => {
     const { result, overlayState } = setup();
     await act(async () => { await result.current.serviceAction('stop', 'web'); });
     expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    // The request carries the node captured at call time, so a switch before the
+    // refusal arrives cannot make the dialog describe another node.
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web/services/web/stop', { method: 'POST', nodeId: 1 });
   });
 });
 

@@ -436,6 +436,35 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
   });
 
+  it('keeps ownership when a failed start leaves a created helper that cannot be removed', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) return { stdout: 'created-id\n', stderr: '' };
+      if (args[0] === 'start') throw Object.assign(new Error('start failed'), { stderr: 'start is stuck' });
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
+      if (args[0] === 'rm') throw new Error('remove failed');
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toBeNull();
+  });
+
+  it('refuses when a failed start leaves a created helper and removal succeeds', async () => {
+    mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
+      if (args.includes('replace')) return { stdout: 'created-id\n', stderr: '' };
+      if (args[0] === 'start') throw Object.assign(new Error('start failed'), { stderr: 'invalid entrypoint' });
+      if (args[0] === 'inspect') return { stdout: 'created\n', stderr: '' };
+      if (args[0] === 'rm') return { stdout: '', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const instance = service();
+    await instance.triggerComposeReapply({ endpointProvider: request });
+    expect(instance.getLastError()).toContain('Nothing was stopped. The replacement helper could not start: invalid entrypoint');
+    expect(instance.getLastErrorCode()).toBe('endpoint_provider_refused');
+  });
+
   it('keeps ownership when the helper existence check itself cannot answer', async () => {
     mockExecFileAsync.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args.includes('stage')) return { stdout: JSON.stringify({ ok: true, providerImage: 'p', previousImageId: 'sha256:old', previousImageRef: null }), stderr: '' };
