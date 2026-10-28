@@ -46,6 +46,8 @@ interface ShellOverlaysProps {
   reapplySelfTarget: ComposeReapplyTarget | null;
   /** The stack file the editor has selected, so a handoff confirm is bound to it. */
   activeStackFile: string | null;
+  /** True when the selected stack is the Sencho instance on this node. */
+  isSelfStackSelected: boolean;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
   canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
@@ -74,6 +76,7 @@ export function ShellOverlays({
   canSelfUpdate,
   reapplySelfTarget,
   activeStackFile,
+  isSelfStackSelected,
   composeReapply,
   canSaveAndReapply,
   canOfferVolumeRemoval,
@@ -211,6 +214,7 @@ export function ShellOverlays({
         nodeId={dockerEndpointProtected?.nodeId ?? null}
         nodeName={dockerEndpointProtected?.nodeName ?? null}
         canRecreate={refusalContextCurrent}
+        isSelfStackSelected={isSelfStackSelected}
         contextMoved={refusalContextStale}
         onRecreate={() => {
           const refusal = dockerEndpointProtected;

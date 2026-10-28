@@ -1636,6 +1636,7 @@ export default function EditorLayout() {
           canSelfUpdate={hasCapability('self-update')}
           reapplySelfTarget={reapplySelfTarget}
           activeStackFile={selectedFile}
+          isSelfStackSelected={isSelfStackSelected}
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}

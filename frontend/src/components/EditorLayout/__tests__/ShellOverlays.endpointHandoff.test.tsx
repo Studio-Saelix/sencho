@@ -64,7 +64,7 @@ function overlayState(over: Partial<OverlayState> = {}): OverlayState {
   } as unknown as OverlayState;
 }
 
-function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null } = {}) {
+function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nodeId: number; type: 'local' | 'remote'; name: string } | null; isSelfStackSelected?: boolean } = {}) {
   return render(
     <ShellOverlays
       overlayState={overlay}
@@ -84,6 +84,7 @@ function renderShell(overlay: OverlayState, options: { reapplySelfTarget?: { nod
         ? { nodeId: 1, type: 'local', name: 'node-1' }
         : options.reapplySelfTarget) as never}
       activeStackFile="sencho.yml"
+      isSelfStackSelected={options.isSelfStackSelected ?? true}
       composeReapply={{ dispatching: false } as never}
       canSaveAndReapply
       canOfferVolumeRemoval={false}
@@ -116,6 +117,12 @@ describe('the Docker endpoint refusal confirmation', () => {
     renderShell(overlayState({
       dockerEndpointProtected: { ...refusal, stackFile: 'other.yml' },
     }));
+    expect(screen.queryByRole('button', { name: /Recreate endpoint/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /Got it/i })).toBeVisible();
+  });
+
+  it('does not offer the replacement for a same-named service outside Sencho\'s own stack', () => {
+    renderShell(overlayState(), { isSelfStackSelected: false });
     expect(screen.queryByRole('button', { name: /Recreate endpoint/i })).toBeNull();
     expect(screen.getByRole('button', { name: /Got it/i })).toBeVisible();
   });

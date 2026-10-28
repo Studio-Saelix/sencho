@@ -498,7 +498,7 @@ export class ImageOperationService {
       // The helper writes its verdict with an atomic rename before it exits. A
       // failed read just before that write can be followed by the helper
       // disappearing, so a check that sees it gone reads once more. A verdict
-      // that exists is used to settle the failure; otherwise the caller's
+      // that exists is used to settle the operation; otherwise the caller's
       // failure stands.
       const settled = await this.readProviderOutcome(operation);
       if (settled) {

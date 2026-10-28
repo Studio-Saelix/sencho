@@ -128,6 +128,7 @@ function shellElement(
       canSelfUpdate={false}
       reapplySelfTarget={(over.reapplySelfTarget ?? null) as never}
       activeStackFile="web.yml"
+      isSelfStackSelected={false}
       composeReapply={(over.composeReapply ?? {}) as never}
       canSaveAndReapply={false}
       canOfferVolumeRemoval={false}

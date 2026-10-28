@@ -20,6 +20,7 @@ function renderDialog(over: Partial<React.ComponentProps<typeof DockerEndpointPr
     nodeId: 4,
     nodeName: 'edge-1',
     canRecreate: true,
+    isSelfStackSelected: true,
     onRecreate: vi.fn(),
     ...over,
   };
@@ -83,12 +84,27 @@ describe('DockerEndpointProtectedDialog', () => {
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
   });
 
-  it('says an admin can recreate a non-admin\'s protected provider even when the option cannot be read', async () => {
+  it('tells a non-admin that an admin may be able to recreate the endpoint when the option cannot be read', async () => {
     // The endpoint option route is admin-only, so a non-admin sees no option.
     apiFetchMock.mockResolvedValue(new Response('', { status: 403 }));
     renderDialog({ canRecreate: false, onRecreate: undefined });
-    expect(await screen.findByText(/An admin who can reapply edge-1/)).toBeInTheDocument();
+    const note = await screen.findByText(/An admin who can reapply edge-1/);
+    expect(note.textContent).toContain('may be able');
     expect(screen.queryByText(/would not change it/)).toBeNull();
+  });
+
+  it('does not promise an admin can recreate an endpoint it has not confirmed', async () => {
+    apiFetchMock.mockResolvedValue(new Response('', { status: 500 }));
+    renderDialog();
+    expect(await screen.findByText(/Sencho has not confirmed edge-1's Docker endpoint/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Recreate endpoint/ })).toBeNull();
+  });
+
+  it('offers nothing for a same-named service in another stack', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    renderDialog({ isSelfStackSelected: false });
+    expect(await screen.findByText(/recreating the Docker endpoint would not change it/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Recreate endpoint/ })).toBeNull();
   });
 
   it('matches the provider by its container name as well as its Compose service', async () => {

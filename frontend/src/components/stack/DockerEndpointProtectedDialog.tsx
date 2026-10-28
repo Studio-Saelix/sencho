@@ -16,6 +16,8 @@ interface DockerEndpointProtectedDialogProps {
   nodeName: string | null;
   /** Admin who can reapply this node's Compose configuration. */
   canRecreate: boolean;
+  /** True when the refused stack is the Sencho instance on this node. */
+  isSelfStackSelected: boolean;
   /** True when the editor has moved to another node or stack since the refusal. */
   contextMoved?: boolean;
   /** Opens the safe replacement preview for the same node and provider. */
@@ -37,6 +39,7 @@ export function DockerEndpointProtectedDialog({
   nodeId,
   nodeName,
   canRecreate,
+  isSelfStackSelected,
   contextMoved = false,
   onRecreate,
 }: DockerEndpointProtectedDialogProps) {
@@ -45,9 +48,12 @@ export function DockerEndpointProtectedDialog({
   const provider = option?.state === 'available' ? option.service : null;
   const bare = (name: string | null | undefined) => name?.replace(/^\//, '') ?? null;
   // A labeled container in another stack is also reason `provider`, but only the
-  // endpoint provider itself can be replaced by this action. The guard may name
-  // the provider by its Compose service or by its container name.
+  // endpoint provider itself can be replaced by this action, and only a refusal
+  // from Sencho's own stack can be about that provider. A same-named service in
+  // another stack must not borrow the action. The guard may name the provider by
+  // its Compose service or by its container name.
   const protectedProvider = option?.state === 'available'
+    && isSelfStackSelected
     && (service === null
       || service === option.service
       || bare(service) === bare(option.containerName));
@@ -77,9 +83,11 @@ export function DockerEndpointProtectedDialog({
   } else if (!canRecreate) {
     // Keep this before the unknown-option branch: a non-admin cannot read the
     // endpoint option at all, so null there says nothing about the provider.
-    note = `An admin who can reapply ${nodeLabel}'s Compose configuration can recreate the Docker endpoint safely.`;
+    note = `An admin who can reapply ${nodeLabel}'s Compose configuration may be able to recreate the Docker endpoint safely.`;
   } else if (option === null) {
-    note = `Sencho could not confirm ${nodeLabel}'s Docker endpoint, so it cannot say whether this operation protected it. Refresh and try again.`;
+    // The hook also returns null while the option is still loading, so this
+    // says what is true in both states: the answer has not arrived.
+    note = `Sencho has not confirmed ${nodeLabel}'s Docker endpoint, so it cannot say whether this operation protected it. If this persists, refresh and try again.`;
   } else if (option.state === 'available' && !protectedProvider) {
     note = `The guard protected ${service ?? 'a container'} in this stack, and recreating the Docker endpoint would not change it. Recreate that service from the host (docker compose up -d) while Sencho is idle.`;
   } else {

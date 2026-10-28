@@ -240,6 +240,8 @@ describe('the Docker socket proxy', () => {
     expect(refusal?.message).toContain('if this node offers');
     expect(refusal?.message).toContain('Recreate Docker endpoint');
     expect(refusal?.message).toContain('docker compose up -d');
+    // The old host-only sentence must be gone, not merely followed by the new one.
+    expect(refusal?.message).not.toContain('same Compose project as Sencho: recreate it from the host');
   });
 
   it('keeps host advice for another labeled container, which the endpoint replacement would not change', async () => {
