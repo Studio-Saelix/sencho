@@ -126,20 +126,27 @@ function defaultTrustAnchors(): string[] {
  */
 function validateCaBundle(pem: string, source: string): void {
     const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-    // Every PEM block, not only certificates, has to be complete: a file with
-    // a valid certificate followed by a truncated private-key block is still
-    // corrupt and should not be cached as usable configuration.
-    const beginLabels = [...pem.matchAll(/-----BEGIN ([^-]+)-----/g)].map((match) => match[1].trim());
-    const endLabels = [...pem.matchAll(/-----END ([^-]+)-----/g)].map((match) => match[1].trim());
     if (blocks.length === 0) {
         throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} does not contain a PEM certificate`);
     }
-    if (
-        beginLabels.length !== endLabels.length
-        || beginLabels.some((label, index) => label !== endLabels[index])
-        || beginLabels.filter((label) => label === 'CERTIFICATE').length !== blocks.length
-    ) {
-        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete PEM block`);
+    // Every PEM block, not only certificates, has to be complete and properly
+    // nested: a valid certificate followed by a truncated private-key block,
+    // or crossed markers, is still corrupt and must not be cached as usable
+    // configuration. A stack catches both truncation and misordered markers.
+    const stack: string[] = [];
+    let certificateBegins = 0;
+    for (const match of pem.matchAll(/-----(BEGIN|END) ([^-]+)-----/g)) {
+        const [, kind, rawLabel] = match;
+        const label = rawLabel.trim();
+        if (kind === 'BEGIN') {
+            stack.push(label);
+            if (label === 'CERTIFICATE') certificateBegins += 1;
+        } else if (stack.pop() !== label) {
+            throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete or misordered PEM block`);
+        }
+    }
+    if (stack.length > 0 || certificateBegins !== blocks.length) {
+        throw new MeshProxyDialConfigError(`${MESH_PROXY_CA_FILE_ENV}: ${source} contains an incomplete or misordered PEM block`);
     }
     for (const block of blocks) {
         try {

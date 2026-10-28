@@ -622,10 +622,16 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
         if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
         if (httpStatus >= 300 && httpStatus < 400) {
             const location = headerValue(headers, 'location');
+            if (cloudflare) {
+                return {
+                    code: 'blocked_by_proxy',
+                    message: `redirected by Cloudflare (HTTP ${httpStatus}), likely a Cloudflare Access login`,
+                };
+            }
             if (!location) {
-                // A redirect without a destination is not evidence of a
-                // login gateway; keep the hop unidentified like an unmarked
-                // 401/403 rather than blaming an access proxy.
+                // A redirect without a destination and without gateway
+                // headers is not evidence of a login gateway; keep the hop
+                // unidentified like an unmarked 401/403.
                 return {
                     code: 'refused_unverified',
                     message: `redirected with HTTP ${httpStatus} without a Location header, so the destination is unknown`,
@@ -633,9 +639,7 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
             }
             return {
                 code: 'blocked_by_proxy',
-                message: cloudflare
-                    ? `redirected by Cloudflare (HTTP ${httpStatus}), likely a Cloudflare Access login`
-                    : `remote redirected the connection (HTTP ${httpStatus}), likely an SSO or access proxy login`,
+                message: `remote redirected the connection (HTTP ${httpStatus}), likely an SSO or access proxy login`,
             };
         }
         if (senchoReason === 'forbidden') {

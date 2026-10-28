@@ -43,8 +43,8 @@ interface WssPeer {
 /**
  * HTTPS peer that completes the WebSocket upgrade itself. `require` models
  * an access gateway: a header that must carry the expected value or the
- * upgrade is refused with Sencho's rejection marker, as Cloudflare Access
- * would refuse before the request reaches Sencho.
+ * upgrade is refused with `refusalHeaders`, as Cloudflare Access would
+ * refuse before the request reaches Sencho.
  */
 async function startPeer(options: {
     require?: Record<string, string>;
