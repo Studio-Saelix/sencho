@@ -4,6 +4,9 @@
  * given the application uid/gid and chowns each file before its final rename.
  */
 import { describe, expect, it, vi } from 'vitest';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { handoffOwner, writeHandoffJson, type HandoffFileSystem } from '../helpers/handoffFile';
 import { buildDeps } from '../helpers/endpointProviderDeps';
 import type { ProviderReplacePlan } from '../helpers/endpointProviderReplace';
@@ -84,6 +87,25 @@ describe('writeHandoffJson', () => {
     expect(calls.map(call => call.call)).toEqual(['write', 'chmod', 'rename']);
     expect(calls[0]).toMatchObject({ extra: '600' });
     expect(calls[1]).toMatchObject({ extra: '600' });
+  });
+
+  it('writes a real 0600 file atomically through the default filesystem', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-handoff-'));
+    try {
+      const file = path.join(dir, 'outcome.json');
+      // chown to the caller's own uid/gid is allowed without privileges, so the
+      // default fs path (write, chmod, chown, rename) is exercised for real.
+      const owner = typeof process.getuid === 'function' && typeof process.getgid === 'function'
+        ? { uid: process.getuid(), gid: process.getgid() }
+        : null;
+      await writeHandoffJson(file, { ok: true }, owner);
+      const info = await fs.stat(file);
+      expect(info.mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ ok: true });
+      expect(await fs.readdir(dir)).toEqual(['outcome.json']);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

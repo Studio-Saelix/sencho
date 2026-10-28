@@ -336,6 +336,16 @@ describe('replaceProvider', () => {
     expect(failing.created).toEqual([]);
   });
 
+  it('still restores the snapshot when the helper log itself throws', async () => {
+    const f = staged(fake({ compose: { 'up:socket-proxy': { ok: false, output: 'boom' } } }));
+    f.deps.log = () => { throw new Error('EPIPE: broken stderr'); };
+    const outcome = await replaceProvider(plan({ scope: 'provider' }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'provider', rollback: { attempted: true, restored: true } });
+    expect(f.removed).toEqual(['new-proxy-id']);
+    expect(f.created).toHaveLength(1);
+    expect(f.files.get(outcomePath)).toMatchObject({ ok: false, rollback: { attempted: true, restored: true } });
+  });
+
   it.each(['provider', 'stack'] as const)(
     'restores the snapshot when publishing the recreation marker fails after the %s-scope replacement',
     async (scope) => {
@@ -350,12 +360,12 @@ describe('replaceProvider', () => {
         ok: false,
         phase: 'verify',
         error: expect.stringContaining('ENOSPC'),
-        rollback: { restored: true, error: null },
+        rollback: { attempted: true, restored: true, error: null },
       });
       expect(f.removed).toEqual(['new-proxy-id']);
       expect(f.created).toHaveLength(1);
       expect(f.created[0]).toMatchObject({ name: 'stack-socket-proxy-1', Image: 'sha256:previous' });
-      expect(f.files.get(outcomePath)).toMatchObject({ ok: false, rollback: { restored: true } });
+      expect(f.files.get(outcomePath)).toMatchObject({ ok: false, rollback: { attempted: true, restored: true } });
       expect(f.composeCalls.some(args => args.includes('sencho'))).toBe(false);
     },
   );
@@ -473,9 +483,9 @@ describe('parseOutcome', () => {
     expect(parseOutcome(null, OP)).toBeNull();
   });
 
-  it('reads a failure without a rollback flag as attempted and not restored', () => {
+  it('treats a failure with no rollback object as unconfirmed, not as an attempted restore', () => {
     expect(parseOutcome({ operationId: OP, ok: false, error: 'x' }, OP)).toEqual({
-      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: true, restored: false, error: null },
+      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: false },
     });
   });
 

@@ -37,8 +37,10 @@ async function main(): Promise<number> {
       error: `The replacement helper could not start the replacement: ${errorText(error)}`,
       rollback: { attempted: false },
     };
-    deps.log(`helper failed: ${errorText(error)}`);
+    // Write the verdict before the diagnostic line: a broken stderr stream must
+    // not be the reason Sencho waits out its deadline.
     await deps.writeJson(helperFiles.outcome(HELPER_DATA_DIR, operationId), outcome);
+    deps.log(`helper failed: ${errorText(error)}`);
     return 1;
   }
 }

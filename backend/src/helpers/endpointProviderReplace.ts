@@ -432,15 +432,17 @@ export function parseOutcome(raw: unknown, operationId: string): ProviderOutcome
   if (value.operationId !== operationId || typeof value.ok !== 'boolean') return null;
   if (value.ok) return { operationId, ok: true };
   const rollback = value.rollback as Record<string, unknown> | undefined;
-  const attempted = rollback?.attempted !== false && rollback?.error !== 'not attempted';
+  const attempted = !!rollback && rollback.attempted !== false && rollback.error !== 'not attempted';
   return {
     operationId,
     ok: false,
     phase: value.phase === 'sencho' || value.phase === 'verify' ? value.phase : 'provider',
     error: typeof value.error === 'string' ? value.error : 'The Docker endpoint replacement failed.',
     rollback: attempted
-      // Outcomes written before this field existed came from the rollback path,
-      // except the entrypoint's explicit "not attempted" marker.
+      // Outcomes written before this field existed are assumed to come from the
+      // rollback path, except the entrypoint's explicit "not attempted" marker.
+      // A missing or malformed rollback object is treated as unconfirmed. An
+      // older compose-copy failure cannot be told apart from a real restore.
       ? { attempted: true, restored: rollback?.restored === true, error: typeof rollback?.error === 'string' ? rollback.error : null }
       : { attempted: false },
   };

@@ -419,8 +419,8 @@ describe('bounded verification', () => {
       const ack = JSON.parse(await fs.readFile(handoff(operationId, 'ack'), 'utf8'));
       expect(ack).toMatchObject({ operationId, ok: false });
     }, { timeout: 2_000 });
-    // The helper then reports that its restore failed while Sencho was still
-    // waiting on the stalled request.
+    // The helper then reports that its restore failed after the bounded request
+    // had already timed out and the negative ack was written.
     await writeOutcome(operationId, {
       ok: false,
       phase: 'verify',
@@ -550,7 +550,7 @@ describe('reconcileOnStartup (the new process)', () => {
   });
 
   it('applies the marker gate to a claimed Update as well: no marker, no ack, recovery required', async () => {
-    mockAvailableProvider();
+    const selfUpdate = mockAvailableProvider();
     const service = fastTimings();
     await service.claimCommunityUpdate({ replaceEndpointProvider: true });
     const operation = (await service.getCurrentOperation())!;
@@ -566,6 +566,8 @@ describe('reconcileOnStartup (the new process)', () => {
       state: 'failed',
       failureCode: 'endpoint_provider_recovery_required',
     });
+    expect(selfUpdate.getLastErrorCode()).toBe('endpoint_provider_recovery_required');
+    expect(FleetUpdateTrackerService.getInstance().get(localNodeId())).toMatchObject({ status: 'failed' });
   });
 
   it('does not answer or succeed after a restart alone: no marker, no verdict means recovery required', async () => {
