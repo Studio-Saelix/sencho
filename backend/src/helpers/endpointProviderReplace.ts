@@ -77,7 +77,8 @@ export type ProviderOutcome =
     ok: false;
     phase: ProviderPhase;
     error: string;
-    rollback: { restored: boolean; error: string | null };
+    /** `attempted: false` means the replacement never reached the rollback step. */
+    rollback: { attempted: boolean; restored: boolean; error: string | null };
   };
 
 /** The parts of `docker container inspect` a rollback needs to recreate the container. */
@@ -117,6 +118,8 @@ export interface HelperDeps {
   compose(args: string[]): Promise<{ ok: boolean; output: string }>;
   readJson(path: string): Promise<unknown | null>;
   writeJson(path: string, value: unknown): Promise<void>;
+  /** Removes a handoff file so a stale phase marker cannot outlive a rollback. */
+  removeFile(path: string): Promise<void>;
   copyFile(from: string, to: string): Promise<void>;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -282,9 +285,9 @@ async function readAck(plan: ProviderReplacePlan, deps: HelperDeps): Promise<Pro
  */
 export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDeps): Promise<ProviderOutcome> {
   /**
-   * The outcome file is the only signal Sencho has. Losing it cannot undo a
-   * recovery that already ran, so a failed write is logged rather than turned
-   * into an exception the outer catch could report as "not attempted".
+   * The outcome file is the only verdict signal Sencho has. Losing it cannot
+   * undo a recovery that already ran, so a failed write is logged rather than
+   * turned into an exception the outer catch could report as "not attempted".
    */
   const publishOutcome = async (outcome: ProviderOutcome): Promise<void> => {
     try {
@@ -297,12 +300,19 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
     deps.log(`${phase} failed: ${error}; restoring the previous Docker endpoint`);
     const rollbackError = await restoreProvider(plan, deps);
     deps.log(rollbackError ? `restore failed: ${rollbackError}` : 'previous Docker endpoint restored');
+    // The marker means "the replacement is installed". A restored (or unknown)
+    // endpoint must not leave it behind for a later process to acknowledge.
+    try {
+      await deps.removeFile(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId));
+    } catch (removeError) {
+      deps.log(`could not remove the recreation marker: ${errorText(removeError)}`);
+    }
     const outcome: ProviderOutcome = {
       operationId: plan.operationId,
       ok: false,
       phase,
       error,
-      rollback: { restored: rollbackError === null, error: rollbackError },
+      rollback: { attempted: true, restored: rollbackError === null, error: rollbackError },
     };
     await publishOutcome(outcome);
     return outcome;
@@ -321,7 +331,7 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
         ok: false,
         phase: 'provider',
         error: `Failed to write the updated compose file: ${errorText(error)}`,
-        rollback: { restored: true, error: null },
+        rollback: { attempted: false, restored: false, error: null },
       };
       await publishOutcome(outcome);
       return outcome;
@@ -341,10 +351,14 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
     // running may verify Docker through it and answer. Without this the ack could
     // be written before the old container was ever replaced. A write failure is
     // itself a reason to recover: the helper cannot announce the new provider.
-    await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
-      operationId: plan.operationId,
-      at: deps.now(),
-    });
+    try {
+      await deps.writeJson(helperFiles.recreated(HELPER_DATA_DIR, plan.operationId), {
+        operationId: plan.operationId,
+        at: deps.now(),
+      });
+    } catch (error) {
+      return await fail('verify', `Could not record that "${plan.providerService}" was replaced: ${errorText(error)}`);
+    }
 
     if (plan.scope === 'provider') {
       deps.log('Sencho stays running; waiting for it to reconnect through the new Docker endpoint');
@@ -385,14 +399,14 @@ export async function replaceProvider(plan: ProviderReplacePlan, deps: HelperDep
     // recovery as a failed compose step, and never depends on a handoff write
     // succeeding. Before the replacement there is nothing to restore.
     if (recreated) {
-      return await fail('verify', `The replacement helper stopped unexpectedly: ${errorText(error)}`);
+      return await fail('verify', `The replacement could not be completed: ${errorText(error)}`);
     }
     const outcome: ProviderOutcome = {
       operationId: plan.operationId,
       ok: false,
       phase: 'provider',
-      error: `The replacement helper stopped unexpectedly: ${errorText(error)}`,
-      rollback: { restored: true, error: null },
+      error: `The replacement helper could not start the replacement: ${errorText(error)}`,
+      rollback: { attempted: false, restored: false, error: null },
     };
     await publishOutcome(outcome);
     return outcome;
@@ -416,6 +430,9 @@ export function parseOutcome(raw: unknown, operationId: string): ProviderOutcome
     phase: value.phase === 'sencho' || value.phase === 'verify' ? value.phase : 'provider',
     error: typeof value.error === 'string' ? value.error : 'The Docker endpoint replacement failed.',
     rollback: {
+      // Outcomes written before this field existed always came from the
+      // rollback path, so absent means attempted.
+      attempted: rollback?.attempted !== false,
       restored: rollback?.restored === true,
       error: typeof rollback?.error === 'string' ? rollback.error : null,
     },

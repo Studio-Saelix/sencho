@@ -28,7 +28,12 @@ function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDep
   // other than its directory would otherwise be rendered as a new project and
   // get a second proxy instead of the replacement.
   const projectFlags = ['-p', plan.project, ...plan.configFiles.flatMap(file => ['-f', file])];
-  return {
+  // The helper runs as root; hand the files it publishes to the application
+  // uid so a Sencho running as SENCHO_USER can read the phase marker and
+  // outcome. Every handoff file, including the rollback snapshot, stays 0600
+  // and is owned by that user.
+  const owner = handoffOwner(process.env, typeof process.getuid === 'function' ? process.getuid() : null);
+  const deps: HelperDeps = {
     docker: {
       ping: async () => { await docker.ping(); },
       inspect: async (id) => {
@@ -71,14 +76,8 @@ function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDep
         return null;
       }
     },
-    // The helper runs as root; hand the files it publishes to the application
-    // uid so a Sencho running as SENCHO_USER can read the phase marker and
-    // outcome (the files stay 0600).
-    writeJson: (path, value) => writeHandoffJson(
-      path,
-      value,
-      handoffOwner(process.env, typeof process.getuid === 'function' ? process.getuid() : null),
-    ),
+    writeJson: (path, value) => writeHandoffJson(path, value, owner),
+    removeFile: (path) => fs.rm(path, { force: true }),
     copyFile: (from, to) => fs.copyFile(from, to),
     sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
     now: () => Date.now(),
@@ -88,6 +87,10 @@ function buildDeps(plan: ProviderReplacePlan, logFile: string | null): HelperDep
       if (logFile) void fs.appendFile(logFile, line).catch(() => undefined);
     },
   };
+  if (!owner && (process.getuid?.() ?? -1) === 0) {
+    deps.log('handoff files will be root-owned: no usable SENCHO_HANDOFF_UID/GID was passed, so a non-root Sencho cannot read them');
+  }
+  return deps;
 }
 
 async function main(): Promise<number> {

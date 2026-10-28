@@ -120,6 +120,7 @@ describe('buildEndpointProviderHelperArgs', () => {
     hostBindMounts: context.hostBindMounts,
     imageId: 'sha256:running',
     composeWritable: false,
+    handoffOwner: null,
   };
 
   it('mounts the provider\'s own host socket, not /var/run/docker.sock from the host', () => {
@@ -188,6 +189,14 @@ describe('triggerComposeReapply with the Docker endpoint', () => {
     expect(calls[1].slice(-2)).toEqual(['stage', OP]);
     expect(calls[2].slice(0, 2)).toEqual(['run', '-d']);
     expect(calls[2].slice(-2)).toEqual(['replace', OP]);
+    // Both helper runs must carry this process's uid/gid, or a non-root Sencho
+    // cannot read the marker and outcome the root helper writes.
+    if (typeof process.getuid === 'function' && typeof process.getgid === 'function') {
+      expect(calls[1]).toContain(`SENCHO_HANDOFF_UID=${process.getuid()}`);
+      expect(calls[1]).toContain(`SENCHO_HANDOFF_GID=${process.getgid()}`);
+      expect(calls[2]).toContain(`SENCHO_HANDOFF_UID=${process.getuid()}`);
+      expect(calls[2]).toContain(`SENCHO_HANDOFF_GID=${process.getgid()}`);
+    }
     expect(mockExecFile).not.toHaveBeenCalled();
     const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
     expect(plan).toMatchObject({

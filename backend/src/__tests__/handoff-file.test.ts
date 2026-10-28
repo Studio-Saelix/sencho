@@ -29,38 +29,52 @@ describe('handoffOwner', () => {
 });
 
 describe('writeHandoffJson', () => {
-  function recordingFs(): { ops: HandoffFileSystem; calls: string[] } {
-    const calls: string[] = [];
+  interface RecordedCall {
+    call: 'write' | 'chmod' | 'chown' | 'rename';
+    path: string;
+    extra?: string;
+    data?: unknown;
+  }
+
+  function recordingFs(): { ops: HandoffFileSystem; calls: RecordedCall[] } {
+    const calls: RecordedCall[] = [];
     return {
       calls,
       ops: {
-        writeFile: async (path) => { calls.push(`write ${path}`); },
-        chown: async (path, uid, gid) => { calls.push(`chown ${path} ${uid}:${gid}`); },
-        rename: async (from, to) => { calls.push(`rename ${from} ${to}`); },
+        writeFile: async (path, data, options) => {
+          calls.push({ call: 'write', path, extra: options.mode.toString(8), data });
+        },
+        chmod: async (path, mode) => { calls.push({ call: 'chmod', path, extra: mode.toString(8) }); },
+        chown: async (path, uid, gid) => { calls.push({ call: 'chown', path, extra: `${uid}:${gid}` }); },
+        rename: async (from, to) => { calls.push({ call: 'rename', path: from, extra: to }); },
       },
     };
   }
 
-  it('chowns the temporary file before the rename, for files written before and after app startup', async () => {
+  it('writes owner-only, chmods a reused temporary file, and chowns before the rename', async () => {
     const { ops, calls } = recordingFs();
     // The staging helper writes the rollback snapshot before Sencho restarts;
     // the detached helper writes the outcome after the new process is up.
     await writeHandoffJson('/app/data/endpoint-provider/op/rollback.json', { id: 1 }, { uid: 1000, gid: 1001 }, ops);
     await writeHandoffJson('/app/data/endpoint-provider/op/outcome.json', { ok: true }, { uid: 1000, gid: 1001 }, ops);
 
-    expect(calls).toHaveLength(6);
-    expect(calls[0]).toMatch(/^write .*rollback\.json\.\d+\.tmp$/);
-    expect(calls[1]).toMatch(/^chown .*rollback\.json\.\d+\.tmp 1000:1001$/);
-    expect(calls[2]).toMatch(/^rename .*rollback\.json\.\d+\.tmp .*rollback\.json$/);
-    expect(calls[3]).toMatch(/^write .*outcome\.json\.\d+\.tmp$/);
-    expect(calls[4]).toMatch(/^chown .*outcome\.json\.\d+\.tmp 1000:1001$/);
-    expect(calls[5]).toMatch(/^rename .*outcome\.json\.\d+\.tmp .*outcome\.json$/);
+    expect(calls).toHaveLength(8);
+    expect(calls[0]).toMatchObject({ call: 'write', extra: '600', data: JSON.stringify({ id: 1 }) });
+    expect(calls[0].path).toMatch(/rollback\.json\.\d+\.tmp$/);
+    expect(calls[1]).toMatchObject({ call: 'chmod', extra: '600' });
+    expect(calls[2]).toMatchObject({ call: 'chown', extra: '1000:1001' });
+    expect(calls[3]).toMatchObject({ call: 'rename', extra: expect.stringMatching(/rollback\.json$/) });
+    expect(calls[4]).toMatchObject({ call: 'write', extra: '600' });
+    expect(calls[5]).toMatchObject({ call: 'chmod', extra: '600' });
+    expect(calls[6]).toMatchObject({ call: 'chown', extra: '1000:1001' });
+    expect(calls[7]).toMatchObject({ call: 'rename', extra: expect.stringMatching(/outcome\.json$/) });
   });
 
-  it('keeps the file owner-only and skips chown when Sencho runs as root', async () => {
+  it('stays owner-only and skips chown when no owner was passed', async () => {
     const { ops, calls } = recordingFs();
     await writeHandoffJson('/app/data/endpoint-provider/op/outcome.json', { ok: true }, null, ops);
-    expect(calls).toHaveLength(2);
-    expect(calls.some(call => call.startsWith('chown '))).toBe(false);
+    expect(calls.map(call => call.call)).toEqual(['write', 'chmod', 'rename']);
+    expect(calls[0]).toMatchObject({ extra: '600' });
+    expect(calls[1]).toMatchObject({ extra: '600' });
   });
 });

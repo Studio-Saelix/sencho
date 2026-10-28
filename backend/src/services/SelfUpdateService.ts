@@ -210,7 +210,7 @@ export function buildEndpointProviderHelperArgs(input: {
   imageId: string;
   composeWritable: boolean;
   /** Application uid/gid that must read the helper's marker and outcome files. */
-  handoffOwner?: { uid: number; gid: number } | null;
+  handoffOwner: { uid: number; gid: number } | null;
 }): string[] {
   const { mode, operationId, socketSource, workingDir, dataDirHost, hostBindMounts, imageId, composeWritable, handoffOwner } = input;
   const ownerArgs = handoffOwner

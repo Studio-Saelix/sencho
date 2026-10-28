@@ -61,6 +61,7 @@ interface Fake {
   composeCalls: string[][];
   created: Array<Record<string, unknown>>;
   removed: string[];
+  removedFiles: string[];
   connected: Array<[string, string]>;
   pruned: string[];
   log: string[];
@@ -80,7 +81,7 @@ function fake(options: {
 } = {}): Fake {
   let now = 0;
   const files = new Map<string, unknown>();
-  const state: Omit<Fake, 'deps'> = { files, composeCalls: [], created: [], removed: [], connected: [], pruned: [], log: [] };
+  const state: Omit<Fake, 'deps'> = { files, composeCalls: [], created: [], removed: [], removedFiles: [], connected: [], pruned: [], log: [] };
   const deps: HelperDeps = {
     docker: {
       ping: options.ping ?? (async () => undefined),
@@ -109,6 +110,7 @@ function fake(options: {
     },
     readJson: async (path) => files.get(path) ?? null,
     writeJson: async (path, value) => { files.set(path, value); },
+    removeFile: async (path) => { files.delete(path); state.removedFiles.push(path); },
     copyFile: async (from, to) => { files.set(to, files.get(from) ?? 'copied'); },
     sleep: async (ms) => {
       now += ms;
@@ -224,9 +226,13 @@ describe('replaceProvider', () => {
   it('restores the provider-only replacement when Sencho does not confirm Docker access', async () => {
     const f = staged(fake());
     const outcome = await replaceProvider(plan({ scope: 'provider' }), f.deps);
-    expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { restored: true, error: null } });
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { attempted: true, restored: true, error: null } });
     expect(f.removed).toEqual(['new-proxy-id']);
     expect(f.created).toHaveLength(1);
+    // A restored endpoint must not leave the "replacement installed" marker
+    // behind for a later Sencho to acknowledge.
+    expect(f.files.has(helperFiles.recreated(HELPER_DATA_DIR, OP))).toBe(false);
+    expect(f.removedFiles).toContain(helperFiles.recreated(HELPER_DATA_DIR, OP));
     expect(f.composeCalls).toEqual([
       ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '60', 'socket-proxy'],
     ]);
@@ -319,7 +325,12 @@ describe('replaceProvider', () => {
     const failing = staged(fake());
     failing.deps.copyFile = async () => { throw new Error('read-only file system'); };
     const outcome = await replaceProvider(plan({ composeCopy: { stagedPath: 'a', targetPath: 'b' } }), failing.deps);
-    expect(outcome).toMatchObject({ ok: false, phase: 'provider', error: expect.stringContaining('read-only') });
+    expect(outcome).toMatchObject({
+      ok: false,
+      phase: 'provider',
+      error: expect.stringContaining('read-only'),
+      rollback: { attempted: false, restored: false, error: null },
+    });
     expect(failing.composeCalls).toEqual([]);
   });
 
@@ -374,10 +385,13 @@ describe('replaceProvider', () => {
     };
     const outcome = await replaceProvider(plan({ scope: 'provider', ackSeconds: 10 }), f.deps);
     expect(outcome).toMatchObject({ ok: false, phase: 'verify', rollback: { restored: true, error: null } });
-    // Recovery does not depend on the verdict file: the old container is back.
+    // Recovery does not depend on the verdict file: the old container is back,
+    // and the stale "replacement installed" marker is gone even though the
+    // outcome could not be published.
     expect(f.removed).toEqual(['new-proxy-id']);
     expect(f.created).toHaveLength(1);
     expect(f.files.has(outcomePath)).toBe(false);
+    expect(f.files.has(helperFiles.recreated(HELPER_DATA_DIR, OP))).toBe(false);
     expect(f.log).toContainEqual(expect.stringContaining('could not write the outcome file'));
   });
 
@@ -407,9 +421,22 @@ describe('replaceProvider', () => {
       return readJson(path);
     };
     const outcome = await replaceProvider(plan({ scope: 'provider', ackSeconds: 10 }), f.deps);
-    expect(outcome).toMatchObject({ ok: false, phase: 'verify', error: expect.stringContaining('EIO'), rollback: { restored: true } });
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', error: expect.stringContaining('EIO'), rollback: { attempted: true, restored: true } });
     expect(f.removed).toEqual(['new-proxy-id']);
     expect(f.created).toHaveLength(1);
+  });
+
+  it('restores the provider after an ack-read exception in stack scope once Sencho was recreated', async () => {
+    const f = staged(fake());
+    const readJson = f.deps.readJson;
+    f.deps.readJson = async (path) => {
+      if (path === ackPath) throw new Error('EIO: read failed');
+      return readJson(path);
+    };
+    const outcome = await replaceProvider(plan({ ackSeconds: 10 }), f.deps);
+    expect(outcome).toMatchObject({ ok: false, phase: 'verify', error: expect.stringContaining('EIO'), rollback: { attempted: true, restored: true } });
+    expect(f.composeCalls).toContainEqual(['up', '-d', '--no-deps', '--force-recreate', 'sencho']);
+    expect(f.removed).toEqual(['new-proxy-id']);
   });
 });
 
@@ -442,9 +469,15 @@ describe('parseOutcome', () => {
     expect(parseOutcome(null, OP)).toBeNull();
   });
 
-  it('reads a failure without a rollback flag as not restored', () => {
+  it('reads a failure without a rollback flag as attempted and not restored', () => {
     expect(parseOutcome({ operationId: OP, ok: false, error: 'x' }, OP)).toEqual({
-      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { restored: false, error: null },
+      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: true, restored: false, error: null },
+    });
+  });
+
+  it('keeps a replacement that never reached rollback as not attempted', () => {
+    expect(parseOutcome({ operationId: OP, ok: false, error: 'x', rollback: { attempted: false, restored: false, error: null } }, OP)).toEqual({
+      operationId: OP, ok: false, phase: 'provider', error: 'x', rollback: { attempted: false, restored: false, error: null },
     });
   });
 });

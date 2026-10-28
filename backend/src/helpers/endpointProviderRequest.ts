@@ -78,7 +78,9 @@ export function describeRemoteUpdateError(code: string): string {
     case 'endpoint_provider_restored':
       return 'Replacing the Docker endpoint failed. The node restored its previous Docker endpoint container and reaches Docker again; fix that service\'s Compose configuration, then run Reapply again.';
     case 'endpoint_provider_recovery_required':
-      return 'Replacing the Docker endpoint failed and the node could not restore the previous container. On that host, run "docker compose up -d" for the Docker endpoint service in Sencho\'s Compose project directory, then check Fleet.';
+      return 'Replacing the Docker endpoint failed and the node could not confirm Sencho reaches Docker through the previous container. On that host, check that the Docker endpoint service runs, then run Reapply again or bring it up with "docker compose up -d" in Sencho\'s Compose project directory.';
+    case 'update_failed':
+      return 'The node reported that the update failed. Check Fleet on that node for details.';
     default:
       return code;
   }

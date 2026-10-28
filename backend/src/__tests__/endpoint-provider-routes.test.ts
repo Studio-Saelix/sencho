@@ -381,7 +381,8 @@ describe('Fleet remote node (proxy and Pilot share this dispatch)', () => {
 
   it.each([
     ['endpoint_provider_restored', 'restored its previous Docker endpoint container'],
-    ['endpoint_provider_recovery_required', 'could not restore the previous container'],
+    ['endpoint_provider_recovery_required', 'could not confirm Sencho reaches Docker through the previous container'],
+    ['update_failed', 'reported that the update failed'],
   ])('fails with an operator message for %s', async (code, message) => {
     mockRemote(ONLINE({ startedAt: 2, updateError: code }));
     trackRemote(30_000);
