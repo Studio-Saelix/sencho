@@ -41,6 +41,7 @@ function makeNode(overrides: Partial<FleetNode> = {}): FleetNode {
 function makeUpdateStatus(overrides: Partial<NodeUpdateStatus> = {}): NodeUpdateStatus {
   return {
     nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0',
+    online: true,
     updateAvailable: false, updateStatus: null,
     ...overrides,
   };

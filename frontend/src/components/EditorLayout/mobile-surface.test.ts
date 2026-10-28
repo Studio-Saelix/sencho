@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { deriveMobileSurface, type MobileSurfaceInput } from './mobile-surface';
+import { describe, it, expect, vi } from 'vitest';
+import { applyNavigateEvent, deriveMobileSurface, type MobileSurfaceInput } from './mobile-surface';
 
 const base: MobileSurfaceInput = {
     activeView: 'dashboard',
@@ -40,5 +40,27 @@ describe('deriveMobileSurface', () => {
         expect(
             deriveMobileSurface({ ...base, mobileView: 'content', activeView: 'editor', selectedFile: 'web.yml' }).surface,
         ).toBe('detail');
+    });
+});
+
+describe('applyNavigateEvent', () => {
+    it('runs the change behind the content-surface hop on a phone', () => {
+        const order: string[] = [];
+        applyNavigateEvent(true, (then) => { order.push('surface'); then(); }, () => order.push('apply'));
+        expect(order).toEqual(['surface', 'apply']);
+    });
+
+    it('runs the change directly, with no surface hop, off a phone', () => {
+        const hop = vi.fn();
+        const apply = vi.fn();
+        applyNavigateEvent(false, hop, apply);
+        expect(hop).not.toHaveBeenCalled();
+        expect(apply).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not apply the change until the surface hop lets it (an unsaved-changes guard may hold it)', () => {
+        const apply = vi.fn();
+        applyNavigateEvent(true, () => { /* guard keeps the editor open */ }, apply);
+        expect(apply).not.toHaveBeenCalled();
     });
 });

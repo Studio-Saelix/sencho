@@ -1895,7 +1895,14 @@ async function runRollbackTarget(
         capturedSourceAcceptanceRef: store.newestSourceAcceptanceId(ctx.app.id, ctx.generationId),
         envelope: ctx.envelope,
       });
-      return { nodeId, status: 'restored', mutationPossible: false, failureClass: 'pre_mutation', settleMissed: false };
+      return {
+        nodeId,
+        status: 'restored',
+        mutationPossible: false,
+        failureClass: 'pre_mutation',
+        settleMissed: false,
+        ...(outcome.policyEvidence ? { policyEvidence: outcome.policyEvidence } : {}),
+      };
     } catch (error) {
       console.error(
         '[GitOps authority] Restore succeeded but its completion could not be recorded:',
@@ -2120,6 +2127,11 @@ gitopsApplicationsRouter.post('/:id/rollout/rollback', async (req: Request, res:
     ok: !failedAny,
     // The mutation classification decides application state; it is not part of
     // the per-target result an operator reads.
-    results: results.map(({ nodeId, status, error }) => ({ nodeId, status, error })),
+    results: results.map(({ nodeId, status, error, policyEvidence }) => ({
+      nodeId,
+      status,
+      error,
+      ...(policyEvidence ? { policyEvidence } : {}),
+    })),
   });
 });

@@ -1703,7 +1703,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.deployStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -1712,7 +1712,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.updateStack(mouseEvent);
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -1721,7 +1721,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'deploy', 'deploy');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'deploy', nodeId: 1 }),
     );
   });
 
@@ -1753,7 +1753,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.executeStackActionByFile('web.yml', 'update', 'update');
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'update', nodeId: 1 }),
     );
   });
 
@@ -1762,7 +1762,7 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.rollbackStack();
     expect(overlayState.setPolicyBlock).toHaveBeenCalledWith(
-      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback' }),
+      expect.objectContaining({ stackName: 'web', stackFile: 'web.yml', action: 'rollback', nodeId: 1 }),
     );
   });
 });
@@ -2013,6 +2013,19 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith({ run: perform });
   });
 
+  it.each([
+    ['a stashed navigation', { pendingLeaveAction: { run: vi.fn() } }],
+    ['a stack load', { pendingUnsavedLoad: 'other.yml' }],
+  ])('refuses the navigation and says so when %s already owns the dialog', (_owner, overlay) => {
+    const perform = vi.fn();
+    const { result, overlayState } = setup({ overlay });
+    result.current.attemptLeaveEditor(perform);
+    expect(perform).not.toHaveBeenCalled();
+    // The open prompt keeps its own navigation; nothing replaces it.
+    expect(overlayState.setPendingLeaveAction).not.toHaveBeenCalled();
+    expect(toast.info).toHaveBeenCalledWith(expect.stringMatching(/unsaved-changes prompt first/));
+  });
+
   it('runs the navigation immediately when the editor is clean', () => {
     const perform = vi.fn();
     const { result, overlayState } = setup({
@@ -2039,6 +2052,25 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     expect(run).toHaveBeenCalledTimes(1);
     // The leave branch returns before the load branch, so no stack fetch fires.
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('lets a node switch carry its own resume step: the stashed action runs and discard does not switch on its own', () => {
+    // The shell parks a queued destination on the leave action when a node
+    // switch waits on this dialog; the action finishes the switch itself.
+    const run = vi.fn();
+    const setActiveNode = vi.fn();
+    const targetNode = { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result } = setup({
+      overlay: {
+        pendingLeaveAction: { run },
+        pendingUnsavedLoad: '__node-switch-pending__',
+        pendingUnsavedNode: targetNode as never,
+      },
+      setActiveNode,
+    });
+    result.current.discardAndLoadPending();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(setActiveNode).not.toHaveBeenCalled();
   });
 
   it('clears a stashed leave action on cancel', () => {

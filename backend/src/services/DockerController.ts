@@ -1,4 +1,5 @@
 import Docker from 'dockerode';
+import { DockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import WebSocket from 'ws';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -326,6 +327,28 @@ export interface LabelInventoryRow {
   labels: Record<string, string>;
   imageId: string;
   inspectFailed: boolean;
+}
+
+/**
+ * How the Docker endpoint guard treats a stop. `batch-checked` skips the guard,
+ * for a caller that has just checked the whole batch with
+ * `assertNoDockerEndpointContainers` and must not pay for every check twice.
+ */
+export interface StopContainerOptions {
+  endpointGuard?: 'batch-checked';
+}
+
+/**
+ * How the Docker endpoint guard treats a restart: `batch-checked` as for a
+ * stop, or `allow-provider-restart`, which runs the guard but lets a restart of
+ * the Docker endpoint provider itself through. For Auto-Heal, which restarts an
+ * unhealthy proxy on purpose: bouncing it is the fix. The owner of a namespace
+ * the provider or Sencho runs in, a labeled container, and a mislabeled one are
+ * still refused. One field rather than two flags, so the two intents cannot be
+ * combined into a silent full bypass.
+ */
+export interface RestartContainerOptions {
+  endpointGuard?: 'batch-checked' | 'allow-provider-restart';
 }
 
 class DockerController {
@@ -3177,8 +3200,42 @@ class DockerController {
     }
   }
 
+  /**
+   * Refuses to stop, restart, or remove the container that carries this node's Docker
+   * API (the socket proxy Sencho reaches Docker through, or Sencho itself on a
+   * stop). The Docker endpoint guard is imported lazily: it reads container and
+   * identity state through this class.
+   */
+  private async assertNotDockerEndpointContainer(
+    containerId: string,
+    action: 'stop' | 'restart',
+    options?: RestartContainerOptions,
+  ): Promise<void> {
+    if (options?.endpointGuard === 'batch-checked') return;
+    const { evaluateDockerEndpointContainer } = await import('../helpers/dockerEndpointGuard');
+    const refusal = await evaluateDockerEndpointContainer(containerId, action, this.docker, {
+      allowProvider: options?.endpointGuard === 'allow-provider-restart',
+    });
+    if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * Checks every container before any of them is touched, so a batch that
+   * contains the Docker endpoint container is refused whole rather than stopping
+   * its siblings first and failing on the one that matters.
+   */
+  public async assertNoDockerEndpointContainers(
+    containerIds: string[],
+    action: 'stop' | 'restart',
+  ): Promise<void> {
+    for (const id of containerIds) {
+      await this.assertNotDockerEndpointContainer(id, action);
+    }
+  }
+
   // State-safe: silently ignores 304 "already stopped" errors
-  public async stopContainer(containerId: string) {
+  public async stopContainer(containerId: string, options?: StopContainerOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'stop', options);
     try {
       const container = this.docker.getContainer(containerId);
       await container.stop();
@@ -3191,7 +3248,8 @@ class DockerController {
     }
   }
 
-  public async restartContainer(containerId: string) {
+  public async restartContainer(containerId: string, options?: RestartContainerOptions) {
+    await this.assertNotDockerEndpointContainer(containerId, 'restart', options);
     const container = this.docker.getContainer(containerId);
     await container.restart();
   }
@@ -3233,15 +3291,22 @@ class DockerController {
 
   public async removeContainers(containerIds: string[]) {
     if (isDebugEnabled()) console.debug('[Resources:debug] removeContainers', { count: containerIds.length });
-    const results = [];
+    const results: Array<{ id: string; success: boolean; error?: string; refused?: true }> = [];
     for (const id of containerIds) {
       try {
+        // Removal is a stop that cannot be undone: the Docker endpoint container is refused.
+        await this.assertNotDockerEndpointContainer(id, 'stop');
         const container = this.docker.getContainer(id);
         await container.remove({ force: true });
         results.push({ id, success: true });
       } catch (error: any) {
         console.error('Failed to remove container %s:', sanitizeForLog(id), sanitizeForLog(error.message));
-        results.push({ id, success: false, error: error.message });
+        results.push({
+          id,
+          success: false,
+          error: error.message,
+          ...(error instanceof DockerEndpointProtectedError ? { refused: true as const } : {}),
+        });
       }
     }
     return results;

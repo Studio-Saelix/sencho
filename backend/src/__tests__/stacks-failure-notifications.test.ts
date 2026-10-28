@@ -58,6 +58,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       ...actual.ComposeService,
       getInstance: () => ({
+        evaluateDockerEndpoint: async () => null,
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
         runDown: mockRunDown,
@@ -79,6 +80,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        assertNoDockerEndpointContainers: vi.fn().mockResolvedValue(undefined),
         getDocker: () => ({
           listContainers: mockListContainers,
         }),

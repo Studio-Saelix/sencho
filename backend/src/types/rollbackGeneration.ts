@@ -42,6 +42,16 @@ export interface RollbackGenerationEntry {
    * or platforms where mode could not be read.
    */
   mode: number | null;
+  /**
+   * Owner and group of the captured file. A restore hands the file back to
+   * them, so the group bits it publishes are judged against the captured group
+   * and not against whatever the live file (deleted, or already moved to the
+   * process's group by an earlier write) happens to have. Absent on
+   * generations captured before they were kept, and where the platform has no
+   * POSIX owners.
+   */
+  uid?: number;
+  gid?: number;
 }
 
 export interface RollbackInvocationRecord {
