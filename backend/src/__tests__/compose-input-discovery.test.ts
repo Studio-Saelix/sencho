@@ -168,6 +168,10 @@ configs:
         expect(unmanaged.some((i) => i.dependencyKind === 'bind-mount')).toBe(true);
         expect(unmanaged.some((i) => i.dependencyKind === 'config' && i.sourcePath === null)).toBe(true);
         expect(unmanaged.every((i) => i.deletionAuthority === 'none')).toBe(true);
+        const hostBind = unmanaged.find((i) => i.hostSourcePath === '/var/run/docker.sock');
+        expect(hostBind).toBeTruthy();
+        expect(hostBind?.sourcePath).toBeNull();
+        expect(hostBind?.materializedPath).toBeNull();
     });
 
     it('materializes build contexts with dockerignore filtering and stable byte accounting', async () => {
@@ -764,6 +768,22 @@ describe('nested-primary runtime path equivalence (audit round 9 B-3)', () => {
         // silently dropped or adopted from the repo root.
         expect(result.refusals.some((r) => r.actionable && r.kind === 'out-of-bounds' && String(r.sourcePath).includes('../shared.yaml'))).toBe(true);
         expect(result.inputs.some((i) => i.sourcePath === 'shared.yaml' && i.ownership === 'managed')).toBe(false);
+    });
+});
+
+describe('Git discovery keeps refusing what authored rollback capture only reports', () => {
+    it.each([
+        ['an interpolated include path', 'include:\n  - "${COMMON_DIR}/base.yaml"\nservices: {}\n', [['parse-error', null], ['dynamic-include', '${COMMON_DIR}/base.yaml']]],
+        ['an interpolated extends file', 'services:\n  web:\n    extends:\n      file: ${BASE_FILE:-base.yaml}\n      service: base\n', [['parse-error', null], ['dynamic-include', '${BASE_FILE:-base.yaml}']]],
+        ['an include project_directory outside the base', 'include:\n  - path: ./local.yaml\n    project_directory: ../shared-common\nservices: {}\n', [['parse-error', null]]],
+    ])('refuses %s as fatal', async (_label, compose, expected) => {
+        const clone = makeClone({
+            'compose.yaml': compose,
+            'local.yaml': 'services:\n  web:\n    image: nginx\n',
+        });
+        const result = await discovery().discoverFromClone({ cloneDir: clone, composePaths: ['compose.yaml'], contextDir: null, bounds: BOUNDS });
+        expect(result.refusals.map((r) => [r.kind, r.sourcePath])).toEqual(expected);
+        expect(result.refusals.every((r) => r.actionable)).toBe(true);
     });
 });
 

@@ -115,8 +115,13 @@ describe('classifyFailure', () => {
       reason: 'mixed_replica_images',
     },
     {
-      name: 'host-absolute include coverage refusal',
-      message: 'Host-absolute include path cannot be captured for exact rollback',
+      name: 'case-colliding path coverage refusal',
+      message: 'Rollback coverage is unavailable: Case-colliding managed paths "App.conf" and "app.conf"',
+      reason: 'rollback_coverage_unavailable',
+    },
+    {
+      name: 'unreadable Mesh setting coverage refusal',
+      message: 'Rollback coverage is unavailable: Could not read Mesh enablement: database is locked',
       reason: 'rollback_coverage_unavailable',
     },
     {
@@ -131,6 +136,18 @@ describe('classifyFailure', () => {
     expect(result.reason).toBe(reason);
     expect(result.label.length).toBeGreaterThan(0);
     expect(result.suggestion.length).toBeGreaterThan(0);
+  });
+
+  it('keeps a coverage refusal classified when it carries a cause another rule would claim', () => {
+    expect(classifyFailure('Rollback coverage is unavailable: Could not read compose file compose.yaml: EACCES: permission denied').reason)
+      .toBe('rollback_coverage_unavailable');
+    expect(classifyFailure('Rollback coverage is unavailable: Cannot parse compose file compose.yaml: yaml: line 3').reason)
+      .toBe('rollback_coverage_unavailable');
+  });
+
+  it('does not classify the retired host-absolute refusal wording as a coverage refusal', () => {
+    expect(classifyFailure('Host-absolute include path cannot be captured for exact rollback').reason)
+      .not.toBe('rollback_coverage_unavailable');
   });
 
   it('short-circuits to node_unreachable when the route flags a dead daemon', () => {

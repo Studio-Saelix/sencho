@@ -212,7 +212,7 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 
 ## Telemetry and data handling
 
-Sencho does not emit telemetry, analytics, or crash reports, and makes no outbound calls to Sencho-controlled endpoints. Stack metadata, container inventory, and user activity never leave your instance.
+Sencho does not emit telemetry, analytics, or crash reports, and makes no outbound calls to Sencho-controlled endpoints. Stack metadata, container inventory, and user activity never leave your instance. The web UI, including its typefaces, is served by the instance.
 
 ---
 

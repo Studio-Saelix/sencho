@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl } from '@/lib/serviceUrl';
+import type { ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import {
   createMuteRuleWithToast,
   stackMuteAllDraft,
@@ -32,6 +33,7 @@ interface UseSidebarContextMenuOptions {
   activeNode: Node | null | undefined;
   isAdmin: boolean;
   can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
+  serviceUrlEntry?: ServiceUrlEntry | null;
 }
 
 export function useSidebarContextMenu({
@@ -42,6 +44,7 @@ export function useSidebarContextMenu({
   activeNode,
   isAdmin,
   can,
+  serviceUrlEntry = null,
 }: UseSidebarContextMenuOptions) {
   const { hasCapability } = useNodes();
   const buildMenuCtx = useCallback((file: string): StackMenuCtx => {
@@ -57,6 +60,10 @@ export function useSidebarContextMenu({
     // must not read as "ordinary stack", and an unverified port must not offer
     // Open App.
     const ready = stackListState.hydrationReady();
+    const generated = mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null;
+    const openStackOverride = file === stackListState.selectedFile
+      && serviceUrlEntry?.status === 'ready'
+      && Object.keys(serviceUrlEntry.serviceUrls).length === 1;
     return {
       stackStatus,
       ready,
@@ -64,9 +71,9 @@ export function useSidebarContextMenu({
       // stack as the Sencho instance. The `ready` gate plus the handler-boundary
       // rechecks are what block actions, not a falsified identity field.
       isSelfStack: stackListState.stackSelfFlags[file] === true,
-      // Only offer "Open App" when a browser-reachable URL can actually be built
-      // (a remote node with no API host, e.g. a pilot agent, yields none).
-      canOpenApp: ready && mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
+      // Offer Open App when a generated host:port link exists. The open stack
+      // also offers it when exactly one service URL is configured.
+      canOpenApp: ready && (generated || openStackOverride),
       isBusy: stackListState.isStackBusy(file),
       isAdmin,
       canDelete: can('stack:delete', 'stack', sName, nodeId),
@@ -198,7 +205,7 @@ export function useSidebarContextMenu({
     stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin, can,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url, activeNode?.id,
-    hasCapability, navState.openMuteRulesWithPrefill,
+    hasCapability, navState.openMuteRulesWithPrefill, serviceUrlEntry, stackListState.selectedFile,
   ]);
 
   return buildMenuCtx;

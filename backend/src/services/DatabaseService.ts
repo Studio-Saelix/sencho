@@ -33,6 +33,16 @@ function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
 }
 
+export interface MeshStackRow {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    created_at: number;
+    created_by: string | null;
+    /** JSON array of `{ service, ports }` last seen while the node was reachable. */
+    last_known_services?: string | null;
+}
+
 export interface Agent {
     id?: number;
     type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
@@ -1294,6 +1304,7 @@ export class DatabaseService {
         this.migrateGitOpsCreateCheckpointSshDeployKey();
         this.migrateGitOpsPauseOrigin();
         this.migrateGitOpsRolloutWithdrawal();
+        this.migrateGitOpsSourceConfirmation();
         this.migrateNodeUpdateSkips();
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
@@ -2415,12 +2426,21 @@ export class DatabaseService {
         // convenience that degrades gracefully offline); operators on air-gapped
         // or firewalled hosts can turn it off.
         stmt.run('cve_intel_enabled', '1');
+        // Evidence-availability policy: what the deploy gate may do when it
+        // cannot prove a target is safe. These defaults reproduce the gate's
+        // pre-policy behavior exactly, so seeding them changes no outcome on an
+        // existing install. A missing scanner still allows the deploy (a tool
+        // outage must not lock an operator out); a failed scan still blocks; a
+        // candidate that cannot be evaluated is still held, which is what the
+        // Git-managed source path did before it was configurable.
+        stmt.run('security_scanner_unavailable', 'allow');
+        stmt.run('security_scan_failure', 'block');
+        stmt.run('security_candidate_unproven', 'block');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         // Managed by /api/sso/auth-mode, not the generic /api/settings route
         // (activation needs safety validation).
         stmt.run('authentication_mode', 'local_and_sso');
-        stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         // Superseded-generation retention (days) and a per-stack cap on total
@@ -3082,6 +3102,16 @@ stmt.run('gitops_schema_version', '1');
         this.cachedGlobalSettings = null;
     }
 
+    private migrateGitOpsSourceConfirmation(): void {
+        // A confirmed absence of placement has to stay distinct from an
+        // acceptance nobody confirmed, and the promise that a rollout would
+        // wait has to survive the request. Both live in this object. A null
+        // column means no object was stored. When the placement pointer is
+        // also set, the reader treats that pointer as a confirmation that
+        // must wait for a person.
+        this.tryAddColumn('gitops_approvals', 'source_confirmation_json', 'TEXT NULL');
+    }
+
     private migrateGitOpsCreateCheckpointSshDeployKey(): void {
         this.tryAddColumn('gitops_create_checkpoints', 'encrypted_deploy_key', 'TEXT');
         this.tryAddColumn('gitops_create_checkpoints', 'ssh_known_hosts_entry', 'TEXT');
@@ -3296,11 +3326,20 @@ stmt.run('gitops_schema_version', '1');
                         stack_name TEXT NOT NULL,
                         created_at INTEGER NOT NULL,
                         created_by TEXT,
+                        last_known_services TEXT,
                         UNIQUE(node_id, stack_name),
                         FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
                     )
                 `).run();
                 this.db.prepare('CREATE INDEX IF NOT EXISTS idx_mesh_stacks_node ON mesh_stacks(node_id)').run();
+                // Last services (JSON) seen for the stack while its node was
+                // reachable. Keeps aliases and port reservations stable while
+                // the node is offline. Declared in the CREATE above so a fresh
+                // install never depends on the ALTER; this covers a database
+                // created before the column existed. `listMeshStacks` selects
+                // the column unconditionally, so a failure here is not
+                // survivable by the callers, hence the loud error above.
+                this.tryAddColumn('mesh_stacks', 'last_known_services', 'TEXT');
             }
         } catch (e) {
             console.warn('[DatabaseService] mesh_stacks migration:', (e as Error).message);
@@ -3536,15 +3575,31 @@ stmt.run('gitops_schema_version', '1');
 
     // --- Sencho Mesh ---
 
-    public listMeshStacks(nodeId?: number): Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }> {
+    /**
+     * Rows come back in opt-in order (oldest first), so the earliest opt-in
+     * deterministically owns a port if two rows ever claim the same one.
+     */
+    public listMeshStacks(nodeId?: number): MeshStackRow[] {
         if (isPilotMode()) return [];
+        const cols = 'id, node_id, stack_name, created_at, created_by, last_known_services';
         const sql = nodeId !== undefined
-            ? 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks WHERE node_id = ?'
-            : 'SELECT id, node_id, stack_name, created_at, created_by FROM mesh_stacks';
+            ? `SELECT ${cols} FROM mesh_stacks WHERE node_id = ? ORDER BY id`
+            : `SELECT ${cols} FROM mesh_stacks ORDER BY id`;
         const rows = nodeId !== undefined
             ? this.db.prepare(sql).all(nodeId)
             : this.db.prepare(sql).all();
-        return rows as Array<{ id: number; node_id: number; stack_name: string; created_at: number; created_by: string | null }>;
+        return rows as MeshStackRow[];
+    }
+
+    /**
+     * Rewrite a membership's saved services by row id. The id is the identity
+     * here: a refresh that started before an opt-out/opt-in cycle still holds
+     * the old row, and its delayed answer must not land in the replacement.
+     */
+    public setMeshStackLastKnownServices(id: number, servicesJson: string): void {
+        if (isPilotMode()) return;
+        this.db.prepare('UPDATE mesh_stacks SET last_known_services = ? WHERE id = ?')
+            .run(servicesJson, id);
     }
 
     public isMeshStackEnabled(nodeId: number, stackName: string): boolean {
@@ -3553,14 +3608,21 @@ stmt.run('gitops_schema_version', '1');
         return !!row;
     }
 
-    public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): void {
+    /**
+     * Insert a membership and return the new row id. The id is the membership's
+     * identity for saved-service updates, so an opt-in can seed the observation
+     * it already made before another refresh runs. Returns null on a pilot,
+     * where memberships live on central.
+     */
+    public insertMeshStack(nodeId: number, stackName: string, createdBy: string | null): number | null {
         if (isPilotMode()) {
             console.warn(`[DatabaseService] insertMeshStack ignored on pilot (node=${nodeId}, stack=${stackName})`);
-            return;
+            return null;
         }
-        this.db.prepare(
+        const info = this.db.prepare(
             'INSERT INTO mesh_stacks (node_id, stack_name, created_at, created_by) VALUES (?, ?, ?, ?)'
         ).run(nodeId, stackName, Date.now(), createdBy);
+        return Number(info.lastInsertRowid);
     }
 
     public deleteMeshStack(nodeId: number, stackName: string): void {
@@ -4238,8 +4300,23 @@ stmt.run('gitops_schema_version', '1');
     }
 
     public updateGlobalSetting(key: string, value: string): void {
+        this.updateGlobalSettings({ [key]: value });
+    }
+
+    /**
+     * Write several settings as one unit. A caller saving a group of related
+     * keys would otherwise leave half of them applied if the third statement
+     * failed, which is worse than applying none: the operator's saved intent
+     * becomes unrecoverable without knowing which half landed. Invalidates the
+     * settings cache once rather than per key.
+     */
+    public updateGlobalSettings(values: Readonly<Record<string, string>>): void {
+        const entries = Object.entries(values);
+        if (entries.length === 0) return;
         const stmt = this.db.prepare('INSERT OR REPLACE INTO global_settings (key, value) VALUES (?, ?)');
-        stmt.run(key, value);
+        this.db.transaction(() => {
+            for (const [key, value] of entries) stmt.run(key, value);
+        })();
         this.cachedGlobalSettings = null;
     }
 

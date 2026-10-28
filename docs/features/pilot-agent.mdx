@@ -3,7 +3,7 @@ title: Pilot Agent
 description: Connect a remote Sencho node to your control instance through a single outbound WebSocket tunnel. No inbound ports, no TLS certificates, no public URL on the remote host.
 ---
 
-Pilot Agent is one of Sencho's two remote-node modes. A small agent container runs on the remote host, dials your control instance over a single outbound WebSocket, and holds that connection open. Every request the control instance sends to that node rides through the same tunnel (HTTP, WebSocket, and, when that limited-availability surface is present, mesh TCP). The remote host never opens an inbound port and never needs a TLS certificate of its own.
+Pilot Agent is one of Sencho's two remote-node modes. A headless Sencho agent container runs on the remote host, dials your control instance over a single outbound WebSocket, and holds that connection open. Every request the control instance sends to that node rides through the same tunnel (HTTP, WebSocket, and, when that limited-availability surface is present, mesh TCP). The remote host never opens an inbound port and never needs a TLS certificate of its own.
 
 This page is the architecture-and-operations reference for Pilot Agent. For the step-by-step UI walkthrough that adds a remote node, see [Multi-Node Management](/features/multi-node).
 
@@ -20,7 +20,9 @@ There are two remote modes, chosen per node when you register it:
 - **Pilot Agent** (this page). The remote dials the control instance. Outbound HTTPS from the remote is the only network requirement.
 - **Distributed API Proxy** ([documented under Multi-Node Management](/features/multi-node)). The control instance dials the remote. The remote must expose a reachable URL.
 
-Both modes are first-class. They can coexist on the same control instance, one per node. Pilot Agent is part of Sencho's Community-tier core surface; there is no license gate on using it.
+Both modes are first-class. They can coexist on the same control instance, one per node.
+
+The agent is not a separate lightweight program. It is the standard `saelix/sencho` image running the same Sencho backend, started with `SENCHO_MODE=pilot` so it runs as a headless, outbound-only node: it serves no UI, opens no inbound port, and takes its instructions from the control instance over the tunnel. Pilot Agent is part of Sencho's Community-tier core surface; there is no license gate on using it.
 
 ## When to choose Pilot Agent
 
@@ -234,7 +236,7 @@ volumes:
   sencho-agent-data:
 ```
 
-The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on.
+The agent uses the bundle as the only trust anchor for the tunnel WebSocket. TLS verification stays on. For a walkthrough that creates the CA and checks the connection from the agent's side, see [Serve Sencho Over HTTPS and Enroll a Pilot Agent](/tutorials/serve-sencho-over-https-and-enroll-a-pilot-agent).
 
 ## Resource limits
 

@@ -770,7 +770,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                                   key={`${pill.task.id}-${idx}-${pill.runAt}`}
                                   type="button"
                                   onClick={() => openRuns(pill.task)}
-                                  className="absolute top-1/2 -translate-y-1/2 h-6 px-2 rounded-sm text-[10px] font-mono tabular-nums flex items-center gap-1.5 border transition-transform hover:scale-105 hover:z-10 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand"
+                                  className="absolute top-1/2 h-6 px-2 rounded-sm text-[10px] font-mono tabular-nums flex items-center gap-1.5 border transition-transform hover:scale-105 hover:z-10 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand"
                                   style={{
                                     left: `${clamped}%`,
                                     backgroundColor: lane.bg,

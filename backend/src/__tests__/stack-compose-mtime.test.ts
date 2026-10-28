@@ -79,6 +79,7 @@ describe('GET /api/stacks/:stackName emits ETag with mtime', () => {
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('image: nginx');
+    expect(res.headers['x-compose-file']).toBe('compose.yaml');
     const etag = res.headers.etag;
     expect(etag).toMatch(/^W\/"\d+"$/);
     expect(parseEtag(etag)).toBeGreaterThan(0);
@@ -146,16 +147,168 @@ describe('PUT /api/stacks/:stackName optimistic concurrency', () => {
   it('writes through when the file does not exist yet (first save creates compose.yaml)', async () => {
     const stackDir = path.join(composeDir, STACK);
     fs.mkdirSync(stackDir, { recursive: true });
-    fs.writeFileSync(path.join(stackDir, 'docker-compose.yaml'), 'legacy', 'utf-8');
 
     const putRes = await request(app)
       .put(`/api/stacks/${STACK}`)
       .set('Cookie', authCookie)
-      .set('If-Match', 'W/"1234"')
       .send({ content: 'fresh' });
 
     expect(putRes.status).toBe(200);
     expect(fs.readFileSync(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('fresh');
+  });
+
+  it('writes an existing docker-compose.yml in place when that is the file that was opened', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const filePath = path.join(stackDir, 'docker-compose.yml');
+    fs.writeFileSync(filePath, 'original', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.headers['x-compose-file']).toBe('docker-compose.yml');
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', getRes.headers.etag)
+      .set('X-Compose-File', 'docker-compose.yml')
+      .send({ content: 'updated' });
+
+    expect(putRes.status).toBe(200);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('updated');
+    expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(false);
+  });
+
+  it('updates docker-compose.yml in place when the save does not name the file', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const filePath = path.join(stackDir, 'docker-compose.yml');
+    fs.writeFileSync(filePath, 'original', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', getRes.headers.etag)
+      .send({ content: 'updated' });
+
+    expect(putRes.status).toBe(200);
+    expect(fs.readFileSync(filePath, 'utf-8')).toBe('updated');
+    expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(false);
+  });
+
+  it('reads a compose.yaml symlink that stays inside the stack directory', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const target = path.join(stackDir, 'real.yaml');
+    fs.writeFileSync(target, 'inside', 'utf-8');
+    fs.symlinkSync(target, path.join(stackDir, 'compose.yaml'));
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(200);
+    expect(getRes.text).toBe('inside');
+  });
+
+  it('opens a compose file that links into another stack but refuses to save through it', async () => {
+    const otherDir = path.join(composeDir, 'other');
+    fs.mkdirSync(otherDir, { recursive: true });
+    const otherCompose = path.join(otherDir, 'compose.yaml');
+    fs.writeFileSync(otherCompose, 'services: { other: {} }', 'utf-8');
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync('../other/compose.yaml', path.join(stackDir, 'docker-compose.yml'));
+
+    try {
+      // The link stays inside the compose root, so this stack's compose file is
+      // the shared one and docker compose loads it on a deploy. The editor opens
+      // it, and the save is refused so the write never lands in the other stack.
+      const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+      expect(getRes.status).toBe(200);
+      expect(getRes.text).toBe('services: { other: {} }');
+
+      const putRes = await request(app)
+        .put(`/api/stacks/${STACK}`)
+        .set('Cookie', authCookie)
+        .set('X-Compose-File', 'docker-compose.yml')
+        .send({ content: 'services: { pwned: {} }' });
+      expect(putRes.status).toBe(409);
+      expect(putRes.body.error).toContain('cannot save it here');
+      expect(fs.readFileSync(otherCompose, 'utf-8')).toBe('services: { other: {} }');
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to read or save a compose file that links out of the compose directory', async () => {
+    const outside = path.join(tmpDir, 'outside-compose.yaml');
+    fs.writeFileSync(outside, 'services: { outside: {} }', 'utf-8');
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync(outside, path.join(stackDir, 'compose.yaml'));
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(409);
+    expect(getRes.body.error).toBe('The compose file links outside the stack directory. Use include: to share a file between stacks.');
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('X-Compose-File', 'compose.yaml')
+      .send({ content: 'services: { pwned: {} }' });
+    expect(putRes.status).toBe(409);
+    expect(fs.readFileSync(outside, 'utf-8')).toBe('services: { outside: {} }');
+  });
+
+  it('refuses a dangling compose.yaml even when compose.yml is present', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.symlinkSync(path.join(stackDir, 'missing.yaml'), path.join(stackDir, 'compose.yaml'));
+    fs.writeFileSync(path.join(stackDir, 'compose.yml'), 'fallback', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    expect(getRes.status).toBe(409);
+    expect(getRes.body.error).toBe('The compose file links outside the stack directory. Use include: to share a file between stacks.');
+    expect(fs.readFileSync(path.join(stackDir, 'compose.yml'), 'utf-8')).toBe('fallback');
+  });
+
+  it('returns 412 and writes nothing when a higher-priority compose file appears after the read', async () => {
+    const stackDir = path.join(composeDir, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    const original = path.join(stackDir, 'docker-compose.yml');
+    fs.writeFileSync(original, 'original', 'utf-8');
+
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    const intruder = path.join(stackDir, 'compose.yaml');
+    fs.writeFileSync(intruder, 'intruder', 'utf-8');
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', getRes.headers.etag)
+      .set('X-Compose-File', 'docker-compose.yml')
+      .send({ content: 'updated' });
+
+    expect(putRes.status).toBe(412);
+    expect(putRes.body.code).toBe('compose_source_changed');
+    expect(putRes.body.filename).toBe('compose.yaml');
+    expect(fs.readFileSync(original, 'utf-8')).toBe('original');
+    expect(fs.readFileSync(intruder, 'utf-8')).toBe('intruder');
+  });
+
+  it('returns 412 and does not create a file when the opened compose file was removed', async () => {
+    const filePath = seedStack(STACK, 'original');
+    const getRes = await request(app).get(`/api/stacks/${STACK}`).set('Cookie', authCookie);
+    fs.rmSync(filePath);
+
+    const putRes = await request(app)
+      .put(`/api/stacks/${STACK}`)
+      .set('Cookie', authCookie)
+      .set('If-Match', getRes.headers.etag)
+      .set('X-Compose-File', 'compose.yaml')
+      .send({ content: 'updated' });
+
+    expect(putRes.status).toBe(412);
+    expect(putRes.body.code).toBe('compose_source_changed');
+    expect(fs.existsSync(filePath)).toBe(false);
   });
 
   it('detects a near-boundary mtime change (Math.floor precision)', async () => {

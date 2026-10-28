@@ -95,8 +95,9 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Integration image** badge | Warning pill shown, for every role, whenever the local node's Sencho image is pinned to the `sencho-dev` integration repository (see [Verifying images](/operations/verifying-images)). Persistent: it shows whether or not a newer build is currently available. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
 | **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
+| **GitOps** chip | Outline pill reading `GitOps · <n> attention`, shown when `<n>` Git-managed applications involving this node need you. Click it to open the [GitOps portfolio](/features/gitops-portfolio) filtered to this node's attention queue. |
 | **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
-| **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. |
+| **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. It stays on the card next to the **Offline** badge while the node is unreachable. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
 | **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
 | **Update to v…** button | Admin-only outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
@@ -288,7 +289,7 @@ A summary strip above the map counts four kinds of issue, and the affected eleme
 
 ### When a node can't be reached
 
-The map is fleet-wide: the control instance gathers each node's view and merges them. Nodes are read a few at a time and each one is drawn as soon as it answers, with `n of N nodes` beside **Refresh** while the rest are pending, so a slow node never holds back the others. If a node is offline or unreachable, a banner names it with the reason (for example `Timed out after 8s` or `Pilot tunnel is disconnected`) and the rest of the fleet still draws. **Retry** in the banner reloads only the nodes that failed. Reopening the tab shows the last map at once and refreshes it in the background once it is a minute old.
+The map is fleet-wide: the control instance gathers each node's view and merges them. Nodes are read a few at a time and each one is drawn as soon as it answers, with `n of N nodes` beside **Refresh** while the rest are pending, so a slow node never holds back the others. If a node is offline or unreachable, a banner names it with the reason (for example `Timed out after 8s` or `Timed out reading this node`) and the rest of the fleet still draws. **Retry** in the banner reloads only the nodes that failed. Reopening the tab shows the last map at once and refreshes it in the background once it is a minute old.
 
 ## Node Updates
 
@@ -309,7 +310,7 @@ Four tiles tell you how the fleet is split across update states:
 
 | Card | Meaning |
 |------|---------|
-| **Up to date** | Nodes whose current version equals the latest published Sencho release. |
+| **Up to date** | Nodes whose current version equals the latest published Sencho release. A node that cannot be reached is not counted here, since its version is unknown. |
 | **Available** | Nodes with a published update they are not yet running. Combines a pending stable release with a pending dev build on a `:dev`-pinned local node. |
 | **Updating** | Nodes that are currently pulling and recreating with the new image. |
 | **Failed** | Nodes whose most-recent update attempt did not succeed (failure or timeout). |
@@ -324,7 +325,7 @@ The table lists every registered node, filtered by the search box at the top. Co
 | **Type** | `local` or `remote` outline pill |
 | **Current** | The node's reported Sencho version, in mono. Reads `unknown` if the node has not reported (offline, unreachable, or never connected). |
 | **Latest** | The newest published Sencho release. Highlighted when newer than Current. Reads **Integration build** on a `:dev`-pinned local node, since a dev build has no version number to compare against. |
-| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release or dev build is available, an icon-only **Reapply configuration** control (tooltip) for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
+| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release or dev build is available, an icon-only **Reapply configuration** control (tooltip) for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, an `Offline` badge when the node cannot be reached, or a `Skipped` badge when the version has been deferred. The `Offline` and `Skipped` badges are independent: a skip outlasts a lost connection, so an unreachable node with a skipped version shows both. |
 
 The latest-version label is resolved from the GitHub Releases API (with a Docker Hub fallback) and cached for 30 minutes. **Recheck** flushes the cache and re-resolves immediately. See [Remote Updates · Reapply configuration](/features/remote-updates#reapply-configuration) for what reapply does and when to use it.
 

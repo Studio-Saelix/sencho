@@ -1,4 +1,4 @@
-import { Suspense, useRef, useEffect, useState } from 'react';
+import { Suspense, useMemo, useRef, useEffect, useState } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import {
     Save,
@@ -52,6 +52,8 @@ import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import { composeServiceNames } from '@/lib/composeServiceUrl';
+import { lockedServiceUrlReasons, type ServiceUrlEntry } from '@/lib/serviceUrlResolve';
 import type { GitSourcePendingMap } from '@/lib/gitopsState';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
@@ -204,6 +206,9 @@ export interface EditorViewProps {
     serviceUpdateStatuses?: StackServiceUpdateStatus[];
     serviceUpdateInProgress?: { service: string; mode: 'update' | 'rebuild' } | null;
     onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
+    serviceUrlEntry?: ServiceUrlEntry | null;
+    onEditServiceUrl?: (serviceName: string) => void;
+    onRetryServiceUrls?: () => void;
 
     // UI state setters
     setActiveTab: (tab: 'compose' | 'env' | 'files') => void;
@@ -309,6 +314,9 @@ export function EditorView(props: EditorViewProps) {
         serviceUpdateStatuses = [],
         serviceUpdateInProgress = null,
         onRequestServiceUpdate,
+        serviceUrlEntry = null,
+        onEditServiceUrl,
+        onRetryServiceUrls,
         setActiveTab,
         setLogsMode,
         setEditingCompose,
@@ -326,6 +334,8 @@ export function EditorView(props: EditorViewProps) {
         stackMuteActions,
         hasUnsavedChanges,
     } = props;
+    const sourceServices = useMemo(() => composeServiceNames(content || ''), [content]);
+    const lockedServices = useMemo(() => lockedServiceUrlReasons(serviceUrlEntry), [serviceUrlEntry]);
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
     const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
     // Pulling stages images for a deploy, so it takes the edit authority for the
@@ -468,6 +478,7 @@ export function EditorView(props: EditorViewProps) {
             canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
             notifications={notifications}
             requestedTab={props.requestedAnatomyTab}
+            serviceUrlEntry={serviceUrlEntry}
         />
     );
 
@@ -475,11 +486,11 @@ export function EditorView(props: EditorViewProps) {
 
     return (
         <ErrorBoundary>
-            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+            <div className={`grid min-w-0 gap-6 ${filesFullscreen ? 'grid-cols-1' : anatomyResizable ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_24px_auto] lg:gap-0' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
                 {/* Left column: identity + health strip + logs, stacked. Hidden in
                     files fullscreen so the editor card fills the width. */}
                 {!filesFullscreen && (
-                <div className="flex flex-col gap-6 min-h-0" data-testid="stack-detail-primary-pane">
+                <div className="flex min-h-0 min-w-0 flex-col gap-6" data-testid="stack-detail-primary-pane">
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (
@@ -538,7 +549,11 @@ export function EditorView(props: EditorViewProps) {
                         />
                         {isMultiContainerLayout ? (
                         <CardContent className="p-4 pt-2 flex-1 min-h-0">
-                            <ScrollArea className="h-full">
+                            {/* `block` keeps every card inside the pane width: the default
+                                table wrapper sizes a card to its widest row, which pushes
+                                the port link past the pane edge. The card wraps its action
+                                icons so that clamp does not crush the port line. */}
+                            <ScrollArea className="h-full" block>
                                 <ContainersHealth
                                     safeContainers={safeContainers}
                                     containerStats={containerStats}
@@ -554,6 +569,12 @@ export function EditorView(props: EditorViewProps) {
                                     serviceUpdateStatuses={serviceUpdateStatuses}
                                     serviceUpdateInProgress={serviceUpdateInProgress}
                                     onRequestServiceUpdate={onRequestServiceUpdate}
+                                    serviceUrlEntry={serviceUrlEntry}
+                                    canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                    sourceServices={sourceServices}
+                                    lockedServices={lockedServices}
+                                    onEditServiceUrl={onEditServiceUrl}
+                                    onRetryServiceUrls={onRetryServiceUrls}
                                     containersExpanded={containersExpanded}
                                     onToggleContainersExpand={toggleContainersExpand}
                                     containersLoadStatus={containersLoadStatus}
@@ -582,6 +603,12 @@ export function EditorView(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                serviceUrlEntry={serviceUrlEntry}
+                                canEditServiceUrl={can('stack:edit', 'stack', stackName, activeNode?.id)}
+                                sourceServices={sourceServices}
+                                lockedServices={lockedServices}
+                                onEditServiceUrl={onEditServiceUrl}
+                                onRetryServiceUrls={onRetryServiceUrls}
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}
                                 onRetryContainersLoad={onRetryContainersLoad}
@@ -607,9 +634,11 @@ export function EditorView(props: EditorViewProps) {
 
                 {/* Right column: anatomy panel by default, Monaco editor when editing */}
                 {editingCompose ? (
-                    <Card className="rounded-xl border-muted overflow-hidden flex flex-col h-full min-h-0 bg-card">
-                        <div className="p-4 border-b border-muted flex items-center justify-between shrink-0">
-                            <div className="flex items-center gap-4">
+                    <Card className="rounded-xl border-muted overflow-hidden flex flex-col h-full min-h-0 min-w-0 bg-card">
+                        {/* Wrap inside the pane. Do not shrink the split save control,
+                            or its chevron gets clipped. */}
+                        <div className="p-4 border-b border-muted flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0 min-w-0">
+                            <div className="flex flex-wrap items-center gap-4 min-w-0">
                                 <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
@@ -646,7 +675,7 @@ export function EditorView(props: EditorViewProps) {
                                     </Select>
                                 )}
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
                                 {activeTab !== 'files' && canEditCompose && (
                                     <>
                                         <Button
@@ -661,14 +690,14 @@ export function EditorView(props: EditorViewProps) {
                                                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brand animate-pulse" />
                                             )}
                                         </Button>
-                                        <div className="flex items-center">
+                                        <div className="flex shrink-0 items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={lifecycleBusy || !actionsReady}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                                 {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy}>
+                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={lifecycleBusy} aria-label="More save actions">
                                                         <ChevronDown className="w-3.5 h-3.5" />
                                                     </Button>
                                                 </DropdownMenuTrigger>

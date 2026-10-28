@@ -22,7 +22,9 @@ import { MeshService } from './MeshService';
 import { NotificationService } from './NotificationService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
+import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { sanitizeForLog } from '../utils/safeLog';
+import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
   BLUEPRINT_MARKER_FILENAME,
@@ -64,7 +66,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -301,6 +303,12 @@ export class DeployedStackDeletionService {
           removeVolumes: intent.prune_volumes_requested === 1,
         });
       } catch (downErr) {
+        // A refusal is not a failed teardown: the stack still runs, so its
+        // files and records must stay.
+        if (isDockerEndpointProtectedError(downErr)) {
+          db.updateCleanupPendingStatus(intentId, 'cancelled');
+          return { ok: false, code: 'docker_endpoint_protected', error: downErr.message };
+        }
         console.warn(
           '[DeployedStackDeletion] Compose down failed or no-op for %s:',
           sanitizeForLog(stackName),
@@ -417,6 +425,7 @@ export class DeployedStackDeletionService {
       db.deleteStackProjectEnvFiles(nodeId, stackName);
       db.deleteStackScans(nodeId, stackName);
       db.deleteNotificationsForStack(nodeId, stackName);
+      removeStackMuteRules(nodeId, stackName);
     } catch (dbErr) {
       console.error(
         '[DeployedStackDeletion] Secondary DB cleanup failed for %s; recovery rows already retired:',

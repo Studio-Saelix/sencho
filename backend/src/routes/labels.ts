@@ -9,7 +9,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { requireBody } from '../middleware/tierGates';
-import { buildPolicyGateOptions, describePolicyBlock } from '../helpers/policyGate';
+import { allowedPolicyEvidence, buildPolicyGateOptions, describePolicyBlock, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { VALID_LABEL_COLORS, MAX_LABELS_PER_NODE } from '../helpers/constants';
 import { isValidStackName } from '../utils/validation';
@@ -210,7 +210,7 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
     try {
       if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action start:', { id, action, nodeId, totalLabeled: stackNames.length, validStacks: validStacks.length, dryRun: isDryRun });
 
-      const results: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];
+      const results: { stackName: string; success: boolean; error?: string; dryRun?: boolean; policyEvidence?: AllowedPolicyEvidence }[] = [];
 
       for (const stackName of validStacks) {
         // Client disconnected mid-bulk: stop dispatching new per-stack ops.
@@ -223,6 +223,7 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
           if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action aborted by client at stack:', stackName);
           break;
         }
+        let allowedEvidence: { policyEvidence?: AllowedPolicyEvidence } = {};
         try {
           if (action === 'deploy') {
             // Policy gate runs for both real and dry-run deploys: a dry-run
@@ -231,15 +232,22 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             const gate = await enforcePolicyPreDeploy(
               stackName,
               req.nodeId,
-              buildPolicyGateOptions(req),
+              // A dry run allows nothing, so it leaves no allowed-evidence row.
+              { ...buildPolicyGateOptions(req), recordAllowedEvidence: !isDryRun },
             );
             if (!gate.ok) {
-              const blockedMsg = describePolicyBlock(gate.policy, gate.violations);
+              const blockedMsg = describePolicyBlock(gate.policy, gate.violations, 'deploy', gate.evidence);
               results.push({ stackName, success: false, error: blockedMsg, ...(isDryRun ? { dryRun: true } : {}) });
               continue;
             }
+            allowedEvidence = allowedPolicyEvidence(gate);
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true });
+              // A dry run answers what the real run would, and the real run is
+              // refused when it would recreate the container carrying the Docker connection.
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: 'up' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true, ...allowedEvidence });
               continue;
             }
             // Per-stack lock so a bulk deploy cannot race a manual
@@ -258,10 +266,13 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               continue;
             }
           } else {
-            // stop / restart have no pre-action policy gate; dry-run just
-            // confirms the stack would be reached.
+            // stop / restart have no pre-action policy gate; dry-run confirms
+            // the stack would be reached and that the Docker endpoint guard allows it.
             if (isDryRun) {
-              results.push({ stackName, success: true, dryRun: true });
+              const refusal = await ComposeService.getInstance(req.nodeId).evaluateDockerEndpoint(stackName, { kind: action === 'stop' ? 'stop' : 'restart' });
+              results.push(refusal
+                ? { stackName, success: false, error: refusal.message, dryRun: true }
+                : { stackName, success: true, dryRun: true });
               continue;
             }
             const lock = await StackOpLockService.getInstance().runExclusive(
@@ -276,16 +287,20 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
                 // failed update. Only when there is something to act on, so a
                 // stack with no containers does not cost a live gate.
                 if (containers.length > 0) {
+                  // Before anything is touched: a batch that holds the Docker
+                  // endpoint container is refused whole, not half-stopped.
+                  await dockerController.assertNoDockerEndpointContainers(containers.map(c => c.Id), action);
                   HealthGateService.getInstance().supersedeForContainerOp(
                     req.nodeId,
                     stackName,
                     `the stack was ${action === 'stop' ? 'stopped' : 'restarted'} during the observation`,
                   );
                 }
+                // The batch was just checked as a whole, so each container skips its own check.
                 if (action === 'stop') {
-                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.stopContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 } else {
-                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id)));
+                  await Promise.all(containers.map(c => dockerController.restartContainer(c.Id, { endpointGuard: 'batch-checked' })));
                 }
               },
             );
@@ -294,7 +309,7 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               continue;
             }
           }
-          results.push({ stackName, success: true });
+          results.push({ stackName, success: true, ...allowedEvidence });
         } catch (err: unknown) {
           results.push({ stackName, success: false, error: getErrorMessage(err, 'Unknown error') });
         }

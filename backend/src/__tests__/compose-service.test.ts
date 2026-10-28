@@ -7,13 +7,16 @@ import { EventEmitter } from 'events';
 import os from 'os';
 import path from 'path';
 import type WebSocket from 'ws';
+import { WITHHELD_DECRYPTED_COMPOSE_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { WITHHELD_DECRYPTED_RENDER_OUTPUT, WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT } from '../helpers/decryptedComposeOutput';
+import { gitSecretsAreaBase } from '../services/gitops/managedPaths';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
 const {
   mockSpawn,
   mockGetContainersByStack, mockGetLegacyOrphanContainersByStack, mockRemoveContainers, mockListContainers,
-  mockContainerInspect, mockContainerLogs,
+  mockContainerInspect, mockContainerLogs, mockImageInspect,
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
@@ -54,6 +57,7 @@ const {
   mockRemoveContainers: vi.fn().mockResolvedValue([]),
   mockListContainers: vi.fn().mockResolvedValue([]),
   mockContainerInspect: vi.fn().mockResolvedValue({ State: { ExitCode: 0 } }),
+  mockImageInspect: vi.fn(),
   mockContainerLogs: vi.fn().mockResolvedValue(Buffer.from('')),
   mockGetRegistries: vi.fn().mockReturnValue([]),
   mockResolveDockerConfig: vi.fn().mockResolvedValue({ config: { auths: {} }, warnings: [] }),
@@ -140,6 +144,7 @@ vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('fs', () => ({
   default: {
+    existsSync: () => false,
     mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
     writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
     unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
@@ -151,6 +156,7 @@ vi.mock('fs', () => ({
       rm: (path: string, opts?: unknown) => mockPromisesRm(path, opts),
     },
   },
+  existsSync: () => false,
   mkdtempSync: (...args: unknown[]) => mockMkdtempSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
@@ -161,6 +167,15 @@ vi.mock('fs', () => ({
     writeFile: (path: string, data: string | Buffer, opts?: unknown) => mockPromisesWriteFile(path, data, opts),
     rm: (path: string, opts?: unknown) => mockPromisesRm(path, opts),
   },
+}));
+
+const { mockEvaluateDockerEndpointGuard } = vi.hoisted(() => ({
+  mockEvaluateDockerEndpointGuard: vi.fn(),
+}));
+
+vi.mock('../helpers/dockerEndpointGuard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../helpers/dockerEndpointGuard')>()),
+  evaluateDockerEndpointGuard: mockEvaluateDockerEndpointGuard,
 }));
 
 vi.mock('../services/NodeRegistry', () => ({
@@ -187,6 +202,7 @@ vi.mock('../services/DockerController', () => ({
           inspect: mockContainerInspect,
           logs: mockContainerLogs,
         }),
+        getImage: () => ({ inspect: mockImageInspect }),
       }),
     }),
   },
@@ -371,6 +387,7 @@ beforeEach(() => {
   mockGetRegistries.mockReturnValue([]);
   mockResolveDockerConfig.mockResolvedValue({ config: { auths: {} }, warnings: [] });
   mockGetBindMounts.mockResolvedValue(null);
+  mockEvaluateDockerEndpointGuard.mockResolvedValue(null);
   mockLoadStackBuildServices.mockResolvedValue([]);
   mockResolveMissingExternalNetworks.mockResolvedValue({
     status: 'ok',
@@ -422,6 +439,352 @@ afterEach(() => {
   } else {
     process.env.SENCHO_MODE = originalSenchoMode;
   }
+});
+
+// ── Docker endpoint guard wiring ───────────────────────────────────────
+
+describe('ComposeService - Docker endpoint guard', () => {
+  const refusal = {
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+  };
+
+  it.each(['stop', 'restart', 'down'] as const)('refuses runCommand %s before spawning compose', async (action) => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', action)).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    });
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('classifies restart separately from stop, so restarting Sencho stays allowed', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    const svc = ComposeService.getInstance(1);
+
+    const restart = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await restart;
+    const stop = svc.runCommand('my-stack', 'stop');
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+    proc.emit('close', 0);
+    await stop;
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['restart', 'stop']);
+  });
+
+  it('does not consult the guard for start', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).runCommand('my-stack', 'start');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+  });
+
+  it('refuses runDown, downStack, and a service-scoped update for the protected service', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.runDown('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    // downStack swallows teardown failures; a refusal is not one of them.
+    await expect(svc.downStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateService('my-stack', 'socket-proxy', false)).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.recreateServiceFromLocal('my-stack', 'socket-proxy')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const mutations = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation);
+    expect(mutations).toEqual([
+      { kind: 'stop' },
+      { kind: 'stop' },
+      { kind: 'service', service: 'socket-proxy' },
+      { kind: 'service', service: 'socket-proxy' },
+    ]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses deployStack and updateStack before any compose work starts', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const svc = ComposeService.getInstance(1);
+
+    await expect(svc.deployStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await expect(svc.updateStack('my-stack')).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    const kinds = mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation.kind);
+    expect(kinds).toEqual(['up', 'update']);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('refuses a recovery up, which pins every service to its rollback tag, as an update of the stack', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+
+    await expect(
+      ComposeService.getInstance(1).composeUpWithRecoveryOverride('my-stack', '/tmp/override.yml'),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls.map(call => call[0].mutation)).toEqual([{ kind: 'update' }]);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('names the services a digest-pin overlay rewrites, which the config hash cannot see', async () => {
+    mockEvaluateDockerEndpointGuard.mockResolvedValue(refusal);
+    const pin = `socket-proxy@sha256:${'a'.repeat(64)}`;
+
+    await expect(
+      ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'blueprint', actor: 'system:blueprint', digestPins: { 'socket-proxy': pin } }),
+    ).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+
+    expect(mockEvaluateDockerEndpointGuard.mock.calls[0][0].mutation).toEqual({ kind: 'up', pinnedServices: ['socket-proxy'] });
+  });
+
+  it('computes the hash against the overlay directory a GitOps deploy runs, not the live stack', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' }, '/tmp/overlay-dir');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/overlay-dir' }));
+  });
+
+  it('hands the guard the overlay a Git deploy runs, so the hash is computed against it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      await input.probes.configHash('socket-proxy');
+      return { reason: 'provider', service: 'socket-proxy', message: 'refused' };
+    });
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir: '/tmp/ov-guard' });
+    const settled = expect(deploy).rejects.toMatchObject({ code: 'docker_endpoint_protected' });
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await settled;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.any(Array), expect.objectContaining({ cwd: '/tmp/ov-guard' }));
+  });
+
+  it('looks up the local image id for the guard, and reports an uninspectable image as unknown', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const seen: unknown[] = [];
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { localImage(ref: string): Promise<unknown> } }) => {
+      mockImageInspect.mockResolvedValueOnce({ Id: 'sha256:abc' });
+      seen.push(await input.probes.localImage('proxy:latest'));
+      mockImageInspect.mockRejectedValueOnce(new Error('no such image'));
+      seen.push(await input.probes.localImage('proxy:latest'));
+      return null;
+    });
+
+    await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+    expect(seen).toEqual([{ state: 'id', id: 'sha256:abc' }, { state: 'unknown' }]);
+  });
+
+  it('hands the guard the Compose version that would run the deploy, so a container from another version is not called unchanged', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('5.6.0\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', ['compose', 'version', '--short'], expect.anything());
+    expect(version).toBe('5.6.0');
+  });
+
+  it('reports an unreadable Compose version as null rather than throwing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let version: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+      version = await input.probes.composeVersion();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('docker: unknown command'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(version).toBeNull();
+  });
+
+  it('gives up on a hung Compose version probe instead of blocking the deploy', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      let version: string | null = 'unset';
+      mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+        const pending = input.probes.composeVersion();
+        await vi.advanceTimersByTimeAsync(5_000);
+        version = await pending;
+        return null;
+      });
+
+      await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+      expect(proc.kill).toHaveBeenCalled();
+      expect(version).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands the guard the rendered Compose config, so a label set only in the file is seen', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let rendered: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      rendered = await input.probes.renderConfig();
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'stop' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: { proxy: { labels: { 'io.sencho.infrastructure': 'true' } } } })));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith('docker', expect.arrayContaining(['compose', 'config', '--format', 'json']), expect.anything());
+    expect(rendered).toContain('io.sencho.infrastructure');
+  });
+
+  it('tells the guard why the Compose config could not be rendered, so a failed render is a refusal and not an empty model', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('services.web.image must be a string\nsecond line'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('services.web.image must be a string');
+  });
+
+  it('says a render timed out, and withholds Compose\'s diagnostics for an overlay render', async () => {
+    const service = ComposeService.getInstance(1);
+    const render = vi.spyOn(service, 'renderConfig');
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: '', code: null, timedOut: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toBe('docker compose config timed out');
+
+    render.mockResolvedValueOnce({ rendered: null, stderr: 'secret=hunter2 is invalid', code: 1, timedOut: false, withheld: true });
+    await service.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    expect((failure as Error).message).toContain('diagnostics are withheld');
+    expect((failure as Error).message).not.toContain('hunter2');
+    render.mockRestore();
+  });
+
+  it('names the error in the render failure, not a warning Compose printed before it', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let failure: unknown = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { renderConfig(): Promise<string | null> } }) => {
+      failure = await input.probes.renderConfig().catch((error: unknown) => error);
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('time="2026-10-26T00:00:00Z" level=warning msg="The \\"FOO\\" variable is not set"\nWARN[0000] version is obsolete\nrequired variable BAR is missing a value: set BAR'));
+    proc.emit('close', 1);
+    await check;
+
+    expect((failure as Error).message).toBe('required variable BAR is missing a value: set BAR');
+  });
+
+  it('turns a guard check that cannot run into a refusal, never a pass', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockEvaluateDockerEndpointGuard.mockRejectedValue(new Error('node lookup failed'));
+
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toMatchObject({
+      name: 'DockerEndpointProtectedError',
+      reason: 'unresolved',
+    });
+    await expect(ComposeService.getInstance(1).runCommand('my-stack', 'stop')).rejects.toThrow(/node lookup failed/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('computes the config hash with the authored invocation and parses `service hash` output', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = null;
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const check = svc.evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from('socket-proxy 4f9a1c\n'));
+    proc.emit('close', 0);
+    await check;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'config', '--hash=socket-proxy'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') }),
+    );
+    expect(hash).toBe('4f9a1c');
+  });
+
+  it('reports an unavailable hash as null rather than throwing', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    let hash: string | null = 'unset';
+    mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { configHash(s: string): Promise<string | null> } }) => {
+      hash = await input.probes.configHash('socket-proxy');
+      return null;
+    });
+
+    const check = ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid compose project'));
+    proc.emit('close', 1);
+    await check;
+
+    expect(hash).toBeNull();
+  });
 });
 
 // ── runCommand ─────────────────────────────────────────────────────────
@@ -919,6 +1282,100 @@ describe('ComposeService - deployStack', () => {
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
+  // A Git deploy runs Compose out of a decrypt overlay, so the guard has to read
+  // the overlay: the live project may fail outright (a typed value held in an
+  // encrypted env file), and where it does render it describes a model the deploy
+  // is not about to run, which Compose can resolve differently once the values in
+  // front of a bind are decrypted. The mock below branches on the spawn's cwd, so
+  // each render is answered with the model that belongs to it: the live project
+  // clears the bind below, the overlay does not, and the refusal has to come from
+  // the overlay. Without a cwd branch one render would answer for both, which is
+  // the mistake this test exists to catch.
+  function setupOverlayBindRenders(options: {
+    overlayDir: string;
+    overlayBindSource: string;
+  }): () => number {
+    const composeDir = path.resolve('/test/compose');
+    // Reset explicitly: the file's beforeEach clears call records but not
+    // implementations, so a guard left on by an earlier test would put an extra
+    // Compose render in front of the assertions below.
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetBindMounts.mockResolvedValue([
+      { source: '/srv/example-apps', destination: composeDir },
+    ]);
+    let spawnCount = 0;
+    mockSpawn.mockImplementation((_command: string, _args: string[], opts: { cwd?: string }) => {
+      spawnCount += 1;
+      const proc = createMockProcess();
+      const source = opts?.cwd === options.overlayDir
+        ? options.overlayBindSource
+        : '/srv/postgres/data';
+      Promise.resolve().then(() => {
+        proc.stdout.emit('data', Buffer.from(JSON.stringify({
+          name: 'my-stack',
+          services: {
+            db: {
+              image: 'postgres:17',
+              volumes: [{
+                type: 'bind',
+                source,
+                target: '/var/lib/postgresql/data',
+              }],
+            },
+          },
+        })));
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    return () => spawnCount;
+  }
+
+  it('refuses a mismapped pilot overlay deploy whose overlay resolves a relative bind', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+    const spawnCount = setupOverlayBindRenders({
+      overlayDir,
+      overlayBindSource: path.join(overlayDir, 'data'),
+    });
+
+    const error = await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir })
+      .then(() => null, (e: Error) => e);
+
+    expect(error, 'the deploy must refuse, not resolve, on a relative bind only the overlay shows').not.toBeNull();
+    expect(error?.message).toContain('1:1');
+    expect(error?.message).toContain(path.resolve('/test/compose'));
+    expect(error?.message).toContain('/srv/example-apps');
+    // The refusal came before anything was cleaned up, removed, or started.
+    expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    // One render, no compose up: the containers were never replaced.
+    expect(spawnCount()).toBe(1);
+    expect(
+      mockSpawn.mock.calls.some((call) => Array.isArray(call[1]) && (call[1] as string[]).includes('up')),
+      'compose up must never run for a refused deploy',
+    ).toBe(false);
+  });
+
+  it('allows a mismapped pilot overlay deploy whose binds are all absolute external sources', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+    setupOverlayBindRenders({ overlayDir, overlayBindSource: '/srv/postgres/data' });
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, { source: 'git_apply', overlayDir });
+    await vi.advanceTimersByTimeAsync(3100);
+
+    await expect(promise).resolves.toEqual({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
+  });
+
   it('blocks a pilot service restore with relative binds before Compose up', async () => {
     process.env.SENCHO_MODE = 'pilot';
     const composeDir = path.resolve('/test/compose');
@@ -1340,6 +1797,30 @@ describe('ComposeService - deployStack', () => {
     expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
   });
 
+  it('keeps the original error and says why when the Docker endpoint guard refused the rollback', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([{
+      Id: 'crashed-c1',
+      State: 'exited',
+      Labels: { 'com.docker.compose.project': 'my-stack' },
+    }]);
+    mockContainerInspect.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockCompensateWithCandidate.mockRejectedValueOnce(
+      new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: 'Service "socket-proxy" carries the Docker connection.' }),
+    );
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('CONTAINER_CRASHED');
+    expect(error!.message).toContain('The rollback did not run: Service "socket-proxy" carries the Docker connection.');
+    expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+  });
+
   it('does not roll back when atomic=false', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([{
@@ -1452,6 +1933,345 @@ describe('ComposeService - deployStack', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // A deploy against a GitOps decrypt overlay runs Compose over decrypted
+  // secret files, and Compose echoes interpolated values back in its
+  // diagnostics (`unable to get image 'audit-...?': invalid reference
+  // format`). Nothing about that text is recognisable as a secret, so the
+  // whole subprocess output is withheld for the life of the operation rather
+  // than filtered. The control below pins the other side of the same
+  // boundary: a deploy without an overlay still reports Compose's words.
+  const leakingDiagnostic = 'unable to get image \'audit-decrypted-value-marker:?\': invalid reference format';
+
+  async function runFailingDeploy(
+    ctx?: { source: 'git_apply'; overlayDir: string },
+  ): Promise<{ error: Error | null; streamed: string }> {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetLegacyOrphanContainersByStack.mockResolvedValue([]);
+    const ws = createMockWs();
+
+    const result = ComposeService.getInstance(1)
+      .deployStack('my-stack', ws, false, ctx)
+      .then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from(`${leakingDiagnostic}\n`));
+    proc.emit('close', 1);
+
+    const error = await result;
+    const streamed = ws.send.mock.calls.map((call) => String(call[0])).join('');
+    return { error, streamed };
+  }
+
+  it('withholds Compose output when the deploy runs against a decrypt overlay', async () => {
+    const { error, streamed } = await runFailingDeploy({
+      source: 'git_apply',
+      overlayDir: '/tmp/git-secrets/1/my-stack/op-1',
+    });
+    expect(error?.message).toBe(WITHHELD_DECRYPTED_COMPOSE_OUTPUT);
+    expect(streamed).not.toContain('audit-decrypted-value-marker');
+    // Sencho's own framing still reaches the operator: it names no secret.
+    expect(streamed).toContain('Command exited with code 1');
+  });
+
+  it('still surfaces the Compose diagnostic when no decrypt overlay is in play', async () => {
+    const { error, streamed } = await runFailingDeploy();
+    expect(error?.message).toContain(leakingDiagnostic);
+    expect(streamed).toContain(leakingDiagnostic);
+  });
+
+  // The external-network gate renders the Compose model before `up`. On a Git
+  // deploy the model the deploy will use is the decrypt overlay's, so the gate
+  // has to read that one: a live render resolves typed values (a published
+  // port, an external network name) out of ciphertext and refuses a deploy
+  // whose own model already validated.
+  it('gates external networks on the overlay the deploy runs Compose in', async () => {
+    setupAutoCloseSpawn(0);
+    mockListContainers.mockResolvedValue([]);
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+    await ComposeService.getInstance(1).deployStack('my-stack', undefined, false, {
+      source: 'git_apply',
+      overlayDir,
+    });
+
+    expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+      stackDirOverride: overlayDir,
+    });
+  });
+
+  it('surfaces the withheld render text, not Compose words, when the gate cannot read the model', async () => {
+    mockListContainers.mockResolvedValue([]);
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: WITHHELD_DECRYPTED_RENDER_OUTPUT,
+    });
+
+    const error = await ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+      })
+      .then(() => null, (e: Error) => e);
+
+    expect(error?.message).toBe(WITHHELD_DECRYPTED_RENDER_OUTPUT);
+    expect(error?.message).not.toContain('audit-decrypted-value-marker');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('gates external networks on the live project when no overlay is in play', async () => {
+    setupAutoCloseSpawn(0);
+    mockListContainers.mockResolvedValue([]);
+
+    await ComposeService.getInstance(1).deployStack('my-stack');
+
+    expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+      stackDirOverride: undefined,
+    });
+  });
+
+  // The required-variable guard spawns its own `config --quiet` instead of going
+  // through execute, so the overlay-substitution boundary does not come for
+  // free: that render reads plaintext secrets, and a `:?` message is itself
+  // interpolated, so Compose prints a decrypted value inside the very phrase the
+  // name-only parser keys on. The guard must refuse on the exit code alone.
+  const nestedGuardDiagnostic =
+    'required variable MISSING is missing a value: required variable audit-decrypted-value-marker is missing\n';
+
+  async function runOverlayGuardDeploy(): Promise<Error> {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+
+    const result = ComposeService.getInstance(1)
+      .deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+      })
+      .then(() => null, (e: Error) => e);
+
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from(nestedGuardDiagnostic));
+    proc.emit('close', 1);
+
+    try {
+      const error = await result;
+      expect(error).not.toBeNull();
+      return error as Error;
+    } finally {
+      // The file's beforeEach clears call records but not implementations, so a
+      // guard left on here would put an extra config render in front of every
+      // later test.
+      mockGetGlobalSettings.mockReturnValue({});
+    }
+  }
+
+  it('refuses an overlay deploy whose variable check failed, without naming a variable', async () => {
+    const error = await runOverlayGuardDeploy();
+
+    expect(error.message).toBe(`Deploy blocked: ${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}then deploy again.`);
+    expect(error.message).not.toContain('audit-decrypted-value-marker');
+    expect(error.message).not.toContain('MISSING');
+    // The refusal came before anything was pulled, created, or started.
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(mockResolveMissingExternalNetworks).not.toHaveBeenCalled();
+    // The variable check speaks before the endpoint guard: a render that fails on
+    // a missing required variable is reported as that, not as an unreadable model.
+    expect(mockEvaluateDockerEndpointGuard).not.toHaveBeenCalled();
+    // The check is handed no stream to read at all, so the diagnostic could not
+    // be collected even by a later change: this is not a promise about the code
+    // that runs today, it is the shape of the spawn.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['config', '--quiet']),
+      expect.objectContaining({ stdio: 'ignore' }),
+    );
+  });
+
+  it('lets an overlay deploy through when its variable check resolved', async () => {
+    mockListContainers.mockResolvedValue([]);
+    setupAutoCloseSpawn(0);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+    const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+    try {
+      await ComposeService.getInstance(1).deployStack('my-stack', undefined, false, {
+        source: 'git_apply',
+        overlayDir,
+      });
+
+      // Reaching the network gate is proof the guard let the deploy past: a
+      // failing check would have refused it first.
+      expect(mockResolveMissingExternalNetworks).toHaveBeenCalledWith(1, 'my-stack', {
+        stackDirOverride: overlayDir,
+      });
+    } finally {
+      mockGetGlobalSettings.mockReturnValue({});
+    }
+  });
+
+  it('refuses rather than waits on an overlay variable check that never returns', async () => {
+    // The check reads nothing but an exit code, so an unbounded one would hold
+    // the deploy open with no diagnostic to explain the wait. A killed child
+    // closes with no code, which the guard treats as a refusal.
+    const proc = createMockProcess();
+    proc.kill = vi.fn(() => {
+      proc.emit('close', null);
+      return true;
+    });
+    mockSpawn.mockReturnValue(proc);
+    mockGetGlobalSettings.mockReturnValue({ env_block_deploy_on_missing_required: '1' });
+
+    try {
+      const result = ComposeService.getInstance(1)
+        .deployStack('my-stack', undefined, false, {
+          source: 'git_apply',
+          overlayDir: path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1'),
+        })
+        .then(() => null, (e: Error) => e);
+
+      await waitForSpawn();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const error = await result;
+
+      expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(error?.message).toBe(
+        `Deploy blocked: ${WITHHELD_DECRYPTED_REQUIRED_ENV_OUTPUT}then deploy again.`,
+      );
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+    } finally {
+      mockGetGlobalSettings.mockReturnValue({});
+    }
+  });
+});
+
+// ── renderConfig: the decrypt-overlay preflight render ────────────────
+
+describe('ComposeService - renderConfig over a decrypt overlay', () => {
+  const overlayDir = path.join(gitSecretsAreaBase(), '1', 'my-stack', 'op-1');
+
+  it('renders from the overlay working directory', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: {}, networks: {} })));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['compose', 'config', '--format', 'json']),
+      expect.objectContaining({ cwd: overlayDir }),
+    );
+    expect(result.rendered).toContain('my-stack');
+  });
+
+  it('pins the stack project name on the overlay render, the way the deploy does', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args.slice(0, 3)).toEqual(['compose', '-p', 'my-stack']);
+  });
+
+  it('leaves the live render without a project-name pin', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain('-p');
+  });
+
+  it('withholds Compose stderr from the decrypted render while keeping the model', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stdout.emit('data', Buffer.from(JSON.stringify({ name: 'my-stack', services: {}, networks: {} })));
+    proc.stderr.emit('data', Buffer.from('invalid IP address: audit-decrypted-value-marker'));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(result.rendered).toContain('my-stack');
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('withholds a failed decrypted render, which is the failure a typed ciphertext value produces', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid IP address: audit-decrypted-value-marker'));
+    proc.emit('close', 1);
+    const result = await promise;
+
+    expect(result.rendered).toBeNull();
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('reports no model for a decrypted render that exceeded the size limit', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: overlayDir });
+    await waitForSpawn();
+    // Past the 5 MiB cap renderConfig enforces, with a decrypted value in it.
+    proc.stdout.emit('data', Buffer.from(`"AUDIT_TOKEN":"audit-decrypted-value-marker${'x'.repeat(5 * 1024 * 1024)}"`));
+    proc.emit('close', 0);
+    const result = await promise;
+
+    expect(result.rendered).toBeNull();
+    expect(result.stderr).toBe('');
+    expect(result.withheld).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('audit-decrypted-value-marker');
+  });
+
+  it('refuses a working directory outside the git-secrets area, before any spawn', async () => {
+    mockSpawn.mockClear();
+
+    await expect(
+      ComposeService.getInstance(1).renderConfig('my-stack', { stackDirOverride: '/etc' }),
+    ).rejects.toThrow('Invalid stack path');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps reporting Compose stderr for a live render', async () => {
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const promise = ComposeService.getInstance(1).renderConfig('my-stack');
+    await waitForSpawn();
+    proc.stderr.emit('data', Buffer.from('invalid proto: udp/tcp'));
+    proc.emit('close', 1);
+    const result = await promise;
+
+    expect(result.stderr).toBe('invalid proto: udp/tcp');
+    expect(result.withheld).toBeUndefined();
   });
 });
 
@@ -2582,5 +3402,46 @@ describe('ComposeService - updateStack safe ordering', () => {
 
     expect(mockHandoff).toHaveBeenCalled();
     expect(mockRemoveContainers).toHaveBeenCalledWith(['orphan-1']);
+  });
+
+  describe('when the Docker endpoint guard steps in after handoff', () => {
+    const refusalMessage = 'Service "socket-proxy" carries the Docker connection.';
+
+    it('names the guard\'s reason when it refuses to remove an orphan container', async () => {
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['proxy-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'proxy-1', success: false, error: refusalMessage, refused: true }]);
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(refusalMessage);
+    });
+
+    it('keeps the update error and says why when the guard refused the rollback', async () => {
+      const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+      setupAutoCloseSpawn();
+      mockListContainers.mockResolvedValue([]);
+      mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({ status: 'orphans', ids: ['orphan-1'] });
+      mockRemoveContainers.mockResolvedValueOnce([{ id: 'orphan-1', success: false, error: 'removal failed' }]);
+      mockCompensateWithCandidate.mockRejectedValueOnce(
+        new DockerEndpointProtectedError({ reason: 'provider', service: 'socket-proxy', message: refusalMessage }),
+      );
+
+      const svc = ComposeService.getInstance(1);
+      const result = svc.updateStack('my-stack').then(() => null, (e: Error) => e);
+      await vi.advanceTimersByTimeAsync(3100);
+      const error = await result;
+
+      expect(error).not.toBeNull();
+      expect(error!.message).toContain('Failed to remove 1 legacy orphan container(s) after handoff');
+      expect(error!.message).toContain(`The rollback did not run: ${refusalMessage}`);
+      expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
+    });
   });
 });

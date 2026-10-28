@@ -211,6 +211,8 @@ Two consequences worth remembering:
 
 Net behaviour: one API token on the hub is a fleet-wide credential whose authority is bounded by its scope and by the hub's enrollment to each node.
 
+Managing tokens is the exception: creating, listing, and revoking tokens always act on the instance that holds them. A request to the token endpoints is never forwarded to a remote node: when `x-node-id` or `?nodeId=` names one, the request is rejected, so tokens are issued and revoked on the hub.
+
 ## Managing tokens
 
 The Settings → API Tokens tab lists every active token you own as a card.

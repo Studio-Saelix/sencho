@@ -1,23 +1,26 @@
 import { useState, useEffect, useRef, type ReactNode } from 'react';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { Masthead, MobileSubTabs } from '@/components/mobile/mobile-ui';
+import { Masthead, MobileSubTabs, type Tone } from '@/components/mobile/mobile-ui';
+import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from "@/components/ui/tabs";
 import { springs } from '@/lib/motion';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConfirmModal } from "@/components/ui/modal";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
+import { Trash2, ShieldCheck, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
+import { useImageScan } from '@/hooks/useImageScan';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
@@ -25,12 +28,11 @@ import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
-import { cn } from '@/lib/utils';
-import { ReclaimHero } from './resources/ReclaimHero';
-import { FootprintTreemap } from './resources/FootprintTreemap';
+import { ResourcesActions } from './resources/ResourcesActions';
+import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
-import { TableSkeleton } from './resources/TableSkeleton';
+import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
@@ -38,19 +40,6 @@ import { SortableTableHead } from '@/components/ui/sortable-table';
 import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
-
-interface UsageData {
-    reclaimableImages: number;
-    reclaimableContainers: number;
-    reclaimableVolumes: number;
-    reclaimableImageCount: number;
-    reclaimableContainerCount: number;
-    reclaimableVolumeCount: number;
-    managedImageBytes: number;
-    unmanagedImageBytes: number;
-    managedVolumeBytes: number;
-    unmanagedVolumeBytes: number;
-}
 
 interface DockerImage {
     Id: string;
@@ -98,6 +87,8 @@ interface UnmanagedContainer {
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 
 const PLAN_PREVIEW_CAP = 30;
+
+const MOBILE_STATE_TONE: Record<MastheadTone, Tone> = { warn: 'warning', live: 'success', idle: 'brand', error: 'destructive' };
 
 function PrunePlanPreview({
     plan,
@@ -152,62 +143,60 @@ function PrunePlanPreview({
     );
 }
 
-// Per-node, per-browser snooze for the reclaim banner. We store the reclaimable
-// byte total at the moment of dismissal; the banner returns only once the node's
-// reclaimable total grows past that snapshot, so a stable residue stays hidden.
-const heroDismissKey = (nodeId: string | number | undefined) => `sencho.reclaimHeroDismissed.${nodeId ?? 'local'}`;
+// ── Filter + search toolbar pieces ─────────────────────────────────────────────
 
-function readHeroDismissed(nodeId: string | number | undefined): number | null {
-    try {
-        const raw = localStorage.getItem(heroDismissKey(nodeId));
-        if (raw === null) return null;
-        const n = Number(raw);
-        return Number.isFinite(n) ? n : null;
-    } catch {
-        // localStorage is unavailable (private mode / blocked); treat as
-        // not-dismissed so the banner still shows.
-        return null;
-    }
-}
-
-function writeHeroDismissed(nodeId: string | number | undefined, bytes: number): void {
-    try {
-        localStorage.setItem(heroDismissKey(nodeId), String(bytes));
-    } catch {
-        // Best-effort: if the write fails the banner simply reappears next load.
-    }
-}
-
-// ── Filter Toggle - Segmented Control ─────────────────────────────────────────
-
-interface FilterToggleProps {
+function ResourceFilterControl({ value, onChange, counts, noun }: {
     value: ResourceFilter;
     onChange: (v: ResourceFilter) => void;
     counts: { all: number; managed: number; unmanaged: number };
+    noun: string;
+}) {
+    return (
+        <SegmentedControl<ResourceFilter>
+            ariaLabel={`Filter ${noun}`}
+            value={value}
+            onChange={onChange}
+            options={[
+                { value: 'all', label: 'All', badge: counts.all },
+                { value: 'managed', label: 'Managed', badge: counts.managed },
+                { value: 'unmanaged', label: 'External', badge: counts.unmanaged },
+            ]}
+        />
+    );
 }
 
-function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
-    const options: { key: ResourceFilter; label: string; count: number }[] = [
-        { key: 'all', label: 'All', count: counts.all },
-        { key: 'managed', label: 'Managed', count: counts.managed },
-        { key: 'unmanaged', label: 'External', count: counts.unmanaged },
-    ];
+/** Icon-only until clicked; stays open while a query is active. */
+function CollapsibleSearch({ value, onChange, noun }: { value: string; onChange: (v: string) => void; noun: string }) {
+    const [expanded, setExpanded] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+    useEffect(() => { if (expanded) inputRef.current?.focus(); }, [expanded]);
 
+    if (value !== '' || expanded) {
+        return (
+            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                <Input
+                    ref={inputRef}
+                    placeholder={`Search ${noun}...`}
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    onBlur={() => { if (value === '') setExpanded(false); }}
+                    className="pl-9 h-9"
+                />
+            </div>
+        );
+    }
     return (
-        <div className="flex items-center gap-1">
-            {options.map(({ key, label, count }) => (
-                <Button
-                    key={key}
-                    variant={value === key ? 'default' : 'outline'}
-                    size="sm"
-                    className="h-7 text-xs px-2.5 gap-1.5"
-                    onClick={() => onChange(key)}
-                >
-                    {label}
-                    <span className="font-mono tabular-nums text-[10px] opacity-70">{count}</span>
-                </Button>
-            ))}
-        </div>
+        <TooltipProvider>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setExpanded(true)} aria-label={`Search ${noun}`}>
+                        <Search className="w-4 h-4" />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent>Search {noun}</TooltipContent>
+            </Tooltip>
+        </TooltipProvider>
     );
 }
 
@@ -286,78 +275,30 @@ function SenchoBadge() {
     );
 }
 
-function RollbackProtectedBadge({ kind }: { kind?: 'stack' | 'service' }) {
+function RollbackProtectedBadge({ kind, onOpen }: { kind?: 'stack' | 'service'; onOpen: () => void }) {
+    const badge = (
+        <Badge variant="outline" className="text-[10px] h-5 gap-1 border-brand/40 text-brand">
+            <ShieldCheck className="w-3 h-3" strokeWidth={2} />
+            Rollback protected
+        </Badge>
+    );
     return (
         <TooltipProvider>
             <Tooltip>
                 <TooltipTrigger asChild>
-                    <Badge variant="outline" className="text-[10px] h-5 gap-1 border-brand/40 text-brand">
-                        <ShieldCheck className="w-3 h-3" strokeWidth={2} />
-                        Rollback protected
-                    </Badge>
+                    {kind === 'stack' ? (
+                        <button type="button" onClick={onOpen} aria-label="Rollback protected, show rollback generations" className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50">
+                            {badge}
+                        </button>
+                    ) : badge}
                 </TooltipTrigger>
                 <TooltipContent>
                     {kind === 'stack'
-                        ? 'Held as a full-stack rollback point. See Resources → Rollback.'
+                        ? 'Held as a full-stack rollback point. Click to open the Rollback tab.'
                         : 'Held for a pending per-service update rollback.'}
                 </TooltipContent>
             </Tooltip>
         </TooltipProvider>
-    );
-}
-
-// ── Severity Badge ─────────────────────────────────────────────────────────────
-
-// ── Quick Clean Prune Button ───────────────────────────────────────────────────
-
-interface PruneButtonProps {
-    target: PruneTarget;
-    icon: React.ReactNode;
-    label: string;
-    accentClass: string;
-    onManaged: () => void;
-    onAll: () => void;
-}
-
-function PruneButton({ target, icon, label, accentClass, onManaged, onAll }: PruneButtonProps) {
-    return (
-        <div className={cn(
-            'group flex flex-col rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel overflow-hidden',
-            'transition-colors duration-200 hover:border-t-card-border-hover',
-        )}>
-            <button
-                onClick={onManaged}
-                className="flex-1 flex flex-col items-center justify-center gap-2 p-3 pt-4 hover:bg-muted/40 transition-colors duration-150"
-            >
-                <span className={cn('transition-transform duration-200 group-hover:scale-110', accentClass)}>
-                    {icon}
-                </span>
-                <span className="text-xs font-medium text-center leading-tight text-foreground">{label}</span>
-                <span className="text-[10px] text-brand font-mono tracking-wide">Sencho only</span>
-            </button>
-            {target !== 'containers' && (
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <button className={cn(
-                            'flex items-center justify-center gap-1 border-t h-7 w-full text-[10px] text-muted-foreground',
-                            'hover:bg-muted/40 hover:text-foreground transition-colors duration-150',
-                        )}>
-                            <MoreVertical className="w-3 h-3" />
-                            <span>More options</span>
-                        </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-52">
-                        <DropdownMenuItem
-                            className="text-destructive focus:text-destructive focus:bg-destructive/10 gap-2 text-xs"
-                            onClick={onAll}
-                        >
-                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                            <span>All Docker <span className="text-muted-foreground">(includes external)</span></span>
-                        </DropdownMenuItem>
-                    </DropdownMenuContent>
-                </DropdownMenu>
-            )}
-        </div>
     );
 }
 
@@ -388,14 +329,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const canDeployResources = can('stack:deploy');
     const canEditSecurityPolicy = can('stack:edit');
     const { activeNode } = useNodes();
-    const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
     const [volumes, setVolumes] = useState<DockerVolume[]>([]);
     const [networks, setNetworks] = useState<DockerNetwork[]>([]);
     const [orphans, setOrphans] = useState<Record<string, UnmanagedContainer[]>>({});
     const [rollbackGenerations, setRollbackGenerations] = useState<RollbackGeneration[]>([]);
 
-    const [isLoading, setIsLoading] = useState(true);
+    // Inventory (tables) and disk usage load as separate requests on separate
+    // clocks, so the tables never wait on the usage figures.
+    const [inventoryState, setInventoryState] = useState<LoadState>('loading');
+    const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
+    const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
 
     // Filter state
@@ -405,14 +349,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Search state
     const [imageSearch, setImageSearch] = useState('');
     const [volumeSearch, setVolumeSearch] = useState('');
-    // Collapsible search: icon-only until clicked, stays open while query is active.
-    const [imageSearchExpanded, setImageSearchExpanded] = useState(false);
-    const [volumeSearchExpanded, setVolumeSearchExpanded] = useState(false);
-    const imageSearchRef = useRef<HTMLInputElement>(null);
-    const volumeSearchRef = useRef<HTMLInputElement>(null);
-
-    useEffect(() => { if (imageSearchExpanded) imageSearchRef.current?.focus(); }, [imageSearchExpanded]);
-    useEffect(() => { if (volumeSearchExpanded) volumeSearchRef.current?.focus(); }, [volumeSearchExpanded]);
 
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
@@ -423,67 +359,71 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [planError, setPlanError] = useState<string | null>(null);
     const planFetchGenRef = useRef(0);
 
-    // Reclaim banner visibility: the per-node opt-in setting (loaded in
-    // fetchAllData) and the per-browser dismiss snapshot for the active node.
-    const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(false);
-    const [heroDismissedBytes, setHeroDismissedBytes] = useState<number | null>(null);
-
     // Classified image selection is node-bound so a node switch cannot leave
     // the previous node's usedByStacks visible beside a new node's inspect.
     const [inspectImage, setInspectImage] = useState<(DockerImage & { nodeId: string | number }) | null>(null);
     const [browseVolume, setBrowseVolume] = useState<string | null>(null);
 
-    // Unmanaged container state
+    // External (unmanaged) container state
     const [selectedOrphans, setSelectedOrphans] = useState<string[]>([]);
     const [bulkPurgeConfirm, setBulkPurgeConfirm] = useState(false);
 
     // Vulnerability scanning state
     const { status: trivy } = useTrivyStatus();
     const [scanSummaries, setScanSummaries] = useState<Record<string, ScanSummary>>({});
-    const [scanningImageRef, setScanningImageRef] = useState<string | null>(null);
     const [inspectScanId, setInspectScanId] = useState<number | null>(null);
-    // Holds the AbortController for the in-flight scan poll so it can be
-    // cancelled; the scan keeps running server-side, only the client poll stops.
-    const scanAbortRef = useRef<AbortController | null>(null);
+    const { scanningRef: scanningImageRef, scanImage, cancelScan } = useImageScan({
+        onComplete: setInspectScanId,
+        onSummaries: setScanSummaries,
+    });
 
-    // Generation counter so a slow fetch for a previously-active node cannot
+    // Generation counters so a slow fetch for a previously-active node cannot
     // stomp the visible resources after the user switches nodes. Each call
     // claims a generation; only the latest call is allowed to write state.
-    const fetchGenerationRef = useRef(0);
+    const inventoryGenerationRef = useRef(0);
+    const usageGenerationRef = useRef(0);
 
-    const fetchAllData = async () => {
-        const generation = ++fetchGenerationRef.current;
-        setIsLoading(true);
+    // `background` refreshes keep the current rows on screen (after a prune or
+    // delete); a foreground load (mount, node switch, Retry) shows skeletons.
+    // A background failure still ends a superseded foreground load, so the
+    // tables can never stay on skeletons.
+    const failInventory = (background: boolean) => {
+        if (background) {
+            toast.error('Failed to refresh resources');
+            setInventoryState((state) => (state === 'loading' ? 'error' : state));
+        } else {
+            setInventoryState('error');
+        }
+    };
+
+    const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
+        const generation = ++inventoryGenerationRef.current;
+        if (!background) setInventoryState('loading');
         try {
-            const [usageRes, resourcesRes, orphansRes, summariesRes, settingsRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/docker-df'),
+            const [resourcesRes, orphansRes, summariesRes, rollbackRes] = await Promise.all([
                 apiFetch('/system/resources'),
                 apiFetch('/system/orphans'),
                 apiFetch('/security/image-summaries').catch(() => null),
-                apiFetch('/settings').catch(() => null),
                 apiFetch('/system/rollback/generations').catch(() => null),
             ]);
 
             // Resolve every body before the staleness check so a stale
             // generation cannot write any subset of the resource slices.
-            const usageData = usageRes.ok ? await usageRes.json() : null;
             const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
             const orphansData = orphansRes.ok ? await orphansRes.json() : null;
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
-            const settingsData = settingsRes && settingsRes.ok ? await settingsRes.json() : null;
             const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
 
-            if (fetchGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation) return;
 
-            // Set unconditionally: a failed /settings (settingsData null) or a
-            // missing key falls back to the default-off state for this node
-            // rather than inheriting the previously active node's value.
-            setReclaimHeroEnabled(settingsData?.reclaim_hero === '1');
-            if (usageData) setUsage(usageData);
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
                 setVolumes(resourcesData.volumes ?? []);
                 setNetworks(resourcesData.networks ?? []);
+                setInventoryState('ready');
+            } else {
+                console.error('Failed to fetch resources', resourcesRes.status);
+                failInventory(background);
             }
             if (orphansData) {
                 setOrphans(orphansData);
@@ -492,31 +432,74 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
         } catch (err) {
-            if (fetchGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation) return;
             console.error('Failed to fetch data', err);
-            toast.error('Failed to load resources data');
-        } finally {
-            if (fetchGenerationRef.current === generation) setIsLoading(false);
+            if (!background) toast.error('Failed to load resources data');
+            failInventory(background);
         }
     };
 
-    useEffect(() => { fetchAllData(); }, [activeNode]);
+    // A failed usage load drops the figures rather than keeping stale ones: the
+    // masthead then reads "Disk usage unknown" with a Retry instead of a number
+    // that may already be out of date.
+    const failUsage = (reason: unknown) => {
+        console.error('Failed to fetch disk usage', reason);
+        setUsageLoad({ status: 'error' });
+    };
 
-    // Load the per-node reclaim-banner dismiss snapshot when the node changes.
+    const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
+        const generation = ++usageGenerationRef.current;
+        if (!background) setUsageLoad({ status: 'loading' });
+        try {
+            const res = await apiFetch('/system/docker-df');
+            const data = res.ok ? await res.json() : null;
+            if (usageGenerationRef.current !== generation) return;
+            if (data) {
+                setUsageLoad({ status: 'ready', data });
+            } else {
+                failUsage(res.status);
+            }
+        } catch (err) {
+            if (usageGenerationRef.current !== generation) return;
+            failUsage(err);
+        }
+    };
+
+    /** After a mutation: refresh the tables (awaited) and the usage figures (not awaited; the tables should not wait on them). */
+    const refreshAll = async () => {
+        void loadUsage({ background: true });
+        await loadInventory({ background: true });
+    };
+
     useEffect(() => {
-        setHeroDismissedBytes(readHeroDismissed(activeNode?.id));
+        // Nothing from the previous node may show under the new one while its
+        // data loads, including when that load fails.
+        setUsageLoad({ status: 'loading' });
+        setImages([]);
+        setVolumes([]);
+        setNetworks([]);
+        setOrphans({});
+        setSelectedOrphans([]);
+        setRollbackGenerations([]);
+        void loadInventory();
+        void loadUsage();
+    }, [activeNode]);
+
+    // A selected image belongs to the node it was listed on.
+    useEffect(() => {
         setInspectImage(null);
     }, [activeNode?.id]);
 
-    // Cancel an in-flight scan poll on unmount or node switch; its result
-    // belongs to the node it started on.
-    useEffect(() => {
-        return () => scanAbortRef.current?.abort();
-    }, [activeNode]);
+    // Stop following an in-flight scan on node switch; its result belongs to
+    // the node it started on (the hook also stops it on unmount).
+    useEffect(() => cancelScan, [activeNode?.id, cancelScan]);
 
-    // Bump the fetch generation on unmount so a fetch that resolves after the
+    // Bump the fetch generations on unmount so a fetch that resolves after the
     // view is gone cannot run state setters or surface a load-error toast.
-    useEffect(() => () => { fetchGenerationRef.current += 1; }, []);
+    useEffect(() => () => {
+        inventoryGenerationRef.current += 1;
+        usageGenerationRef.current += 1;
+    }, []);
 
     type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
 
@@ -610,7 +593,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Pruned ${scopeLabel} ${confirmPrune.target}.${reclaimedLabel}`);
             }
-            await fetchAllData();
+            await refreshAll();
             setConfirmPrune(null);
         } catch (error) {
             console.error('Failed to prune', error);
@@ -637,7 +620,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || `Failed to delete ${confirmDelete.type.slice(0, -1)}`);
             }
             toast.success(`Deleted ${confirmDelete.type.slice(0, -1)}`);
-            await fetchAllData();
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || `Failed to delete ${confirmDelete.type.slice(0, -1)}`));
@@ -659,7 +642,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const handlePurgeOrphans = async () => {
         setIsActioning(true);
-        const loadingId = toast.loading('Purging unmanaged containers...');
+        const loadingId = toast.loading('Purging external containers...');
         try {
             const res = await apiFetch('/system/prune/orphans', {
                 method: 'POST',
@@ -669,8 +652,22 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 const data = await res.json().catch(() => null);
                 throw new Error(data?.error || 'Failed to purge selected containers');
             }
-            toast.success(`Purged ${selectedOrphans.length} unmanaged container(s)`);
-            await fetchAllData();
+            const data: { results?: Array<{ success: boolean; error?: string }> } | null = await res.json().catch(() => null);
+            if (!data?.results) {
+                // Nothing says which containers were removed, so success is not claimed.
+                toast.warning('The purge finished but its result could not be read. Check the list below.');
+                await refreshAll();
+                return;
+            }
+            const failed = data.results.filter(r => !r.success);
+            if (failed.length === 0) {
+                toast.success(`Purged ${selectedOrphans.length} external container(s)`);
+            } else if (failed.length === selectedOrphans.length) {
+                toast.error(failed[0].error || 'Failed to purge selected containers.');
+            } else {
+                toast.warning(`Purged ${selectedOrphans.length - failed.length} of ${selectedOrphans.length} external containers. ${failed[0].error ?? 'Some could not be removed.'}`);
+            }
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || 'Failed to purge selected containers.'));
@@ -678,78 +675,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             toast.dismiss(loadingId);
             setIsActioning(false);
             setBulkPurgeConfirm(false);
-        }
-    };
-
-    const handleScanImage = async (
-        imageRef: string,
-        options: { force?: boolean; scanners?: ('vuln' | 'secret')[] } = {},
-    ) => {
-        const { force = false, scanners } = options;
-        // Supersede any prior in-flight scan poll before claiming this one.
-        scanAbortRef.current?.abort();
-        const controller = new AbortController();
-        scanAbortRef.current = controller;
-        const { signal } = controller;
-        setScanningImageRef(imageRef);
-        const loadingId = toast.loading(`Scanning ${imageRef}...`);
-        try {
-            const res = await apiFetch('/security/scan', {
-                method: 'POST',
-                body: JSON.stringify({ imageRef, force, scanners }),
-                signal,
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data?.error || 'Failed to start scan');
-            const scanId = data.scanId as number;
-
-            const deadline = Date.now() + 5 * 60 * 1000;
-            while (Date.now() < deadline) {
-                await new Promise<void>((resolve) => {
-                    if (signal.aborted) { resolve(); return; }
-                    const timer = setTimeout(resolve, 3000);
-                    signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
-                });
-                if (signal.aborted) return;
-                const poll = await apiFetch(`/security/scans/${scanId}`, { signal });
-                if (signal.aborted) return;
-                if (!poll.ok) continue;
-                const poll_data = await poll.json();
-                if (signal.aborted) return;
-                if (poll_data.status !== 'in_progress') {
-                    if (poll_data.status === 'failed') {
-                        throw new Error(poll_data.error || 'Scan failed');
-                    }
-                    toast.success(`Scan complete: ${poll_data.total_vulnerabilities} vulnerabilities found`);
-                    setInspectScanId(scanId);
-                    const summariesRes = await apiFetch('/security/image-summaries', { signal });
-                    if (signal.aborted) return;
-                    if (summariesRes.ok) {
-                        const summaries = await summariesRes.json();
-                        if (signal.aborted) return;
-                        setScanSummaries(summaries ?? {});
-                    }
-                    return;
-                }
-            }
-            throw new Error('Scan timed out');
-        } catch (error) {
-            if (signal.aborted) {
-                // Suppress the toast for a deliberately cancelled poll, but keep
-                // a breadcrumb so a real error racing the abort is not lost.
-                console.debug('Scan poll aborted', error);
-                return;
-            }
-            const err = error as { message?: string; error?: string; data?: { error?: string } };
-            toast.error(err?.message || err?.error || err?.data?.error || 'Scan failed');
-        } finally {
-            toast.dismiss(loadingId);
-            // Only the owning poll resets shared state; a superseded poll leaves
-            // it to the scan that replaced it.
-            if (scanAbortRef.current === controller) {
-                scanAbortRef.current = null;
-                setScanningImageRef(null);
-            }
         }
     };
 
@@ -767,44 +692,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const imageSort = useTableSort(filteredImages, IMAGE_COMPARATORS, 'repo');
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
 
-    const handleFootprintFilter = (filter: ResourceFilter) => {
-        setImageFilter(filter);
-        setVolumeFilter(filter);
-    };
+    const mastheadModel = deriveResourcesMastheadState(usageLoad);
+    const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
-    const treemapFilterToResourceFilter = (filter: 'managed' | 'unmanaged' | 'reclaimable'): ResourceFilter => {
-        if (filter === 'managed') return 'managed';
-        if (filter === 'unmanaged') return 'unmanaged';
-        return 'unmanaged';
-    };
-
-    const totalReclaimableBytes = (usage?.reclaimableImages ?? 0)
-        + (usage?.reclaimableContainers ?? 0)
-        + (usage?.reclaimableVolumes ?? 0);
-
-    // Banner shows while the opt-in is on and the operator has not dismissed
-    // this (or a larger) reclaimable total. A stable residue stays hidden; a
-    // fresh pile pushes the total past the snapshot and the banner returns.
-    const heroVisible = isAdmin && reclaimHeroEnabled
-        && (heroDismissedBytes === null || totalReclaimableBytes > heroDismissedBytes);
-
-    const handleReviewAndPrune = () => {
-        setConfirmReclaim(true);
-    };
-
-    const handleDismissHero = () => {
-        writeHeroDismissed(activeNode?.id, totalReclaimableBytes);
-        setHeroDismissedBytes(totalReclaimableBytes);
-    };
-
-    // "Review & prune" reclaims everything the banner advertises. Order matters:
+    // Reclaim frees everything the masthead advertises. Order matters:
     // volumes first, while stopped containers still hold a reference to their
     // named volumes, so the prune only removes volumes that are already dangling
     // and a stopped stack's data is never cascaded into deletion. Containers
     // next, then images, so images a stopped container pinned become reclaimable.
-    // Each failed target is reported by name and its server error logged (never a
-    // false success); the reclaimed figure is shown only when the daemon reports
-    // one (the containerd image store returns 0).
+    // A partial failure is reported as a warning and a total failure as an error
+    // (never a false success); the reclaimed figure is shown only when the
+    // daemon reports one (the containerd image store returns 0).
     const handleReclaimAll = async () => {
         if (!prunePlan) return;
         setIsActioning(true);
@@ -828,7 +726,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
             }
-            await fetchAllData();
+            await refreshAll();
             setConfirmReclaim(false);
         } catch (error) {
             console.error('Failed to reclaim', error);
@@ -841,98 +739,20 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
+    const actions = (
+        <ResourcesActions
+            isAdmin={isAdmin}
+            canReclaim={mastheadModel.reclaimableItems > 0}
+            reclaimDisabled={isLoading}
+            usageFailed={usageLoad.status === 'error'}
+            onRetryUsage={() => void loadUsage()}
+            onReclaim={() => setConfirmReclaim(true)}
+            onPrune={(target) => setConfirmPrune({ target, scope: 'managed' })}
+        />
+    );
+
     const mainContent = (
         <>
-            {/* Reclaim hero */}
-            {heroVisible && usage && (
-                <ReclaimHero
-                    bytes={totalReclaimableBytes}
-                    imageCount={usage.reclaimableImageCount}
-                    containerCount={usage.reclaimableContainerCount}
-                    volumeCount={usage.reclaimableVolumeCount}
-                    onReview={handleReviewAndPrune}
-                    onDismiss={handleDismissHero}
-                    disabled={isLoading}
-                />
-            )}
-
-            {/* Top row: Footprint + Quick Clean */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-
-                {/* Disk Footprint */}
-                <Card className="col-span-1 border-card-border border-t-card-border-top shadow-card-bevel transition-colors hover:border-t-card-border-hover animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
-                    <CardHeader className="pb-3">
-                        <CardTitle className="text-sm font-medium text-muted-foreground tracking-wide uppercase">
-                            Docker Disk Footprint
-                        </CardTitle>
-                        <CardDescription className="text-xs">
-                            Click a segment to filter the tabs below
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                        {usage ? (
-                            <FootprintTreemap
-                                managedBytes={usage.managedImageBytes + usage.managedVolumeBytes}
-                                unmanagedBytes={usage.unmanagedImageBytes + usage.unmanagedVolumeBytes}
-                                reclaimableBytes={totalReclaimableBytes}
-                                onFilter={(f) => handleFootprintFilter(treemapFilterToResourceFilter(f))}
-                            />
-                        ) : (
-                            <Skeleton className="h-[150px] w-full rounded-md" />
-                        )}
-                    </CardContent>
-                </Card>
-
-                {/* Quick Clean */}
-                {isAdmin && <Card className="col-span-1 md:col-span-2 border-card-border border-t-card-border-top shadow-card-bevel transition-colors hover:border-t-card-border-hover flex flex-col animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-75">
-                    <CardHeader className="pb-3">
-                        <CardTitle className="text-sm font-medium text-muted-foreground tracking-wide uppercase">
-                            Quick Clean
-                        </CardTitle>
-                        <CardDescription className="text-xs">
-                            Primary actions target <span className="text-foreground font-medium">Sencho-managed</span> resources only.
-                            Use <MoreVertical className="inline w-3 h-3" /> for all-Docker operations.
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex-1 flex flex-col justify-center">
-                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                            <PruneButton
-                                target="images"
-                                icon={<PackageMinus className="w-6 h-6" />}
-                                label="Prune Unused Images"
-                                accentClass="text-brand"
-                                onManaged={() => setConfirmPrune({ target: 'images', scope: 'managed' })}
-                                onAll={() => setConfirmPrune({ target: 'images', scope: 'all' })}
-                            />
-                            <PruneButton
-                                target="volumes"
-                                icon={<HardDrive className="w-6 h-6" />}
-                                label="Prune Unused Volumes"
-                                accentClass="text-brand"
-                                onManaged={() => setConfirmPrune({ target: 'volumes', scope: 'managed' })}
-                                onAll={() => setConfirmPrune({ target: 'volumes', scope: 'all' })}
-                            />
-                            <PruneButton
-                                target="networks"
-                                icon={<Network className="w-6 h-6" />}
-                                label="Prune Dead Networks"
-                                accentClass="text-success"
-                                onManaged={() => setConfirmPrune({ target: 'networks', scope: 'managed' })}
-                                onAll={() => setConfirmPrune({ target: 'networks', scope: 'all' })}
-                            />
-                            <PruneButton
-                                target="containers"
-                                icon={<MonitorX className="w-6 h-6" />}
-                                label="Purge Unmanaged Containers"
-                                accentClass="text-warning"
-                                onManaged={() => setConfirmPrune({ target: 'containers', scope: 'managed' })}
-                                onAll={() => setConfirmPrune({ target: 'containers', scope: 'all' })}
-                            />
-                        </div>
-                    </CardContent>
-                </Card>}
-            </div>
-
             {/* Resource Tabs */}
             <Tabs
                 value={resourceTab}
@@ -940,6 +760,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 className="flex-1 flex flex-col w-full min-h-[400px]"
             >
                 {isMobile ? (
+                    <>
+                    <div className="mb-3">{actions}</div>
                     <MobileSubTabs
                         ariaLabel="Resource sections"
                         active={resourceTab}
@@ -947,10 +769,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         tabs={[
                             { value: 'images', label: 'Images', count: images.length },
                             { value: 'volumes', label: 'Volumes', count: volumes.length },
-                            { value: 'unmanaged', label: 'Unmanaged', count: totalOrphansCount },
+                            { value: 'unmanaged', label: 'External', count: totalOrphansCount },
                             { value: 'rollback', label: 'Rollback', count: rollbackGenerations.length },
                         ]}
                     />
+                    </>
                 ) : (
                 <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
                     <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
@@ -967,7 +790,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             ))}
                             <TabsHighlightItem value="unmanaged">
                                 <TabsTrigger value="unmanaged" className="relative">
-                                    Unmanaged
+                                    External
                                     <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
                                 </TabsTrigger>
                             </TabsHighlightItem>
@@ -979,6 +802,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </TabsHighlightItem>
                         </TabsHighlight>
                     </TabsList>
+                    <div className="ml-auto">{actions}</div>
                 </div>
                 )}
 
@@ -987,31 +811,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <div className="flex flex-wrap items-center gap-2 mb-4">
-                            {imageSearch !== '' || imageSearchExpanded ? (
-                                <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                    <Input
-                                        ref={imageSearchRef}
-                                        placeholder="Search images..."
-                                        value={imageSearch}
-                                        onChange={(e) => setImageSearch(e.target.value)}
-                                        onBlur={() => { if (imageSearch === '') setImageSearchExpanded(false); }}
-                                        className="pl-9 h-9"
-                                    />
-                                </div>
-                            ) : (
-                                <TooltipProvider>
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setImageSearchExpanded(true)} aria-label="Search images">
-                                                <Search className="w-4 h-4" />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Search images</TooltipContent>
-                                    </Tooltip>
-                                </TooltipProvider>
-                            )}
-                            <FilterToggle
+                            <CollapsibleSearch value={imageSearch} onChange={setImageSearch} noun="images" />
+                            <ResourceFilterControl
+                                noun="images"
                                 value={imageFilter}
                                 onChange={setImageFilter}
                                 counts={{
@@ -1021,6 +823,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 }}
                             />
                             <div className="flex-1" />
+                            {isAdmin && (
+                                <Button variant="outline" size="sm" className="h-9 shrink-0 max-md:min-h-11" onClick={() => setConfirmPrune({ target: 'images', scope: 'managed' })}>
+                                    Prune unused
+                                </Button>
+                            )}
                             {trivy.available && (
                                 <Button
                                     variant="outline"
@@ -1050,7 +857,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : (
+                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
+                                <TableLoadError cols={5} noun="images" onRetry={() => void loadInventory()} />
+                            ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No images found.</TableCell></TableRow>
@@ -1077,7 +886,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                         ) : undefined}
                                                     />
                                                     {img.isSencho && <SenchoBadge />}
-                                                    {img.rollbackProtected && <RollbackProtectedBadge kind={img.rollbackProtectionKind} />}
+                                                    {img.rollbackProtected && <RollbackProtectedBadge kind={img.rollbackProtectionKind} onOpen={() => setResourceTab('rollback')} />}
                                                     {(() => {
                                                         const tag = img.RepoTags?.[0];
                                                         const summary = tag ? scanSummaries[tag] : undefined;
@@ -1118,6 +927,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                                 size="icon"
                                                                                 className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
                                                                                 disabled={scanningImageRef === img.RepoTags[0]}
+                                                                                aria-label={`Scan ${img.RepoTags[0]}`}
                                                                             >
                                                                                 {scanningImageRef === img.RepoTags[0] ? (
                                                                                     <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
@@ -1132,12 +942,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                             </TooltipProvider>
                                                             <DropdownMenuContent align="end">
                                                                 <DropdownMenuItem
-                                                                    onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln'] })}
+                                                                    onClick={() => void scanImage(img.RepoTags![0], ['vuln'], { force: false })}
                                                                 >
                                                                     Scan (vulnerabilities)
                                                                 </DropdownMenuItem>
                                                                 <DropdownMenuItem
-                                                                    onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln', 'secret'] })}
+                                                                    onClick={() => void scanImage(img.RepoTags![0], ['vuln', 'secret'], { force: false })}
                                                                 >
                                                                     Full scan (vulnerabilities + secrets)
                                                                 </DropdownMenuItem>
@@ -1178,31 +988,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     {/* Volumes */}
                     <TabsContent value="volumes" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <div className="flex flex-wrap items-center gap-2 mb-4">
-                            {volumeSearch !== '' || volumeSearchExpanded ? (
-                                <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                    <Input
-                                        ref={volumeSearchRef}
-                                        placeholder="Search volumes..."
-                                        value={volumeSearch}
-                                        onChange={(e) => setVolumeSearch(e.target.value)}
-                                        onBlur={() => { if (volumeSearch === '') setVolumeSearchExpanded(false); }}
-                                        className="pl-9 h-9"
-                                    />
-                                </div>
-                            ) : (
-                                <TooltipProvider>
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setVolumeSearchExpanded(true)} aria-label="Search volumes">
-                                                <Search className="w-4 h-4" />
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Search volumes</TooltipContent>
-                                    </Tooltip>
-                                </TooltipProvider>
-                            )}
-                            <FilterToggle
+                            <CollapsibleSearch value={volumeSearch} onChange={setVolumeSearch} noun="volumes" />
+                            <ResourceFilterControl
+                                noun="volumes"
                                 value={volumeFilter}
                                 onChange={setVolumeFilter}
                                 counts={{
@@ -1211,6 +999,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     unmanaged: volumes.filter(v => v.managedStatus !== 'managed').length,
                                 }}
                             />
+                            <div className="flex-1" />
+                            {isAdmin && (
+                                <Button variant="outline" size="sm" className="h-9 shrink-0 max-md:min-h-11" onClick={() => setConfirmPrune({ target: 'volumes', scope: 'managed' })}>
+                                    Prune unused
+                                </Button>
+                            )}
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <ScrollArea className="h-[62vh] max-md:h-auto">
@@ -1224,7 +1018,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : (
+                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
+                                <TableLoadError cols={5} noun="volumes" onRetry={() => void loadInventory()} />
+                            ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No volumes found.</TableCell></TableRow>
@@ -1299,13 +1095,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <div className="flex justify-between items-center px-4 py-2.5 border-b bg-muted/10 sticky top-0 z-10">
                             <div className="flex items-center gap-2.5">
-                                <input
-                                    type="checkbox"
-                                    onChange={selectAllOrphans}
+                                <Checkbox
+                                    id="select-all-external"
+                                    aria-label="Select all external containers"
+                                    onCheckedChange={selectAllOrphans}
                                     checked={selectedOrphans.length === totalOrphansCount && totalOrphansCount > 0}
-                                    className="rounded border-border focus:ring-ring h-4 w-4 accent-foreground"
                                 />
-                                <span className="text-xs font-medium text-muted-foreground">Select all</span>
+                                <label htmlFor="select-all-external" className="text-xs font-medium text-muted-foreground">Select all</label>
                             </div>
                             {isAdmin && <Button
                                 variant="ghost"
@@ -1315,30 +1111,34 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 disabled={selectedOrphans.length === 0 || isActioning}
                             >
                                 <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                {isActioning ? 'Purging...' : `Purge Selected (${selectedOrphans.length})`}
+                                {`Purge selected (${selectedOrphans.length})`}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 ? (
+                        {totalOrphansCount === 0 && inventoryState === 'loading' ? (
+                            <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
+                        ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
+                            <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
+                                <span>Could not load external containers.</span>
+                                <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
+                            </div>
+                        ) : totalOrphansCount === 0 ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
                                     <ShieldCheck className="w-6 h-6 text-success" />
                                 </div>
-                                <p className="font-medium text-sm">No unmanaged containers</p>
+                                <p className="font-medium text-sm">No external containers</p>
                                 <p className="text-xs mt-1 opacity-70">All running containers are managed by Sencho.</p>
                             </div>
                         ) : (
                             <div className="p-4 space-y-3 pb-12">
-                                {Object.entries(orphans).map(([project, containers], gi) => (
+                                {Object.entries(orphans).map(([project, containers]) => (
                                     <div
                                         key={project}
-                                        className="bg-card rounded-lg border shadow-card-bevel overflow-hidden text-sm animate-in fade-in-0 slide-in-from-bottom-1 duration-200"
-                                        style={{ animationDelay: `${gi * 60}ms` }}
+                                        className="bg-card rounded-lg border shadow-card-bevel overflow-hidden text-sm"
                                     >
                                         {/* Project header */}
-                                        <div className="bg-warning/8 border-b border-warning/15 px-4 py-2 font-medium text-xs flex items-center gap-2">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-warning animate-pulse shrink-0" />
-                                            <span className="text-warning">External Project:</span>
+                                        <div className="bg-muted/20 border-b border-border/60 px-4 py-2 font-medium text-xs flex items-center gap-2">
                                             <span className="font-mono text-foreground">{project}</span>
                                             <span className="ml-auto text-muted-foreground font-normal">{containers.length} container{containers.length !== 1 ? 's' : ''}</span>
                                         </div>
@@ -1348,11 +1148,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                     key={container.Id}
                                                     className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/30 transition-colors duration-150"
                                                 >
-                                                    <input
-                                                        type="checkbox"
+                                                    <Checkbox
+                                                        aria-label={`Select ${container.Names[0]?.replace(/^\//, '') || container.Id.substring(0, 12)}`}
                                                         checked={selectedOrphans.includes(container.Id)}
-                                                        onChange={() => toggleOrphan(container.Id)}
-                                                        className="rounded border-border h-4 w-4 accent-foreground"
+                                                        onCheckedChange={() => toggleOrphan(container.Id)}
                                                     />
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-2">
@@ -1387,7 +1186,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             isLoading={isLoading}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
-                            onReleased={fetchAllData}
+                            onReleased={refreshAll}
                         />
                     </TabsContent>
                 </div>
@@ -1412,19 +1211,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 }
                 hint={confirmPrune?.scope === 'all' ? 'AFFECTS external Docker resources' : 'KEEPS external resources'}
                 confirmLabel={
-                    isActioning
-                        ? 'Pruning...'
-                        : planLoading
-                            ? 'Preparing...'
-                            : prunePlan && prunePlan.reclaimableBytes > 0
-                                ? `Prune · ${formatBytes(prunePlan.reclaimableBytes)}`
-                                : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')
+                    planLoading
+                        ? 'Preparing...'
+                        : prunePlan && prunePlan.reclaimableBytes > 0
+                            ? `Prune · ${formatBytes(prunePlan.reclaimableBytes)}`
+                            : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')
                 }
+                busyConfirmLabel="Pruning..."
                 confirming={isActioning}
                 confirmDisabled={planLoading || !prunePlan || !!planError || (prunePlan?.items.length ?? 0) === 0}
                 onConfirm={handlePrune}
             >
                 <div className="space-y-3 text-sm text-stat-subtitle">
+                    {confirmPrune && (
+                        <SegmentedControl<PruneScope>
+                            ariaLabel="Prune scope"
+                            value={confirmPrune.scope}
+                            disabled={isActioning}
+                            onChange={(scope) => setConfirmPrune((current) => (current && current.scope !== scope ? { ...current, scope } : current))}
+                            options={[
+                                { value: 'managed', label: 'Sencho-managed' },
+                                { value: 'all', label: 'All Docker' },
+                            ]}
+                        />
+                    )}
                     <p>
                         {confirmPrune?.scope === 'all' ? (
                             <>
@@ -1442,21 +1252,20 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </div>
             </ConfirmModal>
 
-            {/* Reclaim Confirm (banner "Review & prune") */}
+            {/* Reclaim Confirm (masthead Reclaim) */}
             <ConfirmModal
                 open={confirmReclaim}
                 onOpenChange={(open) => !open && setConfirmReclaim(false)}
                 variant="destructive"
-                kicker="RESOURCES · PRUNE · IRREVERSIBLE"
+                kicker="RESOURCES · RECLAIM · IRREVERSIBLE"
                 title="Reclaim disk space"
                 hint="AFFECTS external Docker resources"
                 confirmLabel={
-                    isActioning
-                        ? 'Reclaiming...'
-                        : planLoading
-                            ? 'Preparing...'
-                            : `Reclaim ${formatBytes(prunePlan?.reclaimableBytes ?? totalReclaimableBytes)}`
+                    planLoading
+                        ? 'Preparing...'
+                        : `Reclaim ${formatBytes(prunePlan?.reclaimableBytes ?? totalReclaimableBytes)}`
                 }
+                busyConfirmLabel="Reclaiming..."
                 confirming={isActioning}
                 confirmDisabled={planLoading || !prunePlan || !!planError || (prunePlan?.items.length ?? 0) === 0}
                 onConfirm={handleReclaimAll}
@@ -1477,7 +1286,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 variant="destructive"
                 kicker="RESOURCES · DELETE · IRREVERSIBLE"
                 title={`Delete ${confirmDelete?.type.slice(0, -1) ?? ''}`}
-                confirmLabel={isActioning ? 'Deleting...' : 'Delete'}
+                confirmLabel="Delete"
+                busyConfirmLabel="Deleting..."
                 confirming={isActioning}
                 onConfirm={handleDelete}
             >
@@ -1489,15 +1299,16 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </p>
             </ConfirmModal>
 
-            {/* Unmanaged Container Purge Confirm */}
+            {/* External Container Purge Confirm */}
             <ConfirmModal
                 open={bulkPurgeConfirm}
                 onOpenChange={setBulkPurgeConfirm}
                 variant="destructive"
                 kicker="RESOURCES · PURGE · IRREVERSIBLE"
-                title="Purge selected unmanaged containers"
+                title="Purge selected external containers"
                 hint={`AFFECTS ${selectedOrphans.length} container${selectedOrphans.length !== 1 ? 's' : ''}`}
-                confirmLabel={isActioning ? 'Purging...' : 'Purge'}
+                confirmLabel="Purge"
+                busyConfirmLabel="Purging..."
                 confirming={isActioning}
                 onConfirm={handlePurgeOrphans}
             >
@@ -1521,7 +1332,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <VulnerabilityScanSheet
                 scanId={inspectScanId}
                 onClose={() => setInspectScanId(null)}
-                onRescan={canDeployResources ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
+                onRescan={canDeployResources ? (imageRef) => { setInspectScanId(null); void scanImage(imageRef, undefined, { force: true }); } : undefined}
                 canGenerateSbom={canReadResources}
                 canExportSarif={canReadResources}
                 canCompare
@@ -1535,8 +1346,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <div className="flex h-full min-h-0 flex-col">
                 <Masthead
                     kicker="resources · docker"
-                    state={totalReclaimableBytes > 0 ? 'Reclaimable' : 'Tidy'}
-                    stateTone={totalReclaimableBytes > 0 ? 'warning' : 'success'}
+                    state={mastheadModel.state}
+                    stateTone={MOBILE_STATE_TONE[mastheadModel.tone]}
                     live={false}
                     meta={`${images.length} images · ${volumes.length} volumes · ${networks.length} networks`}
                     right={headerActions}
@@ -1551,6 +1362,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     return (
         <div className="p-6 h-full overflow-auto text-foreground flex flex-col gap-6 animate-in fade-in-0 duration-300">
+            <PageMasthead
+                kicker={`resources · ${activeNode?.name ?? 'local'}`}
+                state={mastheadModel.state}
+                tone={mastheadModel.tone}
+                subtitle={mastheadModel.subtitle}
+                metadata={mastheadModel.metadata}
+                size="hero"
+                className="rounded-lg"
+            />
             {mainContent}
             {overlays}
         </div>

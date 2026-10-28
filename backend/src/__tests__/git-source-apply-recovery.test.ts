@@ -146,6 +146,8 @@ vi.mock('../utils/authoredComposeArgs', () => ({
   authoredComposeFileArgs: vi.fn().mockResolvedValue(['-f', 'compose.yaml']),
   authoredComposeEnvFileArgs: vi.fn().mockResolvedValue([]),
   candidateValidationEnvFileArgs: vi.fn().mockResolvedValue([]),
+  DEFAULT_PATH_SEPARATOR: ':',
+  composeFileEnvVarSelection: vi.fn().mockResolvedValue({ kind: 'absent', composeEnvFiles: [], loadedEnvFiles: [] }),
 }));
 
 const mockGetGitSource = vi.fn();
@@ -329,6 +331,45 @@ describe('git-source apply recovery (R1)', () => {
     expect(mockCompensate).not.toHaveBeenCalled();
     expect(mockAbandon).not.toHaveBeenCalled();
     expect(mockSetGitSourceLastPlan).toHaveBeenCalledWith('app', 'fp-test', 'applied');
+  });
+
+  it('keeps the applied files and names the reason, without compensating, when the Docker endpoint guard refuses the deploy', async () => {
+    const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointError');
+    mockDeployStack.mockRejectedValue(new DockerEndpointProtectedError({
+      reason: 'provider',
+      service: 'socket-proxy',
+      message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+    }));
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+
+    const result = await svc.apply('app', 'abc1234deadbeef', {
+      deploy: true,
+      actor: 'tester',
+      requirePlanFingerprint: false,
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.deployed).toBe(false);
+    expect(result.deployError).toContain('carries the Docker connection');
+    expect(mockCompensate).not.toHaveBeenCalled();
+    expect(mockAbandon).not.toHaveBeenCalled();
+  });
+
+  it('hands the caller\'s decision callback to the deploy gate, so a manual apply can report it', async () => {
+    const { GitSourceService } = await import('../services/GitSourceService');
+    const { buildSystemPolicyGateOptions } = await import('../helpers/policyGate');
+    const svc = GitSourceService.getInstance();
+    stubApplyPath(svc as never);
+    const onAllowed = vi.fn();
+
+    await svc.apply('app', 'abc1234deadbeef', { deploy: true, actor: 'tester', requirePlanFingerprint: false, onAllowed });
+
+    expect(buildSystemPolicyGateOptions).toHaveBeenCalledWith(
+      'tester',
+      expect.objectContaining({ onAllowed, auditPath: '/api/stacks/app/git-source/apply' }),
+    );
   });
 
   it('refuses to promote when recovery capture fails', async () => {

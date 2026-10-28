@@ -1,13 +1,16 @@
 import { useState } from 'react';
-import { CheckCheck, Hourglass, ShieldCheck } from 'lucide-react';
+import { Hourglass, ShieldCheck } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
 import { RolloutPreviewDialog } from '@/components/blueprints/RolloutPreviewDialog';
-import { acceptGitOpsSource, authorizeGitOpsRollout } from '@/lib/gitopsAuthorityApi';
+import { authorizeGitOpsRollout } from '@/lib/gitopsAuthorityApi';
 import { policyReadFor } from '@/lib/gitopsAuthorityPolicy';
 import GitOpsPolicyControl from '@/components/gitops/GitOpsPolicyControl';
-import { livePlacementFacet, liveSourceFacet } from '@/lib/gitopsState';
+import GitOpsSourceActions from '@/components/gitops/GitOpsSourceActions';
+import { acceptSourceVisible, pullSourceVisible } from '@/components/gitops/sourceActionVisibility';
+import { livePlacementFacet } from '@/lib/gitopsState';
+import { useNodes } from '@/context/NodeContext';
 import type { PermissionAction } from '@/context/AuthContext';
 import type { GitOpsRevisionProjection } from '@/types/gitops';
 
@@ -25,7 +28,12 @@ interface GitOpsAuthorityActionsProps {
    * nothing, so a surface that forgets it hides an action rather than offering
    * one the session may not hold.
    */
-  can?: (action: PermissionAction) => boolean;
+  can?: (
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ) => boolean;
   /**
    * The bound Blueprint's state, when the surface knows it. Disabled withholds
    * the execution authority (placement and rollout) but not source
@@ -35,7 +43,7 @@ interface GitOpsAuthorityActionsProps {
   blueprintEnabled?: boolean;
 }
 
-type PendingAction = 'source' | 'rollout';
+type PendingAction = 'rollout';
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
@@ -69,7 +77,10 @@ export default function GitOpsAuthorityActions({
   blueprintEnabled = true,
 }: GitOpsAuthorityActionsProps) {
   const allowed = (action: PermissionAction): boolean => can?.(action) === true;
+  const { nodes } = useNodes();
+  const sourceNodeId = nodes.find((node) => node.is_default)?.id ?? null;
   const [pending, setPending] = useState<PendingAction | null>(null);
+  const [sourceBusy, setSourceBusy] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
 
   // Both Blueprint modes count as a live application here, because both are
@@ -79,27 +90,15 @@ export default function GitOpsAuthorityActions({
   // automatic decision and no way to reach it from the interface.
   const isBlueprintTarget = projection.targetMode === 'blueprint' || projection.targetMode === 'inline_blueprint';
   const live = isBlueprintTarget ? projection : null;
-  const source = liveSourceFacet(projection);
   const placement = livePlacementFacet(projection);
 
-  // The source facet names the waiting generation directly; the placement
-  // facet's pending arm agrees with it, but a newer candidate after an earlier
-  // acceptance is the source facet's fact to carry.
-  const candidateGenerationId = source?.status === 'candidate_ready' || source?.status === 'source_review_pending'
-    ? source.candidateGenerationId
-    : null;
-  // Each of these acts on a Git source generation, which an Inline Blueprint
-  // does not have, and the routes behind them refuse anything but a Git-managed
-  // application. Offering one would be a button whose every press is a 409.
-  //
-  // Accepting the source is a `stack:create` write. Under the Automatic rollout
+  // Accept source is a stack:create write. Under the Automatic rollout
   // authorization policy the system starts the rollout from the accepted
-  // generation, the same as the automatic source acceptance path, so the
-  // acceptance is the whole operator act and the create grant is the whole
-  // requirement.
-  const canAcceptSource = projection.targetMode === 'blueprint'
-    && candidateGenerationId !== null
-    && allowed('stack:create');
+  // generation, the same as the automatic source acceptance path, so that
+  // acceptance is the whole operator act for Accept source. Pull source is
+  // exact stack:edit on the source stack.
+  const canPullSource = pullSourceVisible(projection, can, sourceNodeId);
+  const canAcceptSource = acceptSourceVisible(projection, can);
 
   const canApprovePlacement = projection.targetMode === 'blueprint'
     && blueprintId !== null
@@ -132,35 +131,14 @@ export default function GitOpsAuthorityActions({
   const canConfigureRolloutPolicy = rolloutPolicyRead !== null && allowed('stack:deploy');
 
   if (
-    !canAcceptSource
+    !canPullSource
+    && !canAcceptSource
     && !canApprovePlacement
     && !canAuthorizeRollout
     && !canConfigurePlacement
     && !canConfigureRolloutPolicy
   ) {
     return null;
-  }
-
-  async function handleAcceptSource(): Promise<void> {
-    if (!candidateGenerationId) return;
-    setPending('source');
-    try {
-      const result = await acceptGitOpsSource(applicationId, candidateGenerationId);
-      if (result.note) {
-        // The acceptance stands; the note says whether the rollout is starting,
-        // waiting for an operator, paused, or held.
-        toast.warning(`Source revision accepted. ${result.note}`);
-      } else if (result.dispatched) {
-        toast.success('Source revision accepted and the rollout started');
-      } else {
-        toast.success('Source revision accepted');
-      }
-      onChanged();
-    } catch (error) {
-      toast.error(errorMessage(error, 'Failed to accept the source revision'));
-    } finally {
-      setPending(null);
-    }
   }
 
   async function handleAuthorizeRollout(): Promise<void> {
@@ -194,24 +172,20 @@ export default function GitOpsAuthorityActions({
             Blueprint disabled
           </span>
         )}
-        {canAcceptSource && (
-          <Button
-            size="sm"
-            className="gap-1.5 max-md:min-h-11"
-            onClick={() => void handleAcceptSource()}
-            disabled={pending !== null}
-            data-testid="gitops-action-accept-source"
-          >
-            <CheckCheck className="h-3.5 w-3.5" strokeWidth={1.5} />
-            {pending === 'source' ? 'Accepting…' : 'Accept source'}
-          </Button>
-        )}
+        <GitOpsSourceActions
+          applicationId={applicationId}
+          projection={projection}
+          can={can}
+          sourceNodeId={sourceNodeId}
+          onChanged={onChanged}
+          onPendingChange={setSourceBusy}
+        />
         {canApprovePlacement && (
           <Button
             size="sm"
             className="gap-1.5 max-md:min-h-11"
             onClick={() => setPreviewOpen(true)}
-            disabled={pending !== null || !blueprintEnabled}
+            disabled={pending !== null || sourceBusy || !blueprintEnabled}
             data-testid="gitops-action-approve-placement"
           >
             <Hourglass className="h-3.5 w-3.5" strokeWidth={1.5} />
@@ -223,7 +197,7 @@ export default function GitOpsAuthorityActions({
             size="sm"
             className="gap-1.5 max-md:min-h-11"
             onClick={() => void handleAuthorizeRollout()}
-            disabled={pending !== null || !blueprintEnabled}
+            disabled={pending !== null || sourceBusy || !blueprintEnabled}
             data-testid="gitops-action-authorize-rollout"
             title="Evaluates registry preflight, records the operator authorization, and starts the rollout."
           >

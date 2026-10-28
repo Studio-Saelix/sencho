@@ -11,6 +11,7 @@ import {
 import { BlueprintService, BlueprintNameConflictError, BlueprintOwnershipProbeError } from '../services/BlueprintService';
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { refuseIfSelfStack } from '../helpers/selfStackGuard';
+import { sendIfDockerEndpointProtected } from '../helpers/dockerEndpointRoute';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
@@ -620,7 +621,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             });
             return;
         }
-        res.json({ deployed: true });
+        res.json({ deployed: true, ...(outcome.policyEvidence ? { policyEvidence: outcome.policyEvidence } : {}) });
     } catch (error) {
         if (error instanceof DigestPinsMismatchError) {
             res.status(400).json({ error: error.message });
@@ -636,6 +637,7 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
             return;
         }
         if (refuseGitManagedConflict(res, error)) return;
+        if (sendIfDockerEndpointProtected(res, error)) return;
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }
@@ -680,6 +682,10 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
                 code: 'stack_op_in_progress',
                 inProgress: { action: result.existingAction },
             });
+            return;
+        }
+        if (result.code === 'docker_endpoint_protected') {
+            res.status(409).json({ error: result.error, code: result.code });
             return;
         }
         res.status(500).json({ error: result.error });

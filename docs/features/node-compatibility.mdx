@@ -92,6 +92,20 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `stack-delete-prune-volumes` | Preserve volumes on Delete unless the operator opts in to remove them |
 | `guided-external-network-preflight` | Guided missing-external-network check before deploy |
 | `service-scoped-update` | Per-service update, rebuild, and restore on multi-service stacks |
+| `notification-suppression-schedule` | Weekly maintenance windows on mute rules |
+| `notification-suppression-replica-retraction` | Removing a mute rule from a node when it is deleted on the control instance |
+| `service-scoped-stack-alert` | Stack alert rules that target one service |
+| `scoped-stack-auth-evidence` | Stack-scoped permissions enforced on requests forwarded to a node |
+| `authentication-mode` | The Authentication mode setting under SSO |
+| `remote-registry-credentials` | Private registry credentials delivered from the control instance to the node for Compose operations |
+| `remote-registry-exact-ref-proof-v1` | Proof that a delivered registry credential matches the exact image reference |
+| `remote-registry-sealed-envelope-v1` | Sealed delivery of registry credentials to the node |
+| `remote-image-inspect-v1` | Image inspection and update checks for a node through the control instance |
+| `remote-auto-update-checked-v1` | Auto-update runs on a node that are checked and verified from the control instance |
+| `gitops-source-controller` | Git sources and their source policy |
+| `blueprint-digest-pins-v1` | Digest-pinned Blueprint rollouts |
+| `fleet-readiness-v1` | Per-node readiness evidence and the per-stack readiness rollup behind the Readiness tab |
+| `health-gate-observation-v1` | Health observation of a stack on a remote node, for health-gated rollouts and updates |
 
 <Note>
   `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node has no scanner installed, it omits this capability and the scanning UI is replaced by a lock card whose body reads "Install a scanner from the Scanner setup tab." instead of the generic upgrade message.

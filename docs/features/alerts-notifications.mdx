@@ -181,6 +181,8 @@ Rules you create on the control instance replicate to remote nodes so alerts emi
 
 From the bell and from the **Recent alerts** card on Home, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
 
+Deleting a stack removes the mute rules that target only that stack on that node, so a later stack created under the same name is not muted by accident. Rules that also cover other stacks (a wildcard, several stacks, or a whole node) or other nodes are kept. The removal reaches remote nodes the same way deleting a rule in Settings does, and it also runs when a Blueprint withdraws a stack from a node.
+
 The masthead carries `SCOPE` (`global`), `RULES` (total), and `ACTIVE` (count).
 
 ### Built-in bell quieting (not a mute rule)
@@ -412,7 +414,7 @@ The entire host threshold evaluation can be silenced per node from **Settings ·
 
 ### Auto-update execution
 
-`info`/`image_update_applied`: `Auto-update: stack "<name>" updated with new images`. If a block-on-deploy policy gates the auto-update: `warning`/`scan_finding` `Policy "<name>" blocked auto-update: N image(s) exceed <severity>`. See [Auto-update policies](/features/auto-update-policies).
+`info`/`image_update_applied`: `Auto-update: stack "<name>" updated with new images`. If a block-on-deploy policy gates the auto-update, the alert is `warning`/`scan_finding` and names the outcome: a matched finding reads `Auto-update blocked for "<stack>": Policy "<name>" blocked update: N image(s) matched <conditions> images=[<refs>]`, and a block on evidence Sencho could not obtain reads `Auto-update blocked for "<stack>": Policy "<name>" blocked update because required security evidence was unavailable: <evidence> images=[<refs>]`. See [Auto-update policies](/features/auto-update-policies).
 
 ### Auto-heal
 

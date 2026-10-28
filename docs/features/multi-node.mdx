@@ -36,7 +36,7 @@ When you add a remote node, the Mode picker offers two options. The form tells y
 |---|---|---|
 | **Direction** | Remote dials the control plane (outbound only) | Control plane dials the remote (inbound to remote) |
 | **Network requirement** | Outbound HTTPS to the control instance | Inbound TCP port reachable from the control instance |
-| **What you run on the remote host** | A generated Compose file, brought up with `docker compose up -d` | A full Sencho install reachable on a routable URL |
+| **What you run on the remote host** | A generated Compose file that runs the standard Sencho image in Pilot mode, brought up with `docker compose up -d` | A Sencho install reachable on a routable URL |
 | **Token model** | One-shot enrollment token, 15-minute expiry | Long-lived bearer token, rotates on regeneration |
 | **Best for** | Hosts behind NAT, dynamic IPs, restrictive ingress, edge boxes | Servers you already expose on a stable URL with TLS termination |
 

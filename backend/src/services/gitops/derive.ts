@@ -38,6 +38,7 @@ import {
 } from './preflight';
 import type { BlueprintObservationStage } from './transitions';
 import type {
+  ApprovedRolloutScope,
   ArtifactExpectedIdentity,
   ArtifactFacet,
   ArtifactLatestEvidence,
@@ -83,6 +84,7 @@ const NOT_APPLICABLE: GitOpsRevisionProjection = {
   limitations: [],
   availableActions: [],
   approvals: null,
+  approvedRolloutScope: { status: 'not_applicable' },
   // An application that does not exist has no policy to report. Present and
   // empty rather than absent, so a reader never has to tell "no application"
   // from "an older build said nothing".
@@ -139,13 +141,14 @@ export function deriveGitOpsRevision(
     .map((target) => deriveTarget(app, acceptedIntent, target, facts.healthDisabled, limitations, confirmationExpected));
   const placement = derivePlacement(app, futureEvidence, targets);
   const rollout = deriveRollout(app, targets, artifact, facts.healthDisabled, futureEvidence);
-  const availableActions = deriveActions(app, source, placement, targets);
+  const availableActions = deriveActions(app, source, placement, targets, facts.targets, facts.healthDisabled);
   return {
     schemaVersion: 1,
     targetMode: app.target_mode,
     applicationId: app.id,
     lifecycleStatus: app.lifecycle_status,
     stackName: app.stack_name,
+    configuredSourceStackName: app.configured_source_stack_name ?? app.stack_name,
     blueprintId: app.blueprint_id,
     rolloutGenerationId: app.rollout_generation_id,
     approvals: {
@@ -154,6 +157,7 @@ export function deriveGitOpsRevision(
       rolloutAuthorizationRef: app.rollout_authorization_ref,
       legacyCombinedApprovalRef: app.legacy_combined_approval_ref,
     },
+    approvedRolloutScope: deriveApprovedRolloutScope(app),
     facets: { source, artifact, placement, rollout },
     targets,
     drift: collectDrift(app, facts.targets, targets, availableActions, {
@@ -166,6 +170,52 @@ export function deriveGitOpsRevision(
     availableActions,
     authorityPolicies: authorityPolicyReads(app, { source, placement, rollout }),
   };
+}
+
+/**
+ * The rollout scope an approved placement froze.
+ *
+ * Read from the rollout candidate's required targets and accepted only once
+ * `resolveApprovalRef` confirms the placement approval stands for that set,
+ * which is the same pair `store.authorizationIngredients` hands the dispatch
+ * boundary. So this names the scope execution would use, not a set the
+ * projection chose.
+ *
+ * The observed `targets` rows cannot answer this. A Blueprint approved for a
+ * node no rollout has reached yet has no row there, and a node it was withdrawn
+ * from keeps one, so the two sets disagree exactly when a confirmation is
+ * worth reading.
+ */
+function deriveApprovedRolloutScope(app: GitOpsApplicationRow): ApprovedRolloutScope {
+  if (app.target_mode !== 'blueprint') return { status: 'not_applicable' };
+  const approvalRef = app.placement_approval_ref;
+  if (!approvalRef) return { status: 'unapproved' };
+  const store = GitOpsStore.getInstance();
+  const candidate = app.rollout_candidate_id
+    ? store.getRolloutCandidate(app.rollout_candidate_id)
+    : undefined;
+  if (!candidate || candidate.application_id !== app.id || !app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  if (candidate.intent_revision_id !== app.intent_revision_id) {
+    return { status: 'unresolved', approvalRef, reason: 'no_candidate' };
+  }
+  let requiredNodeIds: number[];
+  try {
+    requiredNodeIds = decodeGitOpsRequiredTargetsJson(candidate.required_targets_json).nodeIds;
+  } catch {
+    return { status: 'unresolved', approvalRef, reason: 'unreadable_required_targets' };
+  }
+  const resolves = store.resolveApprovalRef(approvalRef, {
+    kind: 'placement_approval',
+    applicationId: app.id,
+    intentRevisionId: app.intent_revision_id,
+    requiredNodeIds,
+  }) !== null;
+  if (!resolves) {
+    return { status: 'unresolved', approvalRef, reason: 'approval_does_not_resolve' };
+  }
+  return { status: 'approved', approvalRef, nodeIds: requiredNodeIds };
 }
 
 /**
@@ -2605,17 +2655,64 @@ function targetDeployLegal(app: GitOpsApplicationRow, target: GitOpsTargetProjec
   );
 }
 
+/**
+ * Whether an operator retry would resume at the deploy because the health gate
+ * judged the applied generation a failure.
+ *
+ * A failed verdict never sets the application's or the target's failure
+ * columns, because the deploy itself succeeded, so no source status offers
+ * `retry` for it. The retry still has somewhere to go: it resumes the deploy
+ * alone against the applied generation. This mirrors the evidence that
+ * decides that arm in `GitSourceService` (the default node's active target
+ * applied exactly the accepted generation, carries no other failure, and the
+ * stack's latest stack-scoped health run is a `failed` verdict bound to it),
+ * plus the states in which retry defers to the real state instead of starting
+ * work (an operation in flight, an unfinished recovery, an interruption;
+ * suspension is excluded by the caller). A service-scoped run, an observing
+ * or unknown run, or a run bound to another generation is not a failure claim
+ * about the applied generation. Only Direct applications reach this.
+ *
+ * With health gates off the verdict is stale: a successful deploy retry opens
+ * no new gate run, so the failure would stay the latest and the button would
+ * come back after every redeploy. The API still resumes the deploy; the sheet
+ * just stops advertising it.
+ */
+function healthFailedDeployRetryLegal(
+  app: GitOpsApplicationRow,
+  rawTargets: GitOpsTargetCurrentRow[],
+  healthDisabled: boolean,
+): boolean {
+  if (healthDisabled) return false;
+  const generationId = app.accepted_generation_id;
+  const stackName = app.stack_name;
+  if (!generationId || !stackName) return false;
+  if (app.active_operation_stage !== null || app.interruption_stage !== null) return false;
+  if (app.recovery_phase !== null && app.recovery_phase !== 'complete') return false;
+  const store = GitOpsStore.getInstance();
+  if (!store.getGeneration(generationId)) return false;
+  const defaultNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+  const target = rawTargets.find((row) => row.node_id === defaultNodeId);
+  if (!target || target.target_status !== 'active') return false;
+  if (target.applied_generation_id !== generationId || target.failure_stage !== null) return false;
+  const run = store.getLatestStackHealthRun(target.node_id, stackName);
+  return run !== undefined && run.status === 'failed' && run.deployed_generation_id === generationId;
+}
+
 function deriveActions(
   app: GitOpsApplicationRow,
   source: SourceFacet,
   placement: PlacementFacet,
   targets: GitOpsTargetProjection[],
+  rawTargets: GitOpsTargetCurrentRow[],
+  healthDisabled: boolean,
 ): GitOpsAvailableAction[] {
   if (source.status === 'applying' || source.status === 'checking_fetching') return ['none'];
   if (source.status === 'recovery_required' || source.status === 'recovery_failed') return ['none'];
   const actions = new Set<GitOpsAvailableAction>();
-  // Fetch is offered only to live Direct applications: Blueprint Git-source
-  // integration ships later, until then no Blueprint mode advertises fetch.
+  // `fetch` stays Direct-only. It opens the stack change plan. A Git-managed
+  // Blueprint pulls through POST .../source/fetch, which stages a candidate
+  // and, for an automatic policy, may accept and dispatch in the same call.
+  // Drift keys off this action, so a Blueprint must not advertise it.
   if (
     app.target_mode === 'direct'
     && (
@@ -2671,7 +2768,11 @@ function deriveActions(
       actions.add('resume');
     } else {
       actions.add('suspend');
-      if (source.status === 'source_failed' || source.status === 'source_retry_scheduled') {
+      if (
+        source.status === 'source_failed'
+        || source.status === 'source_retry_scheduled'
+        || healthFailedDeployRetryLegal(app, rawTargets, healthDisabled)
+      ) {
         actions.add('retry');
       }
     }
@@ -2748,6 +2849,7 @@ function unreachableApplicationRevision(limitation: GitOpsLimitation): GitOpsRev
     limitations: [limitation],
     availableActions: [],
     approvals: null,
+    approvedRolloutScope: { status: 'not_applicable' },
     // A fault carries no application either, so it has no policy to report, and
     // it is deliberately not the shared sentinel's identity.
     authorityPolicies: [],

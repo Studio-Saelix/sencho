@@ -165,7 +165,7 @@ These rules activate when the stack publishes at least one host port. They use t
 | Sensitive service exposed on all interfaces | High | A service that looks like a database or admin tool (postgres, redis, adminer, and similar) publishes on all interfaces. |
 | Stack publishes ports without an exposure intent | Warning | The stack publishes host ports but no exposure intent has been set in the Networking tab. |
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
-| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL or reverse-proxy intent set. |
+| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `sencho.service.url` label, and no reverse-proxy intent. |
 
 ### Self-protection
 
@@ -190,7 +190,7 @@ Sencho recognizes when the stack it is checking is its own running compose proje
 
 This is the one place Compose Doctor's findings connect to an enforcement that is not advisory. Independent of this report, and independent of whether the finding is acknowledged, Sencho refuses generic **deploy, update, stop, down, and delete** actions on its own compose project, because any of them could recreate or remove the dashboard you are using to manage it. Attempting one of those actions returns an error explaining why; Compose Doctor's finding is the heads-up that surfaces the same fact before you try.
 
-To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. To manage the stack normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
+To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. Sencho's own project is refused as described above. Any other stack that holds the Docker socket proxy Sencho is using is protected against operations that would stop or recreate the proxy. Those are refused (see [Updating the proxy](/operations/self-hosting#updating-the-proxy) for the full list), and a deploy that leaves the proxy unchanged goes through. To manage Sencho's own project normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
 
 ## Networking-relevant findings on the Networking page
 

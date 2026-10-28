@@ -58,6 +58,7 @@ vi.mock('../services/ComposeService', async () => {
     ComposeService: {
       ...actual.ComposeService,
       getInstance: () => ({
+        evaluateDockerEndpoint: async () => null,
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
         runDown: mockRunDown,
@@ -79,6 +80,7 @@ vi.mock('../services/DockerController', async () => {
         getContainersByStack: mockGetContainersByStack,
         restartContainer: mockRestartContainer,
         stopContainer: mockStopContainer,
+        assertNoDockerEndpointContainers: vi.fn().mockResolvedValue(undefined),
         getDocker: () => ({
           listContainers: mockListContainers,
         }),
@@ -402,7 +404,7 @@ describe('failure classification on deploy/update error responses', () => {
 
   it('classifies rollback coverage refusals', async () => {
     mockDeployStack.mockRejectedValue(
-      new Error('Host-absolute include path cannot be captured for exact rollback'),
+      new Error('Rollback coverage is unavailable: Case-colliding managed paths "App.conf" and "app.conf"'),
     );
 
     const res = await request(app)

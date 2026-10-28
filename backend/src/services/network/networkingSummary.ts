@@ -55,11 +55,17 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     let content: string;
     try {
       content = await fsSvc.getStackContent(stack);
-    } catch {
-      continue; // unreadable compose: nothing to summarize for this stack
+    } catch (error) {
+      // Unreadable compose (missing, a dangling link or one outside its stack dir, or an I/O error).
+      console.warn('[NetworkingSummary] Skipped stack %s, compose file unreadable:',
+        sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      continue;
     }
     const declared = parseComposeDependencies(content);
-    if (declared.parseError) continue;
+    if (declared.parseError) {
+      console.warn('[NetworkingSummary] Skipped stack %s, compose file does not parse.', sanitizeForLog(stack));
+      continue;
+    }
 
     // A host-network service publishes every container port directly on the host,
     // so it counts as exposed (beyond loopback) and as publishing even with no

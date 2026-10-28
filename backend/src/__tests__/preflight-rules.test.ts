@@ -873,6 +873,13 @@ describe('exposure-intent rules', () => {
     expect(ids(runRules(ctx({ model: m, hasAccessUrls: true })), 'reverse-proxy-undocumented')).toHaveLength(0);
     expect(ids(runRules(ctx({ model: m, stackIntent: 'reverse-proxy' })), 'reverse-proxy-undocumented')).toHaveLength(0);
     expect(ids(runRules(ctx({ model: m, serviceIntents: { web: 'reverse-proxy' } })), 'reverse-proxy-undocumented')).toHaveLength(0);
+    // A validated service URL on that service is documentation. A sibling service is not covered.
+    const documented = model([
+      svc({ name: 'web', labelKeys: ['traefik.enable'], hasServiceUrl: true }),
+      svc({ name: 'api', labelKeys: ['traefik.enable'] }),
+    ]);
+    const documentedFindings = runRules(ctx({ model: documented })).filter(f => f.ruleId === 'reverse-proxy-undocumented');
+    expect(documentedFindings.map(f => f.service)).toEqual(['api']);
   });
   it('flags a sensitive image exposed on all interfaces', () => {
     const m = model([svc({ name: 'db', image: 'postgres:16', ports: [{ startPort: 5432, endPort: 5432, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);

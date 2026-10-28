@@ -23,6 +23,11 @@ import {
   type RegistryReadinessDeps,
 } from './registryReadiness';
 import { readAppliedComposeContent } from './gitManagedMaterialization';
+import {
+  driftHoldReason,
+  sourceConfirmationDrift,
+  UNREADABLE_SOURCE_CONFIRMATION,
+} from './sourceConfirmation';
 import { decodeGitOpsRequiredTargetsJson } from './json';
 import { configuredSnapshotFor, encodePolicySnapshot } from './policyComposition';
 import { recoveryBindingForTarget } from './recoveryCapture';
@@ -35,7 +40,7 @@ import {
   type HealthRolloutPolicy,
 } from './healthPolicy';
 import { probeRemoteCapability, type RemoteCapabilityProbe } from '../../helpers/remoteCapabilities';
-import { HEALTH_ROLLOUT_POLICY_CAPABILITY } from '../CapabilityRegistry';
+import { HEALTH_GATE_OBSERVATION_CAPABILITY } from '../CapabilityRegistry';
 import { HealthGateService } from '../HealthGateService';
 import type { HealthRolloutExecutor } from './healthRolloutExecutor';
 import { DatabaseService, type Node } from '../DatabaseService';
@@ -45,6 +50,57 @@ import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { mapWithConcurrency } from '../../utils/mapWithConcurrency';
 
 export { setRegistryReadinessDepsForTests };
+
+/**
+ * Why a mint is refused because the placement it was about is no longer the one
+ * preflight covered. Refused rather than retried here: the next evaluation runs
+ * against the placement as it stands, which is the only evidence that can
+ * describe the current target set.
+ */
+export const AUTHORIZATION_INPUTS_MOVED_REASON =
+  'The approved placement changed while registry readiness was being evaluated; nothing was authorized.';
+
+/**
+ * Why unattended authorization must not mint for this acceptance, or null when
+ * the stored confirmation still describes the application (or there is none).
+ *
+ * Only the stored claim is read. Authorize rewrites it and Resume clears it,
+ * and either can land while the request that accepted the commit is still
+ * handing off. Checking that request again would pause a rollout those
+ * decisions had already released. The object keeps whichever placement was
+ * named, including none, and whichever rollout promise was confirmed.
+ * An operator mint does not call this: authorizing is that decision.
+ */
+export function sourceConfirmationHoldReason(app: GitOpsApplicationRow): string | null {
+  const stored = GitOpsStore.getInstance().storedSourceConfirmation(app);
+  if (stored.status === 'unreadable') return UNREADABLE_SOURCE_CONFIRMATION;
+  if (stored.status !== 'present') return null;
+  const drift = sourceConfirmationDrift(app, stored.confirmation);
+  return drift ? driftHoldReason(drift) : null;
+}
+
+/**
+ * Whether the ingredients a mint is about to write still describe the ones
+ * registry preflight was run against.
+ *
+ * Compared field by field rather than by a subset, because the mint copies
+ * every one of them onto a rollout generation that cannot be edited afterwards,
+ * and a silent mismatch is a rollout whose recorded readiness describes
+ * something other than what it authorizes.
+ */
+function sameAuthorizationIngredients(
+  left: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+  right: Omit<FutureRolloutAuthorizationBinding, 'preflightFingerprint'>,
+): boolean {
+  if (left.rolloutCandidateId !== right.rolloutCandidateId) return false;
+  if (left.acceptedGenerationId !== right.acceptedGenerationId) return false;
+  if (left.artifactSetId !== right.artifactSetId) return false;
+  if (left.intentRevisionId !== right.intentRevisionId) return false;
+  if (left.sourceAcceptanceRef !== right.sourceAcceptanceRef) return false;
+  if (left.placementApprovalRef !== right.placementApprovalRef) return false;
+  return left.requiredNodeIds.length === right.requiredNodeIds.length
+    && left.requiredNodeIds.every((nodeId, index) => nodeId === right.requiredNodeIds[index]);
+}
 
 const PREFLIGHT_EVAL_TIMEOUT_MS = 30_000;
 
@@ -391,6 +447,33 @@ export async function ensureRolloutAuthorization(
       return { ok: false, reason: 'The rollout authorization policy requires an operator to authorize.' };
     }
 
+    // The durable half of a source confirmation. The request that carried it is
+    // gone by the time preparation resolves, the reconciler re-drives, or a
+    // restart comes back. The acceptance recorded the placement and whether a
+    // rollout was allowed to start, including a confirmation that no placement
+    // was approved.
+    //
+    // Enforced here, at the one funnel every mint passes. An operator mint is
+    // exempt on purpose, because asking to authorize the rollout is the
+    // decision the confirmation deferred, taken against the placement as it
+    // stands now.
+    //
+    // Held rather than merely refused, because a refusal with nothing behind it
+    // is re-attempted on the next reconcile and the operator would watch a
+    // rollout sit queued with no reason attached to it. The acceptance stands.
+    if (!alreadyAuthorized && authority === 'configured_policy') {
+      const reason = sourceConfirmationHoldReason(app);
+      if (reason) {
+        holdBlockedRolloutDispatch(app.id, { reason, holdable: true }, {
+          actor: 'system:rollout-dispatch',
+          trigger: 'blueprint_dispatch',
+          requireLiveBinding: false,
+          origin: 'operator',
+        });
+        return { ok: false, reason };
+      }
+    }
+
     const artifactRefusal = executableArtifactRefusalReason(
       store.getArtifactSet(ingredients.artifactSetId)?.qualification,
     );
@@ -426,6 +509,26 @@ export async function ensureRolloutAuthorization(
     // Re-read after the await: a pause placed while preflight ran must not
     // mint, supersede, or invalidate the authorization it is holding.
     if (shouldAbort?.()) return { ok: false, reason: 'The rollout is paused.' };
+
+    // The evidence above is about the ingredients read before the await, and
+    // the mint below is written against whatever the row says by then. Anything
+    // that moved in between would pair readiness evaluated for one target set
+    // with an authorization minted for another: a placement re-approved during
+    // preflight changes the approval and the frozen set, and a source
+    // acceptance landing in the same window changes the generation, the artifact
+    // set and the acceptance without touching the other pair. Compared in full,
+    // because every one of these is something the mint writes onto an
+    // immutable rollout generation.
+    //
+    // Refuse rather than write: a rollout generation cannot be edited, so a
+    // mismatched mint could only be undone by superseding the rollout it already
+    // queued. The next evaluation runs against the ingredients as they stand,
+    // which is the only evidence that can describe the current state.
+    const settled = store.authorizationIngredients(store.getApplication(applicationId) ?? app);
+    if (!settled || !sameAuthorizationIngredients(ingredients, settled)) {
+      return { ok: false, reason: AUTHORIZATION_INPUTS_MOVED_REASON };
+    }
+
     const preflightEvidenceJson = encodePreflightEvidenceJson(preflight);
     const preflightFingerprint = fingerprintPreflightEvidence(preflight);
     const transitions = GitOpsTransitions.getInstance();
@@ -781,21 +884,18 @@ function policyForDispatch(
     : { kind: 'policy', policy: DEFAULT_HEALTH_ROLLOUT_POLICY };
 }
 
-/** The stack a Blueprint target is deployed under, as the intent names it. */
-function deployStackNameFor(
-  store: GitOpsStore,
-  app: GitOpsApplicationRow,
-  nodeId: number,
-): string | null {
-  const target = store.getTarget(app.id, nodeId);
-  const targetIntent = target?.intent_revision_id
-    ? store.getIntentRevision(target.intent_revision_id)
-    : undefined;
-  const appIntent = app.intent_revision_id ? store.getIntentRevision(app.intent_revision_id) : undefined;
-  return targetIntent?.deploy_stack_name
-    ?? app.configured_source_stack_name
-    ?? appIntent?.deploy_stack_name
-    ?? null;
+/**
+ * The stack a Blueprint target is deployed under, as the intent names it.
+ *
+ * The intent's `deploy_stack_name` is the name the apply writes, on a local node
+ * and on a remote one, so it is the only stack a health run can observe. The
+ * source stack an application was converted from is a different workload, and a
+ * target that has not acked its first Blueprint rollout has no intent of its own
+ * yet, so falling back to that name would watch, or 404 on, the wrong stack.
+ */
+function deployStackNameFor(store: GitOpsStore, app: GitOpsApplicationRow): string | null {
+  if (!app.intent_revision_id) return null;
+  return store.getIntentRevision(app.intent_revision_id)?.deploy_stack_name ?? null;
 }
 
 /**
@@ -803,13 +903,13 @@ function deployStackNameFor(
  * observe.
  *
  * The hub runs a health gate on a target's behalf by reading that target's
- * Docker directly, and a remote node's Docker is not directly reachable; all
- * access to it goes through the HTTP proxy. Sending non-observe health work to a
- * node that cannot serve the verdict would leave the rollout waiting on evidence
- * that can never arrive, so the refusal happens before the apply is dispatched
- * and before any run is reserved.
+ * runtime facts, and for a remote node those come from the node's own
+ * observation route over the HTTP proxy. A node too old to serve them cannot
+ * produce a verdict, and sending non-observe health work to one would leave the
+ * rollout waiting on evidence that can never arrive, so the refusal happens
+ * before the apply is dispatched and before any run is reserved.
  *
- * A local target is not probed: this instance can already read it, so there is
+ * A local target is not probed: this instance reads it itself, so there is
  * nothing to confirm.
  */
 async function refuseUngatedRemoteTarget(
@@ -819,12 +919,12 @@ async function refuseUngatedRemoteTarget(
   if (node.type !== 'remote') return null;
   const probe = healthCapabilityProbeForTests
     ? await healthCapabilityProbeForTests(node.id)
-    : await probeRemoteCapability(node.id, HEALTH_ROLLOUT_POLICY_CAPABILITY);
+    : await probeRemoteCapability(node.id, HEALTH_GATE_OBSERVATION_CAPABILITY);
   if (probe.kind === 'supported') return null;
   if (probe.kind === 'unreachable') {
     return `Node ${node.name} could not be asked whether it supports health-gated rollout (${probe.detail}); the rollout policy "${policy}" was not applied.`;
   }
-  return `Node ${node.name} does not support health-gated rollout, so the policy "${policy}" cannot run against it. Choose "observe" for this application, or move the target to a node that supports it.`;
+  return `Node ${node.name} does not report the observed health this policy needs, so the policy "${policy}" cannot run against it. Update Sencho on that node, choose "observe" for this application, or move the target to a node that supports it.`;
 }
 
 type ReservedTargetRun =
@@ -1189,7 +1289,7 @@ export class BlueprintTargetAdapter implements TargetAdapter {
         app: liveApp,
         binding,
         node,
-        stackName: deployStackNameFor(store, liveApp, nodeId),
+        stackName: deployStackNameFor(store, liveApp),
         policy: healthPolicy,
         actor: generation.actor ?? null,
       });
@@ -1434,11 +1534,13 @@ export function liveHealthRolloutExecutor(): HealthRolloutExecutor {
  * when no authorization is live: a refusal before the mint is the caller's to
  * report, and pausing there would hold a rollout nothing has authorized.
  *
- * The origin is chosen by the refusal's kind, never by the caller. A dispatch
- * refusal carries `system`, which is what lets a source acceptance clear it when
- * it supersedes the rollout the hold was about. A real health decision (a stop,
- * a pause, a rollback) carries `health` and survives until the operator resumes;
- * an operator pause carries `operator` and does the same.
+ * The origin is chosen by the refusal's kind, never by the caller, except for
+ * an operator-origin hold, which is the one hold nobody can schedule away: a
+ * dispatch refusal carries `system`, which is what lets a source acceptance
+ * clear it when it supersedes the rollout the hold was about. A real health
+ * decision (a stop, a pause, a rollback) carries `health` and survives until the
+ * operator resumes; an operator pause, and a refusal that exists because an
+ * operator asked to review something first, carry `operator` and do the same.
  */
 export function holdBlockedRolloutDispatch(
   applicationId: string,
@@ -1459,9 +1561,11 @@ export function holdBlockedRolloutDispatch(
     /**
      * Who the hold belongs to. `system` for a dispatch refusal (cleared by a
      * source acceptance that supersedes the rollout), `health` for a policy
-     * decision. Defaults to `system`.
+     * decision, `operator` for a hold that exists because an operator asked to
+     * see it before anything moves. Only `system` is released by a later source
+     * acceptance; the other two need the operator. Defaults to `system`.
      */
-    origin?: 'system' | 'health';
+    origin?: 'system' | 'health' | 'operator';
   } = {},
 ): void {
   // A refusal that says nothing durable about the rollout is not a hold for the

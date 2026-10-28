@@ -22,7 +22,8 @@ vi.mock('../utils/debug', () => ({
   isDebugEnabled: () => false,
 }));
 
-vi.mock('../services/rollbackInventory', () => ({
+vi.mock('../services/rollbackInventory', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/rollbackInventory')>()),
   resolveRollbackInventory: vi.fn(),
 }));
 
@@ -37,7 +38,10 @@ vi.mock('../services/DatabaseService', () => ({
 import { FileSystemService } from '../services/FileSystemService';
 import { RollbackGenerationStore } from '../services/RollbackGenerationStore';
 import { resolveRollbackInventory } from '../services/rollbackInventory';
-import { resolveComposeProjectContext } from '../services/composeProjectContext';
+import {
+  resolveComposeProjectContext,
+  resolveComposeProjectContextForGeneration,
+} from '../services/composeProjectContext';
 
 describe('composeProjectContext backupFromContext', () => {
   let composeDir: string;
@@ -95,8 +99,15 @@ describe('composeProjectContext backupFromContext', () => {
       lastAppliedContentHash: null,
       manifestState: null,
       manifestGeneration: null,
-      exactCoverage: true,
       coverageRefusal: null,
+      recoveryRefusal: null,
+      uncapturedInputs: [],
+      uncapturedRelativePaths: [],
+      ownedUncapturedRelativePaths: [],
+      applicationDataPaths: [],
+      applicationDataPathPrefixes: [],
+      dynamicApplicationDataSources: [],
+      unparsedComposeSources: [],
     });
     vi.spyOn(RollbackGenerationStore, 'captureGeneration').mockRejectedValue(
       new Error('injected capture failure'),
@@ -108,5 +119,126 @@ describe('composeProjectContext backupFromContext', () => {
     expect(await fsPromises.readFile(backupPath)).toEqual(originalBackup);
     await fsSvc.restoreStackFiles(stackName);
     expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf8')).toBe('ORIGINAL\n');
+  });
+});
+
+describe('composeProjectContext backupFromContext coverage', () => {
+  let composeDir: string;
+  let dataDir: string;
+  let originalDataDir: string | undefined;
+  const stackName = 'partial';
+
+  function inventory(over: Partial<Awaited<ReturnType<typeof resolveRollbackInventory>>> = {}) {
+    return {
+      entries: [{
+        relativePath: 'compose.yaml',
+        dependencyKind: 'compose-root' as const,
+        provenance: 'authored' as const,
+        sensitivity: 'low' as const,
+        absolutePath: path.join(composeDir, stackName, 'compose.yaml'),
+      }],
+      invocation: {
+        composeArgsPrefix: [],
+        projectDirectory: null,
+        projectName: stackName,
+        explicitComposeFiles: ['compose.yaml'],
+        meshEnabled: false,
+        meshOverrideRelativePath: null,
+      },
+      git: null,
+      appliedDeploySpec: null,
+      lastAppliedContentHash: null,
+      manifestState: null,
+      manifestGeneration: null,
+      coverageRefusal: null,
+      recoveryRefusal: null,
+      uncapturedInputs: [],
+      uncapturedRelativePaths: [],
+      ownedUncapturedRelativePaths: [],
+      applicationDataPaths: [],
+      applicationDataPathPrefixes: [],
+      dynamicApplicationDataSources: [],
+      unparsedComposeSources: [],
+      ...over,
+    };
+  }
+
+  beforeEach(async () => {
+    composeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-compose-'));
+    dataDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'sencho-data-'));
+    mockState.composeDir = composeDir;
+    mockState.composeDirs = new Map([[1, composeDir]]);
+    originalDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = dataDir;
+    await fsPromises.mkdir(path.join(composeDir, stackName), { recursive: true });
+    await fsPromises.writeFile(path.join(composeDir, stackName, 'compose.yaml'), 'services: {}\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    if (originalDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = originalDataDir;
+    await fsPromises.rm(composeDir, { recursive: true, force: true });
+    await fsPromises.rm(dataDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('captures a partial generation and logs what was left out', async () => {
+    const note = 'include ../shared/base.yaml is outside the stack directory and is not captured';
+    vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory({ uncapturedInputs: [note] }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const ctx = await resolveComposeProjectContext(1, stackName);
+    const generationId = await ctx.backupFromContext('deployment');
+
+    const manifest = await RollbackGenerationStore.readVerifiedGeneration(1, stackName, generationId);
+    expect(manifest.entries.map((e) => e.relativePath)).toEqual(['compose.yaml']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('../shared/base.yaml');
+  });
+
+  describe('restoring over a file the capture left out', () => {
+    // The live inventory reports a path the generation did not record. For a
+    // generation that recorded no omission of its own, whether the restore may
+    // remove it depends on whether the inventory owns it.
+    async function restoreWithLiveOmission(owned: string[]): Promise<void> {
+      vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory());
+      const ctx = await resolveComposeProjectContext(1, stackName);
+      const generationId = await ctx.backupFromContext('deployment');
+
+      await fsPromises.writeFile(path.join(composeDir, stackName, 'extra.env'), 'KEEP=me\n', 'utf8');
+      vi.mocked(resolveRollbackInventory).mockResolvedValue(inventory({
+        uncapturedRelativePaths: ['extra.env'],
+        ownedUncapturedRelativePaths: owned,
+        uncapturedInputs: ['extra.env is loaded by Compose for interpolation and is not captured'],
+      }));
+      const restoreCtx = await resolveComposeProjectContextForGeneration(1, stackName, generationId);
+      await restoreCtx.restoreFromContext();
+    }
+
+    it('keeps an omission the inventory does not own', async () => {
+      await restoreWithLiveOmission([]);
+
+      expect(await fsPromises.readFile(path.join(composeDir, stackName, 'extra.env'), 'utf8')).toBe('KEEP=me\n');
+    });
+
+    it('removes an owned omission the generation never held', async () => {
+      await restoreWithLiveOmission(['extra.env']);
+
+      await expect(fsPromises.stat(path.join(composeDir, stackName, 'extra.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
+  it('refuses before writing anything when the inventory has a blocking reason', async () => {
+    vi.mocked(resolveRollbackInventory).mockResolvedValue(
+      inventory({ coverageRefusal: 'Case-colliding managed paths "A" and "a"' }),
+    );
+    const capture = vi.spyOn(RollbackGenerationStore, 'captureGeneration');
+
+    const ctx = await resolveComposeProjectContext(1, stackName);
+    await expect(ctx.backupFromContext('deployment')).rejects.toMatchObject({
+      code: 'ROLLBACK_COVERAGE_UNAVAILABLE',
+      message: 'Rollback coverage is unavailable: Case-colliding managed paths "A" and "a"',
+    });
+    expect(capture).not.toHaveBeenCalled();
   });
 });

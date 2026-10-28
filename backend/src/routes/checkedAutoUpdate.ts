@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
-import { buildPolicyGateOptions } from '../helpers/policyGate';
+import { buildPolicyGateOptions, policyEvidenceFor } from '../helpers/policyGate';
 import { REGISTRY_DELIVERY_BODY_FIELD } from '../helpers/registryDeliveryBodyLimits';
 import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { isValidStackName } from '../utils/validation';
@@ -71,7 +71,11 @@ checkedAutoUpdateRouter.post('/execute-checked', authMiddleware, async (req: Req
       },
     });
     if (result.applied) invalidateFleetUpdateCache();
-    res.json({ ...envelope, result: result.result, applied: result.applied, healthGateId: result.healthGateId });
+    res.json({
+      ...envelope, result: result.result, applied: result.applied, healthGateId: result.healthGateId,
+      ...(result.endpointRefusal ? { endpointRefusal: result.endpointRefusal } : {}),
+      ...policyEvidenceFor(res),
+    });
   } catch (error) {
     if (error instanceof ImageUpdateObservationError) {
       res.status(error.status).json({ ...envelope, result: error.code === 'IMAGE_UPDATE_OBSERVATION_STALE' ? 'stale_observation' : 'rejected', code: error.code });

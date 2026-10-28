@@ -1,0 +1,204 @@
+---
+title: Put Sencho Behind Caddy and Keep Real Client Addresses
+sidebarTitle: Run behind a reverse proxy
+description: Serve Sencho over HTTPS through Caddy, trust only the proxy's address, and confirm the audit log, the session cookie, and the sign-in limiter all see each client instead of the proxy.
+---
+
+Say your team reaches Sencho at `https://sencho.example.com`, and a reverse proxy terminates HTTPS in front of it. The proxy alone is not enough. Until Sencho is told which peer to trust, it ignores the client address and scheme the proxy forwards. The audit log then names the proxy for every action, the session cookie is not marked `Secure`, and one person's failed sign-ins lock everyone out for 15 minutes.
+
+This tutorial runs Caddy next to Sencho in one Compose file, shows those symptoms on purpose, and then fixes them with `SENCHO_TRUSTED_PROXY_CIDRS`. By the end, Sencho trusts only Caddy's address, the audit log records each operator's own address, and the sign-in limiter counts each client separately.
+
+It covers Caddy on the same Docker host as Sencho. It does not cover Nginx or Traefik configs, native TLS on the Sencho process, or SSO. The forwarding headers any proxy must send, the Nginx and Traefik examples, and the trusted lists on remote nodes and Pilot agents are in [Reverse proxy setup](/getting-started/configuration#reverse-proxy-setup). To sign in through an identity provider once this works, see [Set Up SSO with Custom OIDC](/tutorials/set-up-sso).
+
+## Prerequisites
+
+- The `admin` role. You read the audit log in this tutorial, and that needs it.
+- A Docker host running Sencho from a Compose file, laid out as in the [Quickstart](/getting-started/quickstart).
+- A DNS name that points at that host, with ports `80` and `443` reachable from the internet so Caddy can get a certificate on its own. This tutorial uses `sencho.example.com`; replace it everywhere. For a name that only resolves on a private network, Caddy needs a different certificate setup; see [Caddy's Automatic HTTPS](https://caddyserver.com/docs/automatic-https).
+- At least one stack to restart in step 3. Any stack will do.
+- A second machine with a different public address than your workstation, with `curl`, for the last step.
+
+<Warning>
+  Step 1 removes the published port `1852` from Sencho, so the proxy is the only way in. Anything that reaches Sencho at `http://<host>:1852` today, such as bookmarks or other nodes enrolled against that address, stops working. A client that connects to Sencho directly is not behind the proxy, so Sencho ignores any forwarding headers it sends.
+</Warning>
+
+<Steps>
+  <Step title="Add Caddy to the Compose file">
+    Next to your Sencho `docker-compose.yml`, change the file to the one below. Sencho joins a network named `edge` with a fixed subnet, and Caddy gets a fixed address on it. The fixed address is what you trust in step 4: Docker would hand Caddy a different one after a recreate, and the trusted value has to match the address Sencho sees.
+
+    ```yaml
+    services:
+      sencho:
+        image: saelix/sencho:latest
+        container_name: sencho
+        restart: unless-stopped
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - /opt/compose:/opt/compose
+          - sencho_data:/app/data
+        environment:
+          - COMPOSE_DIR=/opt/compose
+        networks:
+          - edge
+
+      caddy:
+        image: caddy:2
+        container_name: caddy
+        restart: unless-stopped
+        ports:
+          - "80:80"
+          - "443:443"
+        volumes:
+          - ./Caddyfile:/etc/caddy/Caddyfile:ro
+          - caddy_data:/data
+        networks:
+          edge:
+            ipv4_address: 172.30.10.2
+
+    networks:
+      edge:
+        ipam:
+          config:
+            - subnet: 172.30.10.0/24
+
+    volumes:
+      sencho_data:
+      caddy_data:
+    ```
+
+    If `172.30.10.0/24` overlaps a network you already use (`docker network inspect $(docker network ls -q)` lists them), pick another private range and use its addresses in every later step.
+
+    Create a `Caddyfile` in the same directory:
+
+    ```
+    sencho.example.com {
+    	reverse_proxy sencho:1852
+    }
+    ```
+
+    Caddy sets `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` itself and discards any values a client sends for them, so a visitor cannot forge their own address. It also upgrades WebSocket connections without extra lines, which Sencho uses for live logs and notifications.
+  </Step>
+  <Step title="Start it and sign in over HTTPS">
+    Bring both services up:
+
+    ```bash
+    docker compose up -d
+    docker compose logs caddy | grep "certificate obtained"
+    ```
+
+    The first start takes a few seconds while Caddy gets its certificate. When the `certificate obtained successfully` line appears, open `https://sencho.example.com` and sign in with your admin account.
+
+    <Frame>
+      <img src="/images/tutorials/run-sencho-behind-a-reverse-proxy/login-over-https.png" alt="Sencho sign-in card with Username and Password fields, a Stay signed in checkbox, and a Sign in button, served through the proxy." />
+    </Frame>
+  </Step>
+  <Step title="See what Sencho sees before it trusts the proxy">
+    Do one thing the audit log records. Open any stack and select **Restart**. Then open the navigation launcher, the menu icon at the left end of the top bar, and choose **Audit** under **Security & review**. If the page opens on **Stream**, switch to **Table** and select the newest row. Its **IP Address** is the Caddy container, not you.
+
+    <Frame>
+      <img src="/images/tutorials/run-sencho-behind-a-reverse-proxy/audit-proxy-address.png" alt="Audit Log table filtered to restarts, with the restart entry expanded to show Request Path /api/stacks/demo/restart and IP Address ::ffff:172.30.10.2." />
+    </Frame>
+
+    The address appears in its IPv4-mapped form, `::ffff:172.30.10.2`. Sencho also says why, and names the value to set:
+
+    ```bash
+    docker compose logs sencho | grep TrustProxy
+    ```
+
+    ```text
+    [TrustProxy] SENCHO_TRUSTED_PROXY_CIDRS is not set. X-Forwarded-* headers are ignored, which is correct when browsers reach Sencho directly; set it to your reverse proxy CIDR when one sits in front.
+    [TrustProxy] Ignoring X-Forwarded-* headers from untrusted peer 172.30.10.2. If that peer forwards traffic to this instance (a reverse proxy or another Sencho instance), set SENCHO_TRUSTED_PROXY_CIDRS=172.30.10.2/32 and restart. ...
+    ```
+
+    The second line appears once per unlisted peer, the first time a request from it carries forwarding headers. While it stands, your session cookie is also not marked `Secure`, and every client behind the proxy shares one sign-in budget.
+  </Step>
+  <Step title="Trust only the proxy">
+    Add the variable to the `sencho` service's `environment`, using the value the log gave you:
+
+    ```yaml
+        environment:
+          - COMPOSE_DIR=/opt/compose
+          - SENCHO_TRUSTED_PROXY_CIDRS=172.30.10.2/32
+    ```
+
+    The `/32` means exactly one IPv4 address; use `/128` for one IPv6 address, or the proxy network's CIDR if several proxies share it. Trust the narrowest range that works. A peer in this list decides which client address Sencho records, so a wide range lets anything inside it name any address it likes.
+
+    Sencho reads the list once at startup, so recreate the container:
+
+    ```bash
+    docker compose up -d
+    docker compose logs sencho | grep TrustProxy
+    ```
+
+    ```text
+    [TrustProxy] Trusting X-Forwarded-* headers from: 172.30.10.2/32.
+    ```
+
+    Your running stacks are not touched, and you stay signed in.
+  </Step>
+  <Step title="Sign in again and check your own address">
+    The session cookie you already hold was issued before Sencho trusted the proxy, so it is still not marked `Secure`. Open the profile menu, select **Log Out**, and sign in again. In your browser's developer tools, open the cookies for the site: `sencho_token` is now marked **Secure** as well as **HttpOnly**.
+
+    Repeat the **Restart** on a stack, open **Audit**, and expand the newest row. The **IP Address** is now your own address, without the `::ffff:` prefix.
+
+    <Frame>
+      <img src="/images/tutorials/run-sencho-behind-a-reverse-proxy/audit-client-address.png" alt="Audit Log table filtered to restarts, with the newest restart entry expanded to show IP Address 203.0.113.24." />
+    </Frame>
+  </Step>
+  <Step title="Check that the sign-in limiter counts each client on its own">
+    Sign-in keeps a small budget of attempts per client address, over a 15-minute window. A successful sign-in uses some of it as well as a failed one. First-run setup, the MFA step, and LDAP sign-in draw on the same budget. The OIDC routes have their own, slightly larger one. Requests from a signed-in user are limited per user, not per address, so people who are already working are not affected.
+
+    From the second machine, send a run of failed sign-ins:
+
+    ```bash
+    for i in 1 2 3 4 5 6 7 8; do
+      curl -s -o /dev/null -w "%{http_code}\n" -X POST https://sencho.example.com/api/auth/login \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"wrong"}'
+    done
+    ```
+
+    The first few lines are `401`, then every request returns `429`. Add `-D -` to one request to read its `RateLimit-Remaining` header. Anyone signing in from that address now sees this on the sign-in page:
+
+    <Frame>
+      <img src="/images/tutorials/run-sencho-behind-a-reverse-proxy/sign-in-rate-limited.png" alt="Sencho sign-in card with an ERROR banner reading Too many attempts. Please try again in 15 minutes. above the Sign in button." />
+    </Frame>
+
+    Sign in from your workstation. It works, because its budget is separate. The counters live in memory, so recreating the Sencho container clears them if you lock yourself out while testing.
+  </Step>
+</Steps>
+
+## Verify the result
+
+Three places agree that Sencho now sees each client:
+
+- **Startup log.** `docker compose logs sencho | grep TrustProxy` ends with `Trusting X-Forwarded-* headers from: 172.30.10.2/32.`, and no new `Ignoring X-Forwarded-* headers from untrusted peer` line appears after it.
+- **Audit log.** A new entry shows your own address under **IP Address**, not `::ffff:172.30.10.2`.
+- **Sign-in limiter.** A run of failed sign-ins from the second machine ends in `429`, while a sign-in from your workstation still succeeds.
+
+## If something goes wrong
+
+**Everything looks as it did in step 3 after you set the variable.** The usual cause is a value without a prefix, such as `172.30.10.2`. Sencho rejects an entry that is not a CIDR and then ignores the whole list, so no forwarding header is trusted. Sencho keeps running, which is why it is easy to miss. The startup log says what it rejected:
+
+```text
+[TrustProxy] Ignoring SENCHO_TRUSTED_PROXY_CIDRS: "172.30.10.2" (not a CIDR; add /32 for one IPv4 address, /128 for one IPv6 address, or the network prefix). X-Forwarded-* headers will be ignored and ...
+```
+
+Write `172.30.10.2/32`, run `docker compose up -d`, and check for the `Trusting` line. The same untrusted-peer warning from step 3 also appears when the address in the list is not the one Caddy connects from.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Reverse proxy setup" icon="shield-halved" href="/getting-started/configuration#reverse-proxy-setup">
+    The forwarding headers a proxy must send, Nginx and Traefik examples, and how trusted lists work on remote nodes and Pilot agents.
+  </Card>
+  <Card title="Clients share one rate-limit bucket behind a reverse proxy" icon="triangle-exclamation" href="/operations/troubleshooting#clients-share-one-rate-limit-bucket-behind-a-reverse-proxy">
+    Symptoms and the fix when the trusted list is missing or wrong.
+  </Card>
+  <Card title="Audit Log" icon="scroll" href="/features/audit-log">
+    What the audit log records, how to filter it, and who can read it.
+  </Card>
+  <Card title="Set Up SSO with Custom OIDC" icon="key" href="/tutorials/set-up-sso">
+    Let your team sign in through an identity provider once Sencho is served over HTTPS.
+  </Card>
+</CardGroup>

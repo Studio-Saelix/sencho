@@ -20,12 +20,13 @@ function okJson(payload: unknown): Response {
 }
 
 const STATUSES: NodeUpdateStatus[] = [
-  { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
-  { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
+  { nodeId: 1, name: 'Local', type: 'local', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: true, updateStatus: null },
+  { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', online: true, updateAvailable: true, updateStatus: null },
 ];
 
 const BLOCKED_STATUS: NodeUpdateStatus = {
   nodeId: 3, name: 'Pinned', type: 'remote', version: '1.0.0', latestVersion: '1.1.0',
+  online: true,
   updateAvailable: true, updateStatus: null, updateBlocked: true, updateBlockedReason: 'Digest pin blocks update.',
 };
 
