@@ -315,12 +315,24 @@ describe('the Docker socket proxy', () => {
     expect(refusal?.message).toContain('does not record one');
   });
 
-  it('refuses a deploy when the Compose version that would run it cannot be read', async () => {
+  it('refuses a deploy when the Compose version that would run it cannot be read, naming that cause', async () => {
     mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
 
     const refusal = await run({ kind: 'up' }, probes({ composeVersion: vi.fn().mockResolvedValue(null) }));
 
     expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(refusal?.message).toContain('Docker Compose version');
+    expect(refusal?.message).toContain('could not be read');
+  });
+
+  it('treats a rejected Compose version probe as cannot tell, without throwing from the evaluation', async () => {
+    mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
+    const composeVersion = vi.fn().mockRejectedValue(new Error('version probe failed'));
+
+    const refusal = await run({ kind: 'up' }, probes({ composeVersion }));
+
+    expect(refusal).toMatchObject({ reason: 'unresolved', service: 'socket-proxy' });
+    expect(composeVersion).toHaveBeenCalledTimes(1);
   });
 
   it('reads the Compose version once per evaluation, and only when the hash and image both matched', async () => {
@@ -332,6 +344,16 @@ describe('the Docker socket proxy', () => {
     composeVersion.mockClear();
     expect(await run({ kind: 'up' }, probes({ composeVersion, configHash: vi.fn().mockResolvedValue('hash-new') })))
       .toMatchObject({ reason: 'sencho' });
+    expect(composeVersion).not.toHaveBeenCalled();
+
+    const rendered = 'services:\n  socket-proxy:\n    image: proxy:latest\n';
+    composeVersion.mockClear();
+    mockListContainers.mockResolvedValue([{ ...proxyContainer, ImageID: 'sha256:old' }, webContainer]);
+    expect(await run({ kind: 'up' }, probes({
+      composeVersion,
+      renderConfig: vi.fn().mockResolvedValue(rendered),
+      localImage: vi.fn().mockResolvedValue({ state: 'id', id: 'sha256:new' }),
+    }))).toMatchObject({ reason: 'provider' });
     expect(composeVersion).not.toHaveBeenCalled();
   });
 

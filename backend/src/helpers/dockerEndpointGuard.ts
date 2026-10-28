@@ -380,7 +380,7 @@ function unknownRecreateRefusal(
   const why = cause === 'hash'
     ? '(the service, or a service it is wired to, uses volumes_from or a service: network, pid, or ipc mode, and the configuration hash Docker records for such a service never equals the one Compose renders, so the two cannot be compared). '
     : cause === 'version'
-      ? '(the container was created by a different Docker Compose version than the one this deploy would run, or does not record one, and a different Compose can recreate a service whose configuration hash and image still match). '
+      ? '(the container was created by a different Docker Compose version than the one this deploy would run, it does not record one, or the running version could not be read, and a different Compose can recreate a service whose configuration hash and image still match). '
       : '(Compose did not report its configuration hash, its image could not be inspected, or its pull policy can pull or build a different image). ';
   const remedy = role === 'sencho' && !via
     ? `use Reapply in ${REAPPLY_PATH} to recreate Sencho on purpose.`
@@ -607,10 +607,10 @@ async function ownRecreate(
   // "Unchanged" is only knowable for the Compose version that created the
   // container: a different Compose can recreate it even when the hash and the
   // image both match (Compose 5.6 recreated an unchanged project created by
-  // 5.1.3), so a version mismatch, or a container that records none, cannot be
-  // predicted and is refused rather than guessed.
+  // 5.1.3), so a version mismatch, a container that records none, or a version
+  // that cannot be read cannot be predicted and is refused rather than guessed.
   const running = normalizeComposeVersion(await composeVersion());
-  if (!running) return 'unknown';
+  if (!running) return 'version';
   if (existing.some(container => normalizeComposeVersion(container.Labels?.['com.docker.compose.version']) !== running)) return 'version';
   return 'no';
 }
@@ -625,8 +625,8 @@ function normalizeComposeVersion(version: string | null | undefined): string {
  * decision, or that of anything it is wired to, because Compose recreates or
  * restarts a service when a service it links to, mounts volumes from, runs in
  * the namespace of, or lists in `depends_on` with `restart: true` is recreated.
- * `unreliable` takes precedence over `unknown` so the refusal names the hash
- * limitation; either way the operation is refused.
+ * `unreliable` takes precedence over `version` and `unknown` so the refusal
+ * names the hash limitation; either way the operation is refused.
  */
 async function wouldRecreate(
   input: EndpointGuardInput,
@@ -683,9 +683,11 @@ export async function evaluateDockerEndpointGuard(input: EndpointGuardInput): Pr
   const selfState = await self.ensureResolved();
   const provider = viewOf(await resolveDockerEndpointProvider());
   // One read per evaluation: the version is the same for every service, and a
-  // deploy may judge several protected services.
+  // deploy may judge several protected services. A failed probe is "cannot
+  // tell", never a thrown evaluation.
   let composeVersionCall: Promise<string | null> | null = null;
-  const composeVersion = () => (composeVersionCall ??= input.probes.composeVersion());
+  const composeVersion = (): Promise<string | null> =>
+    (composeVersionCall ??= input.probes.composeVersion().catch(() => null));
 
   let allContainers: ListedContainer[];
   let stackContainers: ListedContainer[];

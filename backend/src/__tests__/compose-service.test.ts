@@ -633,6 +633,29 @@ describe('ComposeService - Docker endpoint guard', () => {
     expect(version).toBeNull();
   });
 
+  it('gives up on a hung Compose version probe instead of blocking the deploy', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const proc = createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      let version: string | null = 'unset';
+      mockEvaluateDockerEndpointGuard.mockImplementation(async (input: { probes: { composeVersion(): Promise<string | null> } }) => {
+        const pending = input.probes.composeVersion();
+        await vi.advanceTimersByTimeAsync(5_000);
+        version = await pending;
+        return null;
+      });
+
+      await ComposeService.getInstance(1).evaluateDockerEndpoint('my-stack', { kind: 'up' });
+
+      expect(proc.kill).toHaveBeenCalled();
+      expect(version).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hands the guard the rendered Compose config, so a label set only in the file is seen', async () => {
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);

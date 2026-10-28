@@ -189,6 +189,9 @@ const DEFAULT_COMPOSE_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 /** An empty env input: naming it replaces Compose's discovery of the default `.env`. */
 const EMPTY_ENV_FILE = '/dev/null';
 
+/** `docker compose version --short` is a local command and must answer quickly; a hung one must not stall a deploy's guard. */
+const COMPOSE_VERSION_TIMEOUT_MS = 5_000;
+
 /** The error line of `docker compose config` stderr: Compose prints warnings (`level=warning`, `WARN`) before the failure. */
 function renderErrorLine(stderr: string): string {
   const lines = stderr.split('\n').map(line => line.trim()).filter(Boolean);
@@ -390,7 +393,7 @@ export class ComposeService {
    */
   private async composeVersion(): Promise<string | null> {
     try {
-      const stdout = await this.captureCompose(['version', '--short'], this.baseDir);
+      const stdout = await this.captureCompose(['version', '--short'], this.baseDir, COMPOSE_VERSION_TIMEOUT_MS);
       return stdout.trim() || null;
     } catch (error) {
       console.warn('[ComposeService] compose version unavailable for the Docker endpoint guard:', sanitizeForLog(getErrorMessage(error, 'unknown')));
@@ -3020,7 +3023,7 @@ export class ComposeService {
     );
   }
 
-  private captureCompose(args: string[], cwd: string): Promise<string> {
+  private captureCompose(args: string[], cwd: string, timeoutMs?: number): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn('docker', ['compose', ...args], {
         cwd,
@@ -3031,6 +3034,25 @@ export class ComposeService {
       });
       let stdout = '';
       let stderr = '';
+      let timer: NodeJS.Timeout | null = null;
+      let settled = false;
+      const finish = (error: Error | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(stdout);
+      };
+      if (timeoutMs) {
+        timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // best effort
+          }
+          finish(new Error(`docker compose ${args.join(' ')} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }
       child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
       child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
       child.on('error', (err: NodeJS.ErrnoException) => {
@@ -3038,11 +3060,11 @@ export class ComposeService {
         if (mapped.isLowMemory) {
           console.warn('[ComposeService] captureCompose spawn failed under memory pressure:', mapped.message);
         }
-        reject(new Error(mapped.message));
+        finish(new Error(mapped.message));
       });
       child.on('close', (code) => {
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));
+        if (code === 0) finish(null);
+        else finish(new Error(stderr.trim() || `docker compose ${args.join(' ')} failed with code ${code}`));
       });
     });
   }
