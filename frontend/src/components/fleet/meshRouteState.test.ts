@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meshRouteStateFor, meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
+import { meshRouteStateFor, meshRouteStateFromBackend, meshRouteStateAfterProbe, meshRouteStateTokens } from './meshRouteState';
 
 describe('meshRouteStateFor', () => {
     const FROZEN_NOW = 1_700_000_000_000;
@@ -58,5 +58,30 @@ describe('meshRouteStateTokens', () => {
             expect(tk.toneClass.length).toBeGreaterThan(0);
             expect(tk.token.length).toBeGreaterThan(0);
         }
+    });
+});
+
+describe('meshRouteStateAfterProbe', () => {
+    it('keeps the diagnostic state when no probe has run or the probe passed', () => {
+        for (const base of ['healthy', 'degraded', 'unreachable', 'tunnel-down', 'not-authorized'] as const) {
+            expect(meshRouteStateAfterProbe(base, null)).toBe(base);
+            expect(meshRouteStateAfterProbe(base, { ok: true })).toBe(base);
+        }
+    });
+
+    it('never leaves a healthy or degraded chip beside a failed probe', () => {
+        for (const base of ['healthy', 'degraded'] as const) {
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'no_route' })).toBe('not-authorized');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'agent_resolve' })).toBe('not-authorized');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'pilot_tunnel' })).toBe('tunnel-down');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'agent_dial' })).toBe('unreachable');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'target_port' })).toBe('unreachable');
+            expect(meshRouteStateAfterProbe(base, { ok: false })).toBe('unreachable');
+        }
+    });
+
+    it('ignores a response that is not a probe result', () => {
+        // An error body has no `ok`, so it says nothing about the route.
+        expect(meshRouteStateAfterProbe('healthy', {} as { ok: boolean })).toBe('healthy');
     });
 });

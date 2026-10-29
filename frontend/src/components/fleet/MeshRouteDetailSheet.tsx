@@ -5,9 +5,16 @@ import { toast } from '@/components/ui/toast-store';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmModal } from '@/components/ui/modal';
-import { Loader2, Activity, Hash, Trash2 } from 'lucide-react';
+import { Loader2, Activity, Hash, Trash2, Copy } from 'lucide-react';
+import { copyToClipboard } from '@/lib/clipboard';
+import {
+    computeMeshMembershipImpact,
+    describeMeshMembershipImpact,
+    meshChangeBlocked,
+} from './meshImpact';
+import { describeMembershipError, describeProbeFailure } from './meshMessages';
 import type { MeshAlias, MeshNodeStatus, MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
-import { meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
+import { meshRouteStateAfterProbe, meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
 import { describeTransport } from './meshTransport';
 import { MeshStackTopologyView } from './MeshStackTopologyView';
 
@@ -17,14 +24,15 @@ interface Props {
     alias: string | null;
     /** Whether the user may start the mesh-wide opt-out cascade. */
     canManage: boolean;
-    status: MeshNodeStatus[];
+    /** Every node's mesh status; the same fleet snapshot the other membership dialogs take. */
+    fleetStatus: MeshNodeStatus[];
     aliases: MeshAlias[];
     onChanged: () => void;
 }
 
 type RouteTab = 'overview' | 'events' | 'topology' | 'raw';
 
-export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, status, aliases, onChanged }: Props) {
+export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fleetStatus, aliases, onChanged }: Props) {
     const [diag, setDiag] = useState<MeshRouteDiagnostic | null>(null);
     const [events, setEvents] = useState<MeshActivityEvent[]>([]);
     const [probe, setProbe] = useState<MeshProbeResult | null>(null);
@@ -69,13 +77,17 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
     const runProbe = async () => {
         if (!alias) return;
         setProbing(true);
-        setProbe(null);
         try {
             const res = await apiFetch(`/mesh/aliases/${encodeURIComponent(alias)}/test`, {
                 method: 'POST', localOnly: true,
             });
+            // An error body is not a probe result: it says nothing about the
+            // route, so it must not drive the chip or the failure sentence.
+            if (!res.ok) throw new Error(`status ${res.status}`);
             const body = await res.json() as MeshProbeResult;
             setProbe(body);
+        } catch {
+            toast.error('Could not run the test. Try again.');
         } finally {
             setProbing(false);
         }
@@ -90,27 +102,48 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                 `/mesh/nodes/${tgt.nodeId}/stacks/${encodeURIComponent(tgt.stack)}/opt-out`,
                 { method: 'POST', localOnly: true },
             );
-            if (!res.ok) throw new Error(`status ${res.status}`);
-            toast.success(`${tgt.stack} removed from mesh, redeploying`);
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({})) as { error?: string };
+                throw new Error(describeMembershipError(res.status, body.error));
+            }
+            toast.success(`${tgt.stack} removed from the mesh. Restarting affected stacks.`);
             onChanged();
             onOpenChange(false);
         } catch (err) {
-            toast.error(`Failed to remove from mesh: ${(err as Error).message}`);
+            toast.error((err as Error).message);
         } finally {
             setRemoving(false);
         }
     };
 
     if (!alias) return null;
-    const pillState = diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized';
+    // The fetched diagnostic is a snapshot from when the sheet opened; a probe
+    // run since then is the newer reading, so the chip must not contradict it.
+    const pillState = meshRouteStateAfterProbe(diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized', probe);
     const pill = meshRouteStateTokens(pillState);
 
+    const nodeLabel = (nodeId: number): string =>
+        fleetStatus.find((s) => s.nodeId === nodeId)?.nodeName ?? `node #${nodeId}`;
     const meta = diag?.target
-        ? `${diag.target.stack}/${diag.target.service}:${diag.target.port} · node #${diag.target.nodeId}`
+        ? `${diag.target.stack}/${diag.target.service}:${diag.target.port} · ${nodeLabel(diag.target.nodeId)}`
         : (loading ? 'Loading…' : 'No target resolved');
+    const probeFailure = probe && !probe.ok
+        ? describeProbeFailure(alias, probe, diag?.target
+            ? { nodeName: nodeLabel(diag.target.nodeId), port: diag.target.port }
+            : undefined)
+        : null;
+    const address = diag?.target ? `${alias}:${diag.target.port}` : alias;
+    const copyAddress = async (): Promise<void> => {
+        try {
+            await copyToClipboard(address);
+            toast.success(`Copied ${address}`);
+        } catch {
+            toast.error('Could not copy to the clipboard');
+        }
+    };
 
     const footerContext = probe
-        ? (probe.ok ? `Last probe ok · ${probe.latencyMs}ms` : `Last probe failed · ${probe.where ?? 'unknown'}`)
+        ? (probe.ok ? `Last probe ok · ${probe.latencyMs}ms` : `Last probe failed`)
         : diag?.lastProbeMs != null
             ? (diag.lastProbeAt != null
                 ? `Last probe ${formatTimeAgo(diag.lastProbeAt)} · ${diag.lastProbeMs}ms`
@@ -118,10 +151,22 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
             : 'No probe run yet';
 
     const target = diag?.target ?? null;
-    const targetNode = target ? status.find((s) => s.nodeId === target.nodeId) : undefined;
+    const targetNode = target ? fleetStatus.find((s) => s.nodeId === target.nodeId) : undefined;
     const stackAliasCount = target
         ? aliases.filter((a) => a.nodeId === target.nodeId && a.stackName === target.stack).length
         : 0;
+    const removeChange = target ? { kind: 'opt-out' as const, nodeId: target.nodeId, stackName: target.stack } : null;
+    // The live alias list can lag a stack that just stopped, so only promise a
+    // removal count when there is one. "This removes 0 hostnames" reads like a
+    // bug and tells the operator nothing.
+    const removedHostnames = target && stackAliasCount > 0
+        ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${target.stack}. `
+        : '';
+    const removeImpact = removeChange ? computeMeshMembershipImpact(fleetStatus, removeChange) : null;
+    const removeDescription = removeChange && removeImpact
+        ? `${removedHostnames}${describeMeshMembershipImpact(removeImpact, removeChange)}`
+        : undefined;
+    const removeBlocked = removeImpact ? meshChangeBlocked(removeImpact) : false;
     const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
 
     return (
@@ -164,17 +209,35 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                             </span>
                             {probe && (
                                 <Badge variant={probe.ok ? 'default' : 'destructive'} className="text-[10px] font-mono">
-                                    {probe.ok ? `ok ${probe.latencyMs}ms` : `${probe.where ?? 'fail'}: ${probe.code ?? 'error'}`}
+                                    {probe.ok ? `ok ${probe.latencyMs}ms` : 'test failed'}
                                 </Badge>
                             )}
                         </div>
+                        {probeFailure && (
+                            <div className="mt-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-stat-value">
+                                {probeFailure.message}
+                            </div>
+                        )}
                     </SheetSection>
 
                     {diag?.target && (
                         <SheetSection title="Target">
                             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
                                 <div className="text-stat-subtitle">Target node</div>
-                                <div className="font-mono text-stat-value">#{diag.target.nodeId}</div>
+                                <div className="font-mono text-stat-value">{nodeLabel(diag.target.nodeId)}</div>
+                                <div className="text-stat-subtitle">Address</div>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="font-mono text-stat-value truncate">{address}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => { void copyAddress(); }}
+                                        className="shrink-0 -m-1 p-1 text-stat-subtitle hover:text-brand transition-colors"
+                                        aria-label={`Copy ${address}`}
+                                        title="Copy address"
+                                    >
+                                        <Copy className="w-3 h-3" strokeWidth={1.75} />
+                                    </button>
+                                </div>
                                 <div className="text-stat-subtitle">Stack / service</div>
                                 <div className="font-mono text-stat-value">{diag.target.stack}/{diag.target.service}</div>
                                 <div className="text-stat-subtitle">Port</div>
@@ -222,7 +285,7 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                         <MeshStackTopologyView
                             nodeId={diag.target.nodeId}
                             stackName={diag.target.stack}
-                            status={status}
+                            status={fleetStatus}
                             aliases={aliases}
                         />
                     ) : (
@@ -245,15 +308,19 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
             variant="destructive"
             kicker={`Mesh / ${target?.stack ?? ''}`}
             title={`Remove ${target?.stack ?? 'stack'} from the mesh?`}
-            description={
-                target
-                    ? `${target.stack} will be redeployed on node #${target.nodeId} so its containers drop the mesh routing entries. This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'alias' : 'aliases'} published by this stack.`
-                    : undefined
-            }
-            confirmLabel="Remove and redeploy"
+            description={removeDescription}
+            confirmLabel="Remove and restart"
+            confirmDisabled={removeBlocked}
+            cancelLabel={removeBlocked ? 'Close' : undefined}
             onConfirm={() => { setConfirmRemove(false); void removeFromMesh(); }}
             onCancel={() => setConfirmRemove(false)}
-        />
+        >
+            {/* Visible as well as announced: `description` alone is the
+                screen-reader-only dialog description. */}
+            {removeDescription !== undefined && (
+                <p className="text-sm text-stat-subtitle leading-snug">{removeDescription}</p>
+            )}
+        </ConfirmModal>
         </>
     );
 }
