@@ -41,22 +41,12 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { test, expect, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
+import { requireDockerCli } from './externalDeps';
+import { cleanupJourneyResources } from './journeyCleanup';
 import { buildFixtureRepo, gitAvailable, pushFixtureCommit, serveRepos } from './gitServer.helper';
 
 const DOCKER_TIMEOUT_MS = 60_000;
 const IMAGE = 'busybox:stable';
-
-function dockerAvailable(): boolean {
-  try {
-    execFileSync('docker', ['compose', 'version'], { timeout: DOCKER_TIMEOUT_MS, stdio: 'pipe' });
-    execFileSync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: DOCKER_TIMEOUT_MS, stdio: 'pipe' });
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return false;
-    // Present but unusable is an environment fault, not a reason to skip.
-    throw error;
-  }
-}
 
 function composeFor(revision: string, configFile: string): string {
   return [
@@ -168,7 +158,7 @@ interface HealthGateView {
 
 test.describe.serial('GitOps converge journey on a Direct node (local git server)', () => {
   test.skip(!gitAvailable(), 'system git binary is not available');
-  test.skip(!dockerAvailable(), 'Docker CLI with the Compose plugin is not available');
+  test.skip(!requireDockerCli(), 'Docker CLI with the Compose plugin is not available');
 
   // Real deploys with a health-gate window and a wall-clock rollback: one
   // scenario, so it gets its own budget instead of the suite default.
@@ -179,6 +169,11 @@ test.describe.serial('GitOps converge journey on a Direct node (local git server
   let repos: Record<string, string>;
   let appId = '';
   let previousGateWindow = '90';
+  // Teardown deletes only what the run got as far as creating, so a failure
+  // before attachment (or before the webhook) does not produce phantom
+  // cleanup errors.
+  let stackAttached = false;
+  let webhookId: number | null = null;
 
   async function appRow(page: Page): Promise<ApplicationView['application']> {
     const res = await api<ApplicationView>(page, `/api/gitops/applications/${encodeURIComponent(`1:${appId}`)}`);
@@ -230,12 +225,10 @@ test.describe.serial('GitOps converge journey on a Direct node (local git server
     const page = await browser.newPage();
     try {
       await loginAs(page);
-      await api(page, `/api/stacks/${stackName}/git-source`, { method: 'DELETE' });
-      await api(page, `/api/stacks/${stackName}`, { method: 'DELETE' });
-      await api(page, '/api/settings', {
-        method: 'PATCH',
-        body: { health_gate_window_seconds: Number(previousGateWindow) },
-      });
+      await cleanupJourneyResources(
+        (path, init) => api(page, path, init),
+        { stackName, attached: stackAttached, webhookId, previousGateWindow },
+      );
     } finally {
       await page.close();
     }
@@ -269,6 +262,9 @@ test.describe.serial('GitOps converge journey on a Direct node (local git server
       },
     });
     expect(created.status, JSON.stringify(created.json)).toBe(200);
+    // The stack and its Git source exist once this call succeeds; teardown
+    // must delete them even if a later assertion in this test fails.
+    stackAttached = true;
     expect(created.json.commitSha).toBe(firstSha);
     const attached = await sourceView(page);
     appId = attached.gitopsRevision.applicationId;
@@ -305,6 +301,12 @@ test.describe.serial('GitOps converge journey on a Direct node (local git server
       body: { name: `e2e-${stackName}`, stack_name: stackName, action: 'git-pull' },
     });
     expect(webhook.status).toBe(201);
+    // Resource ownership: afterAll deletes this row. Stack deletion does not
+    // cascade to generic webhooks, so without its own request it would outlive
+    // the run and accumulate for a stack that no longer exists. An unexpected
+    // 201 without an id must read as "nothing to delete", not as a request for
+    // `/api/webhooks/undefined`.
+    webhookId = webhook.json.id ?? null;
     const rawBody = JSON.stringify({ ref: 'refs/heads/main' });
     const signature = `sha256=${createHmac('sha256', webhook.json.secret).update(rawBody).digest('hex')}`;
     const deliveryId = randomUUID();

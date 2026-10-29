@@ -1,5 +1,6 @@
 /**
- * Shared availability probes for the real-git and real-sshd E2E fixtures.
+ * Shared availability probes for the real-dependency E2E fixtures (git,
+ * sshd, and Docker).
  *
  * Mirrors backend/src/__tests__/__helpers__/externalDeps.ts. Kept as a
  * separate file rather than a shared import: backend's tsconfig pins
@@ -12,7 +13,9 @@
  * behavior but throw under CI, where the dependency is expected to be
  * present and a skip would be a false claim of coverage.
  */
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
+
+const DOCKER_PROBE_TIMEOUT_MS = 60_000;
 
 export type DependencyProbe = () => boolean;
 
@@ -21,6 +24,26 @@ export const defaultGitProbe: DependencyProbe = () =>
 
 export const defaultSshdProbe: DependencyProbe = () =>
   spawnSync('/usr/sbin/sshd', ['-V'], { stdio: 'ignore' }).status === 0;
+
+/**
+ * Probe Docker the way the deploy specs use it: the CLI, the Compose plugin,
+ * and a reachable daemon. Returns false only when the CLI is not installed.
+ * An installed CLI that cannot load Compose or reach a daemon throws, because
+ * that is a broken environment rather than an absent optional dependency.
+ */
+export const defaultDockerProbe: DependencyProbe = () => {
+  try {
+    execFileSync('docker', ['compose', 'version'], { timeout: DOCKER_PROBE_TIMEOUT_MS, stdio: 'pipe' });
+    execFileSync('docker', ['version', '--format', '{{.Server.Version}}'], {
+      timeout: DOCKER_PROBE_TIMEOUT_MS,
+      stdio: 'pipe',
+    });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return false;
+    throw error;
+  }
+};
 
 function requireDependency(name: string, hint: string, probe: DependencyProbe): boolean {
   const present = probe();
@@ -44,6 +67,15 @@ export function requireSshd(probe: DependencyProbe = defaultSshdProbe): boolean 
   return requireDependency(
     'sshd',
     'Ensure the CI image installs openssh-server and frees loopback port 22 (see .github/workflows/ci.yml).',
+    probe,
+  );
+}
+
+/** True when Docker with the Compose plugin is usable; throws under CI if absent. */
+export function requireDockerCli(probe: DependencyProbe = defaultDockerProbe): boolean {
+  return requireDependency(
+    'Docker CLI with the Compose plugin',
+    'Ensure the CI image installs Docker with the Compose plugin and a reachable daemon before running the E2E suite.',
     probe,
   );
 }
