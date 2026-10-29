@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
+import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -33,6 +34,8 @@ interface FleetSnapshot {
     skipped_stacks: string; // JSON string
     created_at: number;
     has_documentation?: number;
+    source_instance_id?: string | null;
+    warnings_known?: number;
 }
 
 type SnapshotStackFile =
@@ -53,6 +56,9 @@ interface SnapshotStack {
 interface SnapshotNode {
     nodeId: number;
     nodeName: string;
+    /** Destination node here; null when an imported snapshot has no mapping yet. */
+    targetNodeId?: number | null;
+    targetNodeName?: string | null;
     stacks: SnapshotStack[];
 }
 
@@ -76,6 +82,13 @@ interface FleetSnapshotDetail extends FleetSnapshot {
     nodes: SnapshotNode[];
     documentation?: SnapshotDocumentation;
     fileDecryptWarnings?: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string }>;
+    /** True when the snapshot came from another instance, so its node ids need mapping. */
+    requiresNodeMapping?: boolean;
+}
+
+interface CurrentNodeOption {
+    id: number;
+    name: string;
 }
 
 // Ordered labels for the read-only dossier block; only non-empty fields render.
@@ -138,6 +151,9 @@ export default function FleetSnapshots() {
     const [page, setPage] = useState(0);
     const [cloudSnapshotIds, setCloudSnapshotIds] = useState<Set<number>>(new Set());
     const [uploadingId, setUploadingId] = useState<number | null>(null);
+    const [currentNodes, setCurrentNodes] = useState<CurrentNodeOption[]>([]);
+    const [mappingDraft, setMappingDraft] = useState<Record<number, string>>({});
+    const [savingMapping, setSavingMapping] = useState(false);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
@@ -194,6 +210,22 @@ export default function FleetSnapshots() {
     useEffect(() => {
         fetchCloudConfig();
     }, [fetchCloudConfig]);
+
+    // Destination choices for mapping an imported snapshot's archived nodes.
+    const fetchCurrentNodes = useCallback(async () => {
+        try {
+            const res = await apiFetch('/nodes', { localOnly: true });
+            if (!res.ok) return;
+            const data = await res.json() as Array<{ id: number; name: string }>;
+            setCurrentNodes(data.map(node => ({ id: node.id, name: node.name })));
+        } catch {
+            // best-effort; an unmapped restore stays blocked without options
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchCurrentNodes();
+    }, [fetchCurrentNodes]);
 
     useEffect(() => {
         fetchCloudSnapshots();
@@ -252,6 +284,10 @@ export default function FleetSnapshots() {
             if (res.ok) {
                 const data: FleetSnapshotDetail = await res.json();
                 setSelectedSnapshot(data);
+                setMappingDraft(Object.fromEntries(data.nodes.map(node => [
+                    node.nodeId,
+                    node.targetNodeId != null ? String(node.targetNodeId) : '',
+                ])));
             } else {
                 const err = await res.json().catch(() => null);
                 toast.error(err?.message || err?.error || err?.data?.error || 'Failed to load snapshot details.');
@@ -391,6 +427,32 @@ export default function FleetSnapshots() {
         }
     };
 
+    const handleSaveMapping = async () => {
+        if (!selectedSnapshot) return;
+        const mappings = selectedSnapshot.nodes
+            .map(node => ({ sourceNodeId: node.nodeId, targetNodeId: Number(mappingDraft[node.nodeId]) }))
+            .filter(mapping => Number.isSafeInteger(mapping.targetNodeId) && mapping.targetNodeId > 0);
+        setSavingMapping(true);
+        try {
+            const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/node-mapping`, {
+                method: 'PUT',
+                localOnly: true,
+                body: JSON.stringify({ mappings }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => null);
+                throw new Error(err?.error || 'Failed to save the node mapping.');
+            }
+            toast.success('Snapshot node mapping saved.');
+            await handleViewDetail(selectedSnapshot);
+        } catch (error: unknown) {
+            const err = error as Record<string, unknown> | null;
+            toast.error(err?.message as string || 'Failed to save the node mapping.');
+        } finally {
+            setSavingMapping(false);
+        }
+    };
+
     // --- Toggle helpers ---
 
     const toggleNode = (nodeId: number) => {
@@ -474,6 +536,9 @@ export default function FleetSnapshots() {
                                     <RestoreAllButton
                                         restoring={restoringAll}
                                         hasDocumentation={(selectedSnapshot.documentation?.stacks.length ?? 0) > 0}
+                                        disabled={selectedSnapshot.requiresNodeMapping === true
+                                            && selectedSnapshot.nodes.some(node => node.targetNodeId == null)}
+                                        disabledReason="Map every archived node to a destination node before restoring all"
                                         onRestoreAll={handleRestoreAll}
                                     />
                                 )}
@@ -493,6 +558,55 @@ export default function FleetSnapshots() {
                                 )}
                             </div>
                         </div>
+
+                        {/* Imported snapshot: archived node ids need explicit destinations */}
+                        {selectedSnapshot.requiresNodeMapping && (
+                            <div className="rounded-xl border border-warning/30 bg-warning/5 p-4 space-y-3">
+                                <div className="flex items-center gap-2">
+                                    <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                                    <span className="text-sm font-medium text-warning">
+                                        This snapshot came from another instance
+                                    </span>
+                                </div>
+                                <p className="text-sm text-muted-foreground">
+                                    Its node numbers belong to the instance that captured it. Choose where each archived node restores to. Restore stays blocked for a node until it is mapped, and two archived nodes cannot share one destination.
+                                </p>
+                                <div className="space-y-2">
+                                    {selectedSnapshot.nodes.map(node => (
+                                        <div key={node.nodeId} className="flex flex-wrap items-center gap-2">
+                                            <span className="text-sm font-medium min-w-0 flex-1 truncate">{node.nodeName}</span>
+                                            <span className="text-xs text-muted-foreground shrink-0">restores to</span>
+                                            <Combobox
+                                                className="w-56"
+                                                options={currentNodes.map(option => ({ value: String(option.id), label: option.name }))}
+                                                value={mappingDraft[node.nodeId] ?? ''}
+                                                onValueChange={value => setMappingDraft(prev => ({ ...prev, [node.nodeId]: value }))}
+                                                placeholder="Not mapped"
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                                <Button size="sm" onClick={handleSaveMapping} disabled={savingMapping}>
+                                    {savingMapping ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
+                                    Save mapping
+                                </Button>
+                            </div>
+                        )}
+
+                        {/* Legacy archive: completeness unknown */}
+                        {selectedSnapshot.warnings_known === 0 && (
+                            <div className="rounded-xl border border-warning/30 bg-warning/5 p-4">
+                                <div className="flex items-center gap-2 mb-2">
+                                    <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                                    <span className="text-sm font-medium text-warning">
+                                        Partial-capture warnings were not recorded
+                                    </span>
+                                </div>
+                                <p className="text-sm text-muted-foreground">
+                                    This snapshot came from an archive made before Sencho recorded which stacks were skipped. An empty warning list here means the archive cannot say, not that the capture was complete.
+                                </p>
+                            </div>
+                        )}
 
                         {/* Skipped nodes warning */}
                         {(() => {
@@ -616,6 +730,11 @@ export default function FleetSnapshots() {
                                             }
                                             <Server className="w-4 h-4 text-muted-foreground shrink-0" />
                                             <span className="text-sm font-medium flex-1 truncate">{node.nodeName}</span>
+                                            {selectedSnapshot.requiresNodeMapping && (
+                                                <span className={`text-[10px] font-mono shrink-0 ${node.targetNodeName ? 'text-stat-subtitle' : 'text-warning'}`}>
+                                                    {node.targetNodeName ? `-> ${node.targetNodeName}` : 'Not mapped'}
+                                                </span>
+                                            )}
                                             <Badge variant="outline" className="text-xs font-mono tabular-nums shrink-0">
                                                 {node.stacks.length} stack{node.stacks.length !== 1 ? 's' : ''}
                                             </Badge>
@@ -652,11 +771,14 @@ export default function FleetSnapshots() {
                                                                 {isAdmin && (
                                                                     <RestoreButton
                                                                         nodeId={node.nodeId}
-                                                                        nodeName={node.nodeName}
+                                                                        nodeName={node.targetNodeName ?? node.nodeName}
                                                                         stackName={stack.stackName}
                                                                         hasDossier={!!dossier}
                                                                         restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
-                                                                        disabled={stackHasUnavailable}
+                                                                        disabled={stackHasUnavailable || (selectedSnapshot.requiresNodeMapping === true && node.targetNodeId == null)}
+                                                                        disabledReason={selectedSnapshot.requiresNodeMapping === true && node.targetNodeId == null
+                                                                            ? 'Map this archived node to a destination node before restoring'
+                                                                            : undefined}
                                                                         onRestore={handleRestore}
                                                                     />
                                                                 )}
@@ -966,13 +1088,14 @@ export default function FleetSnapshots() {
 
 // --- Restore Button Sub-Component ---
 
-function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, disabled, onRestore }: {
+function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, disabled, disabledReason, onRestore }: {
     nodeId: number;
     nodeName: string;
     stackName: string;
     hasDossier: boolean;
     restoring: boolean;
     disabled?: boolean;
+    disabledReason?: string;
     onRestore: (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
@@ -986,7 +1109,7 @@ function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, dis
                 size="sm"
                 className="h-6 px-2 text-xs"
                 disabled={restoring || disabled}
-                title={disabled ? 'One or more files in this stack could not be decrypted' : undefined}
+                title={disabled ? (disabledReason || 'One or more files in this stack could not be decrypted') : undefined}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (
@@ -1072,9 +1195,11 @@ function DossierBlock({ dossier }: { dossier: SnapshotDossierFields }) {
 
 // --- Restore All Button Sub-Component ---
 
-function RestoreAllButton({ restoring, hasDocumentation, onRestoreAll }: {
+function RestoreAllButton({ restoring, hasDocumentation, disabled, disabledReason, onRestoreAll }: {
     restoring: boolean;
     hasDocumentation: boolean;
+    disabled?: boolean;
+    disabledReason?: string;
     onRestoreAll: (redeploy: boolean, restoreNotes: boolean) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
@@ -1087,7 +1212,8 @@ function RestoreAllButton({ restoring, hasDocumentation, onRestoreAll }: {
                 variant="ghost"
                 size="sm"
                 className="h-6 px-2 text-xs shrink-0"
-                disabled={restoring}
+                disabled={restoring || disabled}
+                title={disabled ? disabledReason : undefined}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (

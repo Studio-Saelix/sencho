@@ -1689,3 +1689,230 @@ describe('Fleet snapshot restore: remote node refuses the redeploy to protect it
         expect(res.body.code).toBe('stack_op_in_progress');
     });
 });
+
+// A snapshot imported from another instance keeps that instance's node ids.
+// Restore must never treat a number that happens to exist here as the target.
+describe('Imported snapshot node mapping', () => {
+  const importSnapshot = (options: {
+    sourceInstanceId: string | null;
+    stacks: Array<{ sourceNodeId: number; stackName: string }>;
+    documentation?: string;
+  }): number => {
+    const db = DatabaseService.getInstance();
+    return db.importSnapshotArchive({
+      description: 'imported',
+      createdBy: 'ada',
+      createdAt: Date.now(),
+      nodeCount: new Set(options.stacks.map(stack => stack.sourceNodeId)).size,
+      stackCount: options.stacks.length,
+      skippedNodes: '[]',
+      skippedStacks: '[]',
+      warningsKnown: true,
+      sourceInstanceId: options.sourceInstanceId,
+      documentation: options.documentation ?? '',
+      files: options.stacks.map(stack => ({
+        nodeId: stack.sourceNodeId,
+        nodeName: `archived-${stack.sourceNodeId}`,
+        stackName: stack.stackName,
+        filename: 'compose.yaml',
+        content: 'services:\n  imported: {}\n',
+      })),
+    });
+  };
+
+  const mapNodes = async (snapshotId: number, mappings: Array<{ sourceNodeId: number; targetNodeId: number }>) => {
+    return request(app)
+      .put(`/api/fleet/snapshots/${snapshotId}/node-mapping`)
+      .set('Cookie', adminCookie)
+      .send({ mappings });
+  };
+
+  it('refuses a foreign snapshot whose archived id matches a local node', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'collision-web' }] });
+    seedStackDir('collision-web');
+    fs.writeFileSync(composePath('collision-web'), 'services:\n  live: {}\n');
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'collision-web' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('collision-web'), 'utf-8')).toContain('live');
+  });
+
+  it('restores a foreign snapshot to the explicitly mapped local node', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 4242, stackName: 'mapped-local' }] });
+    seedStackDir('mapped-local');
+    const mapped = await mapNodes(id, [{ sourceNodeId: 4242, targetNodeId: LOCAL_NODE_ID }]);
+    expect(mapped.status).toBe(200);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 4242, stackName: 'mapped-local' });
+
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(composePath('mapped-local'), 'utf-8')).toContain('imported');
+  });
+
+  it('dispatches a mapped foreign snapshot to the mapped remote node, not a same-numbered local one', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'mapped-remote', type: 'remote', api_url: '', api_token: '', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'mapped-remote-web' }] });
+    seedStackDir('mapped-remote-web');
+    await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: remoteId }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'mapped-remote-web' });
+
+    // The mapped node is a remote with no reachable proxy target; a local write
+    // would have returned 200 and created the file.
+    expect(res.status).toBe(503);
+    expect(fs.existsSync(composePath('mapped-remote-web'))).toBe(false);
+  });
+
+  it('dispatches a mapped foreign snapshot to the mapped Pilot node', async () => {
+    const db = DatabaseService.getInstance();
+    const pilotId = db.addNode({
+      name: 'mapped-pilot',
+      type: 'remote',
+      mode: 'pilot_agent',
+      api_url: 'http://pilot:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'mapped-pilot-web' }] });
+    seedStackDir('mapped-pilot-web');
+    await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: pilotId }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'mapped-pilot-web' });
+
+    expect(res.status).toBe(503);
+    expect(fs.existsSync(composePath('mapped-pilot-web'))).toBe(false);
+  });
+
+  it('restore-all restores mapped groups and reports unmapped groups without writing', async () => {
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [
+        { sourceNodeId: 1, stackName: 'mapped-all' },
+        { sourceNodeId: 2, stackName: 'unmapped-all' },
+      ],
+    });
+    seedStackDir('mapped-all');
+    seedStackDir('unmapped-all');
+    await mapNodes(id, [{ sourceNodeId: 1, targetNodeId: LOCAL_NODE_ID }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore-all`)
+      .set('Cookie', adminCookie)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.restored).toBe(1);
+    expect(res.body.failed).toBe(1);
+    const rows = res.body.results as Array<{ stackName: string; success: boolean; code?: string }>;
+    expect(rows.find(row => row.stackName === 'mapped-all')?.success).toBe(true);
+    const unmapped = rows.find(row => row.stackName === 'unmapped-all');
+    expect(unmapped?.success).toBe(false);
+    expect(unmapped?.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('mapped-all'), 'utf-8')).toContain('imported');
+    expect(fs.existsSync(composePath('unmapped-all'))).toBe(false);
+  });
+
+  it('restores notes to the mapped node, not the archived id', async () => {
+    const db = DatabaseService.getInstance();
+    const docJson = JSON.stringify({
+      generated_at: 'x',
+      stacks: [{ nodeId: 77, nodeName: 'archived-77', stackName: 'mapped-notes', dossier: { ...BLANK_FIELDS, purpose: 'from the archive' } }],
+      warnings: [],
+    });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [{ sourceNodeId: 77, stackName: 'mapped-notes' }],
+      documentation: docJson,
+    });
+    seedStackDir('mapped-notes');
+    await mapNodes(id, [{ sourceNodeId: 77, targetNodeId: LOCAL_NODE_ID }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 77, stackName: 'mapped-notes', restoreNotes: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notesRestored).toBe(true);
+    expect(db.getStackDossier(LOCAL_NODE_ID, 'mapped-notes')?.purpose).toBe('from the archive');
+  });
+
+  it('restores a snapshot imported from this instance without a mapping', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: db.getInstanceId(), stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'own-archive' }] });
+    seedStackDir('own-archive');
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'own-archive' });
+
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(composePath('own-archive'), 'utf-8')).toContain('imported');
+  });
+
+  it('reports the mapping and the target name on the detail payload', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'detail-web' }] });
+    const before = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(before.body.requiresNodeMapping).toBe(true);
+    expect(before.body.nodes[0].targetNodeId).toBeNull();
+    expect(before.body.nodes[0].targetNodeName).toBeNull();
+
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    const after = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(after.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(after.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
+  it('validates the mapping route', async () => {
+    const db = DatabaseService.getInstance();
+    const foreign = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'validate-web' }] });
+    const unknownSource = await mapNodes(foreign, [{ sourceNodeId: 99, targetNodeId: LOCAL_NODE_ID }]);
+    expect(unknownSource.status).toBe(400);
+    const unknownTarget = await mapNodes(foreign, [{ sourceNodeId: 5, targetNodeId: 99999 }]);
+    expect(unknownTarget.status).toBe(400);
+    const duplicate = await mapNodes(foreign, [
+      { sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID },
+      { sourceNodeId: 6, targetNodeId: LOCAL_NODE_ID },
+    ]);
+    expect(duplicate.status).toBe(400);
+
+    const local = db.createSnapshot('local-map', 'admin', 1, 1, '[]', '[]');
+    const localRes = await mapNodes(local, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: LOCAL_NODE_ID }]);
+    expect(localRes.status).toBe(400);
+  });
+
+  it('drops the mapping when the snapshot is deleted', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'delete-map' }] });
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    expect(db.getSnapshotNodeMap(id)).toHaveLength(1);
+
+    const res = await request(app).delete(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(db.getSnapshotNodeMap(id)).toHaveLength(0);
+  });
+
+  it('keeps imported snapshots out of local coverage claims', () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'coverage-web' }] });
+    expect(db.getLatestSnapshotTimestampFor(LOCAL_NODE_ID, 'coverage-web')).toBeNull();
+    void id;
+  });
+});

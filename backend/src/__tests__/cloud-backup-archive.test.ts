@@ -5,6 +5,8 @@ import type { Header } from 'tar-stream';
 import {
     ARCHIVE_LIMITS,
     ArchiveFormatError,
+    assertArchiveFitsLimits,
+    assertArchiveObjectSize,
     decryptArchive,
     encryptArchive,
     isEncryptedArchive,
@@ -191,9 +193,126 @@ describe('openSnapshotArchive', () => {
     it('publishes the production limits', () => {
         expect(ARCHIVE_LIMITS).toEqual({
             maxObjectBytes: 32 * 1024 * 1024,
-            maxEntries: 2000,
+            maxEntries: 5000,
             maxEntryBytes: 1_000_000,
+            maxDocumentationBytes: 8 * 1024 * 1024,
+            maxMetadataBytes: 1024 * 1024,
             maxUncompressedBytes: 64 * 1024 * 1024,
         });
+    });
+});
+
+describe('archive metadata fidelity', () => {
+    it('round-trips skipped stacks, counts, and source identity', async () => {
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: metadata({
+                node_count: 3,
+                stack_count: 7,
+                skipped_stacks: [{ nodeId: 9, nodeName: 'edge', stackName: 'db', reason: 'compose.yaml over the size cap' }],
+                instance_id: 'source-instance',
+            }) },
+            { name: 'nodes/3_edge_gw/api/compose.yaml', content: 'services: {}\n' },
+        ]);
+        for (const sealed of [gzip, await encryptArchive(gzip, PASSPHRASE)]) {
+            const opened = await openSnapshotArchive(sealed, sealed === gzip ? null : PASSPHRASE);
+            expect(JSON.parse(opened.skippedStacks)).toEqual([
+                { nodeId: 9, nodeName: 'edge', stackName: 'db', reason: 'compose.yaml over the size cap' },
+            ]);
+            expect(opened.warningsKnown).toBe(true);
+            // Counts cover captured nodes and stacks that produced no files.
+            expect(opened.nodeCount).toBe(3);
+            expect(opened.stackCount).toBe(7);
+            expect(opened.sourceInstanceId).toBe('source-instance');
+        }
+    });
+
+    it('keeps a legacy archive without warning fields truthful', async () => {
+        const legacy = metadata();
+        const parsed = JSON.parse(legacy) as Record<string, unknown>;
+        delete parsed.skipped_stacks;
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: JSON.stringify(parsed) },
+            { name: 'nodes/1_a/web/compose.yaml', content: 'services: {}\n' },
+        ]);
+        const opened = await openSnapshotArchive(gzip, null);
+        expect(opened.warningsKnown).toBe(false);
+        expect(opened.skippedStacks).toBe('[]');
+        // No instance id in a legacy archive means foreign: mapping required.
+        expect(opened.sourceInstanceId).toBeNull();
+    });
+
+    it('never reports fewer nodes or stacks than the archive contains', async () => {
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: metadata({ node_count: 0, stack_count: 1 }) },
+            { name: 'nodes/1_a/web/compose.yaml', content: 'services: {}\n' },
+            { name: 'nodes/2_b/api/compose.yaml', content: 'services: {}\n' },
+        ]);
+        const opened = await openSnapshotArchive(gzip, null);
+        expect(opened.nodeCount).toBe(2);
+        expect(opened.stackCount).toBe(2);
+    });
+
+    it('gives aggregate documentation its own bound', async () => {
+        const doc = 'n'.repeat(50);
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: metadata() },
+            { name: 'documentation.json', content: doc },
+            { name: 'nodes/1_a/web/compose.yaml', content: 'x'.repeat(20) },
+        ]);
+        // A documentation entry larger than the per-Compose-file cap still parses.
+        const opened = await openSnapshotArchive(gzip, null, {
+            ...ARCHIVE_LIMITS,
+            maxEntryBytes: 40,
+            maxDocumentationBytes: 60,
+            maxObjectBytes: gzip.length,
+        });
+        expect(opened.documentation).toBe(doc);
+
+        await expect(openSnapshotArchive(gzip, null, {
+            ...ARCHIVE_LIMITS,
+            maxEntryBytes: 40,
+            maxDocumentationBytes: 20,
+            maxObjectBytes: gzip.length,
+        })).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    });
+});
+
+describe('producer archive limits', () => {
+    it('accepts a plan at the importer bounds and rejects each overrun', () => {
+        expect(() => assertArchiveFitsLimits({
+            metadataBytes: 100,
+            documentationBytes: 200,
+            fileBytes: [1000, 1000],
+        })).not.toThrow();
+
+        expect(() => assertArchiveFitsLimits({
+            metadataBytes: 100,
+            documentationBytes: 0,
+            fileBytes: [1000],
+        }, { ...ARCHIVE_LIMITS, maxEntries: 1 })).toThrow(/entries/);
+
+        expect(() => assertArchiveFitsLimits({
+            metadataBytes: 100,
+            documentationBytes: 0,
+            fileBytes: [100],
+        }, { ...ARCHIVE_LIMITS, maxEntryBytes: 50 })).toThrow(/per-file/);
+
+        expect(() => assertArchiveFitsLimits({
+            metadataBytes: 100,
+            documentationBytes: 100,
+            fileBytes: [],
+        }, { ...ARCHIVE_LIMITS, maxDocumentationBytes: 50 })).toThrow(/documentation/);
+
+        expect(() => assertArchiveFitsLimits({
+            metadataBytes: 100,
+            documentationBytes: 0,
+            fileBytes: [100],
+        }, { ...ARCHIVE_LIMITS, maxUncompressedBytes: 150 })).toThrow(/expand/);
+    });
+
+    it('refuses an upload object past the reader size limit', () => {
+        expect(() => assertArchiveObjectSize(1024)).not.toThrow();
+        expect(() => assertArchiveObjectSize(1025, { ...ARCHIVE_LIMITS, maxObjectBytes: 1024 }))
+            .toThrow(/upload limit/);
     });
 });

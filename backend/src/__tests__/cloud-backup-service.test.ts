@@ -9,7 +9,7 @@ import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { isEncryptedArchive, MAX_ARCHIVE_OBJECT_BYTES, openSnapshotArchive } from '../services/cloudBackupArchive';
+import { isEncryptedArchive, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OBJECT_BYTES, openSnapshotArchive } from '../services/cloudBackupArchive';
 
 const sentSpy = vi.fn();
 const s3ClientCtorSpy = vi.fn();
@@ -536,6 +536,8 @@ describe('CloudBackupService archive encryption', () => {
                 stackCount: 1,
                 skippedNodes: '[]',
                 skippedStacks: '[]',
+                warningsKnown: true,
+                sourceInstanceId: null,
                 documentation: '{"stacks":[]}',
                 files: [{ nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' }],
             })).toThrow(/forced write failure/);
@@ -574,3 +576,191 @@ describe('CloudBackupService archive encryption', () => {
         expect(sentSpy).not.toHaveBeenCalled();
     });
 });
+
+describe('CloudBackupService archive fidelity', () => {
+    it('carries partial-capture warnings, scope counts, and source identity through upload and import', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const skipped = JSON.stringify([
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', reason: 'compose.yaml over the size cap' },
+        ]);
+        const snapshotId = db.createSnapshot('Partial backup', 'admin', 3, 7, '[]', skipped);
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+
+        const importedId = await CloudBackupService.getInstance().importSnapshot(uploaded.Key);
+        const imported = db.getSnapshot(importedId)!;
+        expect(imported.skipped_stacks).toBe(skipped);
+        expect(imported.node_count).toBe(3);
+        expect(imported.stack_count).toBe(7);
+        expect(imported.source_instance_id).toBe('test-instance-id');
+        expect(imported.warnings_known).toBe(1);
+    });
+
+    it('uploads a 1000-stack snapshot that the importer still accepts', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Large fleet', 'admin', 1, 1000, '[]');
+        const files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }> = [];
+        for (let i = 0; i < 1000; i += 1) {
+            files.push({ nodeId: 1, nodeName: 'gateway', stackName: `stack-${i}`, filename: 'compose.yaml', content: 'services: {}\n' });
+            files.push({ nodeId: 1, nodeName: 'gateway', stackName: `stack-${i}`, filename: '.env', content: `IDX=${i}\n` });
+        }
+        db.insertSnapshotFiles(snapshotId, files);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+
+        const importedId = await CloudBackupService.getInstance().importSnapshot(uploaded.Key);
+        expect(db.getSnapshotFiles(importedId)).toHaveLength(2000);
+        expect(db.getSnapshot(importedId)?.stack_count).toBe(1000);
+    });
+
+    it('refuses to publish an archive the importer would reject', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Too many stacks', 'admin', 1, MAX_ARCHIVE_ENTRIES, '[]');
+        const files = Array.from({ length: MAX_ARCHIVE_ENTRIES }, (_, i) => ({
+            nodeId: 1,
+            nodeName: 'gateway',
+            stackName: `stack-${i}`,
+            filename: 'compose.yaml',
+            content: 'services: {}\n',
+        }));
+        db.insertSnapshotFiles(snapshotId, files);
+        sentSpy.mockClear();
+
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/entries/);
+        expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
+    });
+
+    it('marks a legacy archive without warning fields as unknown', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const objectKey = `sencho/instances/test-instance-id/snapshots/9_legacy.tar.gz`;
+        const object = await archiveObject([
+            {
+                name: 'metadata.json',
+                content: JSON.stringify({
+                    description: 'legacy',
+                    created_by: 'ada',
+                    created_at: 1_700_000_000_000,
+                    skipped_nodes: [],
+                    archive_version: 2,
+                }),
+            },
+            { name: 'nodes/1_gateway/web/compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(object) };
+            return {};
+        });
+
+        const importedId = await CloudBackupService.getInstance().importSnapshot(objectKey);
+        const imported = db.getSnapshot(importedId)!;
+        expect(imported.warnings_known).toBe(0);
+        expect(imported.skipped_stacks).toBe('[]');
+        expect(imported.source_instance_id).toBeNull();
+    });
+});
+
+describe('CloudBackupService disaster recovery', () => {
+    it('recovers a sealed archive after the instance identity changes, without widening delete or download', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const snapshotId = db.createSnapshot('Disaster', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        expect(uploaded.Key).toMatch(/\.senc$/);
+
+        // A fresh install has a new identity, so the old object is foreign.
+        db.setSystemState('instance_id', 'fresh-instance');
+        const svc = CloudBackupService.getInstance();
+        await expect(svc.importSnapshot(uploaded.Key)).rejects.toBeInstanceOf(SnapshotKeyError);
+        await expect(svc.downloadSnapshot(uploaded.Key)).rejects.toBeInstanceOf(SnapshotKeyError);
+        await expect(svc.deleteCloudSnapshot(uploaded.Key)).rejects.toBeInstanceOf(SnapshotKeyError);
+
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        const before = snapshotCounts();
+        await expect(svc.importRecoveryArchive(uploaded.Key, 'not-the-passphrase')).rejects.toThrow(/incorrect/i);
+        expect(snapshotCounts()).toEqual(before);
+
+        const importedId = await svc.importRecoveryArchive(uploaded.Key, ARCHIVE_PASSPHRASE);
+        const imported = db.getSnapshot(importedId)!;
+        expect(imported.source_instance_id).toBe('test-instance-id');
+        expect(db.getSnapshotFiles(importedId)).toHaveLength(1);
+    });
+
+    it('refuses a plaintext archive on the recovery path', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Plain disaster', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        db.setSystemState('instance_id', 'fresh-instance');
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        const before = snapshotCounts();
+        await expect(CloudBackupService.getInstance().importRecoveryArchive(uploaded.Key, ARCHIVE_PASSPHRASE))
+            .rejects.toThrow(/Only an encrypted archive/);
+        expect(snapshotCounts()).toEqual(before);
+    });
+
+    it('lists only other instances snapshot archives for recovery', async () => {
+        seedCustomBucket();
+        sentSpy.mockResolvedValue({
+            Contents: [
+                { Key: 'sencho/instances/test-instance-id/snapshots/1_a.tar.gz.senc', Size: 10, LastModified: new Date('2026-01-01T00:00:00Z') },
+                { Key: 'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc', Size: 20, LastModified: new Date('2026-02-01T00:00:00Z') },
+                { Key: 'sencho/instances/old-instance/other/3_c.tar.gz', Size: 30, LastModified: new Date('2026-03-01T00:00:00Z') },
+            ],
+        });
+        const list = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(list.map(entry => entry.objectKey)).toEqual([
+            'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc',
+        ]);
+        expect(list[0].encrypted).toBe(true);
+    });
+});
+
+function archiveObject(entries: Array<{ name: string; content: string }>): Promise<Buffer> {
+    const pack = tar.pack();
+    for (const entry of entries) pack.entry({ name: entry.name }, entry.content);
+    pack.finalize();
+    const gzip = zlib.createGzip();
+    const chunks: Buffer[] = [];
+    return new Promise((resolve, reject) => {
+        gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
+        gzip.on('end', () => resolve(Buffer.concat(chunks)));
+        gzip.on('error', reject);
+        pack.on('error', reject);
+        pack.pipe(gzip);
+    });
+}

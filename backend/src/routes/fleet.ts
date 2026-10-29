@@ -3,7 +3,7 @@ import path from 'path';
 import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
-import { DatabaseService, type Node, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type FleetSnapshot, type Node, type StackDossierFields } from '../services/DatabaseService';
 import { awaitHubPostUpdateVerification } from '../services/hubPostUpdateVerification';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
@@ -2811,14 +2811,29 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
       }
     }
 
-    const nodes = Array.from(nodesMap.values()).map(n => ({
-      nodeId: n.nodeId,
-      nodeName: n.nodeName,
-      stacks: Array.from(n.stacks.entries()).map(([stackName, stackFiles]) => ({
-        stackName,
-        files: stackFiles,
-      })),
-    }));
+    // Archived nodes keep the source installation's ids and names. Resolve each
+    // one to a destination node here: identity for a locally captured snapshot,
+    // the recorded mapping for an imported one, and null when nothing is mapped.
+    const sameInstance = !snapshot.source_instance_id
+      || snapshot.source_instance_id === db.getInstanceId();
+    const requiresNodeMapping = !sameInstance;
+    const mappingBySource = new Map(
+      db.getSnapshotNodeMap(id).map(m => [m.source_node_id, m.target_node_id] as const),
+    );
+    const nodes = Array.from(nodesMap.values()).map(n => {
+      const targetNodeId = sameInstance ? n.nodeId : mappingBySource.get(n.nodeId) ?? null;
+      const targetNode = targetNodeId !== null ? db.getNode(targetNodeId) : undefined;
+      return {
+        nodeId: n.nodeId,
+        nodeName: n.nodeName,
+        targetNodeId: targetNode ? targetNode.id : null,
+        targetNodeName: targetNode ? targetNode.name : null,
+        stacks: Array.from(n.stacks.entries()).map(([stackName, stackFiles]) => ({
+          stackName,
+          files: stackFiles,
+        })),
+      };
+    });
 
     // Surface the captured dossier metadata when present so the detail view can
     // render notes and offer to restore them. The list payload stays lean (only
@@ -2843,10 +2858,76 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
     }
 
     if (isDebugEnabled()) console.debug('[Fleet:debug] Snapshot detail:', id, files.length, 'files');
-    res.json({ ...snapshot, nodes, documentation, fileDecryptWarnings });
+    res.json({ ...snapshot, nodes, documentation, fileDecryptWarnings, requiresNodeMapping });
   } catch (error) {
     console.error('[Fleet Snapshot] Detail error:', error);
     res.status(500).json({ error: 'Failed to fetch snapshot details' });
+  }
+});
+
+// Records the archived-node -> destination-node mapping an imported snapshot
+// needs before it can write anything. Partial mappings are allowed; restore of
+// an unmapped group is refused rather than guessed.
+fleetRouter.put('/snapshots/:id/node-mapping', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const id = parseIntParam(req, res, 'id', 'snapshot ID');
+    if (id === null) return;
+    const db = DatabaseService.getInstance();
+    const snapshot = db.getSnapshot(id);
+    if (!snapshot) {
+      res.status(404).json({ error: 'Snapshot not found' });
+      return;
+    }
+    const sameInstance = !snapshot.source_instance_id
+      || snapshot.source_instance_id === db.getInstanceId();
+    if (sameInstance) {
+      res.status(400).json({ error: 'This snapshot was captured by this instance, so its nodes need no mapping' });
+      return;
+    }
+
+    const raw = req.body?.mappings;
+    if (!Array.isArray(raw)) {
+      res.status(400).json({ error: 'mappings must be an array' });
+      return;
+    }
+    const archivedNodes = db.getSnapshotSourceNodes(id);
+    const archivedIds = new Set(archivedNodes.map(node => node.node_id));
+    const seenSources = new Set<number>();
+    const seenTargets = new Set<number>();
+    const mappings: Array<{ sourceNodeId: number; targetNodeId: number }> = [];
+    for (const entry of raw as unknown[]) {
+      const sourceNodeId = Number((entry as { sourceNodeId?: unknown })?.sourceNodeId);
+      const targetNodeId = Number((entry as { targetNodeId?: unknown })?.targetNodeId);
+      if (!Number.isSafeInteger(sourceNodeId) || !archivedIds.has(sourceNodeId)) {
+        res.status(400).json({ error: 'Each mapping must name a node that exists in this archive' });
+        return;
+      }
+      if (!Number.isSafeInteger(targetNodeId) || !db.getNode(targetNodeId)) {
+        res.status(400).json({ error: 'Each mapping must name an existing destination node' });
+        return;
+      }
+      if (seenSources.has(sourceNodeId) || seenTargets.has(targetNodeId)) {
+        res.status(400).json({ error: 'Each archived node maps to one destination node, and each destination node to one archived node' });
+        return;
+      }
+      seenSources.add(sourceNodeId);
+      seenTargets.add(targetNodeId);
+      mappings.push({ sourceNodeId, targetNodeId });
+    }
+
+    db.setSnapshotNodeMap(id, mappings);
+    res.json({
+      mappings: db.getSnapshotNodeMap(id).map(mapping => ({
+        sourceNodeId: mapping.source_node_id,
+        targetNodeId: mapping.target_node_id,
+        targetNodeName: db.getNode(mapping.target_node_id)?.name ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('[Fleet Snapshot] Node mapping error:', error);
+    res.status(500).json({ error: 'Failed to save the snapshot node mapping' });
   }
 });
 
@@ -3016,6 +3097,51 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ p
   return policyEvidence ? { policyEvidence } : {};
 }
 
+/**
+ * Resolve the live node a snapshot group may be written to.
+ *
+ * A locally captured snapshot names this installation's nodes, so its archived
+ * id is the target. An imported snapshot keeps the source installation's ids;
+ * those become actionable only through an explicit mapping. Numeric equality
+ * with a node here never authorises a foreign snapshot.
+ */
+type SnapshotNodeTargetFailure = {
+  error: string;
+  code: 'SNAPSHOT_NODE_UNMAPPED' | 'SNAPSHOT_TARGET_NODE_MISSING';
+  status: 404 | 409;
+};
+
+function resolveSnapshotNodeTarget(
+  snapshot: FleetSnapshot,
+  sourceNodeId: number,
+): { node: Node } | SnapshotNodeTargetFailure {
+  const db = DatabaseService.getInstance();
+  const sameInstance = !!snapshot.source_instance_id
+    && snapshot.source_instance_id === db.getInstanceId();
+  const capturedHere = !snapshot.source_instance_id || sameInstance;
+  const targetNodeId = capturedHere
+    ? sourceNodeId
+    : db.getSnapshotNodeMap(snapshot.id).find(m => m.source_node_id === sourceNodeId)?.target_node_id;
+  if (targetNodeId === undefined) {
+    return {
+      error: 'This snapshot came from another instance and this archived node has no destination mapping. Map it to a node here before restoring.',
+      code: 'SNAPSHOT_NODE_UNMAPPED',
+      status: 409,
+    };
+  }
+  const node = db.getNode(targetNodeId);
+  if (!node) {
+    return capturedHere
+      ? { error: 'Target node no longer exists', code: 'SNAPSHOT_TARGET_NODE_MISSING', status: 404 }
+      : {
+        error: 'The destination node this archived node is mapped to no longer exists. Update the mapping before restoring.',
+        code: 'SNAPSHOT_NODE_UNMAPPED',
+        status: 409,
+      };
+  }
+  return { node };
+}
+
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
 // when no usable dossier entry exists for that stack (no documentation, an
 // unparseable blob, or no matching entry).
@@ -3106,11 +3232,12 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       console.debug('[Fleet:debug] Restore: snapshot=%s, node=%s, stack="%s", files=[%s], redeploy=%s', sanitizeForLog(snapshotId), sanitizeForLog(nodeId), sanitizeForLog(stackName), sanitizeForLog(fileNames), sanitizeForLog(redeploy));
     }
 
-    const node = db.getNode(nodeId);
-    if (!node) {
-      res.status(404).json({ error: 'Target node no longer exists' });
+    const target = resolveSnapshotNodeTarget(snapshot, nodeId);
+    if ('error' in target) {
+      res.status(target.status).json({ error: target.error, code: target.code });
       return;
     }
+    const node = target.node;
 
     await applySnapshotStackFiles(node, stackName, writableFiles);
 
@@ -3255,8 +3382,21 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
           });
           continue;
         }
-        const node = db.getNode(group.nodeId);
-        if (!node) throw new Error('Target node no longer exists');
+        const target = resolveSnapshotNodeTarget(snapshot, group.nodeId);
+        if ('error' in target) {
+          results.push({
+            nodeId: group.nodeId,
+            nodeName: group.nodeName,
+            stackName: group.stackName,
+            success: false,
+            redeployed: false,
+            notesRestored: false,
+            error: target.error,
+            code: target.code,
+          });
+          continue;
+        }
+        const node = target.node;
 
         const writableFiles = group.files
           .filter((f): f is Extract<typeof f, { available: true }> => f.available)

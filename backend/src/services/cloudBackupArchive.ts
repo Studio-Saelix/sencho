@@ -38,10 +38,24 @@ const SUPPORTED_ARCHIVE_VERSIONS = new Set([1, 2]);
 
 export const MIN_PASSPHRASE_LENGTH = 12;
 export const MAX_ARCHIVE_OBJECT_BYTES = 32 * 1024 * 1024;
-export const MAX_ARCHIVE_ENTRIES = 2000;
+/**
+ * Entry ceiling. Two files per stack plus metadata and documentation, so this
+ * covers roughly 2,500 captured stacks. The upload path enforces the same
+ * number before it publishes anything, so a successful upload is always an
+ * archive the importer accepts.
+ */
+export const MAX_ARCHIVE_ENTRIES = 5000;
 export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 64 * 1024 * 1024;
-/** Tar headers sit outside file payloads. Leave room so a full payload still parses. */
-const GUNZIP_SLACK_BYTES = 2 * 1024 * 1024;
+/**
+ * Aggregate documentation is one tar entry holding every stack's dossier
+ * notes, so it needs its own bound instead of the per-Compose-file ceiling.
+ */
+export const MAX_ARCHIVE_DOCUMENTATION_BYTES = 8 * 1024 * 1024;
+export const MAX_ARCHIVE_METADATA_BYTES = 1024 * 1024;
+/** Tar headers sit outside file payloads. Leave room so a full payload still
+ *  parses: at the 5,000-entry cap each header plus block padding adds about
+ *  1 KB, so 8 MB covers the framing around a 64 MB payload. */
+const GUNZIP_SLACK_BYTES = 8 * 1024 * 1024;
 
 const FILE_NAMES = new Set<string>(FLEET_SNAPSHOT_APPLY_FILENAMES);
 
@@ -65,6 +79,8 @@ export interface ArchiveLimits {
     maxObjectBytes: number;
     maxEntries: number;
     maxEntryBytes: number;
+    maxDocumentationBytes: number;
+    maxMetadataBytes: number;
     maxUncompressedBytes: number;
 }
 
@@ -72,6 +88,8 @@ export const ARCHIVE_LIMITS: ArchiveLimits = {
     maxObjectBytes: MAX_ARCHIVE_OBJECT_BYTES,
     maxEntries: MAX_ARCHIVE_ENTRIES,
     maxEntryBytes: MAX_SNAPSHOT_FILE_BYTES,
+    maxDocumentationBytes: MAX_ARCHIVE_DOCUMENTATION_BYTES,
+    maxMetadataBytes: MAX_ARCHIVE_METADATA_BYTES,
     maxUncompressedBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
 };
 
@@ -92,7 +110,19 @@ export interface ImportedSnapshot {
     documentation: string;
     nodeCount: number;
     stackCount: number;
+    /** Instance that captured the archive; null when the archive cannot say. */
+    sourceInstanceId: string | null;
+    /** False when the archive predates partial-capture warnings, so an empty
+     *  skipped-stack list means "not recorded", not "nothing was skipped". */
+    warningsKnown: boolean;
     files: ImportedSnapshotFile[];
+}
+
+/** What an archive would contain, checked against the reader's limits. */
+export interface ArchiveSizePlan {
+    metadataBytes: number;
+    documentationBytes: number;
+    fileBytes: number[];
 }
 
 export function isEncryptedArchive(bytes: Buffer): boolean {
@@ -156,6 +186,60 @@ export async function openSnapshotArchive(
     const tarBytes = await gunzipLimited(gzipBytes, limits.maxUncompressedBytes + GUNZIP_SLACK_BYTES);
     const entries = await readTarEntries(tarBytes, limits);
     return snapshotFromEntries(entries);
+}
+
+/**
+ * Producer-side check. An upload the recovery path necessarily rejects is not
+ * a backup, so the upload path refuses it with the same TOO_LARGE code and
+ * bound the importer would report. Both sides read the limits above, so they
+ * cannot drift apart.
+ */
+export function assertArchiveFitsLimits(plan: ArchiveSizePlan, limits: ArchiveLimits = ARCHIVE_LIMITS): void {
+    const entryCount = plan.fileBytes.length + 1 + (plan.documentationBytes > 0 ? 1 : 0);
+    if (entryCount > limits.maxEntries) {
+        throw new ArchiveFormatError(
+            'TOO_LARGE',
+            `Archive would have ${entryCount} entries, above the ${limits.maxEntries}-entry recovery limit`,
+        );
+    }
+    if (plan.metadataBytes > limits.maxMetadataBytes) {
+        throw new ArchiveFormatError('TOO_LARGE', 'Archive metadata is larger than the recovery limit');
+    }
+    if (plan.documentationBytes > limits.maxDocumentationBytes) {
+        throw new ArchiveFormatError(
+            'TOO_LARGE',
+            `Snapshot documentation is ${formatMiB(plan.documentationBytes)}, above the ${formatMiB(limits.maxDocumentationBytes)} recovery limit`,
+        );
+    }
+    for (const bytes of plan.fileBytes) {
+        if (bytes > limits.maxEntryBytes) {
+            throw new ArchiveFormatError(
+                'TOO_LARGE',
+                `A captured file is ${formatMiB(bytes)}, above the ${formatMiB(limits.maxEntryBytes)} per-file recovery limit`,
+            );
+        }
+    }
+    const total = plan.metadataBytes + plan.documentationBytes + plan.fileBytes.reduce((sum, bytes) => sum + bytes, 0);
+    if (total > limits.maxUncompressedBytes) {
+        throw new ArchiveFormatError(
+            'TOO_LARGE',
+            `Archive would expand to ${formatMiB(total)}, above the ${formatMiB(limits.maxUncompressedBytes)} recovery limit`,
+        );
+    }
+}
+
+/** Refuses an upload whose compressed object the importer would reject. */
+export function assertArchiveObjectSize(bytes: number, limits: ArchiveLimits = ARCHIVE_LIMITS): void {
+    if (bytes > limits.maxObjectBytes) {
+        throw new ArchiveFormatError(
+            'TOO_LARGE',
+            `Archive is ${formatMiB(bytes)}, above the ${formatMiB(limits.maxObjectBytes)} upload limit`,
+        );
+    }
+}
+
+function formatMiB(bytes: number): string {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function plaintextGzip(objectBytes: Buffer, passphrase: string | null): Promise<Buffer> {
@@ -271,16 +355,24 @@ async function takeEntry(
         stream.resume();
         throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive contains an unexpected entry');
     }
+    const entryLimit = entryByteLimit(name, limits);
     const declared = header.size ?? 0;
-    if (declared > limits.maxEntryBytes || used + declared > limits.maxUncompressedBytes) {
+    if (declared > entryLimit || used + declared > limits.maxUncompressedBytes) {
         stream.resume();
         throw new ArchiveFormatError('TOO_LARGE', 'Archive entry exceeds the size limit');
     }
-    const body = await readStream(stream, limits.maxEntryBytes);
+    const body = await readStream(stream, entryLimit);
     if (used + body.length > limits.maxUncompressedBytes) {
         throw new ArchiveFormatError('TOO_LARGE', 'Archive expands past the size limit');
     }
     return { name, body };
+}
+
+/** Aggregate entries carry their own bound; Compose files keep the per-file cap. */
+function entryByteLimit(name: string, limits: ArchiveLimits): number {
+    if (name === 'metadata.json') return limits.maxMetadataBytes;
+    if (name === 'documentation.json') return limits.maxDocumentationBytes;
+    return limits.maxEntryBytes;
 }
 
 function isAllowedEntryName(name: string): boolean {
@@ -353,17 +445,24 @@ function snapshotFromEntries(entries: Map<string, Buffer>): ImportedSnapshot {
             content: body.toString('utf-8'),
         });
     }
-    const nodeIds = new Set(files.map(file => file.nodeId));
-    const stacks = new Set(files.map(file => `${file.nodeId}\0${file.stackName}`));
+    const derivedNodeCount = new Set(files.map(file => file.nodeId)).size;
+    const derivedStackCount = new Set(files.map(file => `${file.nodeId}\0${file.stackName}`)).size;
     return {
         description: meta.description,
         createdBy: meta.createdBy,
         createdAt: meta.createdAt,
         skippedNodes: JSON.stringify(meta.skippedNodes),
-        skippedStacks: JSON.stringify(meta.skippedStacks),
+        // A pre-warning archive has no skipped_stacks field. Importing it as
+        // "[]" would claim the capture was complete, so it stays an empty list
+        // plus warningsKnown=false and the snapshot says it does not know.
+        skippedStacks: JSON.stringify(meta.skippedStacks ?? []),
+        warningsKnown: meta.skippedStacks !== null,
         documentation: entries.get('documentation.json')?.toString('utf-8') ?? '',
-        nodeCount: nodeIds.size,
-        stackCount: stacks.size,
+        // Metadata counts cover captured nodes and stacks that produced no
+        // files; never report fewer than the archive actually contains.
+        nodeCount: Math.max(meta.nodeCount ?? 0, derivedNodeCount),
+        stackCount: Math.max(meta.stackCount ?? 0, derivedStackCount),
+        sourceInstanceId: meta.instanceId,
         files,
     };
 }
@@ -373,7 +472,11 @@ interface ParsedMetadata {
     createdBy: string;
     createdAt: number;
     skippedNodes: unknown[];
-    skippedStacks: unknown[];
+    /** null when the archive predates partial-capture warnings. */
+    skippedStacks: unknown[] | null;
+    nodeCount: number | null;
+    stackCount: number | null;
+    instanceId: string | null;
 }
 
 function parseMetadata(text: string): ParsedMetadata {
@@ -402,8 +505,17 @@ function parseMetadata(text: string): ParsedMetadata {
         createdBy: record.created_by,
         createdAt: record.created_at,
         skippedNodes: asArray(record.skipped_nodes),
-        skippedStacks: record.skipped_stacks === undefined ? [] : asArray(record.skipped_stacks),
+        skippedStacks: record.skipped_stacks === undefined ? null : asArray(record.skipped_stacks),
+        nodeCount: asCount(record.node_count),
+        stackCount: asCount(record.stack_count),
+        instanceId: typeof record.instance_id === 'string' && record.instance_id !== '' ? record.instance_id : null,
     };
+}
+
+/** A missing or malformed count stays unknown; the caller derives a floor. */
+function asCount(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
+    return value;
 }
 
 function asArray(value: unknown): unknown[] {

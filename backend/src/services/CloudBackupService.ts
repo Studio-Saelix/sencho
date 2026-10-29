@@ -26,6 +26,8 @@ import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import {
     ArchiveFormatError,
+    assertArchiveFitsLimits,
+    assertArchiveObjectSize,
     decryptArchive,
     encryptArchive,
     isEncryptedArchive,
@@ -332,6 +334,64 @@ export class CloudBackupService {
         return DatabaseService.getInstance().importSnapshotArchive(parsed);
     }
 
+    /**
+     * Disaster recovery from a different installation. A fresh instance has a
+     * new instance id and key, so its own prefix cannot reach the old
+     * archives. This path may read any instance's snapshot object inside the
+     * configured bucket prefix, but only a sealed archive with the matching
+     * passphrase is accepted, and it never deletes or returns raw bytes.
+     */
+    public async importRecoveryArchive(objectKey: string, passphrase: string): Promise<number> {
+        this.assertRecoveryObjectKey(objectKey);
+        if (!passphrase) {
+            throw new ArchiveFormatError('PASSPHRASE_REQUIRED', 'A passphrase is required to recover this archive');
+        }
+        const raw = await this.fetchObject(objectKey);
+        if (!isEncryptedArchive(raw)) {
+            throw new ArchiveFormatError(
+                'BAD_ARCHIVE',
+                'Only an encrypted archive can be recovered on another instance. Import a plaintext archive from this instance\'s own snapshots instead.',
+            );
+        }
+        const parsed = await openSnapshotArchive(raw, passphrase);
+        return DatabaseService.getInstance().importSnapshotArchive(parsed);
+    }
+
+    /**
+     * Archives in this bucket that belong to other instances, so a fresh
+     * installation can find what it is recovering. Read-only: recovery still
+     * needs the passphrase, and delete/download stay confined to this
+     * instance's prefix.
+     */
+    public async listRecoveryArchives(): Promise<CloudSnapshotEntry[]> {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) return [];
+        const { client, sdk } = await this.buildS3Client(cfg);
+        const result = await client.send(new sdk.ListObjectsV2Command({
+            Bucket: cfg.bucket,
+            Prefix: `${cfg.pathPrefix}instances/`,
+            MaxKeys: 1000,
+        }));
+        const current = this.getInstanceId();
+        const entries: CloudSnapshotEntry[] = [];
+        for (const object of result.Contents || []) {
+            const key = object.Key;
+            if (!key) continue;
+            const parsed = this.parseRecoveryKey(key, cfg.pathPrefix);
+            if (!parsed || parsed.instanceId === current) continue;
+            const basename = key.split('/').pop() || key;
+            const idMatch = basename.match(/^(\d+)_/);
+            entries.push({
+                objectKey: key,
+                sizeBytes: object.Size ?? 0,
+                lastModified: object.LastModified ? object.LastModified.toISOString() : null,
+                snapshotId: idMatch ? parseInt(idMatch[1], 10) : null,
+                encrypted: key.endsWith('.tar.gz.senc'),
+            });
+        }
+        return entries.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+    }
+
     public async listCloudSnapshots(): Promise<CloudSnapshotEntry[]> {
         const cfg = this.getResolvedConfig();
         if (!cfg) return [];
@@ -377,6 +437,27 @@ export class CloudBackupService {
         }
     }
 
+    /** Recovery may read any instance's archive inside the configured bucket prefix. */
+    public assertRecoveryObjectKey(objectKey: string): void {
+        const cfg = this.getResolvedConfig();
+        if (!cfg) throw new Error('Cloud backup is not configured.');
+        if (!this.parseRecoveryKey(objectKey, cfg.pathPrefix)) {
+            throw new SnapshotKeyError('Object key is not a snapshot archive in this bucket');
+        }
+    }
+
+    /** `<prefix>instances/<instance>/snapshots/<file>`, or null. */
+    private parseRecoveryKey(objectKey: string, pathPrefix: string): { instanceId: string; basename: string } | null {
+        if (objectKey.includes('\\') || objectKey.includes('..')) return null;
+        const prefix = `${pathPrefix}instances/`;
+        if (!objectKey.startsWith(prefix)) return null;
+        const parts = objectKey.slice(prefix.length).split('/');
+        if (parts.length !== 3 || parts[1] !== 'snapshots') return null;
+        const [instanceId, , basename] = parts;
+        if (!instanceId || instanceId === '.' || !basename) return null;
+        return { instanceId, basename };
+    }
+
     // ─── Status tracking ───────────────────────────────────────────────────────
 
     public getUploadStatus(snapshotId: number): UploadStatusEntry {
@@ -410,7 +491,7 @@ export class CloudBackupService {
     }
 
     private getInstanceId(): string {
-        return DatabaseService.getInstance().getSystemState('instance_id') || 'unknown';
+        return DatabaseService.getInstance().getInstanceId();
     }
 
     private buildObjectKey(cfg: ResolvedCloudConfig, snapshotId: number, description: string, createdAt: number, encrypted: boolean): string {
@@ -454,11 +535,10 @@ export class CloudBackupService {
     }
 
     private async buildArchive(
-        snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; created_at: number },
+        snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; skipped_stacks: string; created_at: number },
         files: AvailableSnapshotFile[],
         documentation = '',
     ): Promise<Buffer> {
-        const pack = tar.pack();
         const metadata = {
             id: snapshot.id,
             description: snapshot.description,
@@ -467,13 +547,26 @@ export class CloudBackupService {
             node_count: snapshot.node_count,
             stack_count: snapshot.stack_count,
             skipped_nodes: safeParseJson(snapshot.skipped_nodes, []),
+            // Partial-capture warnings travel with the archive so an import
+            // never turns a known-partial snapshot into a complete-looking one.
+            skipped_stacks: safeParseJson(snapshot.skipped_stacks, []),
             has_documentation: documentation !== '',
             instance_id: this.getInstanceId(),
             // Version 2 adds the optional documentation.json entry; readers of
             // version 1 archives simply will not find that file.
             archive_version: 2,
         };
-        pack.entry({ name: 'metadata.json' }, JSON.stringify(metadata, null, 2));
+        const metadataJson = JSON.stringify(metadata, null, 2);
+        // Refuse before packing when the importer's limits would reject the
+        // result: a successful upload must always be recoverable.
+        assertArchiveFitsLimits({
+            metadataBytes: Buffer.byteLength(metadataJson),
+            documentationBytes: Buffer.byteLength(documentation),
+            fileBytes: files.map(file => Buffer.byteLength(file.content)),
+        });
+
+        const pack = tar.pack();
+        pack.entry({ name: 'metadata.json' }, metadataJson);
 
         // Captured Stack Dossier metadata travels with the archive when present.
         if (documentation !== '') {
@@ -491,13 +584,15 @@ export class CloudBackupService {
 
         const gzip = zlib.createGzip();
         const chunks: Buffer[] = [];
-        return await new Promise<Buffer>((resolve, reject) => {
+        const archive = await new Promise<Buffer>((resolve, reject) => {
             gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
             gzip.on('end', () => resolve(Buffer.concat(chunks)));
             gzip.on('error', reject);
             pack.on('error', reject);
             pack.pipe(gzip);
         });
+        assertArchiveObjectSize(archive.byteLength);
+        return archive;
     }
 }
 

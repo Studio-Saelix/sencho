@@ -703,6 +703,13 @@ export interface FleetSnapshot {
      *  encrypted blob itself is never projected into list/detail rows; read it
      *  with getSnapshotDocumentation(). */
     has_documentation: number;
+    /** Instance that captured this snapshot. NULL for a locally captured
+     *  snapshot; set on import so restore never confuses archived node ids
+     *  with this installation's nodes. */
+    source_instance_id: string | null;
+    /** 0 when the source archive predates partial-capture warnings, so an
+     *  empty skipped_stacks list means "not recorded", not "none skipped". */
+    warnings_known: number;
 }
 
 export interface FleetSnapshotFile {
@@ -1522,7 +1529,9 @@ export class DatabaseService {
         skipped_nodes TEXT NOT NULL DEFAULT '[]',
         skipped_stacks TEXT NOT NULL DEFAULT '[]',
         documentation TEXT NOT NULL DEFAULT '',
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        source_instance_id TEXT,
+        warnings_known INTEGER NOT NULL DEFAULT 1
       );
 
       CREATE TABLE IF NOT EXISTS fleet_snapshot_files (
@@ -1534,6 +1543,17 @@ export class DatabaseService {
         filename TEXT NOT NULL,
         content TEXT NOT NULL,
         FOREIGN KEY(snapshot_id) REFERENCES fleet_snapshots(id) ON DELETE CASCADE
+      );
+
+      -- Archived node id -> destination node id for a snapshot imported from
+      -- another instance. A foreign snapshot has no actionable target until
+      -- the operator records a mapping here.
+      CREATE TABLE IF NOT EXISTS fleet_snapshot_node_map (
+        snapshot_id INTEGER NOT NULL,
+        source_node_id INTEGER NOT NULL,
+        target_node_id INTEGER NOT NULL,
+        PRIMARY KEY (snapshot_id, source_node_id),
+        UNIQUE (snapshot_id, target_node_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_snapshot_files_snapshot ON fleet_snapshot_files(snapshot_id);
@@ -2313,6 +2333,11 @@ export class DatabaseService {
         maybeAddCol('fleet_snapshots', 'skipped_stacks', "TEXT NOT NULL DEFAULT '[]'");
         // Captured Stack Dossier metadata (opt-in documentation snapshots)
         maybeAddCol('fleet_snapshots', 'documentation', "TEXT NOT NULL DEFAULT ''");
+        // Import provenance and capture evidence. Locally captured rows keep
+        // NULL / 1; an imported archive records the instance that made it and
+        // whether that archive recorded partial-capture warnings.
+        maybeAddCol('fleet_snapshots', 'source_instance_id', 'TEXT');
+        maybeAddCol('fleet_snapshots', 'warnings_known', 'INTEGER NOT NULL DEFAULT 1');
 
         // Scan finding enrichment: scan-intrinsic fields Trivy returns that the
         // triage/action posture surfaces (status, CVSS, vendor severity, purl,
@@ -4343,6 +4368,15 @@ stmt.run('gitops_schema_version', '1');
 
     public setSystemState(key: string, value: string): void {
         this.db.prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)').run(key, value);
+    }
+
+    /**
+     * This installation's identity, generated once on first boot. Snapshot
+     * provenance and the off-site object prefix both key off it, so a missing
+     * value reads as 'unknown' rather than as "no identity".
+     */
+    public getInstanceId(): string {
+        return this.getSystemState('instance_id') || 'unknown';
     }
 
     /**
@@ -7338,7 +7372,9 @@ stmt.run('gitops_schema_version', '1');
      * Insert a cloud-imported snapshot and its files in one transaction.
      * The header and file rows commit together, so a failed file write rolls
      * the snapshot row back. File bodies and documentation are encrypted with
-     * the instance key, matching a locally captured snapshot.
+     * the instance key, matching a locally captured snapshot. The source
+     * instance id and warning completeness travel with the row so restore can
+     * tell an archived node id from one that exists here.
      */
     public importSnapshotArchive(snapshot: {
         description: string;
@@ -7348,13 +7384,15 @@ stmt.run('gitops_schema_version', '1');
         stackCount: number;
         skippedNodes: string;
         skippedStacks: string;
+        warningsKnown: boolean;
+        sourceInstanceId: string | null;
         documentation: string;
         files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>;
     }): number {
         const crypto = CryptoService.getInstance();
         const storedDocs = snapshot.documentation === '' ? '' : crypto.encrypt(snapshot.documentation);
         const insertSnap = this.db.prepare(
-            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at, source_instance_id, warnings_known) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const insertFile = this.db.prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
@@ -7369,6 +7407,8 @@ stmt.run('gitops_schema_version', '1');
                 snapshot.skippedStacks,
                 storedDocs,
                 snapshot.createdAt,
+                snapshot.sourceInstanceId,
+                snapshot.warningsKnown ? 1 : 0,
             );
             const snapshotId = Number(result.lastInsertRowid);
             for (const row of snapshot.files) {
@@ -7379,12 +7419,34 @@ stmt.run('gitops_schema_version', '1');
         return write();
     }
 
+    /** Archived node id -> destination node id for one snapshot. */
+    public getSnapshotNodeMap(snapshotId: number): Array<{ source_node_id: number; target_node_id: number }> {
+        return this.db.prepare(
+            'SELECT source_node_id, target_node_id FROM fleet_snapshot_node_map WHERE snapshot_id = ? ORDER BY source_node_id'
+        ).all(snapshotId) as Array<{ source_node_id: number; target_node_id: number }>;
+    }
+
+    /** Replace the whole mapping for a snapshot in one transaction. */
+    public setSnapshotNodeMap(snapshotId: number, mappings: Array<{ sourceNodeId: number; targetNodeId: number }>): void {
+        const remove = this.db.prepare('DELETE FROM fleet_snapshot_node_map WHERE snapshot_id = ?');
+        const insert = this.db.prepare(
+            'INSERT INTO fleet_snapshot_node_map (snapshot_id, source_node_id, target_node_id) VALUES (?, ?, ?)'
+        );
+        const write = this.db.transaction(() => {
+            remove.run(snapshotId);
+            for (const mapping of mappings) {
+                insert.run(snapshotId, mapping.sourceNodeId, mapping.targetNodeId);
+            }
+        });
+        write();
+    }
+
     // The encrypted `documentation` blob is deliberately excluded from these
     // projections (it can be large and is decrypted only on demand). Callers
     // get a cheap `has_documentation` flag; read the blob with
     // getSnapshotDocumentation().
     private static readonly SNAPSHOT_COLUMNS =
-        "id, description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at, (documentation != '') AS has_documentation";
+        "id, description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at, (documentation != '') AS has_documentation, source_instance_id, warnings_known";
 
     public getSnapshots(limit = 50, offset = 0): FleetSnapshot[] {
         return this.db.prepare(
@@ -7428,23 +7490,41 @@ stmt.run('gitops_schema_version', '1');
         return this.mapSnapshotFileRows(rows, snapshotId);
     }
 
+    /** Distinct archived nodes in a snapshot, without decrypting any content. */
+    public getSnapshotSourceNodes(snapshotId: number): Array<{ node_id: number; node_name: string }> {
+        return this.db.prepare(
+            'SELECT DISTINCT node_id, node_name FROM fleet_snapshot_files WHERE snapshot_id = ? ORDER BY node_id'
+        ).all(snapshotId) as Array<{ node_id: number; node_name: string }>;
+    }
+
     private mapSnapshotFileRows(rows: SnapshotFileRow[], snapshotId: number): SnapshotFileReadResult[] {
         return rows.map(row => readSnapshotFileRow(row, snapshotId));
     }
 
-    /** Created-at of the most recent fleet snapshot covering a stack, or null. */
+    /**
+     * Created-at of the most recent fleet snapshot covering a stack, or null.
+     * Only snapshots this instance captured count: an imported archive's node
+     * ids are the source installation's, so matching them here would claim
+     * coverage this installation never had.
+     */
     public getLatestSnapshotTimestampFor(nodeId: number, stackName: string): number | null {
         const row = this.db.prepare(
             `SELECT MAX(s.created_at) AS latest
              FROM fleet_snapshots s
              JOIN fleet_snapshot_files f ON f.snapshot_id = s.id
-             WHERE f.node_id = ? AND f.stack_name = ?`
+             WHERE f.node_id = ? AND f.stack_name = ? AND s.source_instance_id IS NULL`
         ).get(nodeId, stackName) as { latest: number | null } | undefined;
         return row?.latest ?? null;
     }
 
     public deleteSnapshot(id: number): void {
-        this.db.prepare('DELETE FROM fleet_snapshots WHERE id = ?').run(id);
+        // FKs are declarative only (foreign_keys pragma is off), so the node
+        // mapping rows are removed explicitly with the snapshot.
+        const remove = this.db.transaction(() => {
+            this.db.prepare('DELETE FROM fleet_snapshot_node_map WHERE snapshot_id = ?').run(id);
+            this.db.prepare('DELETE FROM fleet_snapshots WHERE id = ?').run(id);
+        });
+        remove();
     }
 
     public getSnapshotCount(): number {
