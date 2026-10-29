@@ -475,7 +475,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
   });
 
   it.each<[string, number]>([
-    ['a past instant', 0],
+    ['the current instant', 0],
     ['exactly the headroom', 250],
     ['a non-finite value', Number.NaN],
   ])('skips the optional probe when the deadline is %s', async (_case, offset) => {
