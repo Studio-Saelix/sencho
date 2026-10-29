@@ -20,6 +20,7 @@ import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let MeshProxyTunnelDialer: typeof import('../services/MeshProxyTunnelDialer').MeshProxyTunnelDialer;
+let MeshService: typeof import('../services/MeshService').MeshService;
 let meshReachableReason: typeof import('../services/MeshService').meshReachableReason;
 
 /** Answer every WebSocket upgrade with one fixed HTTP response. */
@@ -47,7 +48,7 @@ beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ MeshProxyTunnelDialer } = await import('../services/MeshProxyTunnelDialer'));
-    ({ meshReachableReason } = await import('../services/MeshService'));
+    ({ MeshService, meshReachableReason } = await import('../services/MeshService'));
 });
 
 afterAll(() => {
@@ -166,6 +167,12 @@ describe('MeshProxyTunnelDialer', () => {
             expect(failure?.code).toBe('refused_unverified');
             expect(meshReachableReason(failure!.code)).toMatch(/refused or redirected/);
             expect(meshReachableReason(failure!.code)).not.toMatch(/access proxy/);
+            // Mesh status is where the node card and topology read the
+            // explanation, so the cached code has to reach it unchanged.
+            const status = (await MeshService.getInstance().getStatus()).find((s) => s.nodeId === nodeId);
+            expect(status?.reachableMode).toBe('unreachable');
+            expect(status?.reachableReason).toMatch(/refused or redirected/);
+            expect(status?.reachableReason).not.toMatch(/access proxy/);
         } finally {
             MeshProxyTunnelDialer.resetForTest(0);
             await peer.close();
