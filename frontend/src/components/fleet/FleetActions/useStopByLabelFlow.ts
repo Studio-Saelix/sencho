@@ -39,6 +39,8 @@ export interface StopOutcome {
    * partial stop reads as a clean success.
    */
   leftOut: MatchPreviewNode[];
+  /** Stacks the dry-run plan could not resolve, so the stop never sent them a target. */
+  unresolved: number;
   matchedNodes: number;
 }
 
@@ -232,7 +234,12 @@ export function useStopByLabelFlow(open: boolean) {
       // A real stop only sends targets for the plan's reachable nodes, so the
       // response never mentions the nodes the plan left out. Carry them from the
       // plan into the outcome; a dry run reports through the plan section instead.
-      reportStop(apiResults, opts.dryRun, trimmed, opts.dryRun ? [] : unreachable, setOutcome);
+      reportStop(
+        apiResults, opts.dryRun, trimmed,
+        opts.dryRun ? [] : unreachable,
+        opts.dryRun ? 0 : failedToResolve,
+        setOutcome,
+      );
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');
@@ -290,6 +297,7 @@ function reportStop(
   dryRun: boolean,
   label: string,
   plannedOut: MatchPreviewNode[],
+  unresolved: number,
   setOutcome: (outcome: StopOutcome) => void,
 ): void {
   const reachable = apiResults.filter(n => n.reachable);
@@ -303,26 +311,36 @@ function reportStop(
   const stacksTouched = apiResults.flatMap(n => Array.isArray(n.stackResults) ? n.stackResults : []);
   const ok = stacksTouched.filter(s => s.success).length;
   const failed = stacksTouched.length - ok;
-  const unreachableNotes = [
+  // Everything the plan left out of the stop: unreachable nodes, plus stacks a
+  // dry run could not resolve. None of them appear in the response.
+  const partialNotes = [
     leftOut.length > 0 && `${plural(leftOut.length, 'node')} unreachable, left out.`,
     attemptedUnreachable.length > 0 && `${plural(attemptedUnreachable.length, 'node')} unreachable.`,
+    unresolved > 0 && `${plural(unresolved, 'stack')} could not be resolved.`,
   ].filter(Boolean).join(' ');
-  const unreachableSuffix = unreachableNotes ? ` ${unreachableNotes}` : '';
+  const partialSuffix = partialNotes ? ` ${partialNotes}` : '';
   if (!dryRun) {
     setOutcome({
       label, rows: [...toRows(apiResults), ...leftOutRows(leftOut)], ok, failed,
-      unreachable: attemptedUnreachable.length, leftOut, matchedNodes,
+      unreachable: attemptedUnreachable.length, leftOut, unresolved, matchedNodes,
     });
   }
   if (matchedNodes === 0) {
-    if (reachable.length === 0) toast.warning(`No reachable nodes.${unreachableSuffix}`);
-    else toast.info(`No reachable node carries a stack label by that name.${unreachableSuffix}`);
-  } else if (dryRun && failed > 0) toast.warning(`Resolved ${plural(ok, 'stack')}; ${failed} could not be resolved.${unreachableSuffix}`);
-  else if (dryRun) toast.success(`Resolved ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${unreachableSuffix}`);
-  // A stop that could not reach every planned node is partial: warn, never a
-  // green success, even when every stack it did reach stopped cleanly.
-  else if (failed === 0 && ok > 0 && unreachableNotes) toast.warning(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${unreachableSuffix}`);
+    if (reachable.length === 0) toast.warning(`No reachable nodes.${partialSuffix}`);
+    // A confirmed node can lose the label between preview and stop; its
+    // confirmed stacks come back as failures. That is a failed stop, not a
+    // benign "no node carries the label" no-op.
+    else if (failed > 0) toast.warning(`${ok} stopped, ${failed} failed. See the result.${partialSuffix}`);
+    else toast.info(`No reachable node carries a stack label by that name.${partialSuffix}`);
+  } else if (dryRun && failed > 0) toast.warning(`Resolved ${plural(ok, 'stack')}; ${failed} could not be resolved.${partialSuffix}`);
+  else if (dryRun) toast.success(`Resolved ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${partialSuffix}`);
+  // A stop that could not reach or resolve part of the plan is partial: warn,
+  // never a green success, even when every stack it did reach stopped cleanly.
+  else if (failed === 0 && ok > 0 && partialNotes) toast.warning(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${partialSuffix}`);
   else if (failed === 0 && ok > 0) toast.success(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.`);
-  else if (ok === 0 && failed === 0) toast.info(`Stack label matched but no stacks were assigned to it.${unreachableSuffix}`);
-  else toast.warning(`${ok} stopped, ${failed} failed. See the result.${unreachableSuffix}`);
+  else if (ok === 0 && failed === 0) {
+    if (partialNotes) toast.warning(`Nothing was stopped.${partialSuffix}`);
+    else toast.info('Stack label matched but no stacks were assigned to it.');
+  }
+  else toast.warning(`${ok} stopped, ${failed} failed. See the result.${partialSuffix}`);
 }

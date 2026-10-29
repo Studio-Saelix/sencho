@@ -62,7 +62,7 @@ export interface OutcomeSummary {
  * the execution results; the answer must carry them or a partial prune reads as
  * a clean success.
  */
-export function outcomeSummary(results: FleetPruneNodeResult[], plan: FleetPruneNodeResult[] = []): OutcomeSummary {
+export function outcomeSummary(results: FleetPruneNodeResult[], plan: FleetPruneNodeResult[]): OutcomeSummary {
   const outcomes = results.flatMap((result) => result.outcomes ?? []);
   const removed = outcomes.filter((outcome) => outcome.status === 'removed').length;
   const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;

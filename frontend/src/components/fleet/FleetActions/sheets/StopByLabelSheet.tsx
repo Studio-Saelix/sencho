@@ -163,35 +163,35 @@ function stopAnswer(targets: ResolvedTarget[], marker: string | undefined, denie
 }
 
 function OutcomePath({ outcome }: { outcome: StopOutcome }) {
-  const { ok, failed, unreachable, leftOut, matchedNodes, label } = outcome;
+  const { ok, failed, unreachable, leftOut, unresolved, matchedNodes, label } = outcome;
   // `unreachable` counts nodes the stop tried to reach; `leftOut` counts nodes
-  // the plan excluded before the stop ran. Both make the result partial, and the
-  // answer must carry the second one because the response never mentions it.
+  // and `unresolved` counts stacks the plan excluded before the stop ran. All
+  // three make the result partial, and the answer must carry the excluded ones
+  // because the response never mentions them.
   const totalUnreachable = unreachable + leftOut.length;
-  const leftOutMarker = leftOut.length > 0
-    ? `${plural(leftOut.length, 'node')} unreachable, left out`
-    : undefined;
   const marker = [
-    leftOutMarker,
+    leftOut.length > 0 ? `${plural(leftOut.length, 'node')} unreachable, left out` : undefined,
     unreachable > 0 ? `${plural(unreachable, 'node')} unreachable` : undefined,
+    unresolved > 0 ? `${plural(unresolved, 'stack')} could not be resolved` : undefined,
   ].filter(Boolean).join(' · ') || undefined;
   let answer: StatusPathAnswer;
   if (ok === 0 && failed === 0 && totalUnreachable > 0) {
-    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(totalUnreachable, 'node')} unreachable, so the stacks there were not stopped.` };
+    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(totalUnreachable, 'node')} unreachable, so the stacks there were not stopped.`, marker };
+  } else if (ok === 0 && failed === 0 && unresolved > 0) {
+    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(unresolved, 'stack')} could not be resolved, so they were not stopped.`, marker };
   } else if (ok === 0 && failed === 0) {
     answer = { tone: 'neutral', title: 'Nothing was stopped', line: `No stack carried “${label}” on a reachable node.` };
   } else if (failed === 0) {
     answer = {
-      tone: totalUnreachable > 0 ? 'warning' : 'success',
+      tone: totalUnreachable > 0 || unresolved > 0 ? 'warning' : 'success',
       title: `Stopped ${plural(ok, 'stack')}`,
       line: `on ${plural(matchedNodes, 'node')}`,
       marker,
     };
   } else {
-    const extra = unreachable > 0 ? ` · ${plural(unreachable, 'node')} unreachable` : '';
     answer = {
       tone: 'warning', title: `${ok} stopped, ${failed} failed`,
-      line: `on ${plural(matchedNodes, 'node')}${extra}`, marker: leftOutMarker,
+      line: `on ${plural(matchedNodes, 'node')}`, marker,
     };
   }
   return (

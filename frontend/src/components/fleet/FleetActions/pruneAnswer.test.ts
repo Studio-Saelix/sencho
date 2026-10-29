@@ -47,7 +47,7 @@ it('leads a finished prune of unsized items with the items removed', () => {
     nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 0,
     outcomes: [{ id: 'a', target: 'volumes', status: 'removed' }, { id: 'b', target: 'volumes', status: 'removed' }],
     targets: [{ target: 'volumes', success: true, reclaimedBytes: 0, dryRun: false }],
-  }]);
+  }], []);
   expect(answer).toMatchObject({ tone: 'success', title: 'Removed 2 items', line: 'Across 1 node' });
 });
 
@@ -65,7 +65,7 @@ it('keeps a plan-left-out node on the finished answer instead of reporting a cle
   });
 });
 
-it('names both an excluded node and item failures on a partial prune', () => {
+it('counts both an excluded node and item failures on a partial prune', () => {
   const failedNode = {
     nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 0,
     outcomes: [
@@ -80,6 +80,16 @@ it('names both an excluded node and item failures on a partial prune', () => {
   expect(answer.tone).toBe('warning');
 });
 
+it('keeps the excluded marker on a stale result', () => {
+  const stale = plan({
+    code: 'PRUNE_PLAN_STALE', error: 'Prune plan changed', reclaimedBytes: 0,
+    targets: [{ target: 'images', success: false, reclaimedBytes: 0, dryRun: false }],
+  });
+  const unreachable = plan({ nodeId: 2, nodeName: 'edge', reachable: false, fingerprint: undefined });
+  const { answer } = outcomeSummary([stale], [stale, unreachable]);
+  expect(answer).toMatchObject({ tone: 'destructive', title: 'Nothing was pruned', marker: '1 node unreachable, left out' });
+});
+
 it('counts skipped and failed items on a finished prune without hiding the failure', () => {
   const { answer, failedAny } = outcomeSummary([{
     nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 1024,
@@ -89,7 +99,7 @@ it('counts skipped and failed items on a finished prune without hiding the failu
       { id: 'c', target: 'images', status: 'failed', error: 'refused' },
     ],
     targets: [{ target: 'images', success: false, reclaimedBytes: 1024, dryRun: false }],
-  }]);
+  }], []);
   expect(failedAny).toBe(true);
   expect(answer).toMatchObject({ tone: 'warning', title: '1 KB reclaimed with failures', marker: '1 failed · 1 skipped' });
 });

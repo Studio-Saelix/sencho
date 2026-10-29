@@ -455,6 +455,44 @@ it('warns and marks the result when the plan left a node out of the run', async 
   expect(toastSuccess).not.toHaveBeenCalled();
 });
 
+it('keeps the excluded count in the toast when items also fail', async () => {
+  const user = userEvent.setup();
+  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'offline' }] as unknown as FleetNode[];
+  const edgeDown = { nodeId: 2, nodeName: 'edge', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+  routePrune(() => jsonResponse(200, { results: [planResult, edgeDown] }), () => jsonResponse(200, {
+    results: [{
+      ...removedResult,
+      targets: [{ target: 'images', success: false, reclaimedBytes: 4096, dryRun: false, removed: 1, skipped: 0, failed: 1 }],
+    }],
+  }));
+  renderSheet({ nodes: twoNodes });
+  await pruneNow(user);
+
+  expect(await screen.findByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Fleet prune completed with item failures. 4 KB reclaimed. 1 node unreachable, left out.',
+  ));
+});
+
+it('keeps the excluded count in the toast when the plan went stale', async () => {
+  const user = userEvent.setup();
+  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'offline' }] as unknown as FleetNode[];
+  const edgeDown = { nodeId: 2, nodeName: 'edge', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+  routePrune(() => jsonResponse(200, { results: [planResult, edgeDown] }), () => jsonResponse(200, {
+    results: [{
+      nodeId: 1, nodeName: 'central', reachable: true, code: 'PRUNE_PLAN_STALE', error: 'Prune plan changed', reclaimedBytes: 0,
+      targets: [{ target: 'images', success: false, reclaimedBytes: 0, dryRun: false, error: 'Prune plan changed' }],
+    }],
+  }));
+  renderSheet({ nodes: twoNodes });
+  await pruneNow(user);
+
+  expect(await screen.findByText('Nothing was pruned')).toBeInTheDocument();
+  await waitFor(() => expect(toastError).toHaveBeenCalledWith(
+    'The prune plan changed on “central” after it was built. 1 node unreachable, left out. Review the new plan.',
+  ));
+});
+
 it('does not let Prune be clicked again on the old plan after a refused run', async () => {
   const user = userEvent.setup();
   let dryRuns = 0;

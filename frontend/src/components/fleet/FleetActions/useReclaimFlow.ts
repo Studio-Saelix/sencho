@@ -198,15 +198,17 @@ export function useReclaimFlow({ open, nodes, onPruned }: Options) {
 
 function reportOutcome(results: FleetPruneNodeResult[], plan: FleetPruneNodeResult[]): void {
   const { answer, stale, removedAny, failedAny, reclaimed, excluded } = outcomeSummary(results, plan);
+  // The plan left these nodes out, so every branch below is partial even when
+  // every attempted node pruned cleanly; never report a green success, and keep
+  // the excluded count in the toast on the stale and failed branches too.
+  const excludedNote = excluded.length > 0 ? ` ${plural(excluded.length, 'node')} unreachable, left out.` : '';
   if (stale && removedAny) {
-    toast.warning(`Fleet prune partially completed: ${formatBytes(reclaimed)} reclaimed before the plan changed on “${stale.nodeName}”. Review the new plan.`);
+    toast.warning(`Fleet prune partially completed: ${formatBytes(reclaimed)} reclaimed before the plan changed on “${stale.nodeName}”.${excludedNote} Review the new plan.`);
   } else if (stale) {
-    toast.error(`The prune plan changed on “${stale.nodeName}” ${STALE_COPY}`);
+    toast.error(`The prune plan changed on “${stale.nodeName}” after it was built.${excludedNote} Review the new plan.`);
   } else if (failedAny) {
-    toast.warning(`Fleet prune completed with item failures. ${formatBytes(reclaimed)} reclaimed.`);
+    toast.warning(`Fleet prune completed with item failures. ${formatBytes(reclaimed)} reclaimed.${excludedNote}`);
   } else if (excluded.length > 0) {
-    // The plan left these nodes out, so the run is partial even when every
-    // attempted node pruned cleanly; never report it as a green success.
     toast.warning(`${answer.title} across ${plural(results.length, 'node')}; ${plural(excluded.length, 'node')} unreachable, left out.`);
   } else {
     toast.success(`${answer.title} across ${plural(results.length, 'node')}.`);
