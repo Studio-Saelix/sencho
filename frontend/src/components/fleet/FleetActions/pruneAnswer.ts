@@ -52,10 +52,17 @@ export interface OutcomeSummary {
   removedAny: boolean;
   failedAny: boolean;
   reclaimed: number;
+  /** Nodes the reviewed plan left out; execution never attempts them. */
+  excluded: FleetPruneNodeResult[];
 }
 
-/** The Answer once Prune has run: bytes reclaimed, with skipped or failed items counted. */
-export function outcomeSummary(results: FleetPruneNodeResult[]): OutcomeSummary {
+/**
+ * The Answer once Prune has run: bytes reclaimed, with skipped or failed items
+ * counted. `plan` is the reviewed plan, whose unreachable nodes are absent from
+ * the execution results; the answer must carry them or a partial prune reads as
+ * a clean success.
+ */
+export function outcomeSummary(results: FleetPruneNodeResult[], plan: FleetPruneNodeResult[] = []): OutcomeSummary {
   const outcomes = results.flatMap((result) => result.outcomes ?? []);
   const removed = outcomes.filter((outcome) => outcome.status === 'removed').length;
   const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;
@@ -64,24 +71,32 @@ export function outcomeSummary(results: FleetPruneNodeResult[]): OutcomeSummary 
   const stale = results.find((result) => result.code === 'PRUNE_PLAN_STALE');
   const failedAny = results.some((result) => result.targets.some((target) => !target.success));
   const removedAny = removed > 0;
-  const marker = [failed > 0 && `${failed} failed`, skipped > 0 && `${skipped} skipped`].filter(Boolean).join(' · ') || undefined;
+  const executedIds = new Set(results.map((result) => result.nodeId));
+  const excluded = plan.filter((result) => !result.reachable && !executedIds.has(result.nodeId));
+  const excludedMarker = excluded.length > 0 ? `${plural(excluded.length, 'node')} unreachable, left out` : undefined;
+  const marker = [
+    excludedMarker,
+    failed > 0 && `${failed} failed`,
+    skipped > 0 && `${skipped} skipped`,
+  ].filter(Boolean).join(' · ') || undefined;
   const nodes = plural(results.length, 'node');
   // Volumes and networks report no size, so a prune of only those has no byte total to lead with.
   const reclaimedLabel = reclaimed > 0 || removed === 0 ? formatBytes(reclaimed) : null;
   const done = reclaimedLabel ? `${reclaimedLabel} reclaimed` : `${plural(removed, 'item')} removed`;
   const line = reclaimedLabel && outcomes.length > 0 ? `${plural(removed, 'item')} removed on ${nodes}` : `Across ${nodes}`;
+  const tone = excluded.length > 0 ? 'warning' : 'success';
 
   if (stale && !removedAny) {
     return {
       answer: { tone: 'destructive', title: 'Nothing was pruned', line: `The plan changed on “${stale.nodeName}” after it was built.`, marker },
-      stale, removedAny, failedAny, reclaimed,
+      stale, removedAny, failedAny, reclaimed, excluded,
     };
   }
   if (stale || failedAny) {
     const title = stale ? `Partly pruned, ${done}` : `${done} with failures`;
     const detail = stale ? `The plan changed on “${stale.nodeName}” after it was built.` : undefined;
-    return { answer: { tone: 'warning', title, line, marker, detail }, stale, removedAny, failedAny, reclaimed };
+    return { answer: { tone: 'warning', title, line, marker, detail }, stale, removedAny, failedAny, reclaimed, excluded };
   }
   const title = reclaimedLabel ? `Reclaimed ${reclaimedLabel}` : `Removed ${plural(removed, 'item')}`;
-  return { answer: { tone: 'success', title, line, marker }, stale, removedAny, failedAny, reclaimed };
+  return { answer: { tone, title, line, marker }, stale, removedAny, failedAny, reclaimed, excluded };
 }

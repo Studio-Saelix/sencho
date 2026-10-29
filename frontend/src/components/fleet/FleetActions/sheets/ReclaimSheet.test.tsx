@@ -434,6 +434,27 @@ it('sends every reviewed node but only the reachable ones with a fingerprint', a
   });
 });
 
+it('warns and marks the result when the plan left a node out of the run', async () => {
+  const user = userEvent.setup();
+  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'offline' }] as unknown as FleetNode[];
+  const edgeDown = { nodeId: 2, nodeName: 'edge', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+  routePrune(() => jsonResponse(200, { results: [planResult, edgeDown] }), () => jsonResponse(200, { results: [removedResult] }));
+  renderSheet({ nodes: twoNodes });
+  await pruneNow(user);
+
+  expect(await screen.findByText('Reclaimed 4 KB')).toBeInTheDocument();
+  const answer = screen.getByTestId('status-answer');
+  expect(answer).toHaveAttribute('data-tone', 'warning');
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
+  // The excluded node stays visible behind the proof as well.
+  await user.click(screen.getByRole('button', { name: 'Per-node outcome' }));
+  expect(screen.getByText('edge · excluded')).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Reclaimed 4 KB across 1 node; 1 node unreachable, left out.',
+  ));
+  expect(toastSuccess).not.toHaveBeenCalled();
+});
+
 it('does not let Prune be clicked again on the old plan after a refused run', async () => {
   const user = userEvent.setup();
   let dryRuns = 0;

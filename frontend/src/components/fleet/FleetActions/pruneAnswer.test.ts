@@ -51,6 +51,35 @@ it('leads a finished prune of unsized items with the items removed', () => {
   expect(answer).toMatchObject({ tone: 'success', title: 'Removed 2 items', line: 'Across 1 node' });
 });
 
+it('keeps a plan-left-out node on the finished answer instead of reporting a clean success', () => {
+  const removed = {
+    nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 0,
+    outcomes: [{ id: 'a', target: 'volumes' as const, status: 'removed' as const }, { id: 'b', target: 'volumes' as const, status: 'removed' as const }],
+    targets: [{ target: 'volumes' as const, success: true, reclaimedBytes: 0, dryRun: false }],
+  };
+  const unreachable = plan({ nodeId: 2, nodeName: 'edge', reachable: false, fingerprint: undefined });
+  const { answer, excluded } = outcomeSummary([removed], [removed, unreachable]);
+  expect(excluded.map((node) => node.nodeId)).toEqual([2]);
+  expect(answer).toMatchObject({
+    tone: 'warning', title: 'Removed 2 items', line: 'Across 1 node', marker: '1 node unreachable, left out',
+  });
+});
+
+it('names both an excluded node and item failures on a partial prune', () => {
+  const failedNode = {
+    nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 0,
+    outcomes: [
+      { id: 'a', target: 'images' as const, status: 'removed' as const },
+      { id: 'b', target: 'images' as const, status: 'failed' as const, error: 'refused' },
+    ],
+    targets: [{ target: 'images' as const, success: false, reclaimedBytes: 0, dryRun: false }],
+  };
+  const unreachable = plan({ nodeId: 2, nodeName: 'edge', reachable: false, fingerprint: undefined });
+  const { answer } = outcomeSummary([failedNode], [failedNode, unreachable]);
+  expect(answer.marker).toBe('1 node unreachable, left out · 1 failed');
+  expect(answer.tone).toBe('warning');
+});
+
 it('counts skipped and failed items on a finished prune without hiding the failure', () => {
   const { answer, failedAny } = outcomeSummary([{
     nodeId: 1, nodeName: 'central', reachable: true, reclaimedBytes: 1024,

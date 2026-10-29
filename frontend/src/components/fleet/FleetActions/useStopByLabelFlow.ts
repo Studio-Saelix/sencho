@@ -31,7 +31,14 @@ export interface StopOutcome {
   rows: ResultRow[];
   ok: number;
   failed: number;
+  /** Nodes in the confirmed targets that could not be reached when the stop ran. */
   unreachable: number;
+  /**
+   * Nodes the plan left out before the stop ran. They were never sent a target,
+   * so the response cannot mention them; the result must still name them or a
+   * partial stop reads as a clean success.
+   */
+  leftOut: MatchPreviewNode[];
   matchedNodes: number;
 }
 
@@ -222,7 +229,10 @@ export function useStopByLabelFlow(open: boolean) {
       }
       const apiResults = body.results as FleetStopNodeResult[];
       if (opts.dryRun) setDryRunResolved(snapshotOf(trimmed, apiResults));
-      reportStop(apiResults, opts.dryRun, trimmed, setOutcome);
+      // A real stop only sends targets for the plan's reachable nodes, so the
+      // response never mentions the nodes the plan left out. Carry them from the
+      // plan into the outcome; a dry run reports through the plan section instead.
+      reportStop(apiResults, opts.dryRun, trimmed, opts.dryRun ? [] : unreachable, setOutcome);
     } catch (err) {
       toast.dismiss(toastId);
       toast.error(err instanceof Error ? err.message : 'Network error');
@@ -265,26 +275,54 @@ function snapshotOf(label: string, apiResults: FleetStopNodeResult[]): DryRunSna
   return { label, targets, unreachable, failed };
 }
 
+function leftOutRows(nodes: MatchPreviewNode[]): ResultRow[] {
+  return nodes.map(node => ({
+    key: `left-out-${node.nodeId}`,
+    label: `${node.nodeName} (unreachable, left out)`,
+    success: false,
+    error: node.error || 'Node unreachable',
+    sub: [],
+  }));
+}
+
 function reportStop(
   apiResults: FleetStopNodeResult[],
   dryRun: boolean,
   label: string,
+  plannedOut: MatchPreviewNode[],
   setOutcome: (outcome: StopOutcome) => void,
 ): void {
   const reachable = apiResults.filter(n => n.reachable);
-  const unreachable = apiResults.length - reachable.length;
+  const attemptedUnreachable = apiResults.filter(n => !n.reachable);
+  // A node can appear in both lists only if the response names a node the plan
+  // already left out (it should not, because left-out nodes are never targets),
+  // so dedupe rather than double-count a defensive mismatch.
+  const attemptedIds = new Set(apiResults.map(n => n.nodeId));
+  const leftOut = plannedOut.filter(n => !attemptedIds.has(n.nodeId));
   const matchedNodes = reachable.filter(n => n.matched).length;
   const stacksTouched = apiResults.flatMap(n => Array.isArray(n.stackResults) ? n.stackResults : []);
   const ok = stacksTouched.filter(s => s.success).length;
   const failed = stacksTouched.length - ok;
-  const unreachableSuffix = unreachable > 0 ? ` ${plural(unreachable, 'node')} unreachable.` : '';
-  if (!dryRun) setOutcome({ label, rows: toRows(apiResults), ok, failed, unreachable, matchedNodes });
+  const unreachableNotes = [
+    leftOut.length > 0 && `${plural(leftOut.length, 'node')} unreachable, left out.`,
+    attemptedUnreachable.length > 0 && `${plural(attemptedUnreachable.length, 'node')} unreachable.`,
+  ].filter(Boolean).join(' ');
+  const unreachableSuffix = unreachableNotes ? ` ${unreachableNotes}` : '';
+  if (!dryRun) {
+    setOutcome({
+      label, rows: [...toRows(apiResults), ...leftOutRows(leftOut)], ok, failed,
+      unreachable: attemptedUnreachable.length, leftOut, matchedNodes,
+    });
+  }
   if (matchedNodes === 0) {
     if (reachable.length === 0) toast.warning(`No reachable nodes.${unreachableSuffix}`);
     else toast.info(`No reachable node carries a stack label by that name.${unreachableSuffix}`);
   } else if (dryRun && failed > 0) toast.warning(`Resolved ${plural(ok, 'stack')}; ${failed} could not be resolved.${unreachableSuffix}`);
   else if (dryRun) toast.success(`Resolved ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${unreachableSuffix}`);
-  else if (failed === 0 && ok > 0) toast.success(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${unreachableSuffix}`);
+  // A stop that could not reach every planned node is partial: warn, never a
+  // green success, even when every stack it did reach stopped cleanly.
+  else if (failed === 0 && ok > 0 && unreachableNotes) toast.warning(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${unreachableSuffix}`);
+  else if (failed === 0 && ok > 0) toast.success(`Stopped ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.`);
   else if (ok === 0 && failed === 0) toast.info(`Stack label matched but no stacks were assigned to it.${unreachableSuffix}`);
   else toast.warning(`${ok} stopped, ${failed} failed. See the result.${unreachableSuffix}`);
 }

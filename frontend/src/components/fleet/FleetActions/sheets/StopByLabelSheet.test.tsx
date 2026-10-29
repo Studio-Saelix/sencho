@@ -470,6 +470,76 @@ it('reports a confirmed node that vanished as a failure, not a clean success', a
   expect(toastSuccess).not.toHaveBeenCalled();
 });
 
+it('keeps a node left out of the plan on the stop result and toast', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(previewOf([
+        centralWeb,
+        { nodeId: 2, nodeName: 'edge-1', reachable: false, labelExists: false, stackCount: 0, stackNames: [], error: 'Pilot tunnel is disconnected' },
+      ], { nodes: 1, stacks: 1, unreachable: 1 }));
+    }
+    if (url === '/fleet/labels/fleet-stop') {
+      // The real stop sends targets only for reachable nodes, so the response
+      // never mentions the node the plan left out.
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop stacks' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), WAIT);
+  await user.click(stopBtn);
+
+  // The stacks on the reachable node stopped, but the unreachable node keeps
+  // the label's stack running: the result is a warning, not a clean success.
+  expect(await screen.findByText('Stopped 1 stack')).toBeInTheDocument();
+  expect(screen.getByTestId('status-answer')).toHaveAttribute('data-tone', 'warning');
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
+  await user.click(screen.getByRole('button', { name: 'Per-node outcome' }));
+  expect(screen.getByText('edge-1 (unreachable, left out)')).toBeInTheDocument();
+  expect(screen.getByText(/Pilot tunnel is disconnected/)).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Stopped 1 stack across 1 node. 1 node unreachable, left out.',
+  ));
+  expect(toastSuccess).not.toHaveBeenCalled();
+});
+
+it('carries a dry-run snapshot\'s left-out node into the real stop result', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string, init?: { body?: string }) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      const body = JSON.parse(init?.body ?? '{}');
+      if (body.dryRun) {
+        return Promise.resolve(jsonResponse(200, {
+          results: [
+            { nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true, dryRun: true }] },
+            { nodeId: 2, nodeName: 'edge-1', reachable: false, matched: false, stackResults: [], error: 'Pilot tunnel is disconnected' },
+          ],
+        }));
+      }
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Stop stacks' }));
+
+  expect(await screen.findByText('Stopped 1 stack')).toBeInTheDocument();
+  expect(screen.getByTestId('status-answer')).toHaveAttribute('data-tone', 'warning');
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
+  await user.click(screen.getByRole('button', { name: 'Per-node outcome' }));
+  expect(screen.getByText('edge-1 (unreachable, left out)')).toBeInTheDocument();
+});
+
 it('keeps Stop disabled when the session may not stop a resolved stack', async () => {
   const user = userEvent.setup();
   can.mockReturnValue(false);

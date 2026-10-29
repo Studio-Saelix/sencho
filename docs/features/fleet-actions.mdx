@@ -34,9 +34,9 @@ All three actions share one execution model, and understanding it explains every
 
 1. **You describe the target.** A stack label name (Stop stacks by label), a label plus checked stacks (Label stacks), or a set of resource targets and a scope (Reclaim disk space).
 2. **Sencho builds the plan.** Typing a label name fires a non-destructive preview call (`POST /api/fleet/labels/match-preview`) roughly 500ms after you stop typing. Reclaim disk space builds its itemized per-node plan (`POST /api/fleet/labels/fleet-prune` with `dryRun: true`) as soon as the sheet opens and again, after a short pause, whenever you change a target or the scope. There is no separate dry-run button to press.
-3. **One line says what will happen.** The plan section leads with a single answer, such as `4.8 GB to reclaim` or `Stops 6 stacks`, with a quiet marker when something was left out, such as an unreachable node. The per-node detail sits behind a collapsed row one click away.
+3. **One line says what will happen.** The plan section leads with a single answer, such as `4.8 GB to reclaim` or `Stops 6 stacks`, with a quiet marker when something was left out, such as `1 unreachable, left out` for an unreachable node. The marker counts them; the per-node detail sits behind a collapsed row one click away and names each one.
 4. **You commit from the sheet's toolbar.** **Prune**, **Stop stacks**, or **Apply** runs exactly what the plan shows. The button stays disabled while the plan is building or no longer matches your choices. The control instance verifies the plan before mutation: Prune rebuilds every reviewed plan and checks the complete node roster before any node starts deleting, and a stale plan or changed reachability rejects the whole preflight. A later race can still produce an explicit partial result because each node revalidates again immediately before deletion.
-5. **The sheet becomes the result.** The same sheet shows what happened in one line, with a per-node outcome one click away and a **Done** button. Prune retains the reviewed item identity and, when the node returns item outcomes, marks each candidate Removed, Skipped, or Failed. Unreachable nodes remain visible as excluded rather than appearing as successful empty plans.
+5. **The sheet becomes the result.** The same sheet shows what happened in one line, with a per-node outcome one click away and a **Done** button. Prune retains the reviewed item identity and, when the node returns item outcomes, marks each candidate Removed, Skipped, or Failed. Unreachable nodes remain visible as excluded rather than appearing as successful empty plans, and a result that ran without them keeps the plan's `N unreachable, left out` marker and warning tone.
 
 ## The three actions
 
@@ -56,7 +56,7 @@ Stop every stack assigned a given **stack label** on every node where that stack
 
 1. Open **Fleet → Actions** and click **Stop…** on **Stop stacks by label**.
 2. Type a name in the **Stack label** field. The autocomplete queries every reachable node for its own stack labels (`GET /api/fleet/labels/suggestions`) and lists each name once with its combined stack and node counts. A stack label that exists only on a remote node still appears. When a node cannot be reached, a note under the field warns that suggestions may be incomplete. You can also type a name that isn't suggested; the live preview and the eventual stop still resolve it authoritatively against every node.
-3. As you type, the **Plan** section resolves the live blast radius into one line: `Stops 7 stacks`, then the number of nodes and the first few stack names. A marker names the nodes that could not be reached. **Stacks per node** opens the full list. **Stop stacks** stays disabled until the label resolves to at least one matching stack.
+3. As you type, the **Plan** section resolves the live blast radius into one line: `Stops 7 stacks`, then the number of nodes and the first few stack names. A marker counts the nodes that could not be reached (`1 unreachable, left out`); **Stacks per node** opens the full list and names them. **Stop stacks** stays disabled until the label resolves to at least one matching stack.
 
 <Frame>
   <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="The Stop stacks by label sheet with 'Media' typed in the Stack label field. The Plan section shows 'Stops 3 stacks' on 1 node with the stack names plex, radarr, and sonarr, and a collapsed Stacks per node row. The Stop stacks button sits in the sheet toolbar." />
@@ -66,7 +66,7 @@ Stop every stack assigned a given **stack label** on every node where that stack
 
 ### Reading the per-node breakdown
 
-When the request finishes, the sheet turns into the result. The answer line reads `Stopped 6 stacks` and names the node count, or `3 stopped, 1 failed` when something went wrong. **Per-node outcome** opens one row per node with a status icon and either a stack count or a `(no matching stack label)` annotation; the indented children below each row are the per-stack results.
+When the request finishes, the sheet turns into the result. The answer line reads `Stopped 6 stacks` and names the node count, or `3 stopped, 1 failed` when something went wrong. When the plan left a node out, the answer is a warning with the `N node unreachable, left out` marker, and the toast says the same; `Stopped 6 stacks` never hides a node the stop could not reach. **Per-node outcome** opens one row per node with a status icon and either a stack count or a `(no matching stack label)` annotation, and lists each left-out node as `<node> (unreachable, left out)`; the indented children below each row are the per-stack results.
 
 <Frame>
   <img src="/images/fleet-actions/fleet-actions-stop-results.png" alt="The Stop stacks by label sheet after a stop. The result reads 'Stopped 3 stacks' on 1 node, and the expanded Per-node outcome lists Local with the three stacks plex, radarr, and sonarr." />
@@ -157,7 +157,7 @@ Local plan enumeration has an eight-second Docker-daemon timeout. Real local exe
 
 ### Read post-prune outcomes
 
-The sheet turns into the result. The answer line reads `Reclaimed 4.6 GB`, or `Removed 2 items` when no size is reported, with a marker for skipped or failed items. **Per-node outcome** keeps the reviewed name and metadata for every candidate and adds one outcome when the node returns itemized outcomes:
+The sheet turns into the result. The answer line reads `Reclaimed 4.6 GB`, or `Removed 2 items` when no size is reported. It carries the plan's `N node unreachable, left out` marker and warning tone when the run skipped an excluded node, plus a marker for skipped or failed items, and the toast repeats the excluded count rather than reporting a clean success. **Per-node outcome** keeps the reviewed name and metadata for every candidate and adds one outcome when the node returns itemized outcomes:
 
 - **Removed** means the reviewed resource was deleted.
 - **Skipped** means it became active, was already absent, or became protected before deletion.
@@ -176,7 +176,7 @@ If a remote reports only its reclaimed total, the node shows that total without 
 
 - **Operational outcomes are itemized.** Normal fan-out results use per-node and per-item fields. Fleet Prune uses `409` when the reviewed roster, reachability, or fingerprint changes before mutation, because that rejection guarantees no node has started deleting.
 - **No retry, no scheduling, no undo.** Fleet Actions runs synchronously and is operator-driven; there is no background scheduler and no roll-back. For recurrence, use [Scheduled Operations](/features/scheduled-operations).
-- **Offline remotes stay visible.** The plan marks an unreachable node as excluded. If its reachability changes before Prune executes, the reviewed authorization is rejected and a new plan is built for you to review.
+- **Offline remotes stay visible.** The plan marks an unreachable node as excluded, and a result that runs without it keeps the `N node unreachable, left out` marker instead of reading as a clean success. If its reachability changes before Prune executes, the reviewed authorization is rejected and a new plan is built for you to review.
 - **Concurrent mutations serialize per node.** A real local Fleet Prune holds its prune lock through preflight and execution. Dry-run enumeration stays outside the destructive lock.
 
 ## Limitations and non-goals

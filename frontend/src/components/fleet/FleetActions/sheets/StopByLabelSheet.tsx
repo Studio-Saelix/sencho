@@ -163,17 +163,36 @@ function stopAnswer(targets: ResolvedTarget[], marker: string | undefined, denie
 }
 
 function OutcomePath({ outcome }: { outcome: StopOutcome }) {
-  const { ok, failed, unreachable, matchedNodes, label } = outcome;
+  const { ok, failed, unreachable, leftOut, matchedNodes, label } = outcome;
+  // `unreachable` counts nodes the stop tried to reach; `leftOut` counts nodes
+  // the plan excluded before the stop ran. Both make the result partial, and the
+  // answer must carry the second one because the response never mentions it.
+  const totalUnreachable = unreachable + leftOut.length;
+  const leftOutMarker = leftOut.length > 0
+    ? `${plural(leftOut.length, 'node')} unreachable, left out`
+    : undefined;
+  const marker = [
+    leftOutMarker,
+    unreachable > 0 ? `${plural(unreachable, 'node')} unreachable` : undefined,
+  ].filter(Boolean).join(' · ') || undefined;
   let answer: StatusPathAnswer;
-  if (ok === 0 && failed === 0 && unreachable > 0) {
-    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(unreachable, 'node')} unreachable, so the stacks there were not stopped.` };
+  if (ok === 0 && failed === 0 && totalUnreachable > 0) {
+    answer = { tone: 'warning', title: 'Nothing was stopped', line: `${plural(totalUnreachable, 'node')} unreachable, so the stacks there were not stopped.` };
   } else if (ok === 0 && failed === 0) {
     answer = { tone: 'neutral', title: 'Nothing was stopped', line: `No stack carried “${label}” on a reachable node.` };
-  } else if (failed === 0 && unreachable === 0) {
-    answer = { tone: 'success', title: `Stopped ${plural(ok, 'stack')}`, line: `on ${plural(matchedNodes, 'node')}` };
+  } else if (failed === 0) {
+    answer = {
+      tone: totalUnreachable > 0 ? 'warning' : 'success',
+      title: `Stopped ${plural(ok, 'stack')}`,
+      line: `on ${plural(matchedNodes, 'node')}`,
+      marker,
+    };
   } else {
     const extra = unreachable > 0 ? ` · ${plural(unreachable, 'node')} unreachable` : '';
-    answer = { tone: 'warning', title: `${ok} stopped, ${failed} failed`, line: `on ${plural(matchedNodes, 'node')}${extra}` };
+    answer = {
+      tone: 'warning', title: `${ok} stopped, ${failed} failed`,
+      line: `on ${plural(matchedNodes, 'node')}${extra}`, marker: leftOutMarker,
+    };
   }
   return (
     <StatusPath answer={answer} stages={[]} proof={{ label: 'Per-node outcome', children: <ResultsList results={outcome.rows} /> }} />

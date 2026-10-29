@@ -117,7 +117,7 @@ function OutcomePath({ plan, results, onReview }: {
   results: FleetPruneNodeResult[];
   onReview: () => void;
 }) {
-  const summary = outcomeSummary(results);
+  const summary = outcomeSummary(results, plan);
   const answer: StatusPathAnswer = {
     ...summary.answer,
     action: summary.stale
