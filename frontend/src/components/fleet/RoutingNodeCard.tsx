@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/routing-node-card';
 import { ConfirmModal } from '@/components/ui/modal';
 import { deriveNodeState } from './routingNodeState';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact } from './meshImpact';
+import { computeMeshMembershipImpact, describeMeshMembershipImpact, meshChangeNeedsConfirmation } from './meshImpact';
 import { describeMembershipError } from './meshMessages';
 
 interface Props {
@@ -202,12 +202,12 @@ export function RoutingNodeCard({
     const disableChange = { kind: 'disable-node' as const, nodeId: status.nodeId };
     const disableImpact = computeMeshMembershipImpact(fleetStatus, disableChange);
     const disableDescription = describeMeshMembershipImpact(disableImpact, disableChange);
-    // Turning mesh off removes this node's stacks and the backend restarts
-    // every other meshed stack in the fleet, so confirm first whenever any
-    // stack anywhere is meshed.
-    // Turning it on restarts nothing and needs no confirmation.
+    // Turning mesh off removes this node's stacks and redeploys the rest of
+    // the fleet, so confirm first whenever that restarts or starts a stack.
+    // A turn-off that restarts nothing (no stack of this node is meshed and
+    // no hostname changes) and turning mesh on need no confirmation.
     const requestToggle = (next: boolean): void => {
-        if (!next && (disableImpact.direct.length > 0 || disableImpact.others.length > 0)) {
+        if (!next && meshChangeNeedsConfirmation(disableImpact)) {
             setConfirmDisable(true);
             return;
         }

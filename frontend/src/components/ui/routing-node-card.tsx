@@ -432,6 +432,16 @@ interface AliasRowProps {
     onTestAlias?: (alias: string) => void;
 }
 
+/** The hostname gives way to an ellipsis before the port does: the port is what a connection string needs. */
+function AliasAddress({ host, port }: { host: string; port: number }) {
+    return (
+        <>
+            <span className="min-w-0 truncate">{host}</span>
+            <span className="shrink-0 text-brand">:{port}</span>
+        </>
+    );
+}
+
 function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
     const isSuspended = row.kind === 'suspended';
     const [copied, setCopied] = React.useState(false);
@@ -471,13 +481,14 @@ function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
                 : onShowAlias
                     ? <button
                         type="button"
-                        className="flex-1 min-w-0 truncate text-left font-mono text-[11px] text-stat-value hover:text-brand transition-colors"
+                        className="flex flex-1 min-w-0 text-left font-mono text-[11px] text-stat-value hover:text-brand transition-colors"
+                        title={address}
                         onClick={() => onShowAlias(row.host)}
                     >
-                        {row.host}<span className="text-brand">:{row.port}</span>
+                        <AliasAddress host={row.host} port={row.port} />
                     </button>
-                    : <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-stat-value">
-                        {row.host}<span className="text-brand">:{row.port}</span>
+                    : <span className="flex flex-1 min-w-0 font-mono text-[11px] text-stat-value" title={address}>
+                        <AliasAddress host={row.host} port={row.port} />
                     </span>}
             {!isSuspended && ageLabel && (
                 <span className={cn(KICKER, 'shrink-0 text-stat-subtitle tabular-nums')}>{ageLabel}</span>

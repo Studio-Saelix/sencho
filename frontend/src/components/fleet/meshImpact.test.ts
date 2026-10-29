@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { MeshNodeStatus } from '@/types/mesh';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact, isMeshCascadeReachable } from './meshImpact';
+import {
+    computeMeshMembershipImpact,
+    describeMeshMembershipImpact,
+    isMeshCascadeReachable,
+    meshChangeNeedsConfirmation,
+} from './meshImpact';
 
 function node(
     nodeId: number,
@@ -32,7 +37,6 @@ describe('computeMeshMembershipImpact', () => {
         const impact = computeMeshMembershipImpact(fleet, { kind: 'opt-in', nodeId: 2, stackName: 'api' });
         expect(impact.direct).toEqual([{ nodeName: 'vps', stackName: 'api' }]);
         expect(impact.others).toHaveLength(4);
-        expect(impact.otherNodeCount).toBe(3);
     });
 
     it('opt-out does not count the removed stack as an other', () => {
@@ -58,7 +62,6 @@ describe('computeMeshMembershipImpact', () => {
         const impact = computeMeshMembershipImpact(fleet, { kind: 'disable-node', nodeId: 1 });
         expect(impact.direct.map((d) => d.stackName)).toEqual(['pg', 'redis']);
         expect(impact.others.map((o) => o.stackName)).toEqual(['app', 'proxy']);
-        expect(impact.otherNodeCount).toBe(2);
     });
 
     it('keeps stacks the cascade cannot reach out of the restart count', () => {
@@ -72,13 +75,32 @@ describe('computeMeshMembershipImpact', () => {
         const impact = computeMeshMembershipImpact(status, { kind: 'opt-in', nodeId: 1, stackName: 'api' });
 
         expect(impact.others).toEqual([{ nodeName: 'home', stackName: 'pg' }]);
-        expect(impact.otherNodeCount).toBe(1);
         expect(impact.skipped).toEqual([
             { nodeName: 'vps', stackName: 'app' },
             { nodeName: 'edge', stackName: 'proxy' },
         ]);
         // A stopped stack on an unreachable node is skipped, never promised a start.
         expect(impact.started).toEqual([]);
+    });
+
+    it('only changes hostnames when the stack leaving the mesh publishes some', () => {
+        const status = [
+            node(1, 'home', [{ stackName: 'pg', running: true }, { stackName: 'legacy', running: false }]),
+            node(2, 'vps', ['app']),
+        ];
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-in', nodeId: 2, stackName: 'api' }).hostnamesChange).toBe(true);
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 1, stackName: 'pg' }).hostnamesChange).toBe(true);
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 1, stackName: 'legacy' }).hostnamesChange).toBe(false);
+        expect(computeMeshMembershipImpact(status, { kind: 'disable-node', nodeId: 1 }).hostnamesChange).toBe(true);
+        expect(computeMeshMembershipImpact([...status, node(3, 'edge', [])], { kind: 'disable-node', nodeId: 3 }).hostnamesChange).toBe(false);
+        expect(computeMeshMembershipImpact([node(1, 'home', [{ stackName: 'legacy', running: false }]), node(2, 'vps', ['app'])],
+            { kind: 'disable-node', nodeId: 1 }).hostnamesChange).toBe(false);
+    });
+
+    it('marks the changed stacks unreachable when their own node is', () => {
+        const status = [node(1, 'home', ['pg']), node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: false })];
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 2, stackName: 'app' }).directReachable).toBe(false);
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 1, stackName: 'pg' }).directReachable).toBe(true);
     });
 
     it('treats a pilot node with an open tunnel as reachable', () => {
@@ -107,7 +129,7 @@ describe('describeMeshMembershipImpact', () => {
     it('names the stack, node and fleet-wide restarts', () => {
         const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(fleet, change), change))
-            .toBe('api on vps restarts now. 4 other meshed stacks on 3 nodes also restart to refresh their hostnames, so expect brief connection drops.');
+            .toBe('api on vps restarts now. pg and redis on home; app on vps; proxy on edge also restart to refresh hostnames, so expect brief connection drops.');
     });
 
     it('says when nothing else is affected', () => {
@@ -123,7 +145,7 @@ describe('describeMeshMembershipImpact', () => {
             node(2, 'vps', ['app']),
         ];
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
-            .toBe('api on vps restarts now. 3 other meshed stacks on 2 nodes also restart to refresh their hostnames, so expect brief connection drops. 1 of those is not running right now, and that deploy brings it up.');
+            .toBe('api on vps restarts now. pg and legacy on home; app on vps also restart to refresh hostnames, so expect brief connection drops. legacy on home is not running right now, and the redeploy brings it up.');
     });
 
     it('does not mention starting anything when every other stack is running', () => {
@@ -136,7 +158,7 @@ describe('describeMeshMembershipImpact', () => {
         const change = { kind: 'disable-node' as const, nodeId: 1 };
         const impact = computeMeshMembershipImpact([node(1, 'home', ['pg']), node(2, 'vps', ['app'])], change);
         expect(describeMeshMembershipImpact(impact, change))
-            .toBe('1 meshed stack on this node leaves the mesh and restarts. 1 other meshed stack on 1 node also restarts to refresh their hostnames, so expect brief connection drops.');
+            .toBe('pg on this node leaves the mesh and restarts. app on vps also restarts to refresh hostnames, so expect brief connection drops.');
     });
 
     it('names the unreachable node whose stacks are skipped', () => {
@@ -146,7 +168,7 @@ describe('describeMeshMembershipImpact', () => {
             node(2, 'vps', ['app'], { reachableMode: 'unreachable', reachableReason: 'api token missing' }),
         ];
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
-            .toBe('api on home restarts now. 1 other meshed stack on 1 node also restarts to refresh their hostnames, so expect brief connection drops. 1 meshed stack on vps is skipped, because that node is unreachable.');
+            .toBe('api on home restarts now. pg on home also restarts to refresh hostnames, so expect brief connection drops. app on vps is skipped, because that node is unreachable.');
     });
 
     it('joins several unreachable nodes and does not claim nothing else is affected', () => {
@@ -158,6 +180,72 @@ describe('describeMeshMembershipImpact', () => {
         ];
         const text = describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change);
         expect(text).not.toContain('No other meshed stacks are affected');
-        expect(text).toBe('api on home restarts now. 2 meshed stacks on vps and edge are skipped, because those nodes are unreachable.');
+        expect(text).toBe('api on home restarts now. app on vps; proxy on edge are skipped, because those nodes are unreachable.');
+    });
+
+    it('never uses a plural pronoun for a single restarting stack', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
+        const text = describeMeshMembershipImpact(computeMeshMembershipImpact([node(1, 'home', ['pg']), node(2, 'vps', [])], change), change);
+        expect(text).toBe('api on vps restarts now. pg on home also restarts to refresh hostnames, so expect brief connection drops.');
+        expect(text).not.toMatch(/\btheir\b/);
+    });
+
+    it('names every stack that leaves the mesh when a node is turned off', () => {
+        const change = { kind: 'disable-node' as const, nodeId: 1 };
+        const impact = computeMeshMembershipImpact(fleet, change);
+        expect(describeMeshMembershipImpact(impact, change))
+            .toBe('pg and redis on this node leave the mesh and restart. app on vps; proxy on edge also restart to refresh hostnames, so expect brief connection drops.');
+    });
+
+    it('names a stack the redeploy starts, whatever else changes', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
+        const status = [
+            node(1, 'home', [{ stackName: 'qam-a', running: true }, { stackName: 'qam-b', running: false }]),
+            node(2, 'vps', [{ stackName: 'qam-c', running: false }, { stackName: 'qam-d', running: false }], { reachableMode: 'proxy' }),
+        ];
+        const text = describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change);
+        expect(text).toContain('qam-b on home; qam-c and qam-d on vps are not running right now, and the redeploy brings them up.');
+    });
+
+    it('does not say anything restarts when turning off a node that has no meshed stacks', () => {
+        const change = { kind: 'disable-node' as const, nodeId: 3 };
+        const impact = computeMeshMembershipImpact([node(1, 'home', ['pg']), node(2, 'vps', ['app']), node(3, 'edge', [])], change);
+        const text = describeMeshMembershipImpact(impact, change);
+        expect(text).toBe('No stacks on this node are in the mesh. No hostnames change, so no other meshed stack needs a restart.');
+        expect(text).not.toMatch(/also restart/);
+        expect(meshChangeNeedsConfirmation(impact)).toBe(false);
+    });
+
+    it('still names a stopped stack a node turn-off brings up, and asks first', () => {
+        const change = { kind: 'disable-node' as const, nodeId: 3 };
+        const impact = computeMeshMembershipImpact(
+            [node(1, 'home', [{ stackName: 'legacy', running: false }]), node(3, 'edge', [])],
+            change,
+        );
+        expect(describeMeshMembershipImpact(impact, change)).toBe(
+            'No stacks on this node are in the mesh. No hostnames change, so no other meshed stack needs a restart. legacy on home is not running right now, and the redeploy brings it up.',
+        );
+        expect(meshChangeNeedsConfirmation(impact)).toBe(true);
+    });
+
+    it('does not promise other restarts when the stack leaving the mesh publishes nothing', () => {
+        const change = { kind: 'opt-out' as const, nodeId: 1, stackName: 'legacy' };
+        const status = [node(1, 'home', [{ stackName: 'legacy', running: false }]), node(2, 'vps', ['app'])];
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
+            .toBe('legacy on home restarts now. No hostnames change, so no other meshed stack needs a restart.');
+    });
+
+    it('does not say a stack on an unreachable node restarts now', () => {
+        const status = [node(1, 'home', ['pg']), node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: false })];
+        const optOut = { kind: 'opt-out' as const, nodeId: 2, stackName: 'app' };
+        const text = describeMeshMembershipImpact(computeMeshMembershipImpact(status, optOut), optOut);
+        expect(text).toContain('app on vps is not restarted, because that node is unreachable.');
+        expect(text).not.toContain('restarts now');
+        const optIn = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, optIn), optIn))
+            .toContain('api on vps is not restarted, because that node is unreachable.');
+        const disable = { kind: 'disable-node' as const, nodeId: 2 };
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, disable), disable))
+            .toContain('app on this node leaves the mesh but is not restarted, because that node is unreachable.');
     });
 });

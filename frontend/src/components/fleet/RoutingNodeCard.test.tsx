@@ -162,7 +162,7 @@ describe('RoutingNodeCard disable confirmation', () => {
         await act(async () => { fireEvent.click(screen.getByRole('switch')); });
         expect(apiFetch).not.toHaveBeenCalled();
         await screen.findByRole('button', { name: /Turn off and restart/i });
-        expectVisibleInDialog(/1 meshed stack on this node leaves the mesh and restarts\. 1 other meshed stack on 1 node also restarts/);
+        expectVisibleInDialog(/pg on this node leaves the mesh and restarts\. app on node-beta also restarts to refresh hostnames/);
 
         await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Turn off and restart/i })); });
         expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
@@ -185,5 +185,43 @@ describe('RoutingNodeCard disable confirmation', () => {
         );
         await act(async () => { fireEvent.click(screen.getByRole('switch')); });
         expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    function renderDisable(status: MeshNodeStatus, fleet: MeshNodeStatus[]) {
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={fleet}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+    }
+
+    it('turns mesh off without a prompt when no stack of this node is meshed and no hostname changes', async () => {
+        // The redeploy of the rest of the fleet finds nothing to recreate, so a
+        // dialog promising restarts would be false and the prompt pointless.
+        const status = node({ enabled: true });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('still asks when the redeploy would start a stopped stack, and says no hostname changes', async () => {
+        const status = node({ enabled: true });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: false }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/No hostnames change, so no other meshed stack needs a restart\. app on node-beta is not running right now/);
+        expect(screen.queryByText(/also restart/)).not.toBeInTheDocument();
     });
 });

@@ -94,7 +94,7 @@ describe('MeshOptInSheet cascade confirmation', () => {
         fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
         expect(screen.getByText('Add db to mesh?')).toBeInTheDocument();
         expectVisibleInDialog(
-            /db on node-alpha restarts now\. 2 other meshed stacks on 2 nodes also restart to refresh their hostnames/,
+            /db on node-alpha restarts now\. other on node-alpha; api on node-beta also restart to refresh hostnames/,
         );
         expect(screen.getByRole('button', { name: /Add and restart/i })).toBeInTheDocument();
     });
@@ -104,8 +104,24 @@ describe('MeshOptInSheet cascade confirmation', () => {
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
         expect(screen.getByText('Remove web from mesh?')).toBeInTheDocument();
         expectVisibleInDialog(
-            /web on node-alpha restarts now\. 2 other meshed stacks on 2 nodes also restart to refresh their hostnames/,
+            /web on node-alpha restarts now\. other on node-alpha; api on node-beta also restart to refresh hostnames/,
         );
         expect(screen.getByRole('button', { name: /Remove and restart/i })).toBeInTheDocument();
+    });
+
+    it('names the stopped stack the redeploy brings up', async () => {
+        const stopped = meshNode(2, 'node-beta', ['api']);
+        stopped.optedInStacks = [{ stackName: 'api', currentlyResolvable: false }];
+        renderSheet(true, [meshNode(1, 'node-alpha', ['other']), stopped]);
+        fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
+        expectVisibleInDialog(/api on node-beta is not running right now, and the redeploy brings it up\./);
+    });
+
+    it('does not say the changed stack restarts when its node is unreachable', async () => {
+        const down = { ...meshNode(1, 'node-alpha', ['other']), reachableMode: 'pilot' as const, pilotConnected: false };
+        renderSheet(true, [down, meshNode(2, 'node-beta', ['api'])]);
+        fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
+        expectVisibleInDialog(/db on node-alpha is not restarted, because that node is unreachable\./);
+        expect(screen.queryByText(/db on node-alpha restarts now/)).not.toBeInTheDocument();
     });
 });

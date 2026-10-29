@@ -30,7 +30,13 @@ export function describeProbeFailure(
         case 'agent_resolve':
             return { message: `${node} does not publish ${alias}. The stack is not in the mesh on its node.`, fix: 'route' };
         case 'agent_dial':
-            return { message: `Reached ${node}, but could not connect to the container behind ${alias}. Check that it is running.`, fix: 'route' };
+            // The dial fails the same way for a container that is gone and for
+            // one that is running but not listening, so the advice covers both.
+            return {
+                message: `Reached ${node}, but could not connect to the container behind ${alias}. Check that it is running`
+                    + `${target?.port ? ` and listening on port ${target.port}` : ' and listening on its port'}.`,
+                fix: 'route',
+            };
         case 'target_port':
             return {
                 message: target?.port

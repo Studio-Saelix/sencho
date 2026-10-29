@@ -16,6 +16,15 @@ describe('describeProbeFailure', () => {
         expect(out.fix).toBe(fix);
     });
 
+    it('does not send the operator to a container that is already running', () => {
+        // The dial fails the same way for a missing container and for a running
+        // one that is not listening, so the advice covers the port as well.
+        expect(describeProbeFailure('db.api.opsix.sencho', { where: 'agent_dial' }, target).message)
+            .toMatch(/Check that it is running and listening on port 5432\.$/);
+        expect(describeProbeFailure('db.api.opsix.sencho', { where: 'agent_dial' }).message)
+            .toMatch(/Check that it is running and listening on its port\.$/);
+    });
+
     it('falls back to the activity log for unknown stages', () => {
         expect(describeProbeFailure('x.sencho', { message: 'boom' }).fix).toBe('activity');
     });

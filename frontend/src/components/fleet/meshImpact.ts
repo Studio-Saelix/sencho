@@ -16,14 +16,22 @@ export type MeshMembershipChange =
 export interface MeshMembershipImpact {
     /** Stacks changed directly by this action. */
     direct: Array<{ nodeName: string; stackName: string }>;
+    /** False when the node holding `direct` is one the cascade cannot reach, so those stacks do not restart now. */
+    directReachable: boolean;
+    /**
+     * Whether the change adds or removes a hostname. Every meshed stack
+     * carries the full alias set in its `extra_hosts`, so `others` are only
+     * recreated when that set changes. A removed stack that publishes
+     * nothing right now (stopped) leaves every other stack's hostnames, and
+     * so its container, untouched.
+     */
+    hostnamesChange: boolean;
     /** Other meshed stacks restarted so their hostnames refresh. */
     others: Array<{ nodeName: string; stackName: string }>;
-    /** Other meshed stacks that are not currently running, so the cascade starts them. */
+    /** Other meshed stacks that are not currently running, so the cascade starts them (a deploy brings up anything stopped, whether or not hostnames change). */
     started: Array<{ nodeName: string; stackName: string }>;
     /** Other meshed stacks on nodes the cascade cannot reach, so nothing restarts there. */
     skipped: Array<{ nodeName: string; stackName: string }>;
-    /** Number of distinct nodes among `others`. */
-    otherNodeCount: number;
 }
 
 /**
@@ -48,6 +56,14 @@ export function computeMeshMembershipImpact(
     const started: MeshMembershipImpact['started'] = [];
     const skipped: MeshMembershipImpact['skipped'] = [];
     const targetNode = status.find((n) => n.nodeId === change.nodeId);
+    const directReachable = targetNode ? isMeshCascadeReachable(targetNode) : true;
+    const publishes = (stackName: string): boolean =>
+        targetNode?.optedInStacks.find((s) => s.stackName === stackName)?.currentlyResolvable ?? true;
+    const hostnamesChange = change.kind === 'opt-in'
+        ? true
+        : change.kind === 'opt-out'
+            ? publishes(change.stackName)
+            : (targetNode?.optedInStacks.some((s) => s.currentlyResolvable) ?? false);
     if (change.kind !== 'disable-node') {
         direct.push({ nodeName: targetNode?.nodeName ?? `node ${change.nodeId}`, stackName: change.stackName });
     }
@@ -72,17 +88,18 @@ export function computeMeshMembershipImpact(
             if (!s.currentlyResolvable) started.push({ nodeName: node.nodeName, stackName: s.stackName });
         }
     }
-    return {
-        direct,
-        others,
-        started,
-        skipped,
-        otherNodeCount: new Set(others.map((o) => o.nodeName)).size,
-    };
+    return { direct, directReachable, hostnamesChange, others, started, skipped };
 }
 
-function plural(n: number, one: string, many: string): string {
-    return `${n} ${n === 1 ? one : many}`;
+/**
+ * Whether a membership change does anything an operator should confirm: a
+ * stack restarts or starts. A turn-off that restarts nothing (no stack of
+ * this node is meshed, and no other stack is stopped) goes straight through.
+ */
+export function meshChangeNeedsConfirmation(impact: MeshMembershipImpact): boolean {
+    return impact.direct.length > 0
+        || (impact.hostnamesChange && impact.others.length > 0)
+        || impact.started.length > 0;
 }
 
 function joinNames(names: string[]): string {
@@ -90,42 +107,53 @@ function joinNames(names: string[]): string {
     return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
+/** "pg and redis on home; app on vps": every stack named, grouped by node. */
+function describeStacks(items: Array<{ nodeName: string; stackName: string }>): string {
+    const byNode = new Map<string, string[]>();
+    for (const item of items) byNode.set(item.nodeName, [...(byNode.get(item.nodeName) ?? []), item.stackName]);
+    return Array.from(byNode, ([nodeName, names]) => `${joinNames(names)} on ${nodeName}`).join('; ');
+}
+
 /**
- * One or two plain sentences for the confirmation dialog, e.g.
- * "api on opsix restarts now. 6 other meshed stacks on 3 nodes also
- * restart to refresh their hostnames, so expect brief connection drops."
+ * One to four plain sentences for the confirmation dialog, naming every
+ * stack involved, e.g. "api on opsix restarts now. db on opsix and web on
+ * home also restart to refresh hostnames, so expect brief connection drops."
  */
 export function describeMeshMembershipImpact(impact: MeshMembershipImpact, change: MeshMembershipChange): string {
-    const first = change.kind === 'disable-node'
-        ? (impact.direct.length === 0
-            ? 'No stacks on this node are in the mesh.'
-            : impact.direct.length === 1
-                ? '1 meshed stack on this node leaves the mesh and restarts.'
-                : `${impact.direct.length} meshed stacks on this node leave the mesh and restart.`)
-        : `${impact.direct[0].stackName} on ${impact.direct[0].nodeName} restarts now.`;
-    const parts = [first];
+    const directNames = joinNames(impact.direct.map((d) => d.stackName));
+    const directCount = impact.direct.length;
+    const parts: string[] = [];
+    if (change.kind === 'disable-node') {
+        if (directCount === 0) parts.push('No stacks on this node are in the mesh.');
+        else if (impact.directReachable) {
+            parts.push(`${directNames} on this node ${directCount === 1 ? 'leaves' : 'leave'} the mesh and ${directCount === 1 ? 'restarts' : 'restart'}.`);
+        } else {
+            parts.push(`${directNames} on this node ${directCount === 1 ? 'leaves' : 'leave'} the mesh but ${directCount === 1 ? 'is' : 'are'} not restarted, because that node is unreachable.`);
+        }
+    } else {
+        const { stackName, nodeName } = impact.direct[0];
+        parts.push(impact.directReachable
+            ? `${stackName} on ${nodeName} restarts now.`
+            : `${stackName} on ${nodeName} is not restarted, because that node is unreachable.`);
+    }
     if (impact.others.length > 0) {
-        const verb = impact.others.length === 1 ? 'restarts' : 'restart';
-        parts.push(
-            `${plural(impact.others.length, 'other meshed stack', 'other meshed stacks')}`
-            + ` on ${plural(impact.otherNodeCount, 'node', 'nodes')} also ${verb} to refresh their hostnames,`
-            + ' so expect brief connection drops.',
-        );
+        parts.push(impact.hostnamesChange
+            ? `${describeStacks(impact.others)} also ${impact.others.length === 1 ? 'restarts' : 'restart'} to refresh hostnames, so expect brief connection drops.`
+            : 'No hostnames change, so no other meshed stack needs a restart.');
         if (impact.started.length > 0) {
             parts.push(
-                `${plural(impact.started.length, 'of those is', 'of those are')} not running right now,`
-                + ` and that deploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`,
+                `${describeStacks(impact.started)} ${impact.started.length === 1 ? 'is' : 'are'} not running right now,`
+                + ` and the redeploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`,
             );
         }
     } else if (impact.skipped.length === 0) {
         parts.push('No other meshed stacks are affected.');
     }
     if (impact.skipped.length > 0) {
-        const nodeNames = Array.from(new Set(impact.skipped.map((s) => s.nodeName)));
+        const nodeCount = new Set(impact.skipped.map((s) => s.nodeName)).size;
         parts.push(
-            `${plural(impact.skipped.length, 'meshed stack', 'meshed stacks')} on ${joinNames(nodeNames)}`
-            + ` ${impact.skipped.length === 1 ? 'is' : 'are'} skipped, because`
-            + ` ${nodeNames.length === 1 ? 'that node is' : 'those nodes are'} unreachable.`,
+            `${describeStacks(impact.skipped)} ${impact.skipped.length === 1 ? 'is' : 'are'} skipped, because`
+            + ` ${nodeCount === 1 ? 'that node is' : 'those nodes are'} unreachable.`,
         );
     }
     return parts.join(' ');

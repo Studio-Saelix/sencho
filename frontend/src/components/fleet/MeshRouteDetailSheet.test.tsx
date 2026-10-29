@@ -8,7 +8,7 @@
  * transport line to the node's actual transport so a proxy peer never reports a
  * "Pilot tunnel".
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import type { MeshNodeStatus, MeshRouteDiagnostic } from '@/types/mesh';
 
@@ -26,6 +26,7 @@ vi.mock('@xyflow/react', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
 import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
@@ -172,5 +173,73 @@ describe('MeshRouteDetailSheet remove gate', () => {
         // Alias B's proxy transport label survives; alias A (node 9, not in status)
         // would have flipped it to an unknown transport had it overwritten.
         expect(screen.getByText('API proxy bridge')).toBeInTheDocument();
+    });
+
+    it('says the stack does not restart when its node is unreachable', async () => {
+        const down: MeshNodeStatus[] = [{ ...STATUS[0], reachableMode: 'unreachable', reachableReason: 'api token missing' }];
+        render(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/api on peer-a is not restarted, because that node is unreachable\./);
+        expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/restarts now/);
+    });
+});
+
+describe('MeshRouteDetailSheet copy address on a plain-HTTP origin', () => {
+    // The sheet is a modal with a focus trap. The clipboard fallback has to
+    // select its text inside that dialog, or the trap hands focus back, the
+    // copy copies nothing, and the success toast is a lie.
+    const originalExec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+    const originalSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+
+    beforeEach(() => {
+        vi.mocked(toast.success).mockClear();
+        vi.mocked(toast.error).mockClear();
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+    });
+    afterEach(() => {
+        if (originalExec) Object.defineProperty(document, 'execCommand', originalExec);
+        else delete (document as { execCommand?: unknown }).execCommand;
+        if (originalSecure) Object.defineProperty(window, 'isSecureContext', originalSecure);
+    });
+
+    function stubExec(result: boolean): { selectedAtCopy: () => string | null } {
+        let selected: string | null = null;
+        Object.defineProperty(document, 'execCommand', {
+            configurable: true,
+            writable: true,
+            value: vi.fn(() => {
+                const active = document.activeElement;
+                selected = active instanceof HTMLTextAreaElement
+                    ? active.value.slice(active.selectionStart, active.selectionEnd)
+                    : null;
+                return result;
+            }),
+        });
+        return { selectedAtCopy: () => selected };
+    }
+
+    async function clickCopy(): Promise<void> {
+        const copy = await screen.findByRole('button', { name: `Copy ${ALIAS}:80` });
+        copy.focus();
+        await act(async () => { fireEvent.click(copy); });
+    }
+
+    it('copies the address from inside the sheet and confirms it', async () => {
+        const exec = stubExec(true);
+        renderSheet(true);
+        await clickCopy();
+        expect(exec.selectedAtCopy()).toBe(`${ALIAS}:80`);
+        expect(toast.success).toHaveBeenCalledWith(`Copied ${ALIAS}:80`);
+        expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('reports the failure instead of confirming a copy that did not happen', async () => {
+        stubExec(false);
+        renderSheet(true);
+        await clickCopy();
+        expect(toast.error).toHaveBeenCalledWith('Could not copy to the clipboard');
+        expect(toast.success).not.toHaveBeenCalled();
     });
 });

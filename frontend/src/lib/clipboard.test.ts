@@ -94,4 +94,73 @@ describe('copyToClipboard', () => {
 
     expect(document.querySelectorAll('textarea').length).toBe(0);
   });
+
+  describe('inside a focus-trapping dialog', () => {
+    function mountTrappedDialog(): { dialog: HTMLElement; button: HTMLButtonElement; release: () => void } {
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', 'dialog');
+      const button = document.createElement('button');
+      dialog.appendChild(button);
+      document.body.appendChild(dialog);
+      button.focus();
+      // What a modal's focus trap does: focus that lands outside it is handed back.
+      const onFocusIn = (event: FocusEvent): void => {
+        if (!dialog.contains(event.target as Node)) button.focus();
+      };
+      document.addEventListener('focusin', onFocusIn);
+      return {
+        dialog,
+        button,
+        release: () => {
+          document.removeEventListener('focusin', onFocusIn);
+          dialog.remove();
+        },
+      };
+    }
+
+    it('selects the text from a textarea mounted inside the dialog, then returns focus to the control', async () => {
+      setSecureContext(false);
+      setNavigatorClipboard(undefined);
+      const { dialog, button, release } = mountTrappedDialog();
+      let copiedFrom: { active: Element | null; parent: Element | null; selected: string } | null = null;
+      setExecCommand(() => {
+        const ta = document.activeElement as HTMLTextAreaElement | null;
+        copiedFrom = {
+          active: ta,
+          parent: ta?.parentElement ?? null,
+          selected: ta ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : '',
+        };
+        return true;
+      });
+
+      try {
+        await copyToClipboard('host.sencho:8080');
+
+        expect(copiedFrom).not.toBeNull();
+        expect(copiedFrom!.active?.tagName).toBe('TEXTAREA');
+        expect(copiedFrom!.parent).toBe(dialog);
+        expect(copiedFrom!.selected).toBe('host.sencho:8080');
+        expect(document.activeElement).toBe(button);
+        expect(document.querySelectorAll('textarea').length).toBe(0);
+      } finally {
+        release();
+      }
+    });
+
+    it('rejects instead of reporting success when the textarea cannot take focus', async () => {
+      setSecureContext(false);
+      setNavigatorClipboard(undefined);
+      const { release } = mountTrappedDialog();
+      const execCommand = setExecCommand(() => true);
+      vi.spyOn(HTMLTextAreaElement.prototype, 'focus').mockImplementation(() => {});
+
+      try {
+        await expect(copyToClipboard('nothing selected')).rejects.toThrow(/focus/);
+        expect(execCommand).not.toHaveBeenCalled();
+        expect(document.querySelectorAll('textarea').length).toBe(0);
+      } finally {
+        release();
+      }
+    });
+  });
 });

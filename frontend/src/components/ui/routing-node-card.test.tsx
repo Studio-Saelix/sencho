@@ -190,6 +190,24 @@ describe('routing-node-card alias row copy', () => {
         expect(vi.getTimerCount()).toBe(0);
     });
 
+    it.each([
+        ['with a route sheet handler', { onShowAlias: vi.fn() }],
+        ['read only', {}],
+    ])('keeps the port visible when the hostname is cut short (%s)', (_label, extra) => {
+        // Layout cannot be measured in jsdom, so pin the structure that makes
+        // it hold: the hostname truncates, the port never shrinks, and the full
+        // address is on the title for a hostname that did get cut.
+        renderCard({ nodeState: 'meshed', meta: { reverseBridge: 'up', stacks: 1, aliases: 1 }, aliases: liveRow, ...extra });
+        for (const port of screen.getAllByText(':8080')) {
+            expect(port.className).toMatch(/\bshrink-0\b/);
+            expect(port.className).not.toMatch(/\btruncate\b/);
+        }
+        for (const host of screen.getAllByText('web.api.node')) {
+            expect(host.className).toMatch(/\btruncate\b/);
+            expect(host.parentElement).toHaveAttribute('title', address);
+        }
+    });
+
     it('offers no copy control for a suspended row', () => {
         renderWithAlias([{ host: 'stopped-stack', port: 0, kind: 'suspended' }]);
         expect(screen.queryByRole('button', { name: /Copy/ })).not.toBeInTheDocument();
