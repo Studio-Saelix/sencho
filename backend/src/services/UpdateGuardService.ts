@@ -40,7 +40,7 @@ import {
   type Errored,
   type ServiceMembership,
 } from './updateGuard/readiness';
-import type { ContainerProbe, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
+import type { ContainerProbe, ReadinessSignal, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
 
 // Bound on the network-and-socket-backed inputs (container probe, update
 // preview, disk stats, and the Compose version probe) so a hung registry,
@@ -57,7 +57,7 @@ const INPUT_TIMEOUT_MS = 3_000;
  */
 const OPTIONAL_PROBE_DEADLINE_MARGIN_MS = 250;
 
-/** Optional ceiling for `computeUpdateReadiness`; lets a batched caller share its deadline. */
+/** Optional ceilings for `computeUpdateReadiness`; lets a batched caller share its deadline. */
 export interface UpdateReadinessOptions {
   /**
    * Epoch-ms instant by which the caller stops waiting for this report. Only
@@ -69,6 +69,31 @@ export interface UpdateReadinessOptions {
    * version signal.
    */
   deadlineEpochMs?: number;
+  /**
+   * When false, the optional Compose version probe is not started and no
+   * version signal is added. A batched caller defers it so its required
+   * evidence is collected before any optional wait can compete for the pass,
+   * then adds the signal with `composeVersionSignalFor`.
+   */
+  includeComposeVersion?: boolean;
+  /**
+   * Receives the full-stack container probes this report was built from, so a
+   * caller that deferred the version probe can add its signal without a second
+   * Docker read. Called for a full-stack computation only.
+   */
+  captureContainerProbes?: (containers: ContainerProbe[] | Errored) => void;
+}
+
+/**
+ * The optional Compose version probe's own ceiling for a caller-supplied
+ * deadline. It keeps the probe inside the deadline with room for the report to
+ * be assembled, and treats a deadline the arithmetic cannot produce as
+ * expired rather than falling back to the full input budget.
+ */
+function optionalProbeBudget(deadlineEpochMs: number | undefined): number {
+  if (deadlineEpochMs === undefined) return INPUT_TIMEOUT_MS;
+  if (!Number.isFinite(deadlineEpochMs)) return 0;
+  return Math.min(INPUT_TIMEOUT_MS, deadlineEpochMs - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS);
 }
 
 /**
@@ -196,21 +221,17 @@ export class UpdateGuardService {
     // inside that deadline with transport margin. A timed-out probe degrades to
     // the informational unknown signal below and leaves the rest of the report.
     //
-    // A batched caller can supply its own deadline. The probe then shrinks to
-    // the room left in that deadline, so a hung optional probe cannot keep the
-    // report waiting past the caller; when no usable room is left the probe is
-    // skipped and reported as the same informational unknown.
-    const deadline = options.deadlineEpochMs;
-    const versionProbeBudget = deadline === undefined
-      ? INPUT_TIMEOUT_MS
-      : Number.isFinite(deadline)
-        ? Math.min(INPUT_TIMEOUT_MS, deadline - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS)
-        // A deadline the arithmetic could not produce is unusable: skip it like
-        // a deadline that has already passed rather than falling back to the
-        // probe's full budget.
-        : 0;
+    // A batched caller can defer this probe instead of waiting for it here.
+    // That is what keeps the optional wait from competing with the required
+    // inputs of later stacks: the caller collects every required verdict
+    // first, then adds the signal from whatever pass time remains. A caller
+    // that supplies a deadline still shrinks an inline probe to the room left;
+    // when none remains the probe is skipped and reported as the informational
+    // unknown.
+    const includeComposeVersion = options.includeComposeVersion !== false;
+    const versionProbeBudget = includeComposeVersion ? optionalProbeBudget(options.deadlineEpochMs) : 0;
     let composeVersionProbe: Promise<string | null | Errored> | null = null;
-    if (!serviceName) {
+    if (!serviceName && includeComposeVersion) {
       if (versionProbeBudget > 0) {
         composeVersionProbe = this.collect('compose version', stackName, () =>
           withTimeout(ComposeService.getInstance(nodeId).composeVersion(), versionProbeBudget, 'readiness compose version'));
@@ -250,6 +271,10 @@ export class UpdateGuardService {
       this.collect('disk', stackName, () => this.readDiskUsage()),
     ]);
 
+    // Hand the probes to a caller that deferred the optional version signal,
+    // so it can add that signal later without a second Docker read.
+    if (!serviceName) options.captureContainerProbes?.(containers);
+
     const settings = db.getGlobalSettings();
     const limitPercent = parseInt(settings['host_disk_limit'] ?? '90', 10) || 90;
 
@@ -265,7 +290,7 @@ export class UpdateGuardService {
     ];
     if (serviceName) {
       signals.push(serviceSignal(this.resolveServiceMembership(model, serviceName)));
-    } else if (containers !== 'error' && composeVersionProbe) {
+    } else if (includeComposeVersion && containers !== 'error' && composeVersionProbe) {
       // Stack-scope only: a service-scoped update force-recreates the selected
       // service and leaves the others alone, so the version of its siblings is
       // not this verdict's business. When the container probe failed, its own
@@ -291,6 +316,36 @@ export class UpdateGuardService {
       serviceName: serviceName ?? null,
       advisories,
     };
+  }
+
+  /**
+   * The optional Compose-version signal for containers an earlier full-stack
+   * report probed. A batched caller runs this after its required evidence is
+   * collected, so a hung probe can delay only this enrichment and never a
+   * verdict it explains. `deadlineEpochMs` bounds the version read; a
+   * non-finite or elapsed deadline yields the informational unknown.
+   */
+  async composeVersionSignalFor(
+    nodeId: number,
+    stackName: string,
+    containers: ContainerProbe[],
+    options: UpdateReadinessOptions = {},
+  ): Promise<ReadinessSignal> {
+    const budget = optionalProbeBudget(options.deadlineEpochMs);
+    if (budget > 0) {
+      const runningVersion = await this.collect('compose version', stackName, () =>
+        withTimeout(ComposeService.getInstance(nodeId).composeVersion(), budget, 'readiness compose version'));
+      return composeVersionSignal(runningVersion === 'error'
+        ? 'error'
+        : findComposeVersionSkew(containers, runningVersion));
+    }
+    // The skip is deliberate, not a read failure, so say so in the log, exactly
+    // as the inline path does when a deadline leaves no room.
+    console.warn(
+      '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
+      sanitizeForLog(stackName),
+    );
+    return composeVersionSignal('error');
   }
 
   /** Model-membership facts for the selected service; 'error' when the model failed to render. */

@@ -146,7 +146,7 @@ vi.mock('../services/effectiveServiceModel', () => ({
 import { UpdateGuardService, SingleServiceUpdateReadinessError } from '../services/UpdateGuardService';
 import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
 import { CacheService } from '../services/CacheService';
-import type { RollbackReadinessReport } from '../services/updateGuard/types';
+import type { ContainerProbe, RollbackReadinessReport } from '../services/updateGuard/types';
 
 const inspectResult = (over: Record<string, unknown> = {}) => ({
   State: { Status: 'running', ExitCode: 0 },
@@ -474,6 +474,68 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     }
   });
 
+  it('defers the optional probe and enriches the captured containers later', async () => {
+    healthyCollaborators([labeled('web', '2.38.1')]);
+    mockComposeVersion.mockResolvedValue('5.6.0');
+    let captured: ContainerProbe[] | 'error' | undefined;
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', undefined, {
+      includeComposeVersion: false,
+      captureContainerProbes: probes => { captured = probes; },
+    });
+
+    // The required report returns without the optional wait and without the
+    // version signal; the caller adds it from the probes it captured.
+    expect(mockComposeVersion).not.toHaveBeenCalled();
+    expect(report.signals.some(s => s.id === 'compose_version')).toBe(false);
+    expect(report.verdict).toBe('ready');
+    expect(captured).toEqual([expect.objectContaining({ service: 'web', composeVersion: '2.38.1' })]);
+
+    const signal = await UpdateGuardService.getInstance().composeVersionSignalFor(
+      0, 'app', captured as ContainerProbe[], { deadlineEpochMs: Date.now() + 1_000 },
+    );
+    expect(signal).toMatchObject({ id: 'compose_version', status: 'warning' });
+    expect(signal.affectsVerdict).toBe(true);
+  });
+
+  it('bounds the deferred probe by the pass deadline', async () => {
+    healthyCollaborators([labeled('web', '2.38.1')]);
+    mockComposeVersion.mockReturnValue(new Promise(() => {}));
+
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const pending = UpdateGuardService.getInstance()
+        .composeVersionSignalFor(0, 'app', [], { deadlineEpochMs: Date.now() + 1_000 })
+        .finally(() => { settled = true; });
+      // Same 250 ms headroom as the inline probe: the signal has to be ready
+      // for the pass to assemble before the deadline.
+      await vi.advanceTimersByTimeAsync(749);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+
+      expect(await pending).toMatchObject({ id: 'compose_version', status: 'unknown', affectsVerdict: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips the deferred probe when the deadline is non-finite', async () => {
+    healthyCollaborators([labeled('web', '2.38.1')]);
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const signal = await UpdateGuardService.getInstance()
+      .composeVersionSignalFor(0, 'app', [], { deadlineEpochMs: Number.NaN });
+
+    expect(mockComposeVersion).not.toHaveBeenCalled();
+    expect(signal).toMatchObject({ id: 'compose_version', status: 'unknown', affectsVerdict: false });
+    expect(warned).toHaveBeenCalledWith(
+      '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
+      'app',
+    );
+  });
+
   it.each<[string, number]>([
     ['the current instant', 0],
     ['exactly the headroom', 250],
@@ -771,9 +833,9 @@ describe('readiness summary under the pass deadline', () => {
   // Real aggregate builder and real update readiness. The rollback verdict is
   // stubbed to an already-complete report, so the optional Compose version
   // probe is the only bounded wait under test.
-  const stacks = ['alpha', 'beta', 'gamma', 'delta'];
-  /** The pass orders stacks alphabetically within a rank; `gamma` still runs last. */
-  const orderedStacks = [...stacks].sort();
+  let stacks: string[];
+  /** The pass orders stacks alphabetically within a rank. */
+  let orderedStacks: string[];
 
   const healthyPreview = {
     stack_name: 'any',
@@ -808,8 +870,24 @@ describe('readiness summary under the pass deadline', () => {
     stack, computedAt: 1, overall: 'ready', items: [],
   });
 
+  const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+  function answerPreviewAfter(ms: number): void {
+    mockGetPreview.mockImplementation(() => delay(ms).then(() => healthyPreview));
+  }
+
+  function answerRollbackAfter(ms: number): void {
+    vi.spyOn(UpdateGuardService.getInstance(), 'computeRollbackReadiness')
+      .mockImplementation(async (_nodeId, stack) => {
+        await delay(ms);
+        return completedRollback(stack);
+      });
+  }
+
   beforeEach(() => {
     CacheService.getInstance().flush();
+    stacks = ['alpha', 'beta', 'gamma', 'delta'];
+    orderedStacks = [...stacks].sort();
     mockGetStacksStrict.mockImplementation(() => new Promise<string[]>((resolve) => {
       // Nonzero scan latency, so the pass's stack scan is not a single instant.
       setTimeout(() => resolve([...stacks]), 5);
@@ -819,11 +897,10 @@ describe('readiness summary under the pass deadline', () => {
     mockGetOpenDriftFindings.mockReturnValue([]);
     mockListContainers.mockResolvedValue(stackContainers());
     mockGetContainer.mockImplementation(() => ({ inspect: vi.fn().mockResolvedValue(inspectResult()) }));
-    mockGetPreview.mockResolvedValue(healthyPreview);
+    answerPreviewAfter(0);
     mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
     mockFsSize.mockResolvedValue([{ mount: '/', use: 42 }]);
-    vi.spyOn(UpdateGuardService.getInstance(), 'computeRollbackReadiness')
-      .mockImplementation(async (_nodeId, stack) => completedRollback(stack));
+    answerRollbackAfter(0);
   });
 
   /** Run the pass under fake timers, advancing the listing delay and every bounded wait. */
@@ -846,6 +923,18 @@ describe('readiness summary under the pass deadline', () => {
       vi.useRealTimers();
     }
   }
+
+  /** Fill the node with `count` alphabetically ordered stacks. */
+  function pinStacks(count: number): void {
+    stacks = Array.from({ length: count }, (_, index) => `stack-${String(index).padStart(2, '0')}`);
+    orderedStacks = [...stacks].sort();
+    mockListContainers.mockResolvedValue(stackContainers());
+  }
+
+  const batchScenarios = [
+    { label: 'seven stacks with 500 ms ordinary reads', count: 7, previewMs: 500 },
+    { label: 'the 25-stack cap with 50 ms ordinary reads', count: 25, previewMs: 50 },
+  ];
 
   it('keeps responsive version evidence for a late stack', async () => {
     const mismatched = orderedStacks[orderedStacks.length - 1];
@@ -879,28 +968,93 @@ describe('readiness summary under the pass deadline', () => {
     });
   });
 
-  it('keeps completed update and rollback results when only the version probe hangs', async () => {
+  for (const scenario of batchScenarios) {
+    it(`keeps every verdict with a hung version probe across ${scenario.label}`, async () => {
+      pinStacks(scenario.count);
+      answerPreviewAfter(scenario.previewMs);
+      mockComposeVersion.mockReturnValue(new Promise(() => {}));
+
+      await withFakeTimers(async () => {
+        const summary = await runSummaryWithFakeTimers();
+
+        // The optional probe hangs for its whole per-batch share. Before the
+        // share was bounded, the first batches spent the pass and these later
+        // stacks lost both verdicts when their ordinary reads outlived what
+        // was left. Completed rollback evidence must survive regardless.
+        expect(summary.truncated).toBe(false);
+        expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
+        for (const row of summary.stacks) {
+          expect(row.unavailableReason).toBeNull();
+          expect(row.update).not.toBeNull();
+          expect(row.rollback).not.toBeNull();
+        }
+        // The optional evidence degrades to its informational unknown; the
+        // verdict it does not affect stays ready. Probes are attempted only
+        // until the pass has no time left, and never before required evidence.
+        expect(summary.stacks.every(row => row.update?.verdict === 'ready')).toBe(true);
+        expect(mockComposeVersion).toHaveBeenCalled();
+        expect(mockComposeVersion.mock.calls.length).toBeLessThanOrEqual(stacks.length);
+      });
+    });
+
+    it(`keeps every verdict with a responsive version probe across ${scenario.label}`, async () => {
+      pinStacks(scenario.count);
+      answerPreviewAfter(scenario.previewMs);
+      mockComposeVersion.mockResolvedValue('5.6.0');
+
+      await withFakeTimers(async () => {
+        const summary = await runSummaryWithFakeTimers();
+
+        expect(summary.truncated).toBe(false);
+        expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
+        for (const row of summary.stacks) {
+          expect(row.unavailableReason).toBeNull();
+          expect(row.update).not.toBeNull();
+          expect(row.rollback).not.toBeNull();
+        }
+        expect(mockComposeVersion).toHaveBeenCalledTimes(stacks.length);
+      });
+    });
+  }
+
+  it('keeps late required evidence when ordinary reads have mixed latency and the probe hangs', async () => {
+    pinStacks(25);
     mockComposeVersion.mockReturnValue(new Promise(() => {}));
+    // Twenty-one stacks answer quickly; the last four need a full second each.
+    // Their total required work still fits inside the pass without the probe,
+    // so the optional wait must not take the room the last one needs.
+    mockGetPreview.mockImplementation((_nodeId: number, stack: string) =>
+      delay(stack >= 'stack-21' ? 1_000 : 50).then(() => healthyPreview));
 
     await withFakeTimers(async () => {
       const summary = await runSummaryWithFakeTimers();
 
-      // The first batch of hung probes spends the full three-second budget, so
-      // the fourth stack starts at 2,995 ms of the pass left. Before the pass
-      // deadline was handed to the probe, its fixed three-second wait outlived
-      // the per-stack timeout and the row lost both verdicts.
       expect(summary.truncated).toBe(false);
-      expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
       for (const row of summary.stacks) {
         expect(row.unavailableReason).toBeNull();
         expect(row.update).not.toBeNull();
         expect(row.rollback).not.toBeNull();
       }
-      // The optional evidence degrades to its informational unknown; the
-      // verdict it does not affect stays ready. The probe was attempted and
-      // bounded for every stack, not skipped.
-      expect(summary.stacks.every(row => row.update?.verdict === 'ready')).toBe(true);
-      expect(mockComposeVersion).toHaveBeenCalledTimes(stacks.length);
+      expect(summary.stacks.find(row => row.stack === 'stack-24')?.update).not.toBeNull();
+    });
+  });
+
+  it('still reports truncation when required inputs exhaust the deadline', async () => {
+    pinStacks(7);
+    // Required inputs, not the optional probe, outlast the pass: the first two
+    // batches fit, and the last one has less room than an ordinary read needs.
+    answerPreviewAfter(2_500);
+    answerRollbackAfter(2_500);
+
+    await withFakeTimers(async () => {
+      const summary = await runSummaryWithFakeTimers();
+
+      expect(summary.truncated).toBe(true);
+      expect(summary.stacks).toHaveLength(7);
+      const lastRow = summary.stacks[summary.stacks.length - 1];
+      expect(lastRow.unavailableReason).toBe('summary_truncated');
+      expect(lastRow.update).toBeNull();
+      expect(lastRow.rollback).toBeNull();
     });
   });
 });
