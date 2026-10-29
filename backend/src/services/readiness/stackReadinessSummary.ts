@@ -191,9 +191,13 @@ async function computeStackReadinessSummary(nodeId: number): Promise<StackReadin
     if (remaining <= 0) return unavailableRow(stack, 'summary_truncated');
     const safeStack = sanitizeForLog(stack);
     try {
+      // The pass deadline is handed to the update computation so its optional
+      // Compose version probe shrinks to the room left instead of outliving the
+      // per-stack wait: a hung informational probe must not discard the update
+      // and rollback evidence computed beside it in a later batch.
       const [update, rollback] = await withTimeout(
         Promise.allSettled([
-          guard.computeUpdateReadiness(nodeId, stack),
+          guard.computeUpdateReadiness(nodeId, stack, undefined, { deadline }),
           guard.computeRollbackReadiness(nodeId, stack),
         ]),
         remaining,

@@ -51,6 +51,24 @@ import type { ContainerProbe, RollbackReadinessReport, UpdateReadinessReport } f
 const INPUT_TIMEOUT_MS = 3_000;
 
 /**
+ * Headroom kept between the optional Compose version probe's own timeout and a
+ * caller-supplied deadline. The probe may time out, but the report still has to
+ * be assembled and delivered before the caller stops waiting for it.
+ */
+const OPTIONAL_PROBE_DEADLINE_MARGIN_MS = 250;
+
+/** Optional ceiling for `computeUpdateReadiness`; lets a batched caller share its deadline. */
+export interface UpdateReadinessOptions {
+  /**
+   * Epoch-ms instant by which the report must settle. Only the optional
+   * Compose version probe is shortened to fit: required inputs keep their own
+   * bound and the caller's outer timeout still decides whether they were
+   * available. Omitted for the direct route, which uses the dialog budget.
+   */
+  deadline?: number;
+}
+
+/**
  * Thrown by `computeUpdateReadiness` when a `serviceName` is given for a
  * stack that has one (or zero) declared services: service-scoped readiness
  * requires a real choice among siblings. The route maps this to a 400,
@@ -94,16 +112,23 @@ export class UpdateGuardService {
     // same containers as the guard, Compose Doctor, and the deploy notice. A
     // container with no id cannot be inspected and is no evidence either way.
     const { stack } = await listNodeContainers(nodeId, stackName);
+    // Scope before validating ids. A selected-service probe answers for that
+    // service alone, so an unrelated sibling whose list response omitted its id
+    // must not turn the selected service's healthy state into unknown. Callers
+    // that judge the whole stack (full-stack update, sibling, rollback) pass no
+    // serviceName and still fail closed on any uninspectable container.
+    const scoped = serviceName ? filterContainersByComposeService(stack, serviceName) : stack;
     // Docker supplies an id for every listed container. One without it cannot
     // be inspected, so fail closed rather than judge a partial set and call the
     // remaining containers a matching version.
-    const candidates = stack.filter((info): info is ListedContainer & { Id: string } => typeof info.Id === 'string' && info.Id !== '');
-    if (candidates.length !== stack.length) {
-      throw new Error(`A container in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`);
+    const candidates = scoped.filter((info): info is ListedContainer & { Id: string } => typeof info.Id === 'string' && info.Id !== '');
+    if (candidates.length !== scoped.length) {
+      throw new Error(serviceName
+        ? `A container for service "${serviceName}" in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`
+        : `A container in stack "${stackName}" has no id, so its state and Compose labels cannot be read.`);
     }
-    const scoped = serviceName ? filterContainersByComposeService(candidates, serviceName) : candidates;
     const probes = await Promise.all(
-      scoped.map(async (info): Promise<ContainerProbe | null> => {
+      candidates.map(async (info): Promise<ContainerProbe | null> => {
         const name = info.Names?.[0]?.replace(/^\//, '') ?? info.Id.slice(0, 12);
         let inspect: Awaited<ReturnType<ReturnType<typeof docker.getContainer>['inspect']>>;
         try {
@@ -143,7 +168,12 @@ export class UpdateGuardService {
    * the added `service` signal; a single-service stack throws instead of
    * scoping (the caller/route maps that to a 400).
    */
-  async computeUpdateReadiness(nodeId: number, stackName: string, serviceName?: string): Promise<UpdateReadinessReport> {
+  async computeUpdateReadiness(
+    nodeId: number,
+    stackName: string,
+    serviceName?: string,
+    options: UpdateReadinessOptions = {},
+  ): Promise<UpdateReadinessReport> {
     const db = DatabaseService.getInstance();
     const now = Date.now();
 
@@ -161,10 +191,20 @@ export class UpdateGuardService {
     // every other signal; the shared input budget keeps the whole computation
     // inside that deadline with transport margin. A timed-out probe degrades to
     // the informational unknown signal below and leaves the rest of the report.
+    //
+    // A batched caller can supply its own deadline. The probe then shrinks to
+    // the room left in that deadline, so a hung optional probe cannot outlive
+    // the caller and discard the completed required evidence beside it; when no
+    // room is left the probe is skipped and reported as the same unknown.
+    const versionProbeBudget = options.deadline === undefined
+      ? INPUT_TIMEOUT_MS
+      : Math.min(INPUT_TIMEOUT_MS, options.deadline - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS);
     const composeVersionProbe = serviceName
       ? null
-      : this.collect('compose version', stackName, () =>
-          withTimeout(ComposeService.getInstance(nodeId).composeVersion(), INPUT_TIMEOUT_MS, 'readiness compose version'));
+      : versionProbeBudget > 0
+        ? this.collect('compose version', stackName, () =>
+            withTimeout(ComposeService.getInstance(nodeId).composeVersion(), versionProbeBudget, 'readiness compose version'))
+        : Promise.resolve<Errored>('error');
 
     const [preflight, drift, containers, siblings, preview, backup, disk] = await Promise.all([
       this.collect('preflight', stackName, async () => ComposeDoctorService.getInstance().getLatest(nodeId, stackName)),

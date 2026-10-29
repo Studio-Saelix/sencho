@@ -5,7 +5,11 @@
  * container name equal to the service (common with `container_name:`).
  */
 export interface ComposeServiceContainer {
-  Id: string;
+  /**
+   * Not part of the match. Optional because callers scope a freshly listed set
+   * before checking that each remaining container has an id to inspect.
+   */
+  Id?: string;
   Service?: string;
   Names?: string[];
   Labels?: Record<string, string>;

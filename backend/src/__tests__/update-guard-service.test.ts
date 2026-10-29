@@ -28,6 +28,8 @@ const {
   mockBuildEffectiveServiceModel,
   mockGetGitSource,
   mockComposeVersion,
+  mockGetStacksStrict,
+  mockGetStackUpdateDetail,
 } = vi.hoisted(() => ({
   mockListContainers: vi.fn(),
   mockGetContainer: vi.fn(),
@@ -42,6 +44,8 @@ const {
   mockBuildEffectiveServiceModel: vi.fn(),
   mockGetGitSource: vi.fn(),
   mockComposeVersion: vi.fn(),
+  mockGetStacksStrict: vi.fn(),
+  mockGetStackUpdateDetail: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', () => ({
@@ -98,6 +102,7 @@ vi.mock('../services/FileSystemService', () => ({
       getEnvContent: async (stackName: string) =>
         fs.readFileSync(path.join(mockState.composeDir, stackName, '.env'), 'utf8'),
       readFile: async (absPath: string) => fs.readFileSync(absPath, 'utf8'),
+      getStacksStrict: mockGetStacksStrict,
     }),
   },
 }));
@@ -125,6 +130,7 @@ vi.mock('../services/DatabaseService', () => ({
       // Managed-input coverage reads these through the real inventory.
       isMeshStackEnabled: () => false,
       getStackProjectEnvFiles: () => [],
+      getStackUpdateDetail: mockGetStackUpdateDetail,
     }),
   },
 }));
@@ -138,6 +144,8 @@ vi.mock('../services/effectiveServiceModel', () => ({
 }));
 
 import { UpdateGuardService, SingleServiceUpdateReadinessError } from '../services/UpdateGuardService';
+import { buildStackReadinessSummary } from '../services/readiness/stackReadinessSummary';
+import { CacheService } from '../services/CacheService';
 
 const inspectResult = (over: Record<string, unknown> = {}) => ({
   State: { Status: 'running', ExitCode: 0 },
@@ -160,6 +168,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetGlobalSettings.mockReturnValue({ host_disk_limit: '90' });
   mockComposeVersion.mockResolvedValue('5.6.0');
+  mockGetStackUpdateDetail.mockReturnValue({});
   // Sensible defaults for the rollback-readiness inputs (only computeRollbackReadiness reads these).
   mockGetBackupEnvSummary.mockResolvedValue({ exists: true, envPresent: true, keys: ['DB_HOST'] });
   mockEnvExists.mockResolvedValue(true);
@@ -547,6 +556,86 @@ describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
     expect(report.verdict).toBe('ready');
     expect(report.advisories.some(a => a.includes('db'))).toBe(true);
   });
+
+  it('keeps the selected service ready when an unrelated sibling has no id', async () => {
+    // A proxy or partial list response can omit `Id` for a container it still
+    // reports. The selected-service probe answers for `web` alone, so the
+    // unrelated `db` must not turn that verdict into unknown; the whole-stack
+    // sibling probe beside it still fails closed on the same response.
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockListContainers.mockResolvedValue([
+      listed('web1', 'web', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'web' } }),
+      {
+        Names: ['/app-db-1'],
+        State: 'running',
+        Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'db' },
+      },
+    ]);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.verdict).toBe('ready');
+    expect(report.signals.find(s => s.id === 'containers')).toMatchObject({ status: 'ok', affectsVerdict: true });
+    expect(report.advisories).toEqual([]);
+    expect(warned).toHaveBeenCalledWith(
+      '[UpdateGuard] %s unavailable for %s:',
+      'sibling containers',
+      'app',
+      expect.stringContaining('has no id'),
+    );
+  });
+
+  it('fails closed when the selected service container itself has no id', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+    mockListContainers.mockResolvedValue([
+      {
+        Names: ['/app-web-1'],
+        State: 'running',
+        Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'web' },
+      },
+      listed('db1', 'db', { Labels: { 'com.docker.compose.project': 'app', 'com.docker.compose.service': 'db' } }),
+    ]);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.signals.find(s => s.id === 'containers')).toMatchObject({ status: 'unknown', affectsVerdict: true });
+    expect(report.verdict).toBe('unknown');
+  });
+
+  it('scopes a named project by working directory before requiring ids', async () => {
+    // The directory is `app` but Compose runs under the project name
+    // `production`. Scoping must still find `web` through the working-directory
+    // label and exclude the id-less `db` sibling.
+    const stackDir = path.join(mockState.composeDir, 'app');
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+    mockListContainers.mockResolvedValue([
+      {
+        Id: 'production-web-1',
+        Names: ['/production-web-1'],
+        State: 'running',
+        Labels: {
+          'com.docker.compose.project': 'production',
+          'com.docker.compose.project.working_dir': stackDir,
+          'com.docker.compose.service': 'web',
+        },
+      },
+      {
+        Names: ['/production-db-1'],
+        State: 'running',
+        Labels: {
+          'com.docker.compose.project': 'production',
+          'com.docker.compose.project.working_dir': stackDir,
+          'com.docker.compose.service': 'db',
+        },
+      },
+    ]);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.signals.find(s => s.id === 'containers')).toMatchObject({ status: 'ok' });
+    expect(report.verdict).toBe('ready');
+  });
 });
 
 describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => {
@@ -599,4 +688,112 @@ describe('UpdateGuardService.computeRollbackReadiness git-managed disclosure', (
         const report = await UpdateGuardService.getInstance().computeRollbackReadiness(1, 'plain-stack');
         expect(report.note).toBeUndefined();
     });
+});
+
+describe('readiness summary under the pass deadline', () => {
+  // Real aggregate builder and real update/rollback readiness, with only the
+  // backing collaborators stubbed, so the optional Compose version probe is the
+  // one under test rather than a stubbed guard call.
+  const stacks = ['alpha', 'beta', 'gamma', 'delta'];
+  /** The pass orders stacks alphabetically within a rank; `gamma` still starts last. */
+  const orderedStacks = [...stacks].sort();
+
+  const healthyPreview = {
+    stack_name: 'any',
+    images: [],
+    build_services: [],
+    summary: {
+      has_update: false, primary_image: null, current_tag: null, next_tag: null,
+      semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+      has_build_services: false, rebuild_available: false, check_status: 'ok',
+      verification_failed: false, verification_error: null,
+    },
+    rollback_target: null,
+    changelog: null,
+  };
+
+  beforeEach(() => {
+    CacheService.getInstance().flush();
+    mockGetStacksStrict.mockImplementation(() => new Promise<string[]>((resolve) => {
+      // Nonzero scan latency: this is what starts the fourth stack just under
+      // three seconds into the pass, where its optional probe no longer fits.
+      setTimeout(() => resolve([...stacks]), 5);
+    }));
+    mockGetStackUpdateDetail.mockReturnValue({});
+    mockGetLatest.mockReturnValue({ activeStatus: 'pass' });
+    mockGetOpenDriftFindings.mockReturnValue([]);
+    mockListContainers.mockResolvedValue(stacks.map(stack => ({
+      Id: `${stack}-web-1`,
+      Names: [`/${stack}-web-1`],
+      State: 'running',
+      Labels: {
+        'com.docker.compose.project': stack,
+        'com.docker.compose.service': 'web',
+        'com.docker.compose.version': '5.6.0',
+      },
+    })));
+    mockGetContainer.mockImplementation(() => ({ inspect: vi.fn().mockResolvedValue(inspectResult()) }));
+    mockGetPreview.mockResolvedValue(healthyPreview);
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 42 }]);
+  });
+
+  /** Run the pass under fake timers, advancing the listing delay and every bounded wait. */
+  async function runSummaryWithFakeTimers(): Promise<Awaited<ReturnType<typeof buildStackReadinessSummary>>> {
+    let settled = false;
+    const pending = buildStackReadinessSummary(0).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(5);
+    for (let elapsed = 0; elapsed < 10_000 && !settled; elapsed += 250) {
+      await vi.advanceTimersByTimeAsync(250);
+    }
+    expect(settled).toBe(true);
+    return pending;
+  }
+
+  async function withFakeTimers(body: () => Promise<void>): Promise<void> {
+    vi.useFakeTimers();
+    try {
+      await body();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('keeps every stack verdict when the version probe answers', async () => {
+    mockComposeVersion.mockResolvedValue('5.6.0');
+
+    await withFakeTimers(async () => {
+      const summary = await runSummaryWithFakeTimers();
+
+      expect(summary.truncated).toBe(false);
+      expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
+      for (const row of summary.stacks) {
+        expect(row.update).not.toBeNull();
+        expect(row.rollback).not.toBeNull();
+        expect(row.update?.verdict).toBe('ready');
+      }
+    });
+  });
+
+  it('keeps completed update and rollback results when only the version probe hangs', async () => {
+    mockComposeVersion.mockReturnValue(new Promise(() => {}));
+
+    await withFakeTimers(async () => {
+      const summary = await runSummaryWithFakeTimers();
+
+      // The fourth stack starts with less than three seconds left. Before the
+      // pass deadline was handed to the probe, its three-second wait outlived
+      // the per-stack timeout and both completed verdicts were thrown away.
+      expect(summary.truncated).toBe(false);
+      expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
+      for (const row of summary.stacks) {
+        expect(row.unavailableReason).toBeNull();
+        expect(row.update).not.toBeNull();
+        expect(row.rollback).not.toBeNull();
+      }
+      // The optional evidence degrades to its informational unknown; the
+      // verdict it does not affect stays ready.
+      expect(summary.stacks.every(row => row.update?.verdict === 'ready')).toBe(true);
+    });
+  });
 });
