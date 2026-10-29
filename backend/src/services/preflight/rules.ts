@@ -3,6 +3,13 @@ import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
 import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
+import {
+  describeServiceTunnel,
+  describeTunnelConnector,
+  detectTunnels,
+  tunnelExposureByService,
+  type TunnelConnector,
+} from '../network/tunnelDetection';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -14,6 +21,7 @@ export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warni
 export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
   'healthcheck-inherited',
   'docker-socket-proxy-client',
+  'tunnel-exposure',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
@@ -1006,27 +1014,94 @@ const exposureInternalPublished: PreflightRule = {
   },
 };
 
+const tunnelsByModel = new WeakMap<EffectiveModel, TunnelConnector[]>();
+
+/** Tunnel connectors in the model, detected once per model across the rules. */
+function tunnelsOf(model: EffectiveModel): TunnelConnector[] {
+  let tunnels = tunnelsByModel.get(model);
+  if (!tunnels) {
+    tunnels = detectTunnels(model);
+    tunnelsByModel.set(model, tunnels);
+  }
+  return tunnels;
+}
+
+const exposureInternalTunneled: PreflightRule = {
+  id: 'exposure-internal-tunneled',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx.model))) {
+      const intent = effectiveIntent(ctx, service);
+      if (intent !== 'internal' && intent !== 'same-node') continue;
+      const certain = tunnel.path === 'shared-namespace';
+      findings.push({
+        ruleId: 'exposure-internal-tunneled',
+        // A shared network only means the tunnel could route here.
+        severity: certain ? 'high' : 'warning',
+        title: `"${service}" is classified ${intent} but is reachable through a tunnel`,
+        message: `Service "${service}" is classified as ${intent} exposure. ${describeServiceTunnel(tunnel)}`,
+        sourcePath: service,
+        service,
+        remediation: certain
+          ? 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.'
+          : 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service off the shared network, or reclassify the exposure intent.',
+      });
+    }
+    return findings;
+  },
+};
+
+const tunnelExposure: PreflightRule = {
+  id: 'tunnel-exposure',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return tunnelsOf(ctx.model).map((connector): PreflightFinding => {
+      const { title, message } = describeTunnelConnector(connector);
+      return {
+        ruleId: 'tunnel-exposure',
+        severity: 'info',
+        title,
+        message,
+        sourcePath: connector.service,
+        service: connector.service,
+        remediation: 'Record the public hostname or tailnet name in the Stack Dossier access URLs, and set the exposure intent of the services it reaches.',
+      };
+    });
+  },
+};
+
 const exposureUnclassified: PreflightRule = {
   id: 'exposure-unclassified',
   run(ctx) {
     if (!ctx.model) return [];
     // A read failure leaves every intent null; do not read that as "unclassified".
     if (!ctx.exposureAvailable) return [];
-    const publishing = ctx.model.services.filter(s => s.ports.length > 0);
-    if (publishing.length === 0) return [];
-    // Fire only when a publishing service is still effectively unclassified: a
+    const tunneled = tunnelExposureByService(tunnelsOf(ctx.model));
+    const exposed = ctx.model.services.filter(s => s.ports.length > 0 || tunneled.has(s.name));
+    if (exposed.length === 0) return [];
+    // Fire only when an exposed service is still effectively unclassified: a
     // service-level intent suppresses the warning for that service even when the
     // stack itself is unset.
-    const unclassified = publishing.some(s => {
+    const unclassified = exposed.filter(s => {
       const intent = effectiveIntent(ctx, s.name);
       return intent === null || intent === 'unknown';
     });
-    if (!unclassified) return [];
+    if (unclassified.length === 0) return [];
+    if (unclassified.every(s => s.ports.length > 0)) {
+      return [{
+        ruleId: 'exposure-unclassified',
+        severity: 'warning',
+        title: 'Stack publishes ports without an exposure intent',
+        message: 'This stack publishes one or more host ports but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
+        remediation: 'Set the stack exposure intent in the Networking tab.',
+      }];
+    }
     return [{
       ruleId: 'exposure-unclassified',
       severity: 'warning',
-      title: 'Stack publishes ports without an exposure intent',
-      message: 'This stack publishes one or more host ports but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
+      title: 'Stack is reachable without an exposure intent',
+      message: 'This stack publishes host ports or is reachable through a tunnel connector, but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
       remediation: 'Set the stack exposure intent in the Networking tab.',
     }];
   },
@@ -1149,7 +1224,9 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   containerNameInternalDup,
   containerNameCollision,
   exposureInternalPublished,
+  exposureInternalTunneled,
   sensitiveServiceBroadExposure,
+  tunnelExposure,
   exposureUnclassified,
   exposurePortVsDossier,
   reverseProxyUndocumented,

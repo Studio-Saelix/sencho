@@ -7,6 +7,7 @@ import type { ExposureIntent, NetworkFactPort, StackNetworkFacts } from './types
 import { isHostNetwork } from './normalize';
 import { getExposureContext, type ExposureContext } from './exposureContext';
 import { dismissFields } from './networkingDismissals';
+import { describeServiceTunnel, describeTunnelConnector, tunnelExposureByService } from './tunnelDetection';
 import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase, NetworkingRecommendedAction } from './networkingTypes';
 
 type FindingExtra = Pick<NetworkingFinding, 'stack' | 'network' | 'service'>;
@@ -171,6 +172,62 @@ function addExposureFindings(
         { stack: facts.stack, service: service.name },
         [intentAction],
         { targets: portTargets(service.publishedPorts.filter(port => port.allInterfaces)) },
+      ));
+    }
+  }
+}
+
+/** Tunnel connectors and the services they reach. A connector card is a
+ *  structural fact and stays visible when the exposure context is unavailable;
+ *  the intent interpretation of a reached service needs that context. A service
+ *  the host-port pass already flagged for the same kind is not flagged twice. */
+function addTunnelExposureFindings(
+  out: NetworkingFinding[],
+  facts: StackNetworkFacts,
+  context: ExposureContext,
+): void {
+  for (const connector of facts.tunnels) {
+    const { title, message } = describeTunnelConnector(connector);
+    out.push(finding(
+      'tunnel-exposure',
+      'info',
+      title,
+      message,
+      { stack: facts.stack, service: connector.service },
+      stackActions(facts.stack),
+      { targets: connector.reaches.map(r => `${r.path}:${r.service}`) },
+    ));
+  }
+  if (!context.available) return;
+
+  const flagged = (kind: NetworkingFindingKind, service: string) =>
+    out.some(f => f.kind === kind && f.stack === facts.stack && f.service === service);
+  for (const [service, tunnel] of tunnelExposureByService(facts.tunnels)) {
+    const intent = effectiveIntent(service, context.stackIntent, context.serviceIntents);
+    const via = describeServiceTunnel(tunnel);
+    const intentAction: NetworkingRecommendedAction = {
+      kind: 'set-exposure-intent', label: 'Set exposure intent', stack: facts.stack, service,
+    };
+    const targets = [`tunnel:${tunnel.provider}:${tunnel.connector}:${tunnel.path}`];
+    if ((intent === null || intent === 'unknown') && !flagged('exposure-unclassified', service)) {
+      out.push(finding(
+        'exposure-unclassified',
+        'info',
+        'Reachable through a tunnel without exposure intent',
+        `Service "${service}" in stack "${facts.stack}" has no classified exposure intent. ${via}`,
+        { stack: facts.stack, service },
+        [intentAction],
+        { targets },
+      ));
+    } else if ((intent === 'internal' || intent === 'same-node') && !flagged('exposure-intent-mismatch', service)) {
+      out.push(finding(
+        'exposure-intent-mismatch',
+        tunnel.path === 'shared-namespace' ? 'high' : 'medium',
+        intent === 'internal' ? 'Internal intent with tunnel access' : 'Same-node intent with tunnel access',
+        `Service "${service}" is classified ${intent}. ${via}`,
+        { stack: facts.stack, service },
+        [intentAction],
+        { targets: [`intent:${intent}`, ...targets] },
       ));
     }
   }
@@ -360,6 +417,7 @@ export function buildNodeNetworkingFindings(
     if (!facts.renderable) continue;
     const context = getExposureContext(nodeId, facts.stack);
     addExposureFindings(out, facts, context);
+    addTunnelExposureFindings(out, facts, context);
 
     if (!snapshot) continue;
     addComposeDriftFindings(out, facts, baseNetworks);

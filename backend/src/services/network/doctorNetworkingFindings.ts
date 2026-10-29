@@ -25,7 +25,7 @@ import type {
   NetworkingRecommendedAction,
 } from './networkingTypes';
 
-/** The 11 Compose Doctor rules with a networking-relevant interpretation. */
+/** The Compose Doctor rules with a networking-relevant interpretation. */
 export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> = {
   'port-conflict-node': 'port-conflict-node',
   'port-conflict-internal': 'port-conflict-internal',
@@ -33,6 +33,8 @@ export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> 
   'port-exposed-all-interfaces': 'exposure-all-interfaces',
   'network-mode-host': 'network-mode-host',
   'exposure-internal-published': 'exposure-intent-mismatch',
+  'exposure-internal-tunneled': 'exposure-intent-mismatch',
+  'tunnel-exposure': 'tunnel-exposure',
   'sensitive-service-broad-exposure': 'sensitive-service-broad-exposure',
   'exposure-unclassified': 'exposure-unclassified',
   'exposure-port-vs-dossier': 'exposure-port-vs-dossier',
@@ -57,6 +59,7 @@ const LIVE_OVERLAP_KINDS = new Set<NetworkingFindingKind>([
   'exposure-all-interfaces',
   'exposure-intent-mismatch',
   'exposure-unclassified',
+  'tunnel-exposure',
   'network-missing', // new-network reconciles into this when the stack is running
 ]);
 
@@ -84,6 +87,7 @@ function liveDedupeKey(
     case 'exposure-all-interfaces':
     case 'exposure-intent-mismatch':
     case 'exposure-unclassified':
+    case 'tunnel-exposure':
       return f.service ? { key: `${kind}\0${stack}\0${f.service}`, mergeKind: kind } : null;
     case 'new-network': {
       const network = resolveNetworkName(f.sourcePath, facts);
@@ -143,6 +147,7 @@ function isStillPlausible(
     case 'exposure-all-interfaces':
     case 'exposure-intent-mismatch':
     case 'exposure-unclassified':
+    case 'tunnel-exposure':
     case 'sensitive-service-broad-exposure':
     case 'port-conflict-node':
     case 'port-conflict-internal': {

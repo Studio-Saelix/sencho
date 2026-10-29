@@ -59,6 +59,7 @@ export const NETWORKING_FINDING_KINDS = [
   'advanced-driver-caveat',
   'runtime-unavailable',
   'exposure-intent-mismatch',
+  'tunnel-exposure',
   // Doctor-only rules (cached, aggregated via doctorNetworkingFindings.ts)
   'port-conflict-node',
   'port-conflict-internal',

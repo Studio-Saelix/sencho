@@ -8,7 +8,8 @@
  */
 import { getExposureContext } from './network/exposureContext';
 import type { ExposureIntent } from './network/types';
-import type { StackExposure } from './preflight/exposure';
+import type { ExposureReason, StackExposure } from './preflight/exposure';
+import type { ServiceTunnelExposure } from './network/tunnelDetection';
 import type { PostureTarget } from './securityPosture';
 
 /** Max contexts returned per image on /image-summaries (display list only). */
@@ -25,7 +26,8 @@ const CONFLICT: ReadonlySet<ExposureIntent> = new Set(['internal', 'same-node'])
 export interface ImageExposureContext {
   stackName: string;
   serviceName: string;
-  exposureReason: 'published-port' | 'host-network' | null;
+  exposureReason: ExposureReason | null;
+  tunnel?: ServiceTunnelExposure;
   exposureIntent?: ExposureIntent;
   intentStatus: 'set' | 'unset' | 'unavailable';
   intentConflict?: boolean;
@@ -207,6 +209,7 @@ export function buildImageExposureContextRows(
         exposureReason: svc.reason,
         intentStatus: 'unavailable',
       };
+      if (svc.tunnel) row.tunnel = svc.tunnel;
 
       if (ctx.available) {
         const intent = effectiveIntent(svc.service, ctx.stackIntent, ctx.serviceIntents);
@@ -215,7 +218,10 @@ export function buildImageExposureContextRows(
         } else {
           row.intentStatus = 'set';
           row.exposureIntent = intent;
-          if (CONFLICT.has(intent)) row.intentConflict = true;
+          // A tunnel that only shares a network with the service may not route to
+          // it, so an internal intent there stays a review, not a contradiction.
+          const unverifiedTunnelOnly = svc.reason === 'tunnel' && svc.tunnel?.path === 'shared-network';
+          if (CONFLICT.has(intent) && !unverifiedTunnelOnly) row.intentConflict = true;
         }
       }
 
@@ -256,6 +262,7 @@ export function toPostureTarget(row: ImageExposureContextRow): PostureTarget {
     exposureReason: row.exposureReason,
     intentStatus: row.intentStatus,
   };
+  if (row.tunnel) target.tunnel = row.tunnel;
   if (row.exposureIntent) target.exposureIntent = row.exposureIntent;
   if (row.intentConflict) target.intentConflict = true;
   return target;
@@ -280,6 +287,7 @@ function contextsFromTargets(targets: PostureTarget[] | undefined): ImageExposur
       stackName: t.stackName,
       serviceName: t.serviceName,
       exposureReason: t.exposureReason ?? null,
+      ...(t.tunnel ? { tunnel: t.tunnel } : {}),
       exposureIntent: t.exposureIntent,
       intentStatus: t.intentStatus,
       intentConflict: t.intentConflict,

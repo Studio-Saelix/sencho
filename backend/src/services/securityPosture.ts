@@ -32,6 +32,8 @@ import {
   partialTargetsIntentionalWithUnavailable,
 } from './securityExposureTargets';
 import type { ExposureIntent } from './network/types';
+import type { ExposureReason } from './preflight/exposure';
+import type { ServiceTunnelExposure } from './network/tunnelDetection';
 import type { DismissPolicy } from './readiness/types';
 import {
   postureDismissPolicy,
@@ -93,7 +95,9 @@ export interface PostureTarget {
   stackName?: string;
   /** Service within that stack. */
   serviceName?: string;
-  exposureReason?: 'published-port' | 'host-network' | null;
+  exposureReason?: ExposureReason | null;
+  /** The strongest tunnel path reaching the service, when one does. */
+  tunnel?: ServiceTunnelExposure;
   /** Effective intent when context is available and set; omit when unset. */
   exposureIntent?: ExposureIntent;
   /**
@@ -101,7 +105,8 @@ export interface PostureTarget {
    * unavailable is distinct from unset (DB/context failure vs no classification).
    */
   intentStatus?: 'set' | 'unset' | 'unavailable';
-  /** True when intent is internal/same-node but configured exposure is beyond loopback. */
+  /** True when intent is internal/same-node but configured exposure is beyond
+   *  loopback or a tunnel certainly reaches the service. */
   intentConflict?: boolean;
 }
 

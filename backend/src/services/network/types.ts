@@ -68,7 +68,7 @@ export type NetworkRuntimeState = 'available' | 'unavailable';
  * Kept a flat DTO (the frontend mirrors it) rather than a discriminated union;
  * the pairing invariants are enforced by the single producer
  * (`assembleStackNetworkFacts`), not by the type: when `renderable` is false,
- * `renderError` is set and `networks`/`services`/`drift` are empty; when
+ * `renderError` is set and `networks`/`services`/`drift`/`tunnels` are empty; when
  * `runtime` is `'unavailable'`, `drift` is empty (never computed against an
  * absent snapshot).
  */
@@ -88,4 +88,9 @@ export interface StackNetworkFacts {
    * unavailable or the model is not renderable (use `runtime` / `renderable`).
    */
   missingExternalNetworks: import('./missingExternalNetworks').MissingExternalNetwork[];
+  /**
+   * Tunnel and private-overlay connectors (Cloudflare Tunnel, Tailscale,
+   * WireGuard) and the services each one reaches. Empty when not renderable.
+   */
+  tunnels: import('./tunnelDetection').TunnelConnector[];
 }

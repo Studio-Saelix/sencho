@@ -94,6 +94,10 @@ export interface EffService {
   extraHosts: string[];
   /** Label KEY names only. Values are never extracted (a label value can carry a secret). */
   labelKeys: string[];
+  /** `cap_add` capability names. Absent on older hand-built test fixtures. */
+  capAdd?: string[];
+  /** Host-side device paths from `devices` (e.g. `/dev/net/tun`). Absent on older hand-built test fixtures. */
+  devices?: string[];
   /**
    * True when `sencho.service.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
@@ -397,6 +401,22 @@ function labelKeysOf(labels: unknown): string[] {
   return [];
 }
 
+/** A list of plain strings; anything else contributes nothing. */
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(v => str(v)).filter((s): s is string => s !== undefined) : [];
+}
+
+/** Host-side device paths from `devices` (short `host[:container[:perms]]` or long `{ source }` form). */
+function deviceHostPaths(devices: unknown): string[] {
+  if (!Array.isArray(devices)) return [];
+  const out: string[] = [];
+  for (const d of devices) {
+    const source = d && typeof d === 'object' ? str((d as Record<string, unknown>).source) : str(d)?.split(':')[0];
+    if (source) out.push(source);
+  }
+  return out;
+}
+
 /** Service network membership (list or map form), keyed by network key, with aliases. */
 function parseServiceNetworks(networks: unknown): EffServiceNetwork[] {
   if (Array.isArray(networks)) {
@@ -519,6 +539,8 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       networks: parseServiceNetworks(svc.networks),
       extraHosts: parseExtraHosts(svc.extra_hosts),
       labelKeys: labelKeysOf(svc.labels),
+      capAdd: stringList(svc.cap_add),
+      devices: deviceHostPaths(svc.devices),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }

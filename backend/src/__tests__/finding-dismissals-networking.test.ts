@@ -255,6 +255,7 @@ describe('buildNodeNetworkingFindings ids and fingerprints', () => {
     services: [{ name: 'app', networks: [], publishedPorts: ports, extraHosts: [] }],
     drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] },
     missingExternalNetworks: [],
+    tunnels: [],
   });
   const build = (ports: NetworkFactPort[]) => buildNodeNetworkingFindings(localNodeId, null, [facts(ports)], [])
     .find((f) => f.kind === 'exposure-all-interfaces')!;

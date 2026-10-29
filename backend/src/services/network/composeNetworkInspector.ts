@@ -24,6 +24,7 @@ import type {
 } from './types';
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
 import { resolveManagedMeshAttachment } from './managedMeshAttachment';
+import { detectTunnels } from './tunnelDetection';
 import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
 import { getErrorMessage } from '../../utils/errors';
@@ -59,6 +60,7 @@ export function assembleStackNetworkFacts(
       services: [],
       drift: EMPTY_DRIFT,
       missingExternalNetworks: [],
+      tunnels: [],
     };
   }
 
@@ -104,6 +106,7 @@ export function assembleStackNetworkFacts(
     services,
     drift,
     missingExternalNetworks,
+    tunnels: detectTunnels(model),
   };
 }
 
