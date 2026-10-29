@@ -4,11 +4,13 @@ name: Publish PR Preview Image
 # Preview build  vs  integration (dev)  vs  release
 # ---------------------------------------------------------------------------
 # Maintainer-triggered Docker Hub images for external validation BEFORE a PR
-# merges. Testers pull saelix/sencho:pr-<N> without GHCR credentials.
+# merges. Testers pull saelix/sencho:pr-<N> without GHCR credentials. Each
+# image is built from the PR's merge commit, the same tree PR CI validates.
 #
 #   Preview (this file)                  Integration (docker-dev.yml)
 #   ---------------------                ---------------------------
 #   trigger: workflow_dispatch           trigger: push to main
+#   build:  PR merge commit              build: main head
 #   registry: Docker Hub only             registry: GHCR only
 #   image:  saelix/sencho                 image: ghcr.io/.../sencho-dev
 #   tags:   :pr-<N>, :preview-<sha>       tags: :dev, :dev-<sha>
@@ -64,17 +66,31 @@ jobs:
           pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
           state=$(echo "$pr_json" | jq -r '.state')
           head_sha=$(echo "$pr_json" | jq -r '.head.sha')
+          base_ref=$(echo "$pr_json" | jq -r '.base.ref')
+          mergeable=$(echo "$pr_json" | jq -r '.mergeable')
           if [ "$state" != "open" ]; then
             echo "PR #${PR_NUMBER} is not open (state=${state})"
+            exit 1
+          fi
+          # The preview builds refs/pull/<N>/merge, which does not exist while
+          # the PR has conflicts. Fail with the remedy instead of letting the
+          # checkout fail on a missing ref.
+          if [ "$mergeable" = "false" ]; then
+            echo "PR #${PR_NUMBER} conflicts with ${base_ref}; merge ${base_ref} into the branch before publishing a preview"
             exit 1
           fi
           echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
           echo "Building PR #${PR_NUMBER} at ${head_sha}"
 
-      - name: Check out the repo
+      - name: Check out the PR merge commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ inputs.pr_number }}/head
+          # Build the tree GitHub would merge, not the PR head. A head branch
+          # can lag behind the base branch and miss dependency fixes already on
+          # main, so the Trivy gate fails on code that is not going to land.
+          # PR CI checks out the same merge ref, so preview and CI scan the
+          # same tree.
+          ref: refs/pull/${{ inputs.pr_number }}/merge
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
@@ -98,6 +114,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
+          # Describe the checked-out merge commit. The default workflow context
+          # labels a workflow_dispatch build with the default branch head, so
+          # preview-<sha> and the OCI revision would name a commit the image
+          # does not contain.
+          context: git
           images: saelix/sencho
           tags: |
             type=raw,value=pr-${{ inputs.pr_number }}
