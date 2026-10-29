@@ -117,11 +117,11 @@ describe('MeshOptInSheet cascade confirmation', () => {
         expectVisibleInDialog(/api on node-beta is not running right now, and the redeploy brings it up\./);
     });
 
-    it('does not say the changed stack restarts when its node is unreachable', async () => {
+    it('says the change cannot be applied when its node is unreachable', async () => {
         const down = { ...meshNode(1, 'node-alpha', ['other']), reachableMode: 'pilot' as const, pilotConnected: false };
         renderSheet(true, [down, meshNode(2, 'node-beta', ['api'])]);
         fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
-        expectVisibleInDialog(/db on node-alpha is not restarted, because that node is unreachable\./);
-        expect(screen.queryByText(/db on node-alpha restarts now/)).not.toBeInTheDocument();
+        expectVisibleInDialog(/db on node-alpha cannot be added to the mesh while that node is unreachable, so nothing restarts\./);
+        expect(screen.queryByText(/restarts now/)).not.toBeInTheDocument();
     });
 });

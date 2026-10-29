@@ -203,9 +203,10 @@ export function RoutingNodeCard({
     const disableImpact = computeMeshMembershipImpact(fleetStatus, disableChange);
     const disableDescription = describeMeshMembershipImpact(disableImpact, disableChange);
     // Turning mesh off removes this node's stacks and redeploys the rest of
-    // the fleet, so confirm first whenever that restarts or starts a stack.
-    // A turn-off that restarts nothing (no stack of this node is meshed and
-    // no hostname changes) and turning mesh on need no confirmation.
+    // the fleet, so confirm first whenever a stack of this node leaves the
+    // mesh or the redeploy restarts or starts another stack. A turn-off that
+    // does neither (no stack of this node is meshed and no hostname changes)
+    // and turning mesh on need no confirmation.
     const requestToggle = (next: boolean): void => {
         if (!next && meshChangeNeedsConfirmation(disableImpact)) {
             setConfirmDisable(true);

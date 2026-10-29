@@ -232,20 +232,52 @@ describe('describeMeshMembershipImpact', () => {
         const change = { kind: 'opt-out' as const, nodeId: 1, stackName: 'legacy' };
         const status = [node(1, 'home', [{ stackName: 'legacy', running: false }]), node(2, 'vps', ['app'])];
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
-            .toBe('legacy on home restarts now. No hostnames change, so no other meshed stack needs a restart.');
+            .toBe('legacy on home is not running right now, and the redeploy brings it up. No hostnames change, so no other meshed stack needs a restart.');
     });
 
-    it('does not say a stack on an unreachable node restarts now', () => {
+    it('says the change cannot be applied, and nothing restarts, when the changed stack\'s node is unreachable', () => {
+        // The backend stops before changing anything when it cannot reach the
+        // node, so promising restarts elsewhere would be false too.
         const status = [node(1, 'home', ['pg']), node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: false })];
         const optOut = { kind: 'opt-out' as const, nodeId: 2, stackName: 'app' };
-        const text = describeMeshMembershipImpact(computeMeshMembershipImpact(status, optOut), optOut);
-        expect(text).toContain('app on vps is not restarted, because that node is unreachable.');
-        expect(text).not.toContain('restarts now');
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, optOut), optOut))
+            .toBe('app on vps cannot be removed from the mesh while that node is unreachable, so nothing restarts.');
         const optIn = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, optIn), optIn))
-            .toContain('api on vps is not restarted, because that node is unreachable.');
+            .toBe('api on vps cannot be added to the mesh while that node is unreachable, so nothing restarts.');
         const disable = { kind: 'disable-node' as const, nodeId: 2 };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, disable), disable))
-            .toContain('app on this node leaves the mesh but is not restarted, because that node is unreachable.');
+            .toBe('app on this node cannot leave the mesh while that node is unreachable, so nothing restarts.');
+    });
+
+    it('names a stopped stack of the node being turned off apart from the running ones', () => {
+        const change = { kind: 'disable-node' as const, nodeId: 1 };
+        const status = [
+            node(1, 'home', [{ stackName: 'pg', running: true }, { stackName: 'legacy', running: false }]),
+            node(2, 'vps', ['app']),
+        ];
+        const impact = computeMeshMembershipImpact(status, change);
+        expect(impact.directStopped).toEqual([{ nodeName: 'home', stackName: 'legacy' }]);
+        expect(describeMeshMembershipImpact(impact, change)).toBe(
+            'pg on this node leaves the mesh and restarts. legacy on this node leaves the mesh, is not running right now, and the redeploy brings it up. app on vps also restarts to refresh hostnames, so expect brief connection drops.',
+        );
+    });
+
+    it('asks first when the only restart is the node\'s own meshed stack', () => {
+        // Nothing else is meshed, so the prompt rests on the direct stacks alone.
+        const change = { kind: 'disable-node' as const, nodeId: 1 };
+        const running = computeMeshMembershipImpact([node(1, 'home', ['pg'])], change);
+        expect(running.others).toEqual([]);
+        expect(describeMeshMembershipImpact(running, change))
+            .toBe('pg on this node leaves the mesh and restarts. No other meshed stacks are affected.');
+        expect(meshChangeNeedsConfirmation(running)).toBe(true);
+        const stopped = computeMeshMembershipImpact([node(1, 'home', [{ stackName: 'legacy', running: false }])], change);
+        expect(meshChangeNeedsConfirmation(stopped)).toBe(true);
+    });
+
+    it('assumes hostnames change for a node or stack the snapshot does not list', () => {
+        // Unknown must warn, never reassure.
+        expect(computeMeshMembershipImpact([node(2, 'vps', ['app'])], { kind: 'disable-node', nodeId: 9 }).hostnamesChange).toBe(true);
+        expect(computeMeshMembershipImpact([node(1, 'home', ['pg'])], { kind: 'opt-out', nodeId: 1, stackName: 'ghost' }).hostnamesChange).toBe(true);
     });
 });

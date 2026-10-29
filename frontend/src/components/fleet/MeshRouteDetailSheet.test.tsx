@@ -175,13 +175,13 @@ describe('MeshRouteDetailSheet remove gate', () => {
         expect(screen.getByText('API proxy bridge')).toBeInTheDocument();
     });
 
-    it('says the stack does not restart when its node is unreachable', async () => {
+    it('says the change cannot be applied when its node is unreachable', async () => {
         const down: MeshNodeStatus[] = [{ ...STATUS[0], reachableMode: 'unreachable', reachableReason: 'api token missing' }];
         render(
             <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
         );
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
-        expectVisibleInDialog(/api on peer-a is not restarted, because that node is unreachable\./);
+        expectVisibleInDialog(/api on peer-a cannot be removed from the mesh while that node is unreachable, so nothing restarts\./);
         expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/restarts now/);
     });
 });

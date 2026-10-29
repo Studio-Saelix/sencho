@@ -224,4 +224,13 @@ describe('RoutingNodeCard disable confirmation', () => {
         expectVisibleInDialog(/No hostnames change, so no other meshed stack needs a restart\. app on node-beta is not running right now/);
         expect(screen.queryByText(/also restart/)).not.toBeInTheDocument();
     });
+
+    it('asks before turning off the only meshed node, naming its own stack', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        renderDisable(status, [status]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/pg on this node leaves the mesh and restarts\. No other meshed stacks are affected\./);
+    });
 });

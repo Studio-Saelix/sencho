@@ -24,13 +24,16 @@ export async function copyToClipboard(text: string): Promise<void> {
     }
   }
 
-  // A modal dialog traps focus, so a textarea appended to <body> never takes
-  // focus: the trap hands focus back, nothing is selected, and
-  // `execCommand('copy')` still returns true. Mount the textarea inside the
-  // dialog the copy control lives in, and refuse to report success unless it
-  // really holds focus.
+  // A modal dialog or an open menu traps focus, so a textarea appended to
+  // <body> never takes focus: the trap hands focus back, nothing is selected,
+  // and `execCommand('copy')` still returns true. Mount the textarea inside
+  // the surface the copy control lives in, and refuse to report success
+  // unless it really holds focus.
   const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const host = previous?.closest('[role="dialog"], [role="alertdialog"]') ?? document.body;
+  // Some browsers (Safari) do not focus a button on click, so fall back to
+  // the topmost open dialog when focus is not inside a trapping surface.
+  const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+  const host = previous?.closest('[role="dialog"], [role="alertdialog"], [role="menu"]') ?? dialogs[dialogs.length - 1] ?? document.body;
   const ta = document.createElement('textarea');
   ta.value = text;
   ta.setAttribute('readonly', '');

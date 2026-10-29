@@ -16,14 +16,19 @@ export type MeshMembershipChange =
 export interface MeshMembershipImpact {
     /** Stacks changed directly by this action. */
     direct: Array<{ nodeName: string; stackName: string }>;
-    /** False when the node holding `direct` is one the cascade cannot reach, so those stacks do not restart now. */
+    /** False when the node holding `direct` is one the cascade cannot reach: the change cannot be applied there, so nothing restarts. An unknown node counts as reachable. */
     directReachable: boolean;
+    /** Stacks in `direct` that are not running right now, so the redeploy of the changed stack starts them instead of restarting them. */
+    directStopped: Array<{ nodeName: string; stackName: string }>;
     /**
      * Whether the change adds or removes a hostname. Every meshed stack
      * carries the full alias set in its `extra_hosts`, so `others` are only
      * recreated when that set changes. A removed stack that publishes
      * nothing right now (stopped) leaves every other stack's hostnames, and
-     * so its container, untouched.
+     * so its container, untouched. An opt-in always adds hostnames (the
+     * redeploy brings the stack up and it starts publishing), and a node or
+     * stack missing from the snapshot counts as changing them, so the
+     * dialog errs towards warning.
      */
     hostnamesChange: boolean;
     /** Other meshed stacks restarted so their hostnames refresh. */
@@ -56,6 +61,7 @@ export function computeMeshMembershipImpact(
     const started: MeshMembershipImpact['started'] = [];
     const skipped: MeshMembershipImpact['skipped'] = [];
     const targetNode = status.find((n) => n.nodeId === change.nodeId);
+    const directStopped: MeshMembershipImpact['directStopped'] = [];
     const directReachable = targetNode ? isMeshCascadeReachable(targetNode) : true;
     const publishes = (stackName: string): boolean =>
         targetNode?.optedInStacks.find((s) => s.stackName === stackName)?.currentlyResolvable ?? true;
@@ -63,7 +69,7 @@ export function computeMeshMembershipImpact(
         ? true
         : change.kind === 'opt-out'
             ? publishes(change.stackName)
-            : (targetNode?.optedInStacks.some((s) => s.currentlyResolvable) ?? false);
+            : (targetNode ? targetNode.optedInStacks.some((s) => s.currentlyResolvable) : true);
     if (change.kind !== 'disable-node') {
         direct.push({ nodeName: targetNode?.nodeName ?? `node ${change.nodeId}`, stackName: change.stackName });
     }
@@ -74,6 +80,10 @@ export function computeMeshMembershipImpact(
                 && (change.kind === 'disable-node' || s.stackName === change.stackName);
             if (isTarget) {
                 if (change.kind === 'disable-node') direct.push({ nodeName: node.nodeName, stackName: s.stackName });
+                // An opt-in target is running by definition (the backend refuses a stack with no running services).
+                if (change.kind !== 'opt-in' && !s.currentlyResolvable) {
+                    directStopped.push({ nodeName: node.nodeName, stackName: s.stackName });
+                }
                 continue;
             }
             if (!reachable) {
@@ -88,13 +98,14 @@ export function computeMeshMembershipImpact(
             if (!s.currentlyResolvable) started.push({ nodeName: node.nodeName, stackName: s.stackName });
         }
     }
-    return { direct, directReachable, hostnamesChange, others, started, skipped };
+    return { direct, directReachable, directStopped, hostnamesChange, others, started, skipped };
 }
 
 /**
  * Whether a membership change does anything an operator should confirm: a
- * stack restarts or starts. A turn-off that restarts nothing (no stack of
- * this node is meshed, and no other stack is stopped) goes straight through.
+ * meshed stack of this node leaves the mesh, or the redeploy restarts or
+ * starts another stack. A turn-off that does neither (no stack of this node
+ * is meshed, and no other stack is stopped) goes straight through.
  */
 export function meshChangeNeedsConfirmation(impact: MeshMembershipImpact): boolean {
     return impact.direct.length > 0
@@ -116,25 +127,40 @@ function describeStacks(items: Array<{ nodeName: string; stackName: string }>): 
 
 /**
  * One to four plain sentences for the confirmation dialog, naming every
- * stack involved, e.g. "api on opsix restarts now. db on opsix and web on
+ * stack involved, e.g. "api on opsix restarts now. db on opsix; web on
  * home also restart to refresh hostnames, so expect brief connection drops."
  */
 export function describeMeshMembershipImpact(impact: MeshMembershipImpact, change: MeshMembershipChange): string {
-    const directNames = joinNames(impact.direct.map((d) => d.stackName));
-    const directCount = impact.direct.length;
+    // The changed stack's own node has to take part: removing or adding its
+    // override is a call to that node, and the backend stops before changing
+    // anything when it fails. Nothing restarts, so say that and nothing else.
+    if (!impact.directReachable && impact.direct.length > 0) {
+        const what = change.kind === 'disable-node'
+            ? `${joinNames(impact.direct.map((d) => d.stackName))} on this node cannot leave the mesh`
+            : `${impact.direct[0].stackName} on ${impact.direct[0].nodeName} cannot be ${change.kind === 'opt-in' ? 'added to' : 'removed from'} the mesh`;
+        return `${what} while that node is unreachable, so nothing restarts.`;
+    }
+    const stoppedKeys = new Set(impact.directStopped.map((d) => `${d.nodeName}:${d.stackName}`));
+    const running = impact.direct.filter((d) => !stoppedKeys.has(`${d.nodeName}:${d.stackName}`));
+    const stopped = impact.directStopped;
     const parts: string[] = [];
     if (change.kind === 'disable-node') {
-        if (directCount === 0) parts.push('No stacks on this node are in the mesh.');
-        else if (impact.directReachable) {
-            parts.push(`${directNames} on this node ${directCount === 1 ? 'leaves' : 'leave'} the mesh and ${directCount === 1 ? 'restarts' : 'restart'}.`);
-        } else {
-            parts.push(`${directNames} on this node ${directCount === 1 ? 'leaves' : 'leave'} the mesh but ${directCount === 1 ? 'is' : 'are'} not restarted, because that node is unreachable.`);
+        const leave = (n: number): string => (n === 1 ? 'leaves' : 'leave');
+        const be = (n: number): string => (n === 1 ? 'is' : 'are');
+        if (impact.direct.length === 0) parts.push('No stacks on this node are in the mesh.');
+        else {
+            if (running.length > 0) {
+                parts.push(`${joinNames(running.map((d) => d.stackName))} on this node ${leave(running.length)} the mesh and ${running.length === 1 ? 'restarts' : 'restart'}.`);
+            }
+            if (stopped.length > 0) {
+                parts.push(`${joinNames(stopped.map((d) => d.stackName))} on this node ${leave(stopped.length)} the mesh, ${be(stopped.length)} not running right now, and the redeploy brings ${stopped.length === 1 ? 'it' : 'them'} up.`);
+            }
         }
     } else {
         const { stackName, nodeName } = impact.direct[0];
-        parts.push(impact.directReachable
-            ? `${stackName} on ${nodeName} restarts now.`
-            : `${stackName} on ${nodeName} is not restarted, because that node is unreachable.`);
+        parts.push(stopped.length > 0
+            ? `${stackName} on ${nodeName} is not running right now, and the redeploy brings it up.`
+            : `${stackName} on ${nodeName} restarts now.`);
     }
     if (impact.others.length > 0) {
         parts.push(impact.hostnamesChange
