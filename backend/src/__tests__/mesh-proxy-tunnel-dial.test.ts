@@ -132,6 +132,9 @@ describe('MeshProxyTunnelDialer', () => {
             const failure = dialer.getRecentFailure(nodeId);
             expect(failure?.code).toBe('blocked_by_proxy');
             expect(meshReachableReason(failure!.code)).toMatch(/access proxy/);
+            const status = (await MeshService.getInstance().getStatus()).find((s) => s.nodeId === nodeId);
+            expect(status?.reachableMode).toBe('unreachable');
+            expect(status?.reachableReason).toMatch(/access proxy/);
         } finally {
             MeshProxyTunnelDialer.resetForTest(0);
             await peer.close();

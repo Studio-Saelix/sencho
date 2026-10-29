@@ -46,10 +46,13 @@ describe('classifyDialError', () => {
         // An arbitrary, relative, malformed, or missing destination says
         // nothing about which hop sent it.
         [upgradeFailure(302), 'refused_unverified'],
+        [upgradeFailure(301, { location: 'https://app.example.com/login' }), 'refused_unverified'],
         [upgradeFailure(307), 'refused_unverified'],
         [upgradeFailure(302, { location: 'https://app.example.com/login' }), 'refused_unverified'],
         [upgradeFailure(308, { location: '/api/mesh/proxy-tunnel/' }), 'refused_unverified'],
+        [upgradeFailure(301, { location: 'https://team.cloudflareaccess.com/login' }), 'blocked_by_proxy'],
         [upgradeFailure(302, { location: 'not a url at all' }), 'refused_unverified'],
+        [upgradeFailure(302, { location: 'https://[::1' }), 'refused_unverified'],
         [upgradeFailure(302, { server: 'cloudflare' }), 'refused_unverified'],
         [upgradeFailure(302, { 'cf-ray': 'abc' }), 'refused_unverified'],
         [upgradeFailure(302, { location: '' }), 'refused_unverified'],
@@ -63,6 +66,8 @@ describe('classifyDialError', () => {
         [upgradeFailure(302, { location: 'https://app.example.com/login', 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
         [upgradeFailure(404, { 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
         [upgradeFailure(407, { 'x-sencho-mesh-reject': 'tier' }), 'tier_denied'],
+        [upgradeFailure(502, { 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
+        [upgradeFailure(500, { 'x-sencho-mesh-reject': 'scope' }), 'scope_denied'],
         // Markerless 401/403/429: an older Sencho receiver emits its
         // credential refusals without a marker too, so the hop is unknown.
         [upgradeFailure(401), 'refused_unverified'],
@@ -202,6 +207,8 @@ describe('classifyDialError', () => {
         // that redirected, so the diagnosis stays unclaimed.
         'https://evil.example.com/login?next=cloudflareaccess.com',
         'https://team.cloudflareaccess.com.evil.example/login',
+        'https://evilcloudflareaccess.com/login',
+        'https://notcloudflareaccess.com/login',
         'not a url at all cloudflareaccess.com',
     ])('does not treat %s as Access', (location) => {
         const out = classifyDialError(upgradeFailure(302, { location }));

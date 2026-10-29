@@ -598,8 +598,9 @@ function headerValue(headers: UpgradeFailure['httpHeaders'], name: string): stri
  * A scheme-relative Location (`//team.cloudflareaccess.com/...`) is a valid
  * network-path reference to that host, and a trailing-dot FQDN is the same
  * name in absolute form, so both are parsed against a placeholder base and a
- * normalized host. Any other relative destination resolves to the placeholder
- * and stays unrecognized.
+ * normalized host. A path-relative destination resolves to the placeholder; a
+ * network-path reference resolves to its own host. Only the Access host
+ * matches.
  */
 const LOCATION_PARSE_BASE = 'https://sencho.invalid/';
 
