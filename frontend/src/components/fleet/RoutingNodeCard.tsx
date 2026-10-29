@@ -11,7 +11,12 @@ import {
 } from '@/components/ui/routing-node-card';
 import { ConfirmModal } from '@/components/ui/modal';
 import { deriveNodeState } from './routingNodeState';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact, meshChangeNeedsConfirmation } from './meshImpact';
+import {
+    computeMeshMembershipImpact,
+    describeMeshMembershipImpact,
+    meshChangeBlocked,
+    meshChangeNeedsConfirmation,
+} from './meshImpact';
 import { describeMembershipError } from './meshMessages';
 
 interface Props {
@@ -243,6 +248,8 @@ export function RoutingNodeCard({
             title={`Turn off mesh on ${status.nodeName}?`}
             description={disableDescription}
             confirmLabel="Turn off and restart"
+            confirmDisabled={meshChangeBlocked(disableImpact)}
+            cancelLabel={meshChangeBlocked(disableImpact) ? 'Close' : undefined}
             onConfirm={() => { setConfirmDisable(false); void toggleEnabled(false); }}
             onCancel={() => setConfirmDisable(false)}
         >

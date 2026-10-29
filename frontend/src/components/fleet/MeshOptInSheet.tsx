@@ -5,7 +5,12 @@ import { SystemSheet } from '@/components/ui/system-sheet';
 import { Button } from '@/components/ui/button';
 import { ConfirmModal } from '@/components/ui/modal';
 import type { MeshNodeStatus, MeshStackEntry } from '@/types/mesh';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact, type MeshMembershipChange } from './meshImpact';
+import {
+    computeMeshMembershipImpact,
+    describeMeshMembershipImpact,
+    meshChangeBlocked,
+    type MeshMembershipChange,
+} from './meshImpact';
 import { describeMembershipError } from './meshMessages';
 import { Loader2 } from 'lucide-react';
 
@@ -82,9 +87,11 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
     const confirmChange: MeshMembershipChange | null = confirmStack
         ? { kind: confirmStack.optedIn ? 'opt-out' : 'opt-in', nodeId, stackName: confirmStack.name }
         : null;
-    const confirmDescription = confirmChange
-        ? describeMeshMembershipImpact(computeMeshMembershipImpact(fleetStatus, confirmChange), confirmChange)
+    const confirmImpact = confirmChange ? computeMeshMembershipImpact(fleetStatus, confirmChange) : null;
+    const confirmDescription = confirmChange && confirmImpact
+        ? describeMeshMembershipImpact(confirmImpact, confirmChange)
         : undefined;
+    const confirmBlocked = confirmImpact ? meshChangeBlocked(confirmImpact) : false;
     const meta = `${inMeshCount} of ${stacks.length} in mesh`;
 
     return (
@@ -160,6 +167,8 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
                 }
                 description={confirmDescription}
                 confirmLabel={confirmStack?.optedIn ? 'Remove and restart' : 'Add and restart'}
+                confirmDisabled={confirmBlocked}
+                cancelLabel={confirmBlocked ? 'Close' : undefined}
                 onConfirm={() => {
                     if (confirmStack) void performToggle(confirmStack);
                     setConfirmStack(null);

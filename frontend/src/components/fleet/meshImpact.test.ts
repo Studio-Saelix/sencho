@@ -4,6 +4,7 @@ import {
     computeMeshMembershipImpact,
     describeMeshMembershipImpact,
     isMeshCascadeReachable,
+    meshChangeBlocked,
     meshChangeNeedsConfirmation,
 } from './meshImpact';
 
@@ -47,14 +48,15 @@ describe('computeMeshMembershipImpact', () => {
     it('separates stacks the cascade will start from stacks it merely restarts', () => {
         // The cascade deploys every meshed stack, and a deploy brings up
         // anything stopped. A stopped stack the operator meant to leave
-        // stopped has to be its own bucket, not folded into the restart count.
+        // stopped has to be its own bucket, and in no other: a stack is
+        // restarted or started, never both.
         const withStopped = [
             node(1, 'home', [{ stackName: 'pg', running: true }, { stackName: 'legacy', running: false }]),
             node(2, 'vps', [{ stackName: 'app', running: true }]),
         ];
         const impact = computeMeshMembershipImpact(withStopped, { kind: 'opt-in', nodeId: 2, stackName: 'api' });
 
-        expect(impact.others.map((o) => o.stackName).sort()).toEqual(['app', 'legacy', 'pg']);
+        expect(impact.others.map((o) => o.stackName).sort()).toEqual(['app', 'pg']);
         expect(impact.started).toEqual([{ nodeName: 'home', stackName: 'legacy' }]);
     });
 
@@ -145,7 +147,7 @@ describe('describeMeshMembershipImpact', () => {
             node(2, 'vps', ['app']),
         ];
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
-            .toBe('api on vps restarts now. pg and legacy on home; app on vps also restart to refresh hostnames, so expect brief connection drops. legacy on home is not running right now, and the redeploy brings it up.');
+            .toBe('api on vps restarts now. pg on home; app on vps also restart to refresh hostnames, so expect brief connection drops. legacy on home is not running right now, and the redeploy brings it up.');
     });
 
     it('does not mention starting anything when every other stack is running', () => {
@@ -279,5 +281,68 @@ describe('describeMeshMembershipImpact', () => {
         // Unknown must warn, never reassure.
         expect(computeMeshMembershipImpact([node(2, 'vps', ['app'])], { kind: 'disable-node', nodeId: 9 }).hostnamesChange).toBe(true);
         expect(computeMeshMembershipImpact([node(1, 'home', ['pg'])], { kind: 'opt-out', nodeId: 1, stackName: 'ghost' }).hostnamesChange).toBe(true);
+    });
+});
+
+describe('a stopped stack is named once', () => {
+    const stopped = (name: string) => ({ stackName: name, running: false });
+
+    it('is never both restarting and not running, on any kind of change', () => {
+        const status = [
+            node(1, 'home', [{ stackName: 'pg', running: true }, stopped('legacy')]),
+            node(2, 'vps', [{ stackName: 'app', running: true }]),
+        ];
+        const changes = [
+            { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' },
+            { kind: 'opt-out' as const, nodeId: 2, stackName: 'app' },
+            { kind: 'disable-node' as const, nodeId: 2 },
+        ];
+        for (const change of changes) {
+            const impact = computeMeshMembershipImpact(status, change);
+            expect(impact.others.map((o) => o.stackName)).not.toContain('legacy');
+            expect(impact.started).toEqual([{ nodeName: 'home', stackName: 'legacy' }]);
+            const text = describeMeshMembershipImpact(impact, change);
+            expect(text.match(/legacy/g)).toHaveLength(1);
+            expect(text).toContain('legacy on home is not running right now, and the redeploy brings it up.');
+        }
+    });
+
+    it('leaves out the restart sentence when every other reachable stack is stopped', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
+        const status = [node(1, 'home', [stopped('legacy'), stopped('old')]), node(2, 'vps', [])];
+        const impact = computeMeshMembershipImpact(status, change);
+        const text = describeMeshMembershipImpact(impact, change);
+        expect(text).toBe('api on vps restarts now. legacy and old on home are not running right now, and the redeploy brings them up.');
+        expect(meshChangeNeedsConfirmation(impact)).toBe(true);
+    });
+
+    it('says no other stack is affected only when none is restarted, started or skipped', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact([node(2, 'vps', [])], change), change))
+            .toBe('api on vps restarts now. No other meshed stacks are affected.');
+    });
+});
+
+describe('a change blocked by an unreachable node', () => {
+    const down = (stacks: Array<string | { stackName: string; running: boolean }>) =>
+        node(2, 'vps', stacks, { reachableMode: 'pilot', pilotConnected: false });
+
+    it('is blocked for opt-in, opt-out and a node turn-off with stacks, on a pilot node with no tunnel', () => {
+        const status = [node(1, 'home', ['pg']), down(['app'])];
+        expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'opt-in', nodeId: 2, stackName: 'api' }))).toBe(true);
+        expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 2, stackName: 'app' }))).toBe(true);
+        expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'disable-node', nodeId: 2 }))).toBe(true);
+    });
+
+    it('is blocked on a proxy node whose dial failed', () => {
+        const status = [node(1, 'home', ['pg']), node(2, 'edge', ['app'], { reachableMode: 'unreachable', reachableReason: 'api token missing' })];
+        expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 2, stackName: 'app' }))).toBe(true);
+    });
+
+    it('is not blocked when the changed stack\'s node is reachable, or when nothing is changed directly', () => {
+        const status = [node(1, 'home', ['pg']), down(['app'])];
+        expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 1, stackName: 'pg' }))).toBe(false);
+        expect(meshChangeBlocked(computeMeshMembershipImpact([node(1, 'home', ['pg']), down([])], { kind: 'disable-node', nodeId: 2 }))).toBe(false);
+        expect(meshChangeBlocked(computeMeshMembershipImpact([node(1, 'home', ['pg'])], { kind: 'opt-in', nodeId: 9, stackName: 'x' }))).toBe(false);
     });
 });

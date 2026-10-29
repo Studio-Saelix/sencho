@@ -233,4 +233,31 @@ describe('RoutingNodeCard disable confirmation', () => {
         await screen.findByRole('button', { name: /Turn off and restart/i });
         expectVisibleInDialog(/pg on this node leaves the mesh and restarts\. No other meshed stacks are affected\./);
     });
+
+    it('does not offer Turn off and restart when its own node is unreachable', async () => {
+        const status = node({
+            enabled: true,
+            reachableMode: 'pilot',
+            pilotConnected: false,
+            optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }],
+        });
+        renderDisable(status, [status]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expectVisibleInDialog(/pg on this node cannot leave the mesh while that node is unreachable, so nothing restarts\./);
+        expect(screen.getByRole('button', { name: /Turn off and restart/i })).toBeDisabled();
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+        expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it('names a stopped meshed stack once, as started', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        const other = node({
+            nodeId: 2,
+            nodeName: 'node-beta',
+            optedInStacks: [{ stackName: 'app', currentlyResolvable: true }, { stackName: 'legacy', currentlyResolvable: false }],
+        });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expectVisibleInDialog(/app on node-beta also restarts to refresh hostnames, so expect brief connection drops\. legacy on node-beta is not running right now, and the redeploy brings it up\./);
+    });
 });

@@ -1,4 +1,4 @@
-import type { MeshRoutePillState } from '@/types/mesh';
+import type { MeshProbeResult, MeshRoutePillState } from '@/types/mesh';
 
 const SLOW_PROBE_THRESHOLD_MS = 500;
 const RECENT_ERROR_WINDOW_MS = 60_000;
@@ -23,6 +23,23 @@ export function meshRouteStateFor(signals: MeshRouteSignals): MeshRoutePillState
     if (signals.lastErrorAt && now - signals.lastErrorAt < RECENT_ERROR_WINDOW_MS) return 'unreachable';
     if (signals.lastProbeMs != null && signals.lastProbeMs > SLOW_PROBE_THRESHOLD_MS) return 'degraded';
     return 'healthy';
+}
+
+/**
+ * The pill once a probe has run. A probe is newer than the diagnostic the
+ * sheet fetched when it opened, so a failed one must not sit beside a stale
+ * healthy chip, and a passing one must not sit beside a stale outage chip.
+ */
+export function meshRouteStateAfterProbe(
+    base: MeshRoutePillState,
+    probe: Pick<MeshProbeResult, 'ok' | 'where' | 'latencyMs'> | null,
+): MeshRoutePillState {
+    if (!probe) return base;
+    if (!probe.ok) return probe.where === 'pilot_tunnel' ? 'tunnel-down' : 'unreachable';
+    if (base === 'unreachable' || base === 'tunnel-down') {
+        return probe.latencyMs != null && probe.latencyMs > SLOW_PROBE_THRESHOLD_MS ? 'degraded' : 'healthy';
+    }
+    return base;
 }
 
 const TONE_TOKENS: Record<MeshRoutePillState, { token: string; label: string; toneClass: string }> = {

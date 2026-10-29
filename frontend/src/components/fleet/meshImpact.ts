@@ -31,9 +31,9 @@ export interface MeshMembershipImpact {
      * dialog errs towards warning.
      */
     hostnamesChange: boolean;
-    /** Other meshed stacks restarted so their hostnames refresh. */
+    /** Other running meshed stacks the cascade can reach. They restart to refresh hostnames when `hostnamesChange` is true. */
     others: Array<{ nodeName: string; stackName: string }>;
-    /** Other meshed stacks that are not currently running, so the cascade starts them (a deploy brings up anything stopped, whether or not hostnames change). */
+    /** Other reachable meshed stacks that are not running, so the cascade starts them (a deploy brings up anything stopped, whether or not hostnames change). Never also in `others`: a stack is restarted or started, not both. */
     started: Array<{ nodeName: string; stackName: string }>;
     /** Other meshed stacks on nodes the cascade cannot reach, so nothing restarts there. */
     skipped: Array<{ nodeName: string; stackName: string }>;
@@ -90,12 +90,11 @@ export function computeMeshMembershipImpact(
                 skipped.push({ nodeName: node.nodeName, stackName: s.stackName });
                 continue;
             }
-            others.push({ nodeName: node.nodeName, stackName: s.stackName });
             // The cascade deploys every meshed stack, and a deploy brings up
             // anything that is not running. A stopped stack that the operator
-            // meant to leave stopped has to be named, not folded into the
-            // restart count.
-            if (!s.currentlyResolvable) started.push({ nodeName: node.nodeName, stackName: s.stackName });
+            // meant to leave stopped has to be named as started, once, and not
+            // folded into the stacks that restart.
+            (s.currentlyResolvable ? others : started).push({ nodeName: node.nodeName, stackName: s.stackName });
         }
     }
     return { direct, directReachable, directStopped, hostnamesChange, others, started, skipped };
@@ -111,6 +110,16 @@ export function meshChangeNeedsConfirmation(impact: MeshMembershipImpact): boole
     return impact.direct.length > 0
         || (impact.hostnamesChange && impact.others.length > 0)
         || impact.started.length > 0;
+}
+
+/**
+ * Whether the change cannot be applied at all: the node holding the changed
+ * stack is unreachable, so the call that edits its override would fail and
+ * the backend stops before changing anything. The confirmation then has
+ * nothing to confirm.
+ */
+export function meshChangeBlocked(impact: MeshMembershipImpact): boolean {
+    return !impact.directReachable && impact.direct.length > 0;
 }
 
 function joinNames(names: string[]): string {
@@ -162,17 +171,19 @@ export function describeMeshMembershipImpact(impact: MeshMembershipImpact, chang
             ? `${stackName} on ${nodeName} is not running right now, and the redeploy brings it up.`
             : `${stackName} on ${nodeName} restarts now.`);
     }
-    if (impact.others.length > 0) {
-        parts.push(impact.hostnamesChange
-            ? `${describeStacks(impact.others)} also ${impact.others.length === 1 ? 'restarts' : 'restart'} to refresh hostnames, so expect brief connection drops.`
-            : 'No hostnames change, so no other meshed stack needs a restart.');
-        if (impact.started.length > 0) {
-            parts.push(
-                `${describeStacks(impact.started)} ${impact.started.length === 1 ? 'is' : 'are'} not running right now,`
-                + ` and the redeploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`,
-            );
-        }
-    } else if (impact.skipped.length === 0) {
+    const reachableOthers = impact.others.length + impact.started.length;
+    if (impact.others.length > 0 && impact.hostnamesChange) {
+        parts.push(`${describeStacks(impact.others)} also ${impact.others.length === 1 ? 'restarts' : 'restart'} to refresh hostnames, so expect brief connection drops.`);
+    } else if (reachableOthers > 0 && !impact.hostnamesChange) {
+        parts.push('No hostnames change, so no other meshed stack needs a restart.');
+    }
+    if (impact.started.length > 0) {
+        parts.push(
+            `${describeStacks(impact.started)} ${impact.started.length === 1 ? 'is' : 'are'} not running right now,`
+            + ` and the redeploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`,
+        );
+    }
+    if (reachableOthers === 0 && impact.skipped.length === 0) {
         parts.push('No other meshed stacks are affected.');
     }
     if (impact.skipped.length > 0) {

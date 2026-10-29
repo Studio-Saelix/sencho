@@ -7,10 +7,14 @@ import { Badge } from '@/components/ui/badge';
 import { ConfirmModal } from '@/components/ui/modal';
 import { Loader2, Activity, Hash, Trash2, Copy } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact } from './meshImpact';
+import {
+    computeMeshMembershipImpact,
+    describeMeshMembershipImpact,
+    meshChangeBlocked,
+} from './meshImpact';
 import { describeMembershipError, describeProbeFailure } from './meshMessages';
 import type { MeshAlias, MeshNodeStatus, MeshRouteDiagnostic, MeshActivityEvent, MeshProbeResult } from '@/types/mesh';
-import { meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
+import { meshRouteStateAfterProbe, meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
 import { describeTransport } from './meshTransport';
 import { MeshStackTopologyView } from './MeshStackTopologyView';
 
@@ -109,7 +113,9 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fle
     };
 
     if (!alias) return null;
-    const pillState = diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized';
+    // The fetched diagnostic is a snapshot from when the sheet opened; a probe
+    // run since then is the newer reading, so the chip must not contradict it.
+    const pillState = meshRouteStateAfterProbe(diag ? meshRouteStateFromBackend(diag.state) : 'not-authorized', probe);
     const pill = meshRouteStateTokens(pillState);
 
     const nodeLabel = (nodeId: number): string =>
@@ -152,9 +158,11 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fle
     const removedHostnames = target && stackAliasCount > 0
         ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${target.stack}. `
         : '';
-    const removeDescription = removeChange
-        ? `${removedHostnames}${describeMeshMembershipImpact(computeMeshMembershipImpact(fleetStatus, removeChange), removeChange)}`
+    const removeImpact = removeChange ? computeMeshMembershipImpact(fleetStatus, removeChange) : null;
+    const removeDescription = removeChange && removeImpact
+        ? `${removedHostnames}${describeMeshMembershipImpact(removeImpact, removeChange)}`
         : undefined;
+    const removeBlocked = removeImpact ? meshChangeBlocked(removeImpact) : false;
     const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
 
     return (
@@ -298,6 +306,8 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fle
             title={`Remove ${target?.stack ?? 'stack'} from the mesh?`}
             description={removeDescription}
             confirmLabel="Remove and restart"
+            confirmDisabled={removeBlocked}
+            cancelLabel={removeBlocked ? 'Close' : undefined}
             onConfirm={() => { setConfirmRemove(false); void removeFromMesh(); }}
             onCancel={() => setConfirmRemove(false)}
         >

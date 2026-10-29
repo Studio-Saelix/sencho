@@ -9,7 +9,7 @@
  * "Pilot tunnel".
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import type { MeshNodeStatus, MeshRouteDiagnostic } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -183,6 +183,61 @@ describe('MeshRouteDetailSheet remove gate', () => {
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
         expectVisibleInDialog(/api on peer-a cannot be removed from the mesh while that node is unreachable, so nothing restarts\./);
         expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/restarts now/);
+    });
+
+    it('offers no restart action when the changed stack\'s node is unreachable, and Close issues no request', async () => {
+        const down: MeshNodeStatus[] = [{ ...STATUS[0], reachableMode: 'unreachable', reachableReason: 'api token missing' }];
+        render(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        const dialog = await screen.findByRole('alertdialog');
+        expect(within(dialog).getByRole('button', { name: /Remove and restart/i })).toBeDisabled();
+        const calls = vi.mocked(apiFetch).mock.calls.length;
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        expect(vi.mocked(apiFetch).mock.calls.length).toBe(calls);
+    });
+});
+
+describe('MeshRouteDetailSheet state chip after a probe', () => {
+    const probeBody = (body: object) => {
+        vi.mocked(apiFetch).mockImplementation(async (url: string, init?: { method?: string }) => {
+            if (url.endsWith('/test') && init?.method === 'POST') {
+                return { ok: true, status: 200, json: async () => body } as unknown as Response;
+            }
+            return { ok: true, status: 200, json: async () => ({ ...DIAG, events: [] }) } as unknown as Response;
+        });
+    };
+
+    it('does not keep a healthy chip beside a failed no_route probe', async () => {
+        probeBody({ ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' });
+        renderSheet(true);
+        expect(await screen.findByText('healthy')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        expect(await screen.findByText('test failed')).toBeInTheDocument();
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+        expect(screen.getByText('unreachable')).toBeInTheDocument();
+    });
+
+    it('shows tunnel down when the probe failed in the tunnel', async () => {
+        probeBody({ ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no bridge' });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        expect(await screen.findByText('tunnel down')).toBeInTheDocument();
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+    });
+
+    it('clears a stale outage chip once the probe passes', async () => {
+        probeBody({ ok: true, latencyMs: 4 });
+        vi.mocked(apiFetch).mockImplementationOnce(async () => ({ ok: true, status: 200, json: async () => ({ ...DIAG, state: 'tunnel down', events: [] }) } as unknown as Response));
+        renderSheet(true);
+        expect(await screen.findByText('tunnel down')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        expect(await screen.findByText('ok 4ms')).toBeInTheDocument();
+        expect(screen.queryByText('tunnel down')).not.toBeInTheDocument();
+        expect(screen.getByText('healthy')).toBeInTheDocument();
     });
 });
 

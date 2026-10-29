@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meshRouteStateFor, meshRouteStateFromBackend, meshRouteStateTokens } from './meshRouteState';
+import { meshRouteStateFor, meshRouteStateFromBackend, meshRouteStateAfterProbe, meshRouteStateTokens } from './meshRouteState';
 
 describe('meshRouteStateFor', () => {
     const FROZEN_NOW = 1_700_000_000_000;
@@ -58,5 +58,34 @@ describe('meshRouteStateTokens', () => {
             expect(tk.toneClass.length).toBeGreaterThan(0);
             expect(tk.token.length).toBeGreaterThan(0);
         }
+    });
+});
+
+describe('meshRouteStateAfterProbe', () => {
+    it('keeps the diagnostic state when no probe has run', () => {
+        expect(meshRouteStateAfterProbe('healthy', null)).toBe('healthy');
+        expect(meshRouteStateAfterProbe('not-authorized', null)).toBe('not-authorized');
+    });
+
+    it('never leaves a healthy or degraded chip beside a failed probe', () => {
+        for (const base of ['healthy', 'degraded', 'not-authorized'] as const) {
+            for (const where of ['no_route', 'agent_resolve', 'agent_dial', 'target_port'] as const) {
+                expect(meshRouteStateAfterProbe(base, { ok: false, where })).toBe('unreachable');
+            }
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'pilot_tunnel' })).toBe('tunnel-down');
+        }
+        expect(meshRouteStateAfterProbe('healthy', { ok: false })).toBe('unreachable');
+    });
+
+    it('clears a stale outage chip once a probe passes, slow or not', () => {
+        expect(meshRouteStateAfterProbe('tunnel-down', { ok: true, latencyMs: 4 })).toBe('healthy');
+        expect(meshRouteStateAfterProbe('unreachable', { ok: true, latencyMs: 4 })).toBe('healthy');
+        expect(meshRouteStateAfterProbe('unreachable', { ok: true, latencyMs: 900 })).toBe('degraded');
+    });
+
+    it('leaves a non-outage state alone when the probe passes', () => {
+        expect(meshRouteStateAfterProbe('healthy', { ok: true, latencyMs: 4 })).toBe('healthy');
+        expect(meshRouteStateAfterProbe('degraded', { ok: true, latencyMs: 4 })).toBe('degraded');
+        expect(meshRouteStateAfterProbe('not-authorized', { ok: true, latencyMs: 4 })).toBe('not-authorized');
     });
 });
