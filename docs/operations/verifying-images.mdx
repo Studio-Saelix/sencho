@@ -154,12 +154,14 @@ An instance pinned to `:dev` shows a persistent "Integration image" marker on it
 
 ### Preview tags (pre-merge only)
 
-Maintainers publish these from open PRs for external validation. They are unsigned and not for production.
+Maintainers publish these from open PRs for external validation. Each image is built from the PR's merge commit, the same tree PR CI validates, so it includes the base branch as it stands at build time. They are unsigned and not for production.
 
 | Tag | Example | Updates on |
 |---|---|---|
 | `pr-<N>` | `saelix/sencho:pr-1526` | Each re-run of the preview workflow for that PR |
 | `preview-<sha>` | `saelix/sencho:preview-abc1234` | Never (immutable per build) |
+
+`<sha>` is the merge commit the image was built from, not the PR head, so two PRs previewed against the same base branch get different tags.
 
 ## Reading your running build
 
