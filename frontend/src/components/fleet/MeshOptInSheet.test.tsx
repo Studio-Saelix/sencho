@@ -7,8 +7,8 @@
  * must never issue the mutation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import type { MeshStackEntry } from '@/types/mesh';
+import { render, screen, fireEvent } from '@testing-library/react';
+import type { MeshNodeStatus, MeshStackEntry } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
@@ -17,6 +17,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 import { apiFetch } from '@/lib/api';
 import { MeshOptInSheet } from './MeshOptInSheet';
+import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
 const STACKS: MeshStackEntry[] = [
     { name: 'web', optedIn: true },
@@ -31,18 +32,33 @@ beforeEach(() => {
     } as unknown as Response);
 });
 
-function renderSheet(canManage: boolean) {
+function renderSheet(canManage: boolean, fleetStatus: MeshNodeStatus[] = []) {
     return render(
         <MeshOptInSheet
             open={true}
             onOpenChange={() => {}}
             nodeId={1}
             nodeName="node-alpha"
-            status={[]}
+            fleetStatus={fleetStatus}
             onChanged={() => {}}
             canManage={canManage}
         />,
     );
+}
+
+function meshNode(nodeId: number, nodeName: string, stacks: string[]): MeshNodeStatus {
+    return {
+        nodeId,
+        nodeName,
+        enabled: true,
+        localForwarderListening: null,
+        pilotConnected: false,
+        reachableMode: 'local',
+        reachableReason: null,
+        reverseCallbackStatus: 'not_applicable',
+        optedInStacks: stacks.map((stackName) => ({ stackName, currentlyResolvable: true })),
+        activeStreamCount: 0,
+    };
 }
 
 describe('MeshOptInSheet canManage gate', () => {
@@ -65,5 +81,31 @@ describe('MeshOptInSheet canManage gate', () => {
             expect.stringContaining('/opt-'),
             expect.anything(),
         );
+    });
+});
+
+describe('MeshOptInSheet cascade confirmation', () => {
+    // The backend restarts every meshed stack in the fleet, not only the one
+    // that changed. The dialog has to say so before the operator commits.
+    const fleet = [meshNode(1, 'node-alpha', ['other']), meshNode(2, 'node-beta', ['api'])];
+
+    it('asks before adding and names the whole cascade', async () => {
+        renderSheet(true, fleet);
+        fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
+        expect(screen.getByText('Add db to mesh?')).toBeInTheDocument();
+        expectVisibleInDialog(
+            /db on node-alpha restarts now\. 2 other meshed stacks on 2 nodes also restart to refresh their hostnames/,
+        );
+        expect(screen.getByRole('button', { name: /Add and restart/i })).toBeInTheDocument();
+    });
+
+    it('asks before removing and names the restart', async () => {
+        renderSheet(true, fleet);
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expect(screen.getByText('Remove web from mesh?')).toBeInTheDocument();
+        expectVisibleInDialog(
+            /web on node-alpha restarts now\. 2 other meshed stacks on 2 nodes also restart to refresh their hostnames/,
+        );
+        expect(screen.getByRole('button', { name: /Remove and restart/i })).toBeInTheDocument();
     });
 });

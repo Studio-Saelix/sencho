@@ -18,6 +18,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 import { apiFetch } from '@/lib/api';
 import { RoutingNodeCard } from './RoutingNodeCard';
 import { deriveNodeState } from './routingNodeState';
+import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
 function node(over: Partial<MeshNodeStatus>): MeshNodeStatus {
     return {
@@ -131,23 +132,11 @@ describe('RoutingNodeCard enable auto-converge', () => {
 
 /**
  * `ConfirmModal.description` renders into a screen-reader-only element, so a
- * text match alone proves nothing about what a sighted operator sees. This
- * walks up from the matched text and fails if any ancestor inside the dialog
- * is the sr-only description, which is exactly the regression that made the
- * impact copy invisible.
+ * text match alone proves nothing about what a sighted operator sees.
+ * `expectVisibleInDialog` walks up from the matched text and fails if it only
+ * lives inside the hidden description, which is exactly the regression that
+ * made the impact copy invisible.
  */
-function expectVisibleInDialog(text: RegExp): void {
-    const dialog = screen.getByRole('alertdialog');
-    const matches = screen.getAllByText(text);
-    const hidden = matches.filter((el) => {
-        for (let cur: HTMLElement | null = el; cur && cur !== dialog; cur = cur.parentElement) {
-            if (/\bsr-only\b/.test(cur.className)) return true;
-        }
-        return false;
-    });
-    expect(matches.length - hidden.length, `visible copy of ${text}`).toBeGreaterThan(0);
-}
-
 describe('RoutingNodeCard disable confirmation', () => {
     beforeEach(() => {
         vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);

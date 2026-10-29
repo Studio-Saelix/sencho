@@ -22,10 +22,10 @@ interface Props {
      * Required for the same reason as the node card's fleet snapshot: the
      * confirmation must not report an empty cascade it cannot see.
      */
-    status: MeshNodeStatus[];
+    fleetStatus: MeshNodeStatus[];
 }
 
-export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, canManage, status }: Props) {
+export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged, canManage, fleetStatus }: Props) {
     const [stacks, setStacks] = useState<MeshStackEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -83,7 +83,7 @@ export function MeshOptInSheet({ open, onOpenChange, nodeId, nodeName, onChanged
         ? { kind: confirmStack.optedIn ? 'opt-out' : 'opt-in', nodeId, stackName: confirmStack.name }
         : null;
     const confirmDescription = confirmChange
-        ? describeMeshMembershipImpact(computeMeshMembershipImpact(status, confirmChange), confirmChange)
+        ? describeMeshMembershipImpact(computeMeshMembershipImpact(fleetStatus, confirmChange), confirmChange)
         : undefined;
     const meta = `${inMeshCount} of ${stacks.length} in mesh`;
 

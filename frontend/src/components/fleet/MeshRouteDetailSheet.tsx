@@ -145,9 +145,14 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
         ? aliases.filter((a) => a.nodeId === target.nodeId && a.stackName === target.stack).length
         : 0;
     const removeChange = target ? { kind: 'opt-out' as const, nodeId: target.nodeId, stackName: target.stack } : null;
+    // The live alias list can lag a stack that just stopped, so only promise a
+    // removal count when there is one. "This removes 0 hostnames" reads like a
+    // bug and tells the operator nothing.
+    const removedHostnames = target && stackAliasCount > 0
+        ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${target.stack}. `
+        : '';
     const removeDescription = removeChange
-        ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${removeChange.stackName}. ${
-            describeMeshMembershipImpact(computeMeshMembershipImpact(status, removeChange), removeChange)}`
+        ? `${removedHostnames}${describeMeshMembershipImpact(computeMeshMembershipImpact(status, removeChange), removeChange)}`
         : undefined;
     const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
 

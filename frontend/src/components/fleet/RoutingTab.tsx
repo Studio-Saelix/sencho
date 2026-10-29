@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
@@ -13,7 +13,8 @@ import { MeshActivitySheet } from './MeshActivitySheet';
 import { MeshTopologyGraph, type MeshGraphEdgeMode } from './MeshTopologyGraph';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './FleetEmptyState';
-import { describeProbeFailure, fixActionLabel } from './meshMessages';
+import { describeProbeFailure, fixActionLabel, type MeshFixAction } from './meshMessages';
+import { isMeshCascadeReachable } from './meshImpact';
 import type { MeshAlias, MeshDataPlaneStatus, MeshNodeStatus, MeshProbeResult } from '@/types/mesh';
 
 type RoutingViewMode = 'table' | 'graph';
@@ -47,6 +48,11 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
     const [localDataPlane, setLocalDataPlane] = useState<MeshDataPlaneStatus | null>(null);
     const [aliases, setAliases] = useState<MeshAlias[]>([]);
+    // The alias snapshot the probe toast reads its node and port from. Kept in
+    // a ref as well as state so a probe started around a refresh resolves the
+    // freshest target even when the click was rendered from the previous
+    // snapshot, and so the callback handed to every card keeps one identity.
+    const aliasesRef = useRef<MeshAlias[]>([]);
     const [loading, setLoading] = useState(true);
     const [optInNode, setOptInNode] = useState<{ id: number; name: string } | null>(null);
     const [diagnosticsNode, setDiagnosticsNode] = useState<{ id: number; name: string } | null>(null);
@@ -68,6 +74,7 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
             }
             if (aliasesRes.ok) {
                 const body = await aliasesRes.json() as { aliases: MeshAlias[] };
+                aliasesRef.current = body.aliases;
                 setAliases(body.aliases);
             }
         } catch (err) {
@@ -114,16 +121,36 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
             toast.success(`${alias} is reachable (${body.latencyMs}ms)`);
             return;
         }
-        const target = aliases.find((a) => a.host === alias);
+        const target = aliasesRef.current.find((a) => a.host === alias);
         const human = describeProbeFailure(alias, body, { nodeName: target?.nodeName, port: target?.port });
-        const openFix = (): void => {
-            if (human.fix === 'diagnostics' && target) setDiagnosticsNode({ id: target.nodeId, name: target.nodeName });
-            else if (human.fix === 'route') setRouteDetailAlias(alias);
-            else setActivityOpen(true);
+        const openFix = (fix: Exclude<MeshFixAction, null>): void => {
+            switch (fix) {
+                case 'diagnostics':
+                    // With no resolved target there is no node to diagnose. The
+                    // route sheet still names the alias; the activity log is not
+                    // where a tunnel failure gets fixed, so never fall through
+                    // to it.
+                    if (target) setDiagnosticsNode({ id: target.nodeId, name: target.nodeName });
+                    else setRouteDetailAlias(alias);
+                    return;
+                case 'route':
+                    setRouteDetailAlias(alias);
+                    return;
+                case 'activity':
+                    setActivityOpen(true);
+                    return;
+                default: {
+                    const _exhaustive: never = fix;
+                    throw new Error(`Unhandled mesh fix action: ${String(_exhaustive)}`);
+                }
+            }
         };
-        toast.error(human.message, human.fix ? { action: { label: fixActionLabel(human.fix), onClick: openFix } } : undefined);
+        const fix = human.fix;
+        toast.error(human.message, fix
+            ? { action: { label: fixActionLabel(fix), onClick: () => openFix(fix) } }
+            : undefined);
         throw new Error(human.message);
-    }, [aliases]);
+    }, []);
 
     const handleGraphNodeClick = useCallback((nodeId: number) => {
         const target = status.find((s) => s.nodeId === nodeId);
@@ -133,14 +160,9 @@ export function RoutingTab({ canManageNode, canManageMembership }: {
 
     const totalAliases = aliases.length;
     const meshedNodes = status.filter((s) => s.enabled).length;
-    // A node is "reachable for mesh" when it is local, a pilot with an
-    // active tunnel, or a Distributed API remote with valid credentials
-    // (central can dial the on-demand proxy tunnel as needed).
-    const reachableNodes = status.filter((s) => (
-        s.reachableMode === 'local'
-        || (s.reachableMode === 'pilot' && s.pilotConnected)
-        || s.reachableMode === 'proxy'
-    )).length;
+    // A node is "reachable for mesh" when the fleet-wide cascade can land a
+    // redeploy there; that is the same rule the membership confirmations use.
+    const reachableNodes = status.filter(isMeshCascadeReachable).length;
 
     if (loading) {
         return (
@@ -332,7 +354,7 @@ function SheetsRoot(props: {
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
                     nodeId={optInNode.id}
                     nodeName={optInNode.name}
-                    status={props.status}
+                    fleetStatus={props.status}
                     canManage={props.canManageMembership}
                     onChanged={props.onChanged}
                 />

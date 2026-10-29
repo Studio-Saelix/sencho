@@ -8,7 +8,11 @@
  * this the card can drift back to rendering a control the API answers with 403.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+
+vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn(async () => {}) }));
+
+import { copyToClipboard } from '@/lib/clipboard';
 import { RoutingNodeCard, type RoutingNodeCardProps } from '@/components/ui/routing-node-card';
 
 function renderCard(overrides: Partial<RoutingNodeCardProps> = {}) {
@@ -131,5 +135,59 @@ describe('routing-node-card canManage gate (compact density)', () => {
     it('keeps the retry CTA for a non-manager on an offline node', () => {
         renderCard({ nodeState: 'offline', canManage: false });
         expect(screen.getByRole('button', { name: /Retry now/i })).toBeInTheDocument();
+    });
+});
+
+describe('routing-node-card alias row copy', () => {
+    const address = 'web.api.node:8080';
+    const liveRow = [{ host: 'web.api.node', port: 8080, kind: 'alias' as const }];
+
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.runOnlyPendingTimers();
+        vi.useRealTimers();
+        vi.clearAllMocks();
+    });
+
+    function renderWithAlias(aliases: RoutingNodeCardProps['aliases']) {
+        return renderCard({
+            nodeState: 'meshed',
+            meta: { reverseBridge: 'up', stacks: 1, aliases: aliases.length },
+            aliases,
+        });
+    }
+
+    it('copies host:port and acknowledges the copy', async () => {
+        renderWithAlias(liveRow);
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: `Copy ${address}` }));
+        });
+        expect(copyToClipboard).toHaveBeenCalledWith(address);
+        expect(screen.getByRole('button', { name: `Copied ${address}` })).toBeInTheDocument();
+    });
+
+    it('returns the control to its idle label after the acknowledgement window', async () => {
+        renderWithAlias(liveRow);
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: `Copy ${address}` }));
+        });
+        await act(async () => { vi.advanceTimersByTime(1500); });
+        expect(screen.getByRole('button', { name: `Copy ${address}` })).toBeInTheDocument();
+    });
+
+    it('clears the pending acknowledgement timer when the row unmounts', async () => {
+        const view = renderWithAlias(liveRow);
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: `Copy ${address}` }));
+        });
+        view.unmount();
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('offers no copy control for a suspended row', () => {
+        renderWithAlias([{ host: 'stopped-stack', port: 0, kind: 'suspended' }]);
+        expect(screen.queryByRole('button', { name: /Copy/ })).not.toBeInTheDocument();
     });
 });

@@ -434,16 +434,17 @@ interface AliasRowProps {
 function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
     const isSuspended = row.kind === 'suspended';
     const [copied, setCopied] = React.useState(false);
+    const resetCopiedTimer = React.useRef<number | null>(null);
+    React.useEffect(() => () => {
+        if (resetCopiedTimer.current !== null) window.clearTimeout(resetCopiedTimer.current);
+    }, []);
     const address = `${row.host}:${row.port}`;
-    React.useEffect(() => {
-        if (!copied) return;
-        const t = setTimeout(() => setCopied(false), 1500);
-        return () => clearTimeout(t);
-    }, [copied]);
     const copyAddress = async (): Promise<void> => {
         try {
             await copyToClipboard(address);
             setCopied(true);
+            if (resetCopiedTimer.current !== null) window.clearTimeout(resetCopiedTimer.current);
+            resetCopiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
         } catch {
             /* clipboard unavailable; the address stays visible to select by hand */
         }

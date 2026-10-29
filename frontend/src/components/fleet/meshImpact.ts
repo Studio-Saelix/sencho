@@ -20,8 +20,23 @@ export interface MeshMembershipImpact {
     others: Array<{ nodeName: string; stackName: string }>;
     /** Other meshed stacks that are not currently running, so the cascade starts them. */
     started: Array<{ nodeName: string; stackName: string }>;
+    /** Other meshed stacks on nodes the cascade cannot reach, so nothing restarts there. */
+    skipped: Array<{ nodeName: string; stackName: string }>;
     /** Number of distinct nodes among `others`. */
     otherNodeCount: number;
+}
+
+/**
+ * Whether the fleet-wide cascade can reach a node at all.
+ *
+ * A pilot node with no open tunnel and a proxy node whose dial failed both
+ * report a live mesh membership, but the per-stack redeploy is a cross-node
+ * call that cannot land there. Counting their stacks as "also restart" would
+ * promise restarts that never happen.
+ */
+export function isMeshCascadeReachable(node: MeshNodeStatus): boolean {
+    if (node.reachableMode === 'local' || node.reachableMode === 'proxy') return true;
+    return node.reachableMode === 'pilot' && node.pilotConnected;
 }
 
 export function computeMeshMembershipImpact(
@@ -31,16 +46,22 @@ export function computeMeshMembershipImpact(
     const direct: MeshMembershipImpact['direct'] = [];
     const others: MeshMembershipImpact['others'] = [];
     const started: MeshMembershipImpact['started'] = [];
+    const skipped: MeshMembershipImpact['skipped'] = [];
     const targetNode = status.find((n) => n.nodeId === change.nodeId);
     if (change.kind !== 'disable-node') {
         direct.push({ nodeName: targetNode?.nodeName ?? `node ${change.nodeId}`, stackName: change.stackName });
     }
     for (const node of status) {
+        const reachable = isMeshCascadeReachable(node);
         for (const s of node.optedInStacks) {
             const isTarget = node.nodeId === change.nodeId
                 && (change.kind === 'disable-node' || s.stackName === change.stackName);
             if (isTarget) {
                 if (change.kind === 'disable-node') direct.push({ nodeName: node.nodeName, stackName: s.stackName });
+                continue;
+            }
+            if (!reachable) {
+                skipped.push({ nodeName: node.nodeName, stackName: s.stackName });
                 continue;
             }
             others.push({ nodeName: node.nodeName, stackName: s.stackName });
@@ -51,11 +72,22 @@ export function computeMeshMembershipImpact(
             if (!s.currentlyResolvable) started.push({ nodeName: node.nodeName, stackName: s.stackName });
         }
     }
-    return { direct, others, started, otherNodeCount: new Set(others.map((o) => o.nodeName)).size };
+    return {
+        direct,
+        others,
+        started,
+        skipped,
+        otherNodeCount: new Set(others.map((o) => o.nodeName)).size,
+    };
 }
 
 function plural(n: number, one: string, many: string): string {
     return `${n} ${n === 1 ? one : many}`;
+}
+
+function joinNames(names: string[]): string {
+    if (names.length <= 1) return names.join('');
+    return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
 /**
@@ -71,11 +103,30 @@ export function describeMeshMembershipImpact(impact: MeshMembershipImpact, chang
                 ? '1 meshed stack on this node leaves the mesh and restarts.'
                 : `${impact.direct.length} meshed stacks on this node leave the mesh and restart.`)
         : `${impact.direct[0].stackName} on ${impact.direct[0].nodeName} restarts now.`;
-    if (impact.others.length === 0) {
-        return `${first} No other meshed stacks are affected.`;
+    const parts = [first];
+    if (impact.others.length > 0) {
+        const verb = impact.others.length === 1 ? 'restarts' : 'restart';
+        parts.push(
+            `${plural(impact.others.length, 'other meshed stack', 'other meshed stacks')}`
+            + ` on ${plural(impact.otherNodeCount, 'node', 'nodes')} also ${verb} to refresh their hostnames,`
+            + ' so expect brief connection drops.',
+        );
+        if (impact.started.length > 0) {
+            parts.push(
+                `${plural(impact.started.length, 'of those is', 'of those are')} not running right now,`
+                + ` and that deploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`,
+            );
+        }
+    } else if (impact.skipped.length === 0) {
+        parts.push('No other meshed stacks are affected.');
     }
-    const verb = impact.others.length === 1 ? 'restarts' : 'restart';
-    const cascade = `${first} ${plural(impact.others.length, 'other meshed stack', 'other meshed stacks')} on ${plural(impact.otherNodeCount, 'node', 'nodes')} also ${verb} to refresh their hostnames, so expect brief connection drops.`;
-    if (impact.started.length === 0) return cascade;
-    return `${cascade} ${plural(impact.started.length, 'of those is', 'of those are')} not running right now, and that deploy brings ${impact.started.length === 1 ? 'it' : 'them'} up.`;
+    if (impact.skipped.length > 0) {
+        const nodeNames = Array.from(new Set(impact.skipped.map((s) => s.nodeName)));
+        parts.push(
+            `${plural(impact.skipped.length, 'meshed stack', 'meshed stacks')} on ${joinNames(nodeNames)}`
+            + ` ${impact.skipped.length === 1 ? 'is' : 'are'} skipped, because`
+            + ` ${nodeNames.length === 1 ? 'that node is' : 'those nodes are'} unreachable.`,
+        );
+    }
+    return parts.join(' ');
 }

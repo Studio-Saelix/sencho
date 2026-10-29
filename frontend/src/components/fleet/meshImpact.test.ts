@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { MeshNodeStatus } from '@/types/mesh';
-import { computeMeshMembershipImpact, describeMeshMembershipImpact } from './meshImpact';
+import { computeMeshMembershipImpact, describeMeshMembershipImpact, isMeshCascadeReachable } from './meshImpact';
 
-function node(nodeId: number, nodeName: string, stacks: Array<string | { stackName: string; running: boolean }>): MeshNodeStatus {
+function node(
+    nodeId: number,
+    nodeName: string,
+    stacks: Array<string | { stackName: string; running: boolean }>,
+    over: Partial<MeshNodeStatus> = {},
+): MeshNodeStatus {
     return {
         nodeId,
         nodeName,
@@ -16,6 +21,7 @@ function node(nodeId: number, nodeName: string, stacks: Array<string | { stackNa
             ? { stackName: s, currentlyResolvable: true }
             : { stackName: s.stackName, currentlyResolvable: s.running })),
         activeStreamCount: 0,
+        ...over,
     };
 }
 
@@ -54,6 +60,47 @@ describe('computeMeshMembershipImpact', () => {
         expect(impact.others.map((o) => o.stackName)).toEqual(['app', 'proxy']);
         expect(impact.otherNodeCount).toBe(2);
     });
+
+    it('keeps stacks the cascade cannot reach out of the restart count', () => {
+        // A pilot node with no tunnel and an unreachable proxy node both hold
+        // live mesh memberships, but the cross-node redeploy cannot land there.
+        const status = [
+            node(1, 'home', ['pg']),
+            node(2, 'vps', [{ stackName: 'app', running: false }], { reachableMode: 'pilot', pilotConnected: false }),
+            node(3, 'edge', ['proxy'], { reachableMode: 'unreachable', reachableReason: 'api token missing' }),
+        ];
+        const impact = computeMeshMembershipImpact(status, { kind: 'opt-in', nodeId: 1, stackName: 'api' });
+
+        expect(impact.others).toEqual([{ nodeName: 'home', stackName: 'pg' }]);
+        expect(impact.otherNodeCount).toBe(1);
+        expect(impact.skipped).toEqual([
+            { nodeName: 'vps', stackName: 'app' },
+            { nodeName: 'edge', stackName: 'proxy' },
+        ]);
+        // A stopped stack on an unreachable node is skipped, never promised a start.
+        expect(impact.started).toEqual([]);
+    });
+
+    it('treats a pilot node with an open tunnel as reachable', () => {
+        const status = [node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: true })];
+        expect(computeMeshMembershipImpact(status, { kind: 'opt-in', nodeId: 1, stackName: 'api' }).skipped).toEqual([]);
+    });
+});
+
+describe('isMeshCascadeReachable', () => {
+    it('is reachable for the local node and a proxy peer', () => {
+        expect(isMeshCascadeReachable(node(1, 'home', []))).toBe(true);
+        expect(isMeshCascadeReachable(node(2, 'vps', [], { reachableMode: 'proxy' }))).toBe(true);
+    });
+
+    it('needs an open tunnel for a pilot node', () => {
+        expect(isMeshCascadeReachable(node(2, 'vps', [], { reachableMode: 'pilot', pilotConnected: true }))).toBe(true);
+        expect(isMeshCascadeReachable(node(2, 'vps', [], { reachableMode: 'pilot', pilotConnected: false }))).toBe(false);
+    });
+
+    it('is unreachable when the node reports unreachable', () => {
+        expect(isMeshCascadeReachable(node(3, 'edge', [], { reachableMode: 'unreachable' }))).toBe(false);
+    });
 });
 
 describe('describeMeshMembershipImpact', () => {
@@ -90,5 +137,27 @@ describe('describeMeshMembershipImpact', () => {
         const impact = computeMeshMembershipImpact([node(1, 'home', ['pg']), node(2, 'vps', ['app'])], change);
         expect(describeMeshMembershipImpact(impact, change))
             .toBe('1 meshed stack on this node leaves the mesh and restarts. 1 other meshed stack on 1 node also restarts to refresh their hostnames, so expect brief connection drops.');
+    });
+
+    it('names the unreachable node whose stacks are skipped', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 1, stackName: 'api' };
+        const status = [
+            node(1, 'home', ['pg']),
+            node(2, 'vps', ['app'], { reachableMode: 'unreachable', reachableReason: 'api token missing' }),
+        ];
+        expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change))
+            .toBe('api on home restarts now. 1 other meshed stack on 1 node also restarts to refresh their hostnames, so expect brief connection drops. 1 meshed stack on vps is skipped, because that node is unreachable.');
+    });
+
+    it('joins several unreachable nodes and does not claim nothing else is affected', () => {
+        const change = { kind: 'opt-in' as const, nodeId: 1, stackName: 'api' };
+        const status = [
+            node(1, 'home', []),
+            node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: false }),
+            node(3, 'edge', ['proxy'], { reachableMode: 'unreachable' }),
+        ];
+        const text = describeMeshMembershipImpact(computeMeshMembershipImpact(status, change), change);
+        expect(text).not.toContain('No other meshed stacks are affected');
+        expect(text).toBe('api on home restarts now. 2 meshed stacks on vps and edge are skipped, because those nodes are unreachable.');
     });
 });

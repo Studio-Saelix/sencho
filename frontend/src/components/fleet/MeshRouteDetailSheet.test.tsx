@@ -27,6 +27,7 @@ vi.mock('@xyflow/react', () => ({
 
 import { apiFetch } from '@/lib/api';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
+import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
 const ALIAS = 'web.api.peer.sencho';
 
@@ -104,6 +105,16 @@ describe('MeshRouteDetailSheet remove gate', () => {
             );
         });
         await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    });
+
+    it('shows the removal impact visibly and never claims to remove zero hostnames', async () => {
+        // The live alias list can lag a stack that just stopped. "This removes
+        // 0 hostnames" reads like a bug, so the count is only promised when
+        // there is one.
+        renderSheet(true);
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/api on peer-a restarts now/);
+        expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/0 hostnames/);
     });
 
     it('ignores a superseded alias diagnostic whose body resolves after switching aliases', async () => {
