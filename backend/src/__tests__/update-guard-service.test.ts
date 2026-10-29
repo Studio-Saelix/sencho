@@ -474,12 +474,16 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     }
   });
 
-  it('skips the optional probe when the caller deadline leaves no room', async () => {
+  it.each<[string, number]>([
+    ['a past instant', 0],
+    ['exactly the headroom', 250],
+    ['a non-finite value', Number.NaN],
+  ])('skips the optional probe when the deadline is %s', async (_case, offset) => {
     healthyCollaborators([labeled('web', '2.38.1')]);
     const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const report = await UpdateGuardService.getInstance()
-      .computeUpdateReadiness(0, 'app', undefined, { deadlineEpochMs: Date.now() });
+      .computeUpdateReadiness(0, 'app', undefined, { deadlineEpochMs: Date.now() + offset });
 
     expect(mockComposeVersion).not.toHaveBeenCalled();
     expect(report.signals.find(s => s.id === 'compose_version')).toMatchObject({
@@ -488,7 +492,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     });
     expect(report.verdict).toBe('ready');
     expect(warned).toHaveBeenCalledWith(
-      '[UpdateGuard] compose version probe skipped for %s: no time left before the readiness deadline',
+      '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
       'app',
     );
   });
@@ -725,10 +729,11 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
 
   it('fails the healthchecks item closed when a stack container has no id', async () => {
     // The rollback probe judges the whole stack, so an uninspectable container
-    // must not let the remaining ones stand in for it.
+    // must not let the inspectable ones stand in for it.
     mockGetPreview.mockResolvedValue(preview([{ current_tag: '1.2.3' }]));
     mockListContainers.mockResolvedValue([
       { Names: ['/app-web-1'], State: 'running', Labels: { 'com.docker.compose.project': 'app' } },
+      listed('db1', 'app-db-1', { Labels: { 'com.docker.compose.project': 'app' } }),
     ]);
     const report = await UpdateGuardService.getInstance().computeRollbackReadiness(0, 'app');
     expect(report.items.find(i => i.id === 'healthchecks')).toMatchObject({ state: 'unknown' });
@@ -797,8 +802,7 @@ describe('readiness summary under the pass deadline', () => {
   beforeEach(() => {
     CacheService.getInstance().flush();
     mockGetStacksStrict.mockImplementation(() => new Promise<string[]>((resolve) => {
-      // Nonzero scan latency: this starts the fourth stack with 2,995 ms of the
-      // pass left, so its probe can no longer take the full three seconds.
+      // Nonzero scan latency, so the pass's stack scan is not a single instant.
       setTimeout(() => resolve([...stacks]), 5);
     }));
     mockGetStackUpdateDetail.mockReturnValue({});
@@ -834,10 +838,18 @@ describe('readiness summary under the pass deadline', () => {
     }
   }
 
-  it('keeps responsive version evidence in a late batch', async () => {
-    mockComposeVersion.mockResolvedValue('5.6.0');
+  it('keeps responsive version evidence when a late probe gets a shortened budget', async () => {
     const mismatched = orderedStacks[orderedStacks.length - 1];
     mockListContainers.mockResolvedValue(stackContainers({ [mismatched]: '2.38.1' }));
+    let calls = 0;
+    mockComposeVersion.mockImplementation(() => {
+      calls += 1;
+      // The first batch hangs, so the last stack starts with less than three
+      // seconds of the pass left. Its probe answers inside that shortened
+      // budget, and the evidence still reaches the row.
+      if (calls < stacks.length) return new Promise(() => {});
+      return new Promise((resolve) => { setTimeout(() => resolve('5.6.0'), 1_000); });
+    });
 
     await withFakeTimers(async () => {
       const summary = await runSummaryWithFakeTimers();
@@ -848,8 +860,8 @@ describe('readiness summary under the pass deadline', () => {
         expect(row.update).not.toBeNull();
         expect(row.rollback).not.toBeNull();
       }
-      // The late batch still ran the probe: its mismatching stack carries the
-      // warning the probe produced, not just a generic ready row.
+      // The shortened probe still produced evidence for the late stack, and the
+      // row carries the warning instead of a generic ready verdict.
       expect(summary.stacks.find(row => row.stack === mismatched)?.update).toMatchObject({
         verdict: 'ready_with_warnings',
         topReasonId: 'compose_version',
@@ -864,9 +876,10 @@ describe('readiness summary under the pass deadline', () => {
     await withFakeTimers(async () => {
       const summary = await runSummaryWithFakeTimers();
 
-      // The fourth stack starts with less than three seconds left. Before the
-      // pass deadline was handed to the probe, its fixed three-second wait
-      // outlived the per-stack timeout and the row lost both verdicts.
+      // The first batch of hung probes spends the full three-second budget, so
+      // the fourth stack starts at 2,995 ms of the pass left. Before the pass
+      // deadline was handed to the probe, its fixed three-second wait outlived
+      // the per-stack timeout and the row lost both verdicts.
       expect(summary.truncated).toBe(false);
       expect(summary.stacks.map(row => row.stack)).toEqual(orderedStacks);
       for (const row of summary.stacks) {

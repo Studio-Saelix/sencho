@@ -197,22 +197,27 @@ export class UpdateGuardService {
     //
     // A batched caller can supply its own deadline. The probe then shrinks to
     // the room left in that deadline, so a hung optional probe cannot keep the
-    // report waiting past the caller; when no room is left the probe is skipped
-    // and reported as the same informational unknown.
+    // report waiting past the caller; when no usable room is left the probe is
+    // skipped and reported as the same informational unknown.
     const deadline = options.deadlineEpochMs;
-    const versionProbeBudget = deadline === undefined || !Number.isFinite(deadline)
+    const versionProbeBudget = deadline === undefined
       ? INPUT_TIMEOUT_MS
-      : Math.min(INPUT_TIMEOUT_MS, deadline - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS);
+      : Number.isFinite(deadline)
+        ? Math.min(INPUT_TIMEOUT_MS, deadline - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS)
+        // A deadline the arithmetic could not produce is not a reason to run
+        // the probe unbounded: skip it like a deadline that has already passed.
+        : 0;
     let composeVersionProbe: Promise<string | null | Errored> | null = null;
     if (!serviceName) {
       if (versionProbeBudget > 0) {
         composeVersionProbe = this.collect('compose version', stackName, () =>
           withTimeout(ComposeService.getInstance(nodeId).composeVersion(), versionProbeBudget, 'readiness compose version'));
       } else {
-        // The skip is deliberate, not a read failure, so say so in the log while
-        // still handing the report its informational unknown row.
+        // The skip is deliberate, not a read failure, so say so in the log. The
+        // report still carries the informational unknown row when the container
+        // probe succeeded (the row is skipped with the rest when it did not).
         console.warn(
-          '[UpdateGuard] compose version probe skipped for %s: no time left before the readiness deadline',
+          '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
           sanitizeForLog(stackName),
         );
         composeVersionProbe = Promise.resolve<Errored>('error');
