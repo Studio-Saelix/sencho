@@ -304,14 +304,17 @@ describe('MeshProxyTunnelDialer', () => {
         // The configuration docs say NODE_EXTRA_CA_CERTS is read at process
         // start while SENCHO_MESH_PROXY_CA_FILE is read when the dial
         // configuration is first loaded, on the first proxy-mode dial, and
-        // kept once it parses. Pin both halves: the file is not opened before
-        // a dial, a failed parse is retried on the next dial, and a loaded
-        // config is not re-read afterwards.
+        // kept once it parses. Pin the mesh half: the file is not opened
+        // before a dial, a failed parse is retried on the next dial, and a
+        // loaded config is not re-read afterwards.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-lazy-'));
         const file = path.join(dir, 'ca.pem');
         const server = await startUpgradeRefusal('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
         const caReads = vi.spyOn(fs, 'readFileSync');
         try {
+            // The later dials use a cleartext local URL, which the header
+            // guard would refuse if the ambient environment carried headers.
+            delete process.env.SENCHO_MESH_PROXY_HEADERS;
             process.env.SENCHO_MESH_PROXY_CA_FILE = file;
             fs.writeFileSync(file, 'not a cert');
             const reads = (): number => caReads.mock.calls.filter((args) => String(args[0]) === file).length;
@@ -360,8 +363,9 @@ describe('MeshProxyTunnelDialer', () => {
             expect(server.seen).toHaveLength(2);
         } finally {
             delete process.env.SENCHO_MESH_PROXY_CA_FILE;
-            MeshProxyTunnelDialer.resetForTest(0);
+            delete process.env.SENCHO_MESH_PROXY_HEADERS;
             caReads.mockRestore();
+            MeshProxyTunnelDialer.resetForTest(0);
             fs.rmSync(dir, { recursive: true, force: true });
             await server.close();
         }
