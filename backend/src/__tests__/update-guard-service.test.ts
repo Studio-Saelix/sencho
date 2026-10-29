@@ -482,19 +482,27 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     healthyCollaborators([labeled('web', '2.38.1')]);
     const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const report = await UpdateGuardService.getInstance()
-      .computeUpdateReadiness(0, 'app', undefined, { deadlineEpochMs: Date.now() + offset });
+    // Freeze the clock so "exactly the headroom" leaves a budget of exactly
+    // zero, not one that a millisecond of test overhead makes negative.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_700_000_000_000);
+      const report = await UpdateGuardService.getInstance()
+        .computeUpdateReadiness(0, 'app', undefined, { deadlineEpochMs: Date.now() + offset });
 
-    expect(mockComposeVersion).not.toHaveBeenCalled();
-    expect(report.signals.find(s => s.id === 'compose_version')).toMatchObject({
-      status: 'unknown',
-      affectsVerdict: false,
-    });
-    expect(report.verdict).toBe('ready');
-    expect(warned).toHaveBeenCalledWith(
-      '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
-      'app',
-    );
+      expect(mockComposeVersion).not.toHaveBeenCalled();
+      expect(report.signals.find(s => s.id === 'compose_version')).toMatchObject({
+        status: 'unknown',
+        affectsVerdict: false,
+      });
+      expect(report.verdict).toBe('ready');
+      expect(warned).toHaveBeenCalledWith(
+        '[UpdateGuard] compose version probe skipped for %s: the readiness deadline leaves no usable time for it',
+        'app',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -731,6 +739,7 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
     // The rollback probe judges the whole stack, so an uninspectable container
     // must not let the inspectable ones stand in for it.
     mockGetPreview.mockResolvedValue(preview([{ current_tag: '1.2.3' }]));
+    mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
     mockListContainers.mockResolvedValue([
       { Names: ['/app-web-1'], State: 'running', Labels: { 'com.docker.compose.project': 'app' } },
       listed('db1', 'app-db-1', { Labels: { 'com.docker.compose.project': 'app' } }),
@@ -838,15 +847,15 @@ describe('readiness summary under the pass deadline', () => {
     }
   }
 
-  it('keeps responsive version evidence when a late probe gets a shortened budget', async () => {
+  it('keeps responsive version evidence for a late stack', async () => {
     const mismatched = orderedStacks[orderedStacks.length - 1];
     mockListContainers.mockResolvedValue(stackContainers({ [mismatched]: '2.38.1' }));
     let calls = 0;
     mockComposeVersion.mockImplementation(() => {
       calls += 1;
       // The first batch hangs, so the last stack starts with less than three
-      // seconds of the pass left. Its probe answers inside that shortened
-      // budget, and the evidence still reaches the row.
+      // seconds of the pass left. Its probe answers inside that reduced room,
+      // and the evidence still reaches the row.
       if (calls < stacks.length) return new Promise(() => {});
       return new Promise((resolve) => { setTimeout(() => resolve('5.6.0'), 1_000); });
     });
@@ -860,8 +869,8 @@ describe('readiness summary under the pass deadline', () => {
         expect(row.update).not.toBeNull();
         expect(row.rollback).not.toBeNull();
       }
-      // The shortened probe still produced evidence for the late stack, and the
-      // row carries the warning instead of a generic ready verdict.
+      // The probe still produced evidence for the late stack, and the row
+      // carries the warning instead of a generic ready verdict.
       expect(summary.stacks.find(row => row.stack === mismatched)?.update).toMatchObject({
         verdict: 'ready_with_warnings',
         topReasonId: 'compose_version',

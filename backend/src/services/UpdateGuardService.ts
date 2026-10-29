@@ -64,8 +64,9 @@ export interface UpdateReadinessOptions {
    * the optional Compose version probe is shortened to fit: required inputs
    * keep their own bound and the caller's outer timeout still decides whether
    * they were available. Omitted for the direct route, which uses the dialog
-   * budget. No effect when `serviceName` is set, because service-scoped
-   * readiness omits the version signal.
+   * budget. A non-finite value is treated as an expired deadline. No effect
+   * when `serviceName` is set, because service-scoped readiness omits the
+   * version signal.
    */
   deadlineEpochMs?: number;
 }
@@ -204,8 +205,9 @@ export class UpdateGuardService {
       ? INPUT_TIMEOUT_MS
       : Number.isFinite(deadline)
         ? Math.min(INPUT_TIMEOUT_MS, deadline - Date.now() - OPTIONAL_PROBE_DEADLINE_MARGIN_MS)
-        // A deadline the arithmetic could not produce is not a reason to run
-        // the probe unbounded: skip it like a deadline that has already passed.
+        // A deadline the arithmetic could not produce is unusable: skip it like
+        // a deadline that has already passed rather than falling back to the
+        // probe's full budget.
         : 0;
     let composeVersionProbe: Promise<string | null | Errored> | null = null;
     if (!serviceName) {
