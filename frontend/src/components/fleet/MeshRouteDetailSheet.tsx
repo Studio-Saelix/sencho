@@ -20,14 +20,15 @@ interface Props {
     alias: string | null;
     /** Whether the user may start the mesh-wide opt-out cascade. */
     canManage: boolean;
-    status: MeshNodeStatus[];
+    /** Every node's mesh status; the same fleet snapshot the other membership dialogs take. */
+    fleetStatus: MeshNodeStatus[];
     aliases: MeshAlias[];
     onChanged: () => void;
 }
 
 type RouteTab = 'overview' | 'events' | 'topology' | 'raw';
 
-export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, status, aliases, onChanged }: Props) {
+export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fleetStatus, aliases, onChanged }: Props) {
     const [diag, setDiag] = useState<MeshRouteDiagnostic | null>(null);
     const [events, setEvents] = useState<MeshActivityEvent[]>([]);
     const [probe, setProbe] = useState<MeshProbeResult | null>(null);
@@ -112,7 +113,7 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
     const pill = meshRouteStateTokens(pillState);
 
     const nodeLabel = (nodeId: number): string =>
-        status.find((s) => s.nodeId === nodeId)?.nodeName ?? `node #${nodeId}`;
+        fleetStatus.find((s) => s.nodeId === nodeId)?.nodeName ?? `node #${nodeId}`;
     const meta = diag?.target
         ? `${diag.target.stack}/${diag.target.service}:${diag.target.port} · ${nodeLabel(diag.target.nodeId)}`
         : (loading ? 'Loading…' : 'No target resolved');
@@ -140,7 +141,7 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
             : 'No probe run yet';
 
     const target = diag?.target ?? null;
-    const targetNode = target ? status.find((s) => s.nodeId === target.nodeId) : undefined;
+    const targetNode = target ? fleetStatus.find((s) => s.nodeId === target.nodeId) : undefined;
     const stackAliasCount = target
         ? aliases.filter((a) => a.nodeId === target.nodeId && a.stackName === target.stack).length
         : 0;
@@ -152,7 +153,7 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
         ? `This removes ${stackAliasCount} ${stackAliasCount === 1 ? 'hostname' : 'hostnames'} published by ${target.stack}. `
         : '';
     const removeDescription = removeChange
-        ? `${removedHostnames}${describeMeshMembershipImpact(computeMeshMembershipImpact(status, removeChange), removeChange)}`
+        ? `${removedHostnames}${describeMeshMembershipImpact(computeMeshMembershipImpact(fleetStatus, removeChange), removeChange)}`
         : undefined;
     const transport = describeTransport(targetNode, diag?.pilot.connected ?? false);
 
@@ -272,7 +273,7 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, sta
                         <MeshStackTopologyView
                             nodeId={diag.target.nodeId}
                             stackName={diag.target.stack}
-                            status={status}
+                            status={fleetStatus}
                             aliases={aliases}
                         />
                     ) : (

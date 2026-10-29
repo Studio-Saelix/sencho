@@ -371,7 +371,7 @@ function SheetsRoot(props: {
                 onOpenChange={(open) => { if (!open) props.setRouteDetailAlias(null); }}
                 alias={props.routeDetailAlias}
                 canManage={props.canManageMembership}
-                status={props.status}
+                fleetStatus={props.status}
                 aliases={props.aliases}
                 onChanged={props.onChanged}
             />

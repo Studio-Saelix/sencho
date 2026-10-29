@@ -3,6 +3,7 @@ import { Check, Copy, Loader2, Play, Plus, RotateCw, ServerCog } from 'lucide-re
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TogglePill } from '@/components/ui/toggle-pill';
+import { toast } from '@/components/ui/toast-store';
 import { useDensity } from '@/hooks/use-density';
 import { formatAgeShort } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
@@ -446,7 +447,9 @@ function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
             if (resetCopiedTimer.current !== null) window.clearTimeout(resetCopiedTimer.current);
             resetCopiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
         } catch {
-            /* clipboard unavailable; the address stays visible to select by hand */
+            // Same failure surface as the route sheet's copy control: the address
+            // stays selectable on screen, but a click that did nothing must say so.
+            toast.error('Could not copy to the clipboard');
         }
     };
     const dot: DotTone = isSuspended

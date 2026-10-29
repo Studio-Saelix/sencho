@@ -11,8 +11,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn(async () => {}) }));
+vi.mock('@/components/ui/toast-store', () => ({
+    toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
+}));
 
 import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
 import { RoutingNodeCard, type RoutingNodeCardProps } from '@/components/ui/routing-node-card';
 
 function renderCard(overrides: Partial<RoutingNodeCardProps> = {}) {
@@ -189,5 +193,15 @@ describe('routing-node-card alias row copy', () => {
     it('offers no copy control for a suspended row', () => {
         renderWithAlias([{ host: 'stopped-stack', port: 0, kind: 'suspended' }]);
         expect(screen.queryByRole('button', { name: /Copy/ })).not.toBeInTheDocument();
+    });
+
+    it('says so when the clipboard rejects instead of failing silently', async () => {
+        vi.mocked(copyToClipboard).mockRejectedValueOnce(new Error('denied'));
+        renderWithAlias(liveRow);
+        await act(async () => {
+            fireEvent.click(screen.getByRole('button', { name: `Copy ${address}` }));
+        });
+        expect(toast.error).toHaveBeenCalledWith('Could not copy to the clipboard');
+        expect(screen.getByRole('button', { name: `Copy ${address}` })).toBeInTheDocument();
     });
 });

@@ -67,7 +67,7 @@ function renderSheet(canManage: boolean, onChanged: () => void = () => {}) {
             onOpenChange={() => {}}
             alias={ALIAS}
             canManage={canManage}
-            status={STATUS}
+            fleetStatus={STATUS}
             aliases={[]}
             onChanged={onChanged}
         />,
@@ -117,6 +117,27 @@ describe('MeshRouteDetailSheet remove gate', () => {
         expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/0 hostnames/);
     });
 
+    it('states the hostname count when the alias list knows the stack', async () => {
+        vi.mocked(apiFetch).mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ ...DIAG, events: [] }),
+        } as unknown as Response);
+        render(
+            <MeshRouteDetailSheet
+                open
+                onOpenChange={() => {}}
+                alias={ALIAS}
+                canManage
+                fleetStatus={STATUS}
+                aliases={[{ host: ALIAS, nodeId: 2, nodeName: 'peer-a', stackName: 'api', serviceName: 'web', port: 80 }]}
+                onChanged={() => {}}
+            />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/This removes 1 hostname published by api\./);
+    });
+
     it('ignores a superseded alias diagnostic whose body resolves after switching aliases', async () => {
         let resolveAJson: (value: unknown) => void = () => {};
         const diagA: MeshRouteDiagnostic = {
@@ -135,13 +156,13 @@ describe('MeshRouteDetailSheet remove gate', () => {
         });
 
         const { rerender } = render(
-            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasA" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasA" canManage fleetStatus={STATUS} aliases={[]} onChanged={() => {}} />,
         );
         // Let alias A's fetches resolve so its effect parks on the deferred body read.
         await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
         rerender(
-            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasB" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasB" canManage fleetStatus={STATUS} aliases={[]} onChanged={() => {}} />,
         );
         expect(await screen.findByText('API proxy bridge')).toBeInTheDocument();
 

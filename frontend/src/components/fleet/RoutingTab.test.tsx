@@ -123,6 +123,10 @@ describe('RoutingTab probe failure routing', () => {
         act(() => { card.onChanged?.(); });
         await waitFor(() => expect(screen.getByText('target peer-b')).toBeInTheDocument());
 
+        // The callback keeps one identity across the refresh, so a card that
+        // captured it does not hold a second, older copy of the closure.
+        expect(card.onTestUpstream).toBe(callbackFromFirstRender);
+
         // A card that kept the earlier callback must not report the old node.
         await act(async () => {
             await callbackFromFirstRender?.(ALIAS).catch(() => {});
@@ -176,5 +180,20 @@ describe('RoutingTab probe failure routing', () => {
 
         result = { ok: false, where: 'agent_dial' };
         await expect(card.onTestUpstream?.(ALIAS)).rejects.toThrow(/could not connect to the container/);
+    });
+
+    it('sends an unexplained failure to the activity log', async () => {
+        stubApi({ aliases: () => [alias('peer-a', 80)], probe: () => ({ ok: false, message: 'boom' }) });
+        renderTab();
+
+        await screen.findByText('target peer-a');
+        await act(async () => {
+            await card.onTestUpstream?.(ALIAS).catch(() => {});
+        });
+
+        const opts = vi.mocked(toast.error).mock.calls[0]?.[1];
+        expect(opts?.action?.label).toBe('View activity');
+        act(() => { opts?.action?.onClick(); });
+        expect(screen.getByText('mesh activity')).toBeInTheDocument();
     });
 });
