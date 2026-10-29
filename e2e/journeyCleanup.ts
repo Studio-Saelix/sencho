@@ -57,11 +57,6 @@ function cleanupSteps(targets: JourneyCleanupTargets): CleanupStep[] {
   return steps;
 }
 
-function failureText(step: CleanupStep, error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `${step.label}: ${detail}`;
-}
-
 /**
  * Delete everything the journey created and restore the gate window. Every
  * step runs regardless of earlier failures; a failed step is reported after
@@ -74,7 +69,8 @@ export async function cleanupJourneyResources(callApi: CleanupApi, targets: Jour
       const { status } = await callApi(step.path, step.init);
       if (status < 200 || status >= 300) failures.push(`${step.label}: HTTP ${status}`);
     } catch (error) {
-      failures.push(failureText(step, error));
+      const detail = error instanceof Error ? error.message : String(error);
+      failures.push(`${step.label}: ${detail}`);
     }
   }
   if (failures.length > 0) {
