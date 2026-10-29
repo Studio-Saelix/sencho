@@ -41,6 +41,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
     exposureAvailable: true,
     isSelfStack: false,
+    meshManaged: false,
     healthchecks: {},
     ...over,
   };

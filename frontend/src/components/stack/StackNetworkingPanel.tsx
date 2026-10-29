@@ -8,7 +8,7 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import { TUNNEL_PROVIDER_LABEL, TUNNEL_SCOPE_LABEL } from '@/lib/tunnelExposure';
+import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
 import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/types/networking';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
@@ -71,25 +71,26 @@ function BindingBadge({ port }: { port: NetworkFactPort }) {
 
 const CHIP_CLASS = 'rounded border px-1 py-0.5 font-mono text-[10px]';
 
-/** Tunnel facts for one service: the connector it runs, or the tunnel that reaches it. */
+/** Tunnel facts for one service: the connector it runs, or the tunnel that reaches it.
+ *  A public edge reads as a warning; a private overlay stays neutral. */
 function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunnel?: ServiceTunnelExposure }) {
   if (!connector && !tunnel) return null;
   return (
     <div className="flex flex-wrap items-center gap-2">
       {connector && (
-        <span className={cn(CHIP_CLASS, 'border-info/40 bg-info/[0.06] text-info')}>
-          {TUNNEL_PROVIDER_LABEL[connector.provider]} connector · {TUNNEL_SCOPE_LABEL[connector.scope]}
+        <span className={cn(CHIP_CLASS, 'border-brand/40 bg-brand/[0.08] text-brand')}>
+          {tunnelProviderLabel(connector.provider)} connector · {tunnelScopeLabel(connector.scope)}
         </span>
       )}
       {tunnel && (
         <>
           <span className={cn(CHIP_CLASS, tunnel.scope === 'public-edge'
             ? 'border-warning/40 bg-warning/[0.08] text-warning'
-            : 'border-info/40 bg-info/[0.06] text-info')}
+            : 'border-muted bg-card/40 text-foreground/80')}
           >
-            via {TUNNEL_PROVIDER_LABEL[tunnel.provider]} ({tunnel.connector}) · {TUNNEL_SCOPE_LABEL[tunnel.scope]}
+            via {tunnelProviderLabel(tunnel.provider)} ({tunnel.connector}) · {tunnelScopeLabel(tunnel.scope)}
           </span>
-          {tunnel.path === 'shared-network' && (
+          {isRoutingUnverified(tunnel) && (
             <span className={cn(CHIP_CLASS, 'border-muted bg-card/40 text-stat-subtitle')}>routing unverified</span>
           )}
         </>

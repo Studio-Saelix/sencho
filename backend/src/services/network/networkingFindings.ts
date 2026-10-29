@@ -7,7 +7,7 @@ import type { ExposureIntent, NetworkFactPort, StackNetworkFacts } from './types
 import { isHostNetwork } from './normalize';
 import { getExposureContext, type ExposureContext } from './exposureContext';
 import { dismissFields } from './networkingDismissals';
-import { describeServiceTunnel, describeTunnelConnector, tunnelExposureByService } from './tunnelDetection';
+import { describeServiceTunnel, describeTunnelConnector, isCertainTunnelPath, tunnelExposureByService } from './tunnelDetection';
 import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase, NetworkingRecommendedAction } from './networkingTypes';
 
 type FindingExtra = Pick<NetworkingFinding, 'stack' | 'network' | 'service'>;
@@ -222,7 +222,7 @@ function addTunnelExposureFindings(
     } else if ((intent === 'internal' || intent === 'same-node') && !flagged('exposure-intent-mismatch', service)) {
       out.push(finding(
         'exposure-intent-mismatch',
-        tunnel.path === 'shared-namespace' ? 'high' : 'medium',
+        isCertainTunnelPath(tunnel.path) ? 'high' : 'medium',
         intent === 'internal' ? 'Internal intent with tunnel access' : 'Same-node intent with tunnel access',
         `Service "${service}" is classified ${intent}. ${via}`,
         { stack: facts.stack, service },

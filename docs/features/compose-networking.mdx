@@ -73,7 +73,7 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 
 **How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port or sits behind a tunnel, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
 
-**Tunnel-exposed services:** a service behind a Cloudflare Tunnel publishes no host port but is reachable from the internet, so classify it **public** (or **reverse-proxy** when the tunnel points at your proxy). A service reached over Tailscale or WireGuard is reachable only by the peers of that private network; **lan** is the closest intent. See [Tunnels and private overlays](#tunnels-and-private-overlays).
+**Tunnel-exposed services:** a service behind a Cloudflare Tunnel publishes no host port but is reachable from the internet, so classify it **public** (or **reverse-proxy** when the tunnel points at your proxy). A service reached over Tailscale or WireGuard is reachable only by the peers of that private network; **lan** is the closest intent. A service that only shares a network with a connector you know does not route to it can stay **internal**: Doctor asks you to confirm that, and Security takes the intent at your word. See [Tunnels and private overlays](#tunnels-and-private-overlays).
 
 ## Networks
 
@@ -139,18 +139,20 @@ Tunnels publish no host ports, so the port badges alone would make a tunnel-expo
 
 | Connector | Scope | How Sencho recognizes it |
 |-----------|-------|--------------------------|
-| **Cloudflare Tunnel** | Public edge: anyone on the internet, through Cloudflare | A `cloudflared` image, or a `TUNNEL_TOKEN` variable |
-| **Tailscale** | Private overlay: devices on the tailnet | A `tailscale` image, or a `TS_AUTHKEY` variable |
-| **WireGuard** | Private overlay: WireGuard peers | A `wg-easy` image, or a `wireguard` image running as a server (`PEERS`, `SERVERURL`, `SERVERPORT`, `WG_HOST`, or a published UDP port) |
+| **Cloudflare Tunnel** | Public edge: anyone on the internet through Cloudflare, unless Cloudflare Access restricts it | A `cloudflared` image, or a `TUNNEL_TOKEN` or `TUNNEL_TOKEN_FILE` variable |
+| **Tailscale** | Private overlay: devices on the tailnet | A `tailscale` image, or a `TS_AUTHKEY` or `TS_AUTH_KEY` variable |
+| **WireGuard** | Private overlay: WireGuard peers | A `wg-easy` image, a `WG_HOST` variable, or a `wireguard` image running as a server (`PEERS`, `SERVERURL`, `SERVERPORT`, `WG_HOST`, or a published UDP port) |
 
-Sencho reads image names, variable *names*, `cap_add`, `devices`, mount targets, and network membership only. A tunnel token or auth key is never read. A WireGuard or other VPN container that runs as an outbound client (a VPN for your torrent client, for example) exposes nothing and is not reported.
+Sencho reads image names, variable *names*, `cap_add`, `devices`, mount targets, `network_mode`, network membership, the protocol of published ports, and whether `command` names the cloudflared `tunnel`, `proxy-dns`, or `access` subcommand. A tunnel token or auth key is never read. Containers that only connect outward are not reported: a WireGuard or other VPN client (a VPN for your torrent client, for example), a cloudflared DNS proxy (`proxy-dns` or `TUNNEL_DNS_*` settings), and a cloudflared `access` client.
 
-The connector's card shows a blue badge such as **Cloudflare Tunnel connector · public edge**. Each service the connector reaches shows **via Cloudflare Tunnel (cloudflared) · public edge** (amber for a public edge, blue for a private overlay):
+The connector's card shows a badge such as **Cloudflare Tunnel connector · public edge**. Each service the connector reaches shows **via Cloudflare Tunnel (cloudflared) · public edge** (amber for a public edge, neutral for a private overlay):
 
-- **Shares the connector's network namespace** (`network_mode: service:<connector>`, or the connector runs in the service's namespace): the service is certainly reachable through the tunnel.
-- **Shares a network with the connector**: the connector can reach the service, but which services it actually routes to is configured outside the Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard AllowedIPs). These services also show a **routing unverified** badge. A Tailscale container reaches services on a shared network only when it is a subnet router (`TS_ROUTES`) or uses Serve (`TS_SERVE_CONFIG`).
+- **Shares the connector's network namespace** (`network_mode: service:<connector>`, or the connector runs in the service's namespace): the service is reachable at the connector's own address, so the reach is certain.
+- **Shares a network with the connector**, or **publishes a host port while the connector uses `network_mode: host`**: the connector can reach the service, but which services it actually routes to is configured outside the Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard AllowedIPs). These services also show a **routing unverified** badge.
 
-A connector attached to the Sencho Mesh network may also route to services on other nodes through Mesh aliases. Sencho cannot see that from the Compose file, so those services are not marked; the connector's Doctor finding says so. Tunnel detection never changes Mesh routing.
+Sencho treats a Tailscale container as forwarding beyond its own namespace only when `TS_ROUTES`, `TS_SERVE_CONFIG`, `TS_DEST_IP`, or `TS_EXTRA_ARGS` is set; otherwise tailnet peers reach the Tailscale node itself. A connector that runs in another container's namespace (`network_mode: container:<name>`) is reported with its reach unknown.
+
+Reach is worked out within one stack. A connector on an external network may also reach services of other stacks on that network, and a connector on the Sencho Mesh network (declared in Compose, or added because the stack is opted into Mesh) may route to services on other nodes through Mesh aliases. Sencho cannot see those routes from the Compose file, so those services are not marked; the connector's Doctor finding names the networks instead. Tunnel detection never changes Mesh routing.
 
 ### Extra hosts
 

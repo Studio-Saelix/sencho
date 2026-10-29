@@ -30,13 +30,12 @@ async function hasPilotMeshOverride(nodeId: number, stackName: string): Promise<
   }
 }
 
-export async function resolveManagedMeshAttachment(
-  nodeId: number,
-  stackName: string,
-): Promise<ManagedNetworkAttachmentPredicate> {
-  let stackManaged = false;
+/** Whether the stack is opted into Sencho Mesh, through the database or a
+ *  Pilot Mesh override. A failed opt-in read is logged and counts as not
+ *  opted in. */
+export async function isStackMeshManaged(nodeId: number, stackName: string): Promise<boolean> {
   try {
-    stackManaged = DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName);
+    if (DatabaseService.getInstance().isMeshStackEnabled(nodeId, stackName)) return true;
   } catch (error) {
     console.warn(
       '[NetworkDrift] Could not verify Mesh opt-in state for %s:',
@@ -44,7 +43,14 @@ export async function resolveManagedMeshAttachment(
       sanitizeForLog(getErrorMessage(error, 'unknown')),
     );
   }
-  if (!stackManaged) stackManaged = await hasPilotMeshOverride(nodeId, stackName);
+  return hasPilotMeshOverride(nodeId, stackName);
+}
+
+export async function resolveManagedMeshAttachment(
+  nodeId: number,
+  stackName: string,
+): Promise<ManagedNetworkAttachmentPredicate> {
+  const stackManaged = await isStackMeshManaged(nodeId, stackName);
   const selfIdentity = SelfIdentityService.getInstance();
 
   return (container, networkName) => networkName === SENCHO_MESH_NETWORK && (

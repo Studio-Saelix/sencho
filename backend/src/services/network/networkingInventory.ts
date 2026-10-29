@@ -111,7 +111,7 @@ function buildExposureSummary(
         return (net?.name ?? n.key) === networkName;
       });
       if (!attached) continue;
-      const publishes = svc.publishedPorts.length > 0 || isHostNetwork(svc.networkMode);
+      const publishes = svc.publishedPorts.length > 0 || isHostNetwork(svc.networkMode) || svc.tunnel !== undefined;
       if (svc.publishedPorts.some(p => p.allInterfaces) || isHostNetwork(svc.networkMode)) stackBroad = true;
       const intent = byService.get(svc.name) ?? stackIntent;
       if (publishes && (intent === null || intent === 'unknown')) stackUnclassified = true;

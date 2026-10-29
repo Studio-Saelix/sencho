@@ -7,7 +7,8 @@ export type ExposureIntent = (typeof EXPOSURE_INTENTS)[number];
 /** Tunnel and private-overlay exposure. Mirrors the backend `tunnelDetection` types. */
 export type TunnelProvider = 'cloudflared' | 'tailscale' | 'wireguard';
 export type TunnelScope = 'public-edge' | 'private-overlay';
-export type TunnelPath = 'shared-namespace' | 'shared-network';
+export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
+export type TunnelAttachment = 'networks' | 'host' | 'other';
 
 export interface TunnelReach {
   service: string;
@@ -19,10 +20,12 @@ export interface TunnelConnector {
   service: string;
   provider: TunnelProvider;
   scope: TunnelScope;
+  attachment: TunnelAttachment;
   signals: string[];
   localConfig: boolean;
   serveConfig: boolean;
   meshAttached: boolean;
+  externalNetworks: string[];
   reaches: TunnelReach[];
 }
 

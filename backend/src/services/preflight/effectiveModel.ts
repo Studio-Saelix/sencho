@@ -6,11 +6,14 @@
  * finite whitelist of Docker socket-proxy API flags, whether the rendered
  * value is exactly `1` (stored as enabled flag names only). `command`,
  * `entrypoint`, and `DOCKER_HOST` are read for `tcp://` endpoint host names
- * only. Render errors are handled by the caller, not here.
+ * only, and `command`/`entrypoint` for a fixed set of cloudflared subcommands.
+ * `cap_add` names and `devices` host paths are kept. Render errors are handled
+ * by the caller, not here.
  */
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
+import { cloudflaredCommandHints } from '../network/tunnelDetection';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -98,6 +101,8 @@ export interface EffService {
   capAdd?: string[];
   /** Host-side device paths from `devices` (e.g. `/dev/net/tun`). Absent on older hand-built test fixtures. */
   devices?: string[];
+  /** cloudflared subcommands (`tunnel`, `proxy-dns`, `access`) named by `command`/`entrypoint`; no other token is kept. */
+  commandHints?: string[];
   /**
    * True when `sencho.service.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
@@ -541,6 +546,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       labelKeys: labelKeysOf(svc.labels),
       capAdd: stringList(svc.cap_add),
       devices: deviceHostPaths(svc.devices),
+      commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }

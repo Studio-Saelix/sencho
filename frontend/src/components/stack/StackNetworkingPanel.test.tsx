@@ -85,8 +85,8 @@ describe('StackNetworkingPanel', () => {
         { name: 'admin', networks: [], publishedPorts: [], networkMode: 'service:tailscale', extraHosts: [], tunnel: tunnelTs },
       ],
       tunnels: [
-        { service: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, reaches: [{ service: 'app', path: 'shared-network', networks: ['default'] }] },
-        { service: 'tailscale', provider: 'tailscale', scope: 'private-overlay', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, reaches: [{ service: 'admin', path: 'shared-namespace', networks: [] }] },
+        { service: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', attachment: 'networks', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, externalNetworks: [], reaches: [{ service: 'app', path: 'shared-network', networks: ['default'] }] },
+        { service: 'tailscale', provider: 'tailscale', scope: 'private-overlay', attachment: 'networks', signals: ['image'], localConfig: false, serveConfig: false, meshAttached: false, externalNetworks: [], reaches: [{ service: 'admin', path: 'shared-namespace', networks: [] }] },
       ],
     }));
     render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);

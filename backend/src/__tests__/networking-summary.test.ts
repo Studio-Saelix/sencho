@@ -58,6 +58,27 @@ describe('networking summary', () => {
     expect(res.body.exposed.count).toBe(res.body.exposed.stacks.length);
   });
 
+  it('counts a stack reached only through a tunnel connector as exposed until it has an intent', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    command: tunnel run\n    environment:\n      TUNNEL_TOKEN: secret-value\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('secret-value');
+
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, '', 'public', null);
+    const classified = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(classified.body.exposed.stacks).toContain(STACK);
+    expect(classified.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('does not count a cloudflared DNS proxy as exposure', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  dns:\n    image: cloudflare/cloudflared:latest\n    command: proxy-dns\n  pihole:\n    image: pihole/pihole\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
   it('flags a stack with an undeclared runtime network as network drift', async () => {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getDependencySnapshot: vi.fn().mockResolvedValue({

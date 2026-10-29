@@ -1,6 +1,7 @@
 /**
  * A cheap per-node networking summary for the Fleet view filter: which stacks
- * are exposed beyond loopback, which publish ports without an exposure intent,
+ * are exposed beyond loopback (published ports, host networking, or a tunnel
+ * connector), which are exposed without an exposure intent,
  * and which have network drift. It reads each stack's compose with the light
  * dependency parser (no `docker compose config` render) and one Docker snapshot,
  * so it stays inexpensive across a node's full stack set.
@@ -8,7 +9,8 @@
 import DockerController, { type DependencySnapshot } from '../DockerController';
 import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
-import { parseComposeDependencies } from '../../helpers/composeDependencyParse';
+import { parseComposeDependencies, type DeclaredCompose } from '../../helpers/composeDependencyParse';
+import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
 import { assembleStackDrift } from '../DriftDetectionService';
 import { resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { isHostNetwork, isLoopback } from './normalize';
@@ -22,15 +24,32 @@ export interface NetworkingSummaryBucket {
 }
 
 export interface NodeNetworkingSummary {
-  /** Stacks that publish a host port on a non-loopback interface. */
+  /** Stacks that publish a host port on a non-loopback interface, use host networking, or are reached through a tunnel. */
   exposed: NetworkingSummaryBucket;
-  /** Stacks that publish ports but have no stack-level exposure intent set. */
+  /** Stacks with an exposed service (published port, host networking, or tunnel) that has no effective exposure intent. */
   unknownExposure: NetworkingSummaryBucket;
   /** Stacks whose running networking disagrees with the Compose file. */
   networkDrift: NetworkingSummaryBucket;
 }
 
 const bucket = (stacks: string[]): NetworkingSummaryBucket => ({ count: stacks.length, stacks });
+
+/** Services a tunnel connector reaches, from the light parse (raw, uninterpolated YAML). */
+function tunneledServices(declared: DeclaredCompose): Set<string> {
+  const connectors = detectTunnels({
+    services: declared.services.map(s => ({
+      name: s.name,
+      image: s.image,
+      envKeys: s.envKeys ?? [],
+      networkMode: s.networkMode,
+      networks: s.networks.map(key => ({ key })),
+      ports: s.ports,
+      commandHints: s.commandHints,
+    })),
+    networks: Object.fromEntries(Object.entries(declared.networks).map(([key, r]) => [key, { name: r.name ?? key, external: r.external }])),
+  });
+  return new Set(tunnelExposureByService(connectors).keys());
+}
 
 export async function computeNodeNetworkingSummary(nodeId: number): Promise<NodeNetworkingSummary> {
   const fsSvc = FileSystemService.getInstance(nodeId);
@@ -71,9 +90,12 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     // so it counts as exposed (beyond loopback) and as publishing even with no
     // declared `ports:`. This keeps the summary honest about host networking,
     // matching the Compose Doctor's host-network finding.
-    const publishes = (s: typeof declared.services[number]): boolean => s.ports.length > 0 || isHostNetwork(s.networkMode);
+    // A service a tunnel connector reaches is exposed without a published port.
+    const tunneled = tunneledServices(declared);
+    const publishes = (s: typeof declared.services[number]): boolean =>
+      s.ports.length > 0 || isHostNetwork(s.networkMode) || tunneled.has(s.name);
     const publishesPort = declared.services.some(publishes);
-    if (declared.services.some(s => isHostNetwork(s.networkMode) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
+    if (declared.services.some(s => isHostNetwork(s.networkMode) || tunneled.has(s.name) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
 
     if (publishesPort) {
       // Unknown only when a publishing service is effectively unclassified: a

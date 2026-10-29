@@ -3,8 +3,9 @@
  * detection from the effective model, the Security exposure descriptor and
  * intent conflicts, the Compose Doctor rules, and the live Networking findings.
  * Fixtures go through parseEffectiveModel with `docker compose config` shaped
- * JSON, so the parse path is covered too. Every fixture carries real-looking
- * secret values to prove none of them reaches an output.
+ * JSON, so the parse path is covered too. Fixtures that set a token or auth key
+ * use real-looking values, and the tests that read them assert none reaches an
+ * output.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEffectiveModel, type EffectiveModel } from '../services/preflight/effectiveModel';
@@ -16,7 +17,7 @@ import {
   type TunnelConnector,
 } from '../services/network/tunnelDetection';
 import { buildExposedImageMap, deriveStackExposure } from '../services/preflight/exposure';
-import { buildImageExposureContextRows, toPostureTarget } from '../services/securityExposureTargets';
+import { buildImageExposureContextRows, settleTunnelExposure, toPostureTarget } from '../services/securityExposureTargets';
 import { classifyImageExposureBucket } from '../services/securityExposureClassification';
 import { isPreflightNoteFinding, runRules } from '../services/preflight/rules';
 import type { PreflightContext, PreflightFinding } from '../services/preflight/types';
@@ -277,11 +278,25 @@ describe('Security exposure targets with tunnels', () => {
     expect(classifyImageExposureBucket([toPostureTarget(app!)])).toBe('conflict');
   });
 
-  it('keeps an internal intent on an unverified tunnel reach as a review, not a conflict', () => {
-    const dbRow = rows({ db: 'internal' }).find(r => r.serviceName === 'db');
-    expect(dbRow).toMatchObject({ exposureReason: 'tunnel', intentStatus: 'set', exposureIntent: 'internal' });
-    expect(dbRow?.intentConflict).toBeUndefined();
-    expect(classifyImageExposureBucket([toPostureTarget(dbRow!)])).toBe('unclassified');
+  it('takes an internal intent on an unverified tunnel reach at the operator\'s word', () => {
+    const settled = settleTunnelExposure(1, [exposure], () => context({ db: 'internal', app: 'internal' }));
+    expect(settled[0].services.find(s => s.service === 'db')?.publiclyExposed).toBe(false);
+    // A certain reach stays exposed and still conflicts with the intent.
+    expect(settled[0].services.find(s => s.service === 'app')?.publiclyExposed).toBe(true);
+    expect(buildExposedImageMap(settled).get('postgres:16')).toBe(false);
+    const settledRows = buildImageExposureContextRows({ nodeId: 1, exposures: settled, getContext: () => context({ db: 'internal', app: 'internal' }) });
+    expect(settledRows.map(r => r.serviceName)).not.toContain('db');
+    expect(settledRows.find(r => r.serviceName === 'app')?.intentConflict).toBe(true);
+  });
+
+  it('leaves unverified tunnel exposure counted when the intent is unset, deliberate, or unreadable', () => {
+    const cases: Record<string, ExposureIntent>[] = [{}, { db: 'public' }];
+    for (const intents of cases) {
+      const settled = settleTunnelExposure(1, [exposure], () => context(intents));
+      expect(settled[0].services.find(s => s.service === 'db')?.publiclyExposed).toBe(true);
+    }
+    const unreadable = settleTunnelExposure(1, [exposure], () => ({ available: false }));
+    expect(unreadable[0].services.find(s => s.service === 'db')?.publiclyExposed).toBe(true);
   });
 
   it('accepts a deliberate intent on a tunnel-reached service', () => {
@@ -297,7 +312,7 @@ function ctx(model: EffectiveModel, over: Partial<PreflightContext> = {}): Prefl
     sourceReadable: true, nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
-    exposureAvailable: true, isSelfStack: false, healthchecks: {},
+    exposureAvailable: true, isSelfStack: false, meshManaged: false, healthchecks: {},
     ...over,
   };
 }
@@ -314,21 +329,24 @@ describe('Compose Doctor tunnel rules', () => {
 
   it('reports each connector as an informational note naming provider, scope, and what is unverified', () => {
     const findings = byRule(runRules(ctx(model, { stackIntent: 'public' })), 'tunnel-exposure');
-    expect(findings.map(f => [f.service, f.severity])).toEqual([['cloudflared', 'info'], ['tailscale', 'info']]);
-    expect(findings[0].title).toBe('Cloudflare Tunnel connector "cloudflared" (public edge)');
-    expect(findings[0].message).toContain('"app" shares a network with it');
-    expect(findings[0].message).toContain('Sencho cannot see');
-    expect(findings[1].title).toBe('Tailscale connector "tailscale" (private overlay)');
-    expect(findings[1].message).toContain('"admin" shares its network namespace');
+    const bySvc = Object.fromEntries(findings.map(f => [f.service, f]));
+    expect(Object.keys(bySvc).sort()).toEqual(['cloudflared', 'tailscale']);
+    expect(findings.every(f => f.severity === 'info')).toBe(true);
+    expect(bySvc.cloudflared.title).toBe('Cloudflare Tunnel connector "cloudflared" (public edge)');
+    expect(bySvc.cloudflared.message).toContain('"app" shares a network with it');
+    expect(bySvc.cloudflared.message).toContain('Sencho cannot see');
+    expect(bySvc.tailscale.title).toBe('Tailscale connector "tailscale" (private overlay)');
+    expect(bySvc.tailscale.message).toContain('"admin" shares its network namespace');
     expect(isPreflightNoteFinding('tunnel-exposure')).toBe(true);
     expectNoSecrets(findings);
   });
 
   it('flags an internal intent on a tunnel-reached service, high when certain and a warning when unverified', () => {
     const findings = byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled');
-    expect(findings.map(f => [f.service, f.severity])).toEqual([['app', 'warning'], ['admin', 'high']]);
-    expect(findings[0].message).toContain('that routing is unverified');
-    expect(findings[1].message).toContain('devices on the tailnet can reach it');
+    const bySvc = Object.fromEntries(findings.map(f => [f.service, f]));
+    expect(Object.fromEntries(findings.map(f => [f.service, f.severity]))).toEqual({ app: 'warning', admin: 'high' });
+    expect(bySvc.app.message).toContain('that routing is unverified');
+    expect(bySvc.admin.message).toContain('devices on the tailnet can reach it');
   });
 
   it('stays silent for deliberate intents', () => {
@@ -390,7 +408,7 @@ describe('live Networking findings for tunnels', () => {
     const mismatches = buildNodeNetworkingFindings(1, null, [facts], [])
       .filter(f => f.kind === 'exposure-intent-mismatch');
     expect(Object.fromEntries(mismatches.map(f => [f.service, f.severity]))).toEqual({ app: 'medium', admin: 'high' });
-    expect(mismatches[0].title).toBe('Internal intent with tunnel access');
+    expect(new Set(mismatches.map(f => f.title))).toEqual(new Set(['Internal intent with tunnel access']));
   });
 
   it('keeps the connector card but skips intent interpretation when the context is unavailable', () => {
@@ -423,5 +441,151 @@ describe('live Networking findings for tunnels', () => {
     const cards = merged.filter(f => f.kind === 'tunnel-exposure');
     expect(cards).toHaveLength(2);
     expect(cards.every(c => c.sources.includes('doctor') && c.sources.includes('live'))).toBe(true);
+  });
+});
+
+describe('detectTunnels: connector attachment and identification edge cases', () => {
+  it('reaches services that publish a host port when the connector uses the host network, routing unverified', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'host', environment: { TUNNEL_TOKEN: CF_TOKEN } },
+      app: { ...app, ports: [{ published: '3000', target: 3000, host_ip: '127.0.0.1', protocol: 'tcp' }] },
+      db,
+    });
+    const c = connector(model, 'cloudflared');
+    expect(c.attachment).toBe('host');
+    expect(reachOf(c)).toEqual({ app: 'host-network' });
+    expect(describeTunnelConnector(c).message).toContain('"app" publishes a host port it can reach over the host network');
+    const svc = deriveStackExposure(model, 'proj', 1).services.find(s => s.service === 'app');
+    expect(svc).toMatchObject({ publiclyExposed: true, reason: 'tunnel', tunnel: { path: 'host-network' } });
+  });
+
+  it('says so when a host-network connector finds no published port', () => {
+    const c = connector(render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'host' }, db }), 'cloudflared');
+    expect(c.reaches).toEqual([]);
+    expect(describeTunnelConnector(c).message).toContain('It uses the host network, so it can reach any port published on the host');
+  });
+
+  it('reports an unknown reach, not an empty one, for a connector in another container\'s namespace', () => {
+    for (const mode of ['container:edge-proxy', 'none']) {
+      const c = connector(render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: mode }, app }), 'cloudflared');
+      expect(c.attachment).toBe('other');
+      expect(c.reaches).toEqual([]);
+      expect(describeTunnelConnector(c).message).toContain('Sencho cannot see which services it reaches');
+    }
+  });
+
+  it('does not loop or invent a reach on a network_mode cycle', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared' },
+      a: { image: 'example/a', network_mode: 'service:b' },
+      b: { image: 'example/b', network_mode: 'service:a' },
+    });
+    expect(reachOf(connector(model, 'cloudflared'))).toEqual({});
+  });
+
+  it('names external networks the connector shares with other stacks as unknown reach', () => {
+    const model = render({ cloudflared: { image: 'cloudflare/cloudflared', networks: { proxy: null } } }, { proxy: { name: 'proxy', external: true } });
+    const c = connector(model, 'cloudflared');
+    expect(c.externalNetworks).toEqual(['proxy']);
+    expect(c.reaches).toEqual([]);
+    expect(describeTunnelConnector(c).message).toContain('external network "proxy", so services of other stacks on that network may be reachable');
+  });
+
+  it('marks a connector Mesh-attached when the stack is opted into Mesh, unless it uses a network_mode', () => {
+    const model = render({ cloudflared: { image: 'cloudflare/cloudflared' }, sidecar: { image: 'cloudflare/cloudflared', network_mode: 'service:app' }, app });
+    expect(connector(model, 'cloudflared').meshAttached).toBe(false);
+    const managed = detectTunnels(model, { meshManaged: true });
+    expect(managed.find(c => c.service === 'cloudflared')?.meshAttached).toBe(true);
+    // The sidecar runs in app's namespace, which Mesh opt-in does attach.
+    expect(managed.find(c => c.service === 'sidecar')?.meshAttached).toBe(true);
+    const hostMode = detectTunnels(render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'host' } }), { meshManaged: true });
+    expect(hostMode[0].meshAttached).toBe(false);
+  });
+
+  it('ignores a cloudflared DNS proxy or access client, but keeps a tunnel that says so', () => {
+    expect(detectTunnels(render({ dns: { image: 'cloudflare/cloudflared', command: 'proxy-dns --port 5053' }, pihole: { image: 'pihole/pihole' } }))).toEqual([]);
+    expect(detectTunnels(render({ dns: { image: 'crazymax/cloudflared', environment: { TUNNEL_DNS_UPSTREAM: 'https://1.1.1.1/dns-query' } }, pihole: { image: 'pihole/pihole' } }))).toEqual([]);
+    expect(detectTunnels(render({ ssh: { image: 'cloudflare/cloudflared', command: ['access', 'tcp', '--hostname', 'ssh.example.com'] }, app }))).toEqual([]);
+    expect(detectTunnels(render({ cf: { image: 'cloudflare/cloudflared', command: ['tunnel', 'run', '--token', CF_TOKEN] }, app }))).toHaveLength(1);
+  });
+
+  it('identifies custom images by TUNNEL_TOKEN_FILE, TS_AUTH_KEY, or WG_HOST key names', () => {
+    expect(connector(render({ edge: { image: 'example/edge', environment: { TUNNEL_TOKEN_FILE: '/run/secrets/cf' } }, app }), 'edge').provider).toBe('cloudflared');
+    expect(connector(render({ mesh: { image: 'example/ts', environment: { TS_AUTH_KEY: TS_KEY } }, app }), 'mesh').provider).toBe('tailscale');
+    expect(connector(render({ vpn: { image: 'example/wg', environment: { WG_HOST: 'vpn.example.com' } }, app }), 'vpn').provider).toBe('wireguard');
+  });
+
+  it('treats a wireguard image publishing a UDP port as a server, and accepts a CAP_ prefixed capability', () => {
+    const c = connector(render({
+      wireguard: { image: 'linuxserver/wireguard', cap_add: ['CAP_NET_ADMIN'], ports: [{ published: '51820', target: 51820, protocol: 'udp' }] },
+      app,
+    }), 'wireguard');
+    expect(c.signals).toEqual(['image', 'cap:NET_ADMIN', 'udp-port']);
+    expect(reachOf(c)).toEqual({ app: 'shared-network' });
+  });
+
+  it('lets a Tailscale node forward to shared networks when TS_EXTRA_ARGS or TS_DEST_IP is set', () => {
+    for (const key of ['TS_EXTRA_ARGS', 'TS_DEST_IP']) {
+      const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, [key]: 'x' } }, db }), 'ts');
+      expect(reachOf(c)).toEqual({ db: 'shared-network' });
+    }
+  });
+});
+
+describe('cached Doctor tunnel findings', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('retires a cached tunnel finding once the current facts no longer show the tunnel', () => {
+    const before = render({ cloudflared: { image: 'cloudflare/cloudflared' }, app });
+    const cached = runRules(ctx(before, { stackIntent: 'internal' }))
+      .filter(f => f.ruleId === 'tunnel-exposure' || f.ruleId === 'exposure-internal-tunneled');
+    expect(cached.map(f => f.ruleId).sort()).toEqual(['exposure-internal-tunneled', 'tunnel-exposure']);
+    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+      getLatest: vi.fn().mockReturnValue({ status: 'warning', ranAt: 1, findings: cached }),
+    } as unknown as ComposeDoctorService);
+    const options = (model: EffectiveModel) => ({
+      nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null)], snapshot: null,
+    });
+
+    const stillThere = applyDoctorNetworkingFindings([], options(before));
+    expect(stillThere.map(f => f.kind).sort()).toEqual(['exposure-intent-mismatch', 'tunnel-exposure']);
+
+    const removed = applyDoctorNetworkingFindings([], options(render({ app })));
+    expect(removed).toEqual([]);
+  });
+});
+
+describe('Networking overview counters with tunnels', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('counts a tunnel-only stack as exposed and, without an intent, as unknown exposure', async () => {
+    const { buildNodeNetworkingAggregate } = await import('../services/network/networkingAggregate');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const DockerController = (await import('../services/DockerController')).default;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({ getStacks: vi.fn().mockResolvedValue(['proj']) } as unknown as ReturnType<typeof FileSystemService.getInstance>);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({
+        rendered: JSON.stringify({ name: 'proj', services: { cloudflared: { image: 'cloudflare/cloudflared', networks: { default: null } }, app: { image: 'example/app', networks: { default: null } } }, networks: { default: { name: 'proj_default' } } }),
+        stderr: '',
+      }),
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      getStackExposureIntents: vi.fn().mockReturnValue([]),
+      getStackDossier: vi.fn().mockReturnValue(null),
+      isMeshStackEnabled: vi.fn().mockReturnValue(false),
+      getNodeStackActivity: vi.fn().mockReturnValue([]),
+    } as unknown as DatabaseService);
+    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+      getLatest: vi.fn().mockReturnValue({ status: 'never-run', ranAt: null, findings: [] }),
+    } as unknown as ComposeDoctorService);
+
+    const aggregate = await buildNodeNetworkingAggregate(90_683, {});
+    expect(aggregate.overview.exposedStackCount).toBe(1);
+    expect(aggregate.overview.unknownExposureStackCount).toBe(1);
   });
 });

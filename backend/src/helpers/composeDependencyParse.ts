@@ -1,4 +1,5 @@
 import YAML from 'yaml';
+import { cloudflaredCommandHints } from '../services/network/tunnelDetection';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -26,6 +27,10 @@ export interface DeclaredService {
   image?: string;
   /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
   networkMode?: string;
+  /** Environment KEY names (never values), for tunnel detection. Absent on hand-built fixtures. */
+  envKeys?: string[];
+  /** cloudflared subcommands named by `command`/`entrypoint`, for tunnel detection. Absent on hand-built fixtures. */
+  commandHints?: string[];
   /** Service `restart` from raw YAML parse. The effective-model path may set this via normalizeComposeRestartIntent (including deploy.restart_policy). Null when unset. */
   restart?: string | null;
 }
@@ -52,6 +57,14 @@ function asString(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (typeof value === 'number') return String(value);
   return undefined;
+}
+
+/** Environment KEY names from list (`KEY=value`) or map form. Values are never kept. */
+function envKeyNames(env: unknown): string[] {
+  if (Array.isArray(env)) {
+    return env.map(asString).filter((v): v is string => v !== undefined).map(v => v.split('=')[0]).filter(Boolean);
+  }
+  return env && typeof env === 'object' ? Object.keys(env as Record<string, unknown>) : [];
 }
 
 /** Extracts keys from a depends_on / networks block in list or map form. */
@@ -202,6 +215,8 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       ports,
       image: asString(svc.image),
       networkMode: asString(svc.network_mode),
+      envKeys: envKeyNames(svc.environment),
+      commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
       restart: asString(svc.restart) ?? null,
     });
   }

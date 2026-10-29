@@ -9,7 +9,7 @@
 import { getExposureContext } from './network/exposureContext';
 import type { ExposureIntent } from './network/types';
 import type { ExposureReason, StackExposure } from './preflight/exposure';
-import type { ServiceTunnelExposure } from './network/tunnelDetection';
+import { isCertainTunnelPath, type ServiceTunnelExposure } from './network/tunnelDetection';
 import type { PostureTarget } from './securityPosture';
 
 /** Max contexts returned per image on /image-summaries (display list only). */
@@ -67,6 +67,41 @@ function effectiveIntent(
   serviceIntents: Record<string, ExposureIntent>,
 ): ExposureIntent | null {
   return serviceIntents[service] ?? stackIntent ?? null;
+}
+
+/**
+ * Settle unverified tunnel exposure against the operator's intent. A service
+ * exposed only by a tunnel whose routing Sencho cannot see (a shared network or
+ * the host network) and classified internal or same-node is taken at the
+ * operator's word and not counted as exposed; Compose Doctor still asks them to
+ * confirm the routing. A certain reach (a shared network namespace) stays
+ * exposed and conflicts with that intent. Every caller that reads cached
+ * descriptors for Security runs them through this first, so the exposed-image
+ * map and the exposure targets agree.
+ */
+export function settleTunnelExposure(
+  nodeId: number,
+  exposures: StackExposure[],
+  getContext: typeof getExposureContext = getExposureContext,
+): StackExposure[] {
+  return exposures.map((exp) => {
+    const unverified = exp.services.filter((svc) =>
+      svc.reason === 'tunnel' && svc.tunnel !== undefined && !isCertainTunnelPath(svc.tunnel.path));
+    if (unverified.length === 0) return exp;
+    const ctx = getContext(nodeId, exp.stack);
+    if (!ctx.available) return exp;
+    const settled = new Set(unverified
+      .filter((svc) => {
+        const intent = effectiveIntent(svc.service, ctx.stackIntent, ctx.serviceIntents);
+        return intent !== null && CONFLICT.has(intent);
+      })
+      .map((svc) => svc.service));
+    if (settled.size === 0) return exp;
+    return {
+      ...exp,
+      services: exp.services.map((svc) => (settled.has(svc.service) ? { ...svc, publiclyExposed: false } : svc)),
+    };
+  });
 }
 
 function rowKey(imageRef: string, stackName: string, serviceName: string): string {
@@ -218,10 +253,7 @@ export function buildImageExposureContextRows(
         } else {
           row.intentStatus = 'set';
           row.exposureIntent = intent;
-          // A tunnel that only shares a network with the service may not route to
-          // it, so an internal intent there stays a review, not a contradiction.
-          const unverifiedTunnelOnly = svc.reason === 'tunnel' && svc.tunnel?.path === 'shared-network';
-          if (CONFLICT.has(intent) && !unverifiedTunnelOnly) row.intentConflict = true;
+          if (CONFLICT.has(intent)) row.intentConflict = true;
         }
       }
 

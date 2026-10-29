@@ -162,10 +162,10 @@ These rules activate when the stack publishes at least one host port or runs a t
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | Classified internal but publishes a host port | High | A service is classified as internal or same-node exposure but publishes a host port that contradicts that intent. |
-| Classified internal but reachable through a tunnel | High or Warning | A service classified as internal or same-node is reachable through a tunnel connector. High when it shares the connector's network namespace; Warning when it only shares a network with it, because the tunnel's routing is unverified. |
+| Classified internal but reachable through a tunnel | High or Warning | A service classified as internal or same-node is reachable through a tunnel connector. High when it shares the connector's network namespace; Warning when it only shares a network with it (or publishes a host port the connector reaches over the host network), because the tunnel's routing is unverified. |
 | Sensitive service exposed on all interfaces | High | A service that looks like a database or admin tool (postgres, redis, adminer, and similar) publishes on all interfaces. |
 | Tunnel connector | Info | A Cloudflare Tunnel, Tailscale, or WireGuard connector runs in the stack. The finding names the provider, its scope (public edge or private overlay), the services it reaches, and what Sencho cannot verify. It is a note: it does not change the stack's result. |
-| Stack publishes ports without an exposure intent | Warning | The stack publishes host ports, or a tunnel connector reaches one of its services, but no exposure intent has been set in the Networking tab. |
+| Stack publishes ports without an exposure intent | Warning | The stack publishes host ports, or a tunnel connector reaches one of its services, but no exposure intent has been set in the Networking tab. When a tunnel is involved, the finding reads **Stack is reachable without an exposure intent**. |
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
 | Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `sencho.service.url` label, and no reverse-proxy intent. |
 
@@ -188,11 +188,11 @@ Once an intent and access URLs are set, Sencho can detect when the configuration
 
 ### Tunnel-exposed services
 
-Tunnels publish no host ports, so Doctor also recognizes Cloudflare Tunnel, Tailscale, and WireGuard connectors in the effective model and the services they reach. It reads image names, variable names, `cap_add`, `devices`, mount targets, and network membership only, never a token or auth key. See [Tunnels and private overlays](/features/compose-networking#tunnels-and-private-overlays) for how a connector is recognized.
+Tunnels publish no host ports, so Doctor also recognizes Cloudflare Tunnel, Tailscale, and WireGuard connectors in the effective model and the services they reach. It reads structure only (image names, variable names, `cap_add`, `devices`, mount targets, `network_mode`, network membership, published-port protocols, and the cloudflared subcommand), never a token or auth key. See [Tunnels and private overlays](/features/compose-networking#tunnels-and-private-overlays) for how a connector is recognized.
 
-- A service that shares the connector's network namespace is certainly reachable through the tunnel.
-- A service that only shares a network with the connector can be reached if the tunnel routes there. Cloudflare ingress rules, Tailscale Serve and ACLs, and WireGuard AllowedIPs live outside the Compose file, so Doctor reports that routing as unverified rather than guessing. If the tunnel does not route to a service you classified internal, acknowledge the warning.
-- A connector on the Sencho Mesh network may route to services on other nodes through Mesh aliases. Doctor cannot see those routes and says so in the connector finding.
+- A service that shares the connector's network namespace is reachable at the connector's own address, so the reach is certain.
+- A service that only shares a network with the connector, or publishes a host port while the connector uses the host network, can be reached if the tunnel routes there. Cloudflare ingress rules, Tailscale Serve and ACLs, and WireGuard AllowedIPs live outside the Compose file, so Doctor reports that routing as unverified rather than guessing. If the tunnel does not route to a service you classified internal, acknowledge the warning here and dismiss the matching finding on the Networking page.
+- A connector on an external network or on the Sencho Mesh network may reach services in other stacks or on other nodes. Doctor cannot see those routes and names the networks in the connector finding.
 
 Record the tunnel's public hostname or tailnet name as an access URL in the Stack Dossier so the access path is documented with the stack.
 

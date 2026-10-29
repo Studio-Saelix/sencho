@@ -7,6 +7,7 @@ import {
   describeServiceTunnel,
   describeTunnelConnector,
   detectTunnels,
+  isCertainTunnelPath,
   tunnelExposureByService,
   type TunnelConnector,
 } from '../network/tunnelDetection';
@@ -1014,14 +1015,15 @@ const exposureInternalPublished: PreflightRule = {
   },
 };
 
-const tunnelsByModel = new WeakMap<EffectiveModel, TunnelConnector[]>();
+const tunnelsByContext = new WeakMap<PreflightContext, TunnelConnector[]>();
 
-/** Tunnel connectors in the model, detected once per model across the rules. */
-function tunnelsOf(model: EffectiveModel): TunnelConnector[] {
-  let tunnels = tunnelsByModel.get(model);
+/** Tunnel connectors in the context's model, detected once per run across the rules. */
+function tunnelsOf(ctx: PreflightContext): TunnelConnector[] {
+  if (!ctx.model) return [];
+  let tunnels = tunnelsByContext.get(ctx);
   if (!tunnels) {
-    tunnels = detectTunnels(model);
-    tunnelsByModel.set(model, tunnels);
+    tunnels = detectTunnels(ctx.model, { meshManaged: ctx.meshManaged });
+    tunnelsByContext.set(ctx, tunnels);
   }
   return tunnels;
 }
@@ -1031,13 +1033,13 @@ const exposureInternalTunneled: PreflightRule = {
   run(ctx) {
     if (!ctx.model) return [];
     const findings: PreflightFinding[] = [];
-    for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx.model))) {
+    for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx))) {
       const intent = effectiveIntent(ctx, service);
       if (intent !== 'internal' && intent !== 'same-node') continue;
-      const certain = tunnel.path === 'shared-namespace';
+      const certain = isCertainTunnelPath(tunnel.path);
       findings.push({
         ruleId: 'exposure-internal-tunneled',
-        // A shared network only means the tunnel could route here.
+        // A shared network or the host network only means the tunnel could route here.
         severity: certain ? 'high' : 'warning',
         title: `"${service}" is classified ${intent} but is reachable through a tunnel`,
         message: `Service "${service}" is classified as ${intent} exposure. ${describeServiceTunnel(tunnel)}`,
@@ -1045,7 +1047,7 @@ const exposureInternalTunneled: PreflightRule = {
         service,
         remediation: certain
           ? 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.'
-          : 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service off the shared network, or reclassify the exposure intent.',
+          : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or stop publishing its port when the connector uses the host network), or reclassify the exposure intent.',
       });
     }
     return findings;
@@ -1056,7 +1058,7 @@ const tunnelExposure: PreflightRule = {
   id: 'tunnel-exposure',
   run(ctx) {
     if (!ctx.model) return [];
-    return tunnelsOf(ctx.model).map((connector): PreflightFinding => {
+    return tunnelsOf(ctx).map((connector): PreflightFinding => {
       const { title, message } = describeTunnelConnector(connector);
       return {
         ruleId: 'tunnel-exposure',
@@ -1077,7 +1079,7 @@ const exposureUnclassified: PreflightRule = {
     if (!ctx.model) return [];
     // A read failure leaves every intent null; do not read that as "unclassified".
     if (!ctx.exposureAvailable) return [];
-    const tunneled = tunnelExposureByService(tunnelsOf(ctx.model));
+    const tunneled = tunnelExposureByService(tunnelsOf(ctx));
     const exposed = ctx.model.services.filter(s => s.ports.length > 0 || tunneled.has(s.name));
     if (exposed.length === 0) return [];
     // Fire only when an exposed service is still effectively unclassified: a

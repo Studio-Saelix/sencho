@@ -23,7 +23,7 @@ import type {
   NetworkDriftFacts, NetworkFactNetwork, NetworkFactService, NetworkRuntimeState, StackNetworkFacts,
 } from './types';
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
-import { resolveManagedMeshAttachment } from './managedMeshAttachment';
+import { isStackMeshManaged, resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
 import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
@@ -47,6 +47,7 @@ export function assembleStackNetworkFacts(
   renderError: string | null,
   snapshot: DependencySnapshot | null,
   managedNetworkAttachment?: ManagedNetworkAttachmentPredicate,
+  meshManaged = false,
 ): StackNetworkFacts {
   const runtime: NetworkRuntimeState = snapshot ? 'available' : 'unavailable';
 
@@ -72,7 +73,7 @@ export function assembleStackNetworkFacts(
     createdByStack: !res.external && key !== 'default',
   }));
 
-  const tunnels = detectTunnels(model);
+  const tunnels = detectTunnels(model, { meshManaged });
   const tunnelByService = tunnelExposureByService(tunnels);
   const services: NetworkFactService[] = model.services.map(s => ({
     name: s.name,
@@ -161,5 +162,6 @@ export async function buildStackNetworkFacts(
   const managedNetworkAttachment = snapshot && model
     ? await resolveManagedMeshAttachment(nodeId, stackName)
     : undefined;
-  return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment);
+  const meshManaged = model ? await isStackMeshManaged(nodeId, stackName) : false;
+  return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment, meshManaged);
 }

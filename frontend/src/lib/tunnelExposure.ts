@@ -16,8 +16,23 @@ export const TUNNEL_SCOPE_LABEL: Record<TunnelScope, string> = {
   'private-overlay': 'private overlay',
 };
 
+/** Provider label, falling back to the raw provider for one a newer node reports. */
+export function tunnelProviderLabel(provider: TunnelProvider): string {
+  return TUNNEL_PROVIDER_LABEL[provider] ?? provider;
+}
+
+/** Scope label, falling back to the raw scope for one a newer node reports. */
+export function tunnelScopeLabel(scope: TunnelScope): string {
+  return TUNNEL_SCOPE_LABEL[scope] ?? scope;
+}
+
+/** Only a shared network namespace makes a tunnel reach certain. */
+export function isRoutingUnverified(e: Pick<ServiceTunnelExposure, 'path'>): boolean {
+  return e.path !== 'shared-namespace';
+}
+
 /** "via Cloudflare Tunnel (cloudflared), routing unverified" style phrase. */
 export function tunnelPathLabel(e: ServiceTunnelExposure): string {
-  const base = `via ${TUNNEL_PROVIDER_LABEL[e.provider]} (${e.connector})`;
-  return e.path === 'shared-network' ? `${base}, routing unverified` : base;
+  const base = `via ${tunnelProviderLabel(e.provider)} (${e.connector})`;
+  return isRoutingUnverified(e) ? `${base}, routing unverified` : base;
 }

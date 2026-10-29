@@ -83,3 +83,22 @@ describe('networkExposureSection', () => {
     expect(md).not.toContain('SECRET-DRIVER');
   });
 });
+
+describe('tunnel path labels', () => {
+  it('marks a host-network reach as unverified like a shared network', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'app', publishedPorts: [], tunnel: { connector: 'cf', provider: 'cloudflared', scope: 'public-edge', path: 'host-network' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Cloudflare Tunnel (cf), routing unverified');
+  });
+  it('omits the caveat for a shared namespace', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'admin', publishedPorts: [], tunnel: { connector: 'ts', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Tailscale (ts)');
+  });
+});

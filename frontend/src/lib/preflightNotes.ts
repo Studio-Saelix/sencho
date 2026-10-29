@@ -5,6 +5,7 @@
 const PREFLIGHT_NOTE_RULE_IDS = new Set([
   'healthcheck-inherited',
   'docker-socket-proxy-client',
+  'tunnel-exposure',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string | undefined): boolean {
