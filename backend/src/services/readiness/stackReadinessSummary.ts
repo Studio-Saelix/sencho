@@ -197,7 +197,7 @@ async function computeStackReadinessSummary(nodeId: number): Promise<StackReadin
       // and rollback evidence computed beside it in a later batch.
       const [update, rollback] = await withTimeout(
         Promise.allSettled([
-          guard.computeUpdateReadiness(nodeId, stack, undefined, { deadline }),
+          guard.computeUpdateReadiness(nodeId, stack, undefined, { deadlineEpochMs: deadline }),
           guard.computeRollbackReadiness(nodeId, stack),
         ]),
         remaining,
