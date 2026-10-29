@@ -15,6 +15,7 @@ import { assembleStackDrift } from '../DriftDetectionService';
 import { resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { isHostNetwork, isLoopback } from './normalize';
 import { getErrorMessage } from '../../utils/errors';
+import { composeInterpolationLookup } from '../../utils/authoredComposeArgs';
 import { sanitizeForLog } from '../../utils/safeLog';
 
 /** One signal bucket: how many stacks match, and which. */
@@ -34,7 +35,7 @@ export interface NodeNetworkingSummary {
 
 const bucket = (stacks: string[]): NetworkingSummaryBucket => ({ count: stacks.length, stacks });
 
-/** Services a tunnel connector reaches, from the light parse (raw, uninterpolated YAML). */
+/** Services a tunnel connector reaches, from the light parse (raw YAML; only `TS_EXTRA_ARGS` is interpolated). */
 function tunneledServices(declared: DeclaredCompose): Set<string> {
   const connectors = detectTunnels({
     services: declared.services.map(s => ({
@@ -50,6 +51,25 @@ function tunneledServices(declared: DeclaredCompose): Set<string> {
     networks: Object.fromEntries(Object.entries(declared.networks).map(([key, r]) => [key, { name: r.name ?? key, external: r.external }])),
   });
   return new Set(tunnelExposureByService(connectors).keys());
+}
+
+/**
+ * Re-parse with the stack's interpolation variables when a Tailscale
+ * `TS_EXTRA_ARGS` holds a `${VAR}` the raw YAML cannot answer, so these
+ * counters read the same flags as Compose Doctor and the stack views, which
+ * use the rendered model. Left unresolved (counted as forwarding) when the
+ * stack's env files cannot be read the way Compose reads them.
+ */
+async function withTailscaleArgsInterpolated(nodeId: number, stack: string, content: string, declared: DeclaredCompose): Promise<DeclaredCompose> {
+  if (!declared.services.some(s => s.tailscaleFlags?.includes('unresolved'))) return declared;
+  try {
+    const lookup = await composeInterpolationLookup(stack, nodeId);
+    return lookup ? parseComposeDependencies(content, { lookup }) : declared;
+  } catch (error) {
+    console.warn('[NetworkingSummary] Stack %s env files unreadable; TS_EXTRA_ARGS left unresolved:',
+      sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    return declared;
+  }
 }
 
 export async function computeNodeNetworkingSummary(nodeId: number): Promise<NodeNetworkingSummary> {
@@ -81,11 +101,12 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
         sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
       continue;
     }
-    const declared = parseComposeDependencies(content);
+    let declared = parseComposeDependencies(content);
     if (declared.parseError) {
       console.warn('[NetworkingSummary] Skipped stack %s, compose file does not parse.', sanitizeForLog(stack));
       continue;
     }
+    declared = await withTailscaleArgsInterpolated(nodeId, stack, content, declared);
 
     // A host-network service publishes every container port directly on the host,
     // so it counts as exposed (beyond loopback) and as publishing even with no

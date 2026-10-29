@@ -564,6 +564,25 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(reachOf(hosted)).toEqual({ legacy: 'host-network' });
   });
 
+  it('treats two network_mode: bridge services as sharing Docker\'s default bridge, and only with each other', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'bridge' },
+      legacy: { image: 'example/legacy', network_mode: 'bridge' },
+      app,
+    });
+    const c = connector(model, 'cloudflared');
+    expect(c.reaches).toEqual([{ service: 'legacy', path: 'shared-network', networks: ['bridge'] }]);
+    expect(c.externalNetworks).toEqual([]);
+    expect(c.meshAttached).toBe(false);
+    expect(describeTunnelConnector(c).message).toContain('"legacy" shares a network with the connector');
+    // A stack network keyed `bridge` is the project's own network, not Docker's default bridge.
+    const keyed = render(
+      { cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'bridge' }, other: { image: 'example/other', networks: { bridge: null } } },
+      { bridge: { name: 'proj_bridge' } },
+    );
+    expect(connector(keyed, 'cloudflared').reaches).toEqual([]);
+  });
+
   it('does not loop or invent a reach on a network_mode cycle', () => {
     const model = render({
       cloudflared: { image: 'cloudflare/cloudflared' },
@@ -668,8 +687,28 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-routes=10.0.0.0/24 -advertise-exit-node' })).toEqual(['--advertise-routes', '--advertise-exit-node']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=false --advertise-routes=' })).toEqual([]);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=true' })).toEqual(['--advertise-exit-node']);
+    // Every spelling Go's strconv.ParseBool reads as false turns the flag off.
+    for (const off of ['0', 'f', 'F', 'FALSE', 'False']) {
+      expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node=${off}` })).toEqual([]);
+    }
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=1' })).toEqual(['--advertise-exit-node']);
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--accept-dns=false', 'TS_EXTRA_ARGS=--advertise-exit-node'])).toEqual(['--advertise-exit-node']);
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--advertise-exit-node', 'TS_EXTRA_ARGS=--accept-dns=false'])).toEqual([]);
+  });
+
+  it('expands an uninterpolated TS_EXTRA_ARGS with the stack\'s variables the way Compose does', () => {
+    const vars: Record<string, string> = { TS_ARGS: '--advertise-routes=10.0.0.0/24', QUIET: '--accept-dns=false', EMPTY: '' };
+    const lookup = (name: string) => vars[name];
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS}' }, lookup)).toEqual(['--advertise-routes']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '$QUIET' }, lookup)).toEqual([]);
+    // Unset or empty with no default renders empty, as Compose renders it.
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${MISSING}' }, lookup)).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${EMPTY:---advertise-exit-node}' }, lookup)).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=${MISSING:-}'], lookup)).toEqual([]);
+    // A key with no value takes the variable of the same name.
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'], name => (name === 'TS_EXTRA_ARGS' ? '--advertise-exit-node' : undefined))).toEqual(['--advertise-exit-node']);
+    // A value that needs no interpolation is read as written.
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node' }, () => undefined)).toEqual(['--advertise-exit-node']);
   });
 
   it('treats a TS_EXTRA_ARGS value it cannot read as forwarding, never as a node that only exposes itself', () => {
@@ -678,6 +717,9 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS}' })).toEqual(['unresolved']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=$HOSTNAME' })).toEqual(['unresolved']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=box$$1' })).toEqual([]);
+    // A lookup that cannot answer, or a template Compose refuses, stays unresolved.
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'], () => undefined)).toEqual(['unresolved']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS:?set it}' }, () => undefined)).toEqual(['unresolved']);
     const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: null } }, db }), 'ts');
     expect(reachOf(c)).toEqual({ db: 'shared-network' });
     expect(c.signals).toContain('flag:unresolved');

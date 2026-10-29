@@ -1,5 +1,6 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
+import type { ComposeEnvLookup } from '../utils/composeDotenv';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -181,8 +182,11 @@ function collectResources(value: unknown): Record<string, DeclaredResource> {
  * Runtime edges in the dependency map come from the live container snapshot;
  * this declared view is used only to flag missing dependencies and to gather
  * declared port claimants for conflict detection.
+ *
+ * Values are read uninterpolated, except that `options.lookup`, when given,
+ * expands a Tailscale `TS_EXTRA_ARGS` value the way Compose would.
  */
-export function parseComposeDependencies(content: string): DeclaredCompose {
+export function parseComposeDependencies(content: string, options: { lookup?: ComposeEnvLookup } = {}): DeclaredCompose {
   if (content.length > MAX_COMPOSE_PARSE_BYTES) {
     return { services: [], networks: {}, volumes: {}, parseError: 'Compose file is too large to parse.' };
   }
@@ -219,7 +223,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       networkMode: asString(svc.network_mode),
       envKeys: envKeyNames(svc.environment),
       commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
-      tailscaleFlags: tailscaleForwardFlags(svc.environment),
+      tailscaleFlags: tailscaleForwardFlags(svc.environment, options.lookup),
       restart: asString(svc.restart) ?? null,
     });
   }

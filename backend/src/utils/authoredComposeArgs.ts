@@ -5,7 +5,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { isPathWithinBase, isValidRelativeStackPath } from './validation';
-import { ComposeEnvFiles, DEFAULT_PATH_SEPARATOR } from './composeDotenv';
+import { ComposeEnvFiles, DEFAULT_PATH_SEPARATOR, type ComposeEnvLookup } from './composeDotenv';
 import { getErrorMessage } from './errors';
 
 /**
@@ -481,7 +481,20 @@ export async function lexicalComposePath(nodeId: number, physicalPath: string): 
   return physicalPath;
 }
 
-export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
+/** The env files a stack's Compose run loads, read the way Compose reads them. */
+type ComposeEnvRead =
+  | {
+    kind: 'read';
+    reader: ComposeEnvFiles;
+    composeEnvFiles: string[];
+    loadedEnvFiles: string[];
+    stackEnvRead: boolean;
+    projectEnvDisabled: boolean;
+  }
+  | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] }
+  | { kind: 'invalid'; reason: string; loadedEnvFiles: string[] };
+
+async function readComposeEnv(stackName: string, nodeId?: number): Promise<ComposeEnvRead> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const fsSvc = FileSystemService.getInstance(resolvedNodeId);
   let envArgs: string[];
@@ -528,12 +541,12 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
   for (const source of sources) {
     if (source.path !== null) loadedEnvFiles.push(source.path);
   }
-  const unreadable = (reason: string): ComposeFileEnvSelection => ({
+  const unreadable = (reason: string): ComposeEnvRead => ({
     kind: 'unknown',
     reason,
     loadedEnvFiles,
   });
-  const invalid = (reason: string): ComposeFileEnvSelection => ({
+  const invalid = (reason: string): ComposeEnvRead => ({
     kind: 'invalid',
     reason,
     loadedEnvFiles,
@@ -608,7 +621,13 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
       projectEnvDisabled = disabled;
     }
   }
+  return { kind: 'read', reader, composeEnvFiles, loadedEnvFiles, stackEnvRead, projectEnvDisabled };
+}
 
+export async function composeFileEnvVarSelection(stackName: string, nodeId?: number): Promise<ComposeFileEnvSelection> {
+  const env = await readComposeEnv(stackName, nodeId);
+  if (env.kind !== 'read') return env;
+  const { reader, composeEnvFiles, loadedEnvFiles, stackEnvRead, projectEnvDisabled } = env;
   // The process environment sits above every file, and the files in the order
   // Compose reads them.
   const value = reader.lookup('COMPOSE_FILE');
@@ -625,6 +644,19 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
     stackEnvRead,
     projectEnvDisabled,
   };
+}
+
+/**
+ * The variables Compose interpolates a stack's compose file with: the process
+ * environment above the env files the run loads. Null when those files cannot
+ * be read the way Compose reads them, or when the stack `.env` disables itself
+ * with COMPOSE_DISABLE_ENV_FILE (it was still read for that setting, so its
+ * values would wrongly appear here).
+ */
+export async function composeInterpolationLookup(stackName: string, nodeId?: number): Promise<ComposeEnvLookup | null> {
+  const env = await readComposeEnv(stackName, nodeId);
+  if (env.kind !== 'read' || (env.projectEnvDisabled && env.stackEnvRead)) return null;
+  return (name) => env.reader.lookup(name);
 }
 
 /**

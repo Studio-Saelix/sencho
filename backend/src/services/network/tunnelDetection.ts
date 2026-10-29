@@ -23,6 +23,7 @@
  * services elsewhere, which is reported as unknown rather than guessed.
  */
 import { SENCHO_MESH_NETWORK } from '../MeshComposeOverride';
+import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../../utils/composeDotenv';
 
 export type TunnelProvider = 'cloudflared' | 'tailscale' | 'wireguard';
 
@@ -43,13 +44,14 @@ export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
 export interface TunnelReach {
   service: string;
   path: TunnelPath;
-  /** Network keys shared with the connector (empty unless `shared-network`). */
+  /** Network keys shared with the connector (empty unless `shared-network`); `bridge` is Docker's default bridge. */
   networks: string[];
 }
 
 /** How the connector is attached: to the stack's networks (`network_mode:
- *  bridge` counts here but joins only Docker's default bridge, none of the
- *  stack's networks), to the host network, or to another container's namespace
+ *  bridge` counts here but joins only Docker's default bridge, shared with
+ *  other bridge-mode services and none of the stack's networks), to the host
+ *  network, or to another container's namespace
  *  (`container:<x>`), whose reach Sencho cannot see. A connector with
  *  `network_mode: none` has no network and is not reported. */
 export type TunnelAttachment = 'networks' | 'host' | 'other';
@@ -164,8 +166,8 @@ const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP'];
 
 /** What `TS_EXTRA_ARGS` says about forwarding: a `tailscale up` flag that makes
  *  a node forward to other addresses, or `unresolved` when the value cannot be
- *  read (left to the shell environment, or interpolated from a variable the
- *  light parse does not expand), which is treated as forwarding. */
+ *  read (left to the shell environment, or interpolated with no lookup to
+ *  expand it), which is treated as forwarding. */
 export type TailscaleForwardFlag = '--advertise-routes' | '--advertise-exit-node' | 'unresolved';
 
 const TAILSCALE_FORWARD_FLAGS: ReadonlySet<string> = new Set(['--advertise-routes', '--advertise-exit-node']);
@@ -203,15 +205,37 @@ export function cloudflaredCommandHints(command: unknown, entrypoint: unknown): 
   return [...hints];
 }
 
+/** Go's strconv.ParseBool spellings of false, which Tailscale's flag parser accepts. */
+const GO_FALSE: ReadonlySet<string> = new Set(['0', 'f', 'F', 'false', 'FALSE', 'False']);
+
+/** `TS_EXTRA_ARGS` as text, or null when it cannot be read. A raw value that
+ *  still holds `${VAR}`/`$VAR` is expanded with `lookup` the way Compose
+ *  interpolates it; a key with no value takes the variable of the same name. */
+function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined): string | null {
+  if (value === undefined || value === null) return lookup?.('TS_EXTRA_ARGS') ?? null;
+  if (typeof value !== 'string') return null;
+  if (!/\$\{|\$[A-Za-z_]/.test(value.replace(/\$\$/g, ''))) return value;
+  if (!lookup) return null;
+  try {
+    return expandComposeEnvTemplate(value, lookup);
+  } catch (error) {
+    // Compose refuses to render this template (a malformed reference or a
+    // required variable with no value), so no flag can be read from it.
+    if (error instanceof ComposeEnvFileError) return null;
+    throw error;
+  }
+}
+
 /**
  * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`,
  * in Go's single- or double-dash form) named in a service's `TS_EXTRA_ARGS`,
  * from list (`KEY=value`, last entry wins as in Compose) or map form. A flag
- * set to `false` or to an empty value does not forward. A key with no readable
- * value yields `unresolved`. Only membership in that fixed set is kept; the
- * routes and every other flag are discarded.
+ * set to an empty value or to a Go spelling of false does not forward.
+ * `lookup` expands an uninterpolated value (the raw YAML); without it, or when
+ * the value still cannot be read, the result is `unresolved`. Only membership
+ * in that fixed set is kept; the routes and every other flag are discarded.
  */
-export function tailscaleForwardFlags(environment: unknown): TailscaleForwardFlag[] {
+export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvLookup): TailscaleForwardFlag[] {
   let present = false;
   let value: unknown;
   if (Array.isArray(environment)) {
@@ -223,13 +247,14 @@ export function tailscaleForwardFlags(environment: unknown): TailscaleForwardFla
     value = (environment as Record<string, unknown>).TS_EXTRA_ARGS;
   }
   if (!present) return [];
-  if (typeof value !== 'string' || /\$\{|\$[A-Za-z_]/.test(value.replace(/\$\$/g, ''))) return ['unresolved'];
+  const text = readableExtraArgs(value, lookup);
+  if (text === null) return ['unresolved'];
   const flags = new Set<TailscaleForwardFlag>();
-  for (const token of value.split(/\s+/)) {
+  for (const token of text.split(/\s+/)) {
     const eq = token.indexOf('=');
     const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
-    const setting = eq === -1 ? undefined : token.slice(eq + 1).toLowerCase();
-    if (setting === '' || setting === 'false') continue;
+    const setting = eq === -1 ? undefined : token.slice(eq + 1);
+    if (setting === '' || (setting !== undefined && GO_FALSE.has(setting))) continue;
     if (isTailscaleForwardFlag(name)) flags.add(name);
   }
   return [...flags];
@@ -303,9 +328,15 @@ function attachmentOf(owner: TunnelDetectionService | undefined): TunnelAttachme
   return owner?.networkMode === 'host' ? 'host' : 'other';
 }
 
-/** Stack network keys a namespace owner joins (Compose's implicit `default`
- *  when it lists none; none on Docker's default bridge). */
+/** Stands for Docker's default bridge among network keys. A Compose network
+ *  key cannot contain a space, so it never matches a stack network. */
+const DEFAULT_BRIDGE_KEY = 'docker default bridge';
+
+/** Network keys a namespace owner joins: its stack networks (Compose's implicit
+ *  `default` when it lists none), or Docker's default bridge alone under
+ *  `network_mode: bridge`, which it shares only with other bridge-mode services. */
 function networksOf(owner: TunnelDetectionService | undefined): string[] {
+  if (owner?.networkMode === 'bridge') return [DEFAULT_BRIDGE_KEY];
   if (!owner || !declaresNoNetworkMode(owner)) return [];
   return owner.networks.length > 0 ? owner.networks.map(n => n.key) : ['default'];
 }
@@ -362,11 +393,13 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
       }
       if (!forwards) continue;
       const shared = networksOf(otherOwner).filter(key => connectorNetworks.has(key));
-      if (shared.length > 0) reaches.push({ service: other.name, path: 'shared-network', networks: shared });
+      if (shared.length > 0) {
+        reaches.push({ service: other.name, path: 'shared-network', networks: shared.map(key => (key === DEFAULT_BRIDGE_KEY ? 'bridge' : key)) });
+      }
     }
 
     const networkName = (key: string) => model.networks[key]?.name ?? key;
-    const keys = [...connectorNetworks];
+    const keys = [...connectorNetworks].filter(key => key !== DEFAULT_BRIDGE_KEY);
     connectors.push({
       service: svc.name,
       provider,

@@ -85,6 +85,28 @@ describe('networking summary', () => {
     expect(JSON.stringify(router.body)).not.toContain('tskey-secret');
   });
 
+  it('reads an interpolated TS_EXTRA_ARGS from the stack .env, as the rendered views do', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:-}\n  app:\n    image: example/app:1\n');
+    // Unset: Compose renders an empty value, so the node exposes only itself.
+    const unset = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(unset.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--accept-dns=false\n');
+    const quiet = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(quiet.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--advertise-routes=10.0.0.0/24\n');
+    const router = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(router.body.exposed.stacks).toContain(STACK);
+    expect(JSON.stringify(router.body)).not.toContain('10.0.0.0');
+
+    // An env file Compose would refuse leaves the value unresolved, counted as forwarding.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=maybe\n');
+    const unreadable = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(unreadable.body.exposed.stacks).toContain(STACK);
+  });
+
   it('does not count a cloudflared DNS proxy as exposure', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  dns:\n    image: cloudflare/cloudflared:latest\n    command: proxy-dns\n  pihole:\n    image: pihole/pihole\n');
