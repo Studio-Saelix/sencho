@@ -60,15 +60,21 @@ export type DialFailureCode =
     | 'scope_denied'
     /** The remote Sencho refused: license tier does not include mesh. */
     | 'tier_denied'
-    /** Refused or redirected by something in front of the remote Sencho (access gateway, WAF, SSO proxy). */
+    /**
+     * Refused or redirected by something in front of the remote Sencho, with
+     * evidence that identifies it: an access-gateway login redirect or a 407
+     * proxy-authentication challenge.
+     */
     | 'blocked_by_proxy'
     /** The remote Sencho itself refused the upgrade for a reason it did not classify. */
     | 'remote_refused'
     /**
-     * Something answered 401/403/429 but did not identify itself. Older
-     * Sencho receivers have no rejection marker, so in a mixed-version fleet
-     * this can be their credential refusal or a gateway in front of them;
-     * do not claim either.
+     * Something refused or redirected the upgrade without identifying itself.
+     * Older Sencho receivers have no rejection marker, so in a mixed-version
+     * fleet a 401/403/429 can be their credential refusal or a gateway in
+     * front of them. An arbitrary redirect is equally unattributable, and
+     * ordinary Cloudflare edge headers only prove the response passed through
+     * Cloudflare, not which hop produced it. Do not claim either.
      */
     | 'refused_unverified'
     /** A reverse proxy or tunnel in front of the remote answered but could not reach Sencho. */
@@ -576,19 +582,20 @@ function headerValue(headers: UpgradeFailure['httpHeaders'], name: string): stri
 }
 
 /**
- * True when the response carries markers of Cloudflare's edge or Access.
+ * True when a redirect destination is Cloudflare Access's login host.
  *
- * The Location check parses the redirect target and compares its host,
- * rather than looking for the Access domain anywhere in the string. A
- * redirect whose query or path merely mentions that domain is not an Access
- * login, and treating it as one would send the operator after a gateway that
- * is not in the path.
+ * The Location value is parsed and its host compared, rather than looking for
+ * the Access domain anywhere in the string. A redirect whose query or path
+ * merely mentions that domain is not an Access login, and treating it as one
+ * would send the operator after a gateway that is not in the path.
+ *
+ * Only the host establishes an Access login. Ordinary Cloudflare edge headers
+ * (`Server: cloudflare`, `CF-Ray`) appear on every response Cloudflare
+ * forwards, including the remote's own refusal, so they prove transit and
+ * nothing about which hop produced the status code. They must not upgrade an
+ * unmarked refusal or an arbitrary redirect into a gateway diagnosis.
  */
-function looksLikeCloudflare(headers: UpgradeFailure['httpHeaders']): boolean {
-    const server = headerValue(headers, 'server')?.toLowerCase() ?? '';
-    if (server.includes('cloudflare')) return true;
-    if (headerValue(headers, 'cf-ray') !== undefined) return true;
-    const location = headerValue(headers, 'location');
+function isCloudflareAccessLogin(location: string | undefined): boolean {
     if (!location) return false;
     try {
         const host = new URL(location).hostname.toLowerCase();
@@ -615,31 +622,26 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
     if (httpStatus !== undefined) {
         const headers = failure.httpHeaders;
         const senchoReason = headerValue(headers, MESH_REJECT_HEADER);
-        const cloudflare = looksLikeCloudflare(headers);
         if (senchoReason === 'unauthorized') return { code: 'auth_failed', message: 'api token rejected by remote' };
         if (senchoReason === 'scope') return { code: 'scope_denied', message: 'remote refused: node token is not full-admin' };
         if (senchoReason === 'tier') return { code: 'tier_denied', message: 'remote refused: license tier does not include mesh' };
         if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
         if (httpStatus >= 300 && httpStatus < 400) {
             const location = headerValue(headers, 'location');
-            if (cloudflare) {
+            if (isCloudflareAccessLogin(location)) {
                 return {
                     code: 'blocked_by_proxy',
-                    message: `redirected by Cloudflare (HTTP ${httpStatus}), likely a Cloudflare Access login`,
+                    message: `redirected to the Cloudflare Access login (HTTP ${httpStatus}); the gateway wants its own credential`,
                 };
             }
-            if (!location) {
-                // A redirect without a destination and without gateway
-                // headers is not evidence of a login gateway; keep the hop
-                // unidentified like an unmarked 401/403.
-                return {
-                    code: 'refused_unverified',
-                    message: `redirected with HTTP ${httpStatus} without a Location header, so the destination is unknown`,
-                };
-            }
+            // Any other destination is not evidence of a login gateway. A
+            // relative path, another host, or a malformed value can come from
+            // the remote itself or a proxy that does not identify itself.
             return {
-                code: 'blocked_by_proxy',
-                message: `remote redirected the connection (HTTP ${httpStatus}), likely an SSO or access proxy login`,
+                code: 'refused_unverified',
+                message: location
+                    ? `redirected with HTTP ${httpStatus} to a destination that is not a recognized access-gateway login, so neither the destination nor the response headers identify the hop that redirected`
+                    : `redirected with HTTP ${httpStatus} without a Location header, so neither the destination nor the response headers identify the hop that redirected`,
             };
         }
         if (senchoReason === 'forbidden') {
@@ -650,18 +652,12 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
             // one does identify something in front of the remote.
             return { code: 'blocked_by_proxy', message: 'proxy authentication required (HTTP 407) by a proxy in front of the remote' };
         }
-        if (cloudflare && (httpStatus === 401 || httpStatus === 403 || httpStatus === 429)) {
-            // Gateway-identifying headers (Cloudflare edge or Access) are
-            // positive evidence, unlike a bare 401/403.
-            return {
-                code: 'blocked_by_proxy',
-                message: `refused by Cloudflare (HTTP ${httpStatus}), likely Cloudflare Access or a WAF rule`,
-            };
-        }
         // Unmarked 401/403/429: an older Sencho receiver emits its credential
-        // refusals without a marker too, so marker absence proves nothing
-        // about which hop refused. Keep the uncertainty instead of sending
-        // the operator to the gateway when the token is the actual problem.
+        // refusals without a marker too, and ordinary Cloudflare edge headers
+        // are forwarded with the origin's response. Marker absence and edge
+        // headers both leave the refusing hop unknown, so keep the uncertainty
+        // instead of sending the operator to the gateway when the token is the
+        // actual problem.
         if (httpStatus === 401 || httpStatus === 403 || httpStatus === 429) {
             return {
                 code: 'refused_unverified',

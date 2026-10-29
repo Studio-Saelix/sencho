@@ -20,11 +20,34 @@ import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let MeshProxyTunnelDialer: typeof import('../services/MeshProxyTunnelDialer').MeshProxyTunnelDialer;
+let meshReachableReason: typeof import('../services/MeshService').meshReachableReason;
+
+/** Answer every WebSocket upgrade with one fixed HTTP response. */
+async function startUpgradeRefusal(response: string): Promise<{
+    port: number;
+    seen: http.IncomingHttpHeaders[];
+    close: () => Promise<void>;
+}> {
+    const seen: http.IncomingHttpHeaders[] = [];
+    const server = http.createServer();
+    server.on('upgrade', (req, socket) => {
+        seen.push(req.headers);
+        socket.end(response);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const { port } = server.address() as AddressInfo;
+    return {
+        port,
+        seen,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+}
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ MeshProxyTunnelDialer } = await import('../services/MeshProxyTunnelDialer'));
+    ({ meshReachableReason } = await import('../services/MeshService'));
 });
 
 afterAll(() => {
@@ -82,19 +105,15 @@ describe('MeshProxyTunnelDialer', () => {
     });
 
     /**
-     * A Cloudflare-style 403 at the edge. Asserts the operator-facing label
-     * and that Sencho's own credential is still on the upgrade.
+     * A gateway refusal that identifies itself: Cloudflare Access redirects a
+     * request with no service token to its login host. Asserts the
+     * operator-facing gateway label and that Sencho's own credential is still
+     * on the upgrade.
      */
-    it('labels an access-proxy refusal', async () => {
-        const seen: http.IncomingHttpHeaders[] = [];
-        const server = http.createServer();
-        server.on('upgrade', (req, socket) => {
-            seen.push(req.headers);
-            // Mimic Cloudflare Access refusing the request at the edge.
-            socket.end('HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\nCF-RAY: test\r\nContent-Length: 0\r\n\r\n');
-        });
-        await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
-        const { port } = server.address() as AddressInfo;
+    it('labels an access-gateway refusal that identifies itself', async () => {
+        const peer = await startUpgradeRefusal(
+            'HTTP/1.1 302 Found\r\nLocation: https://team.cloudflareaccess.com/cdn-cgi/access/login\r\nContent-Length: 0\r\n\r\n',
+        );
         try {
             const dialer = MeshProxyTunnelDialer.resetForTest(0);
             const nodeId = DatabaseService.getInstance().addNode({
@@ -103,16 +122,53 @@ describe('MeshProxyTunnelDialer', () => {
                 compose_dir: '',
                 is_default: false,
                 mode: 'proxy',
-                api_url: `http://127.0.0.1:${port}`,
+                api_url: `http://127.0.0.1:${peer.port}`,
                 api_token: 'test-token',
             });
 
             expect(await dialer.ensureBridge(nodeId)).toBeNull();
-            expect(seen[0]?.authorization).toBe('Bearer test-token');
-            expect(dialer.getRecentFailure(nodeId)?.code).toBe('blocked_by_proxy');
+            expect(peer.seen[0]?.authorization).toBe('Bearer test-token');
+            const failure = dialer.getRecentFailure(nodeId);
+            expect(failure?.code).toBe('blocked_by_proxy');
+            expect(meshReachableReason(failure!.code)).toMatch(/access proxy/);
         } finally {
             MeshProxyTunnelDialer.resetForTest(0);
-            await new Promise<void>((r) => server.close(() => r()));
+            await peer.close();
+        }
+    });
+
+    /**
+     * The mixed-version shape: an older remote rejects a stale token with an
+     * unmarked 403 and Cloudflare forwards that response with the ordinary
+     * edge headers every proxied response carries. Edge headers identify
+     * transit, not the hop that refused, so the dial must not blame a
+     * gateway and send the operator after the gateway credential.
+     */
+    it('keeps a forwarded origin refusal unclassified', async () => {
+        const peer = await startUpgradeRefusal(
+            'HTTP/1.1 403 Forbidden\r\nServer: cloudflare\r\nCF-RAY: test\r\nContent-Length: 0\r\n\r\n',
+        );
+        try {
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const nodeId = DatabaseService.getInstance().addNode({
+                name: 'proxy-test-forwarded-refusal',
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: `http://127.0.0.1:${peer.port}`,
+                api_token: 'stale-token',
+            });
+
+            expect(await dialer.ensureBridge(nodeId)).toBeNull();
+            expect(peer.seen[0]?.authorization).toBe('Bearer stale-token');
+            const failure = dialer.getRecentFailure(nodeId);
+            expect(failure?.code).toBe('refused_unverified');
+            expect(meshReachableReason(failure!.code)).toMatch(/refused or redirected/);
+            expect(meshReachableReason(failure!.code)).not.toMatch(/access proxy/);
+        } finally {
+            MeshProxyTunnelDialer.resetForTest(0);
+            await peer.close();
         }
     });
 

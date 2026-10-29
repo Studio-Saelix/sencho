@@ -48,6 +48,7 @@ interface WssPeer {
  */
 async function startPeer(options: {
     require?: Record<string, string>;
+    refusalStatus?: number;
     refusalHeaders?: Record<string, string>;
 } = {}): Promise<WssPeer> {
     const seen: http.IncomingHttpHeaders[] = [];
@@ -62,7 +63,9 @@ async function startPeer(options: {
             const extraHeaders = Object.entries(options.refusalHeaders ?? {})
                 .map(([name, value]) => `${name}: ${value}\r\n`)
                 .join('');
-            socket.end(`HTTP/1.1 401 Unauthorized\r\n${extraHeaders}Content-Length: 0\r\n\r\n`);
+            const status = options.refusalStatus ?? 401;
+            const reason = status === 302 ? 'Found' : 'Unauthorized';
+            socket.end(`HTTP/1.1 ${status} ${reason}\r\n${extraHeaders}Content-Length: 0\r\n\r\n`);
             return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -167,8 +170,10 @@ describe('proxy-mode mesh WSS dial', () => {
     it('fails when the gateway requires a credential that was not configured', async () => {
         const peer = await startPeer({
             require: { 'x-gateway-key': 'needed' },
-            // What Cloudflare Access returns when no service token is sent.
-            refusalHeaders: { Server: 'cloudflare', 'CF-RAY': 'test' },
+            // What Cloudflare Access does when no service token is sent:
+            // redirects the upgrade to its login host.
+            refusalStatus: 302,
+            refusalHeaders: { Location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' },
         });
         process.env.SENCHO_MESH_PROXY_CA_FILE = PRIVATE_CA_FILE;
         const dialer = MeshProxyTunnelDialer.resetForTest(0);

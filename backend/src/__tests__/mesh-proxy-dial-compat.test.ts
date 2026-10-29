@@ -30,19 +30,29 @@ describe('classifyDialError', () => {
         [upgradeFailure(403, { 'x-sencho-mesh-reject': 'scope' }), 'scope_denied'],
         [upgradeFailure(403, { 'x-sencho-mesh-reject': 'tier' }), 'tier_denied'],
         [upgradeFailure(404), 'endpoint_not_found'],
-        // Gateway-identifying responses: Cloudflare edge or Access headers,
-        // a login redirect, or a proxy auth challenge.
-        [upgradeFailure(403, { server: 'cloudflare', 'cf-ray': 'abc' }), 'blocked_by_proxy'],
-        [upgradeFailure(401, { server: 'cloudflare' }), 'blocked_by_proxy'],
-        [upgradeFailure(429, { 'cf-ray': 'abc' }), 'blocked_by_proxy'],
+        // Positive gateway evidence: a redirect to the Cloudflare Access
+        // login host, or a proxy authentication challenge.
         [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' }), 'blocked_by_proxy'],
-        // A redirect with no destination says nothing about which hop sent it;
-        // Cloudflare edge headers still identify the gateway.
+        [upgradeFailure(303, { location: 'https://cloudflareaccess.com/login', server: 'cloudflare', 'cf-ray': 'abc' }), 'blocked_by_proxy'],
+        [upgradeFailure(407, { server: 'nginx' }), 'blocked_by_proxy'],
+        // Generic edge headers prove only that Cloudflare forwarded the
+        // response. Cloudflare forwards the remote's own refusal with the
+        // same headers, so they cannot turn an unmarked 401/403/429 into a
+        // gateway label.
+        [upgradeFailure(401, { server: 'cloudflare' }), 'refused_unverified'],
+        [upgradeFailure(403, { server: 'cloudflare', 'cf-ray': 'abc' }), 'refused_unverified'],
+        [upgradeFailure(429, { 'cf-ray': 'abc' }), 'refused_unverified'],
+        // A redirect identifies a gateway only when its destination does.
+        // An arbitrary, relative, malformed, or missing destination says
+        // nothing about which hop sent it.
         [upgradeFailure(302), 'refused_unverified'],
         [upgradeFailure(307), 'refused_unverified'],
-        [upgradeFailure(302, { server: 'cloudflare' }), 'blocked_by_proxy'],
-        [upgradeFailure(302, { 'cf-ray': 'abc' }), 'blocked_by_proxy'],
-        [upgradeFailure(407, { server: 'nginx' }), 'blocked_by_proxy'],
+        [upgradeFailure(302, { location: 'https://app.example.com/login' }), 'refused_unverified'],
+        [upgradeFailure(308, { location: '/api/mesh/proxy-tunnel/' }), 'refused_unverified'],
+        [upgradeFailure(302, { location: 'not a url at all' }), 'refused_unverified'],
+        [upgradeFailure(302, { server: 'cloudflare' }), 'refused_unverified'],
+        [upgradeFailure(302, { 'cf-ray': 'abc' }), 'refused_unverified'],
+        [upgradeFailure(302, { server: 'cloudflare', 'cf-ray': 'abc', location: 'https://app.example.com/login' }), 'refused_unverified'],
         // Markerless 401/403/429: an older Sencho receiver emits its
         // credential refusals without a marker too, so the hop is unknown.
         [upgradeFailure(401), 'refused_unverified'],
@@ -83,9 +93,43 @@ describe('classifyDialError', () => {
         expect(out.message).toMatch(/without identifying whether the remote Sencho or a proxy in front of it answered/);
     });
 
+    it.each([
+        // An edge header combination that appears on a forwarded origin
+        // refusal must not become a gateway diagnosis. Cloudflare forwards
+        // the remote's unmarked 401/403/429 with these headers attached.
+        ['Cloudflare edge headers', { server: 'cloudflare', 'cf-ray': 'abc' }],
+        ['a CF-Ray only', { 'cf-ray': 'abc' }],
+        ['a Cloudflare Server only', { server: 'cloudflare' }],
+    ])('does not turn a forwarded refusal with %s into a gateway diagnosis', (_label, headers) => {
+        for (const status of [401, 403, 429]) {
+            const out = classifyDialError(upgradeFailure(status, headers));
+            expect(out.code).toBe('refused_unverified');
+            expect(out.message).not.toMatch(/refused by Cloudflare/);
+            // The node card consumes this mapping, so the certainty claim
+            // has to stay out of the displayed wording too.
+            expect(meshReachableReason(out.code)).toMatch(/refused or redirected/);
+            expect(meshReachableReason(out.code)).not.toMatch(/blocked by an access proxy/);
+        }
+    });
+
+    it.each([
+        ['a generic destination', { location: 'https://app.example.com/login' }],
+        ['a relative destination', { location: '/api/mesh/proxy-tunnel/' }],
+        ['a malformed destination', { location: 'not a url' }],
+        ['no destination', {}],
+        ['no destination with Cloudflare edge headers', { server: 'cloudflare', 'cf-ray': 'abc' }],
+    ])('keeps a redirect with %s out of the gateway label', (_label, headers) => {
+        const out = classifyDialError(upgradeFailure(302, headers));
+        expect(out.code).toBe('refused_unverified');
+        expect(out.message).toMatch(/neither the destination nor the response headers identify the hop that redirected/);
+        expect(meshReachableReason(out.code)).toMatch(/refused or redirected/);
+        expect(meshReachableReason(out.code)).not.toMatch(/blocked by an access proxy/);
+    });
+
     it('shows an explanation that matches the evidence for each refusal class', () => {
         // The node card renders REACHABLE_REASON, not the classification
         // message, so the certainty claim has to be pinned there too.
+        expect(meshReachableReason('refused_unverified')).toMatch(/refused or redirected/);
         expect(meshReachableReason('refused_unverified')).toMatch(/remote or a proxy in front of it/);
         expect(meshReachableReason('refused_unverified')).not.toMatch(/^blocked by an access proxy/);
         expect(meshReachableReason('blocked_by_proxy')).toMatch(/access proxy/);
@@ -110,7 +154,9 @@ describe('classifyDialError', () => {
 
     it('names Cloudflare when a redirect points at Cloudflare Access', () => {
         const out = classifyDialError(upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login' }));
+        expect(out.code).toBe('blocked_by_proxy');
         expect(out.message).toMatch(/Cloudflare Access/);
+        expect(meshReachableReason(out.code)).toMatch(/access proxy/);
     });
 
     it.each([
@@ -118,18 +164,23 @@ describe('classifyDialError', () => {
         'https://team.cloudflareaccess.com/cdn-cgi/access/login',
         'https://cloudflareaccess.com/login',
     ])('treats a redirect to %s as Access', (location) => {
-        expect(classifyDialError(upgradeFailure(302, { location })).message).toMatch(/Cloudflare Access/);
+        const out = classifyDialError(upgradeFailure(302, { location }));
+        expect(out.code).toBe('blocked_by_proxy');
+        expect(out.message).toMatch(/Cloudflare Access/);
     });
 
     it.each([
-        // A redirect that merely mentions the Access domain is not Access.
+        // A redirect that merely mentions the Access domain is not Access,
+        // and a lookalike host is not Access. Neither one identifies the hop
+        // that redirected, so the diagnosis stays unclaimed.
         'https://evil.example.com/login?next=cloudflareaccess.com',
         'https://team.cloudflareaccess.com.evil.example/login',
         'not a url at all cloudflareaccess.com',
     ])('does not treat %s as Access', (location) => {
         const out = classifyDialError(upgradeFailure(302, { location }));
         expect(out.message).not.toMatch(/Cloudflare Access/);
-        expect(out.code).toBe('blocked_by_proxy');
+        expect(out.code).toBe('refused_unverified');
+        expect(meshReachableReason(out.code)).not.toMatch(/access proxy/);
     });
 });
 
