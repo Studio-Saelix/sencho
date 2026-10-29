@@ -71,7 +71,9 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 
 **Permissions:** editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
 
-**How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
+**How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port or sits behind a tunnel, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
+
+**Tunnel-exposed services:** a service behind a Cloudflare Tunnel publishes no host port but is reachable from the internet, so classify it **public** (or **reverse-proxy** when the tunnel points at your proxy). A service reached over Tailscale or WireGuard is reachable only by the peers of that private network; **lan** is the closest intent. See [Tunnels and private overlays](#tunnels-and-private-overlays).
 
 ## Networks
 
@@ -131,6 +133,25 @@ When a service uses `network_mode:` instead of individual network attachments, t
 - **`network_mode: none`**: the service has no network connectivity at all.
 - **`network_mode: service:<name>`** or **`network_mode: container:<name>`**: the service shares another container's network namespace.
 
+### Tunnels and private overlays
+
+Tunnels publish no host ports, so the port badges alone would make a tunnel-exposed service look internal. Sencho recognizes three kinds of tunnel connector in the effective model:
+
+| Connector | Scope | How Sencho recognizes it |
+|-----------|-------|--------------------------|
+| **Cloudflare Tunnel** | Public edge: anyone on the internet, through Cloudflare | A `cloudflared` image, or a `TUNNEL_TOKEN` variable |
+| **Tailscale** | Private overlay: devices on the tailnet | A `tailscale` image, or a `TS_AUTHKEY` variable |
+| **WireGuard** | Private overlay: WireGuard peers | A `wg-easy` image, or a `wireguard` image running as a server (`PEERS`, `SERVERURL`, `SERVERPORT`, `WG_HOST`, or a published UDP port) |
+
+Sencho reads image names, variable *names*, `cap_add`, `devices`, mount targets, and network membership only. A tunnel token or auth key is never read. A WireGuard or other VPN container that runs as an outbound client (a VPN for your torrent client, for example) exposes nothing and is not reported.
+
+The connector's card shows a blue badge such as **Cloudflare Tunnel connector · public edge**. Each service the connector reaches shows **via Cloudflare Tunnel (cloudflared) · public edge** (amber for a public edge, blue for a private overlay):
+
+- **Shares the connector's network namespace** (`network_mode: service:<connector>`, or the connector runs in the service's namespace): the service is certainly reachable through the tunnel.
+- **Shares a network with the connector**: the connector can reach the service, but which services it actually routes to is configured outside the Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard AllowedIPs). These services also show a **routing unverified** badge. A Tailscale container reaches services on a shared network only when it is a subnet router (`TS_ROUTES`) or uses Serve (`TS_SERVE_CONFIG`).
+
+A connector attached to the Sencho Mesh network may also route to services on other nodes through Mesh aliases. Sencho cannot see that from the Compose file, so those services are not marked; the connector's Doctor finding says so. Tunnel detection never changes Mesh routing.
+
 ### Extra hosts
 
 When a service declares `extra_hosts:`, the resolved hostname-to-IP mappings are listed at the bottom of the card. These entries are injected into the container's `/etc/hosts` file at startup.
@@ -163,13 +184,15 @@ When Docker is not reachable, the section shows **runtime unavailable, showing t
 
 ## Doctor findings
 
-When Compose Doctor is available on the active node, a prompt at the bottom of the Networking tab directs you to the Doctor tab for deploy and security checks. The Doctor tab reads the same effective model and, when exposure intents are set, adds five exposure-aware findings on top of its standard checks:
+When Compose Doctor is available on the active node, a prompt at the bottom of the Networking tab directs you to the Doctor tab for deploy and security checks. The Doctor tab reads the same effective model and adds these exposure-aware findings on top of its standard checks:
 
 1. A service classified **internal** or **same-node** that publishes a host port.
-2. A database or admin image published on all interfaces.
-3. A stack that publishes ports but has no exposure intent set.
-4. A published port that the Stack Dossier's documented access URLs do not mention.
-5. Reverse-proxy labels with no documented URL or reverse-proxy intent set.
+2. A service classified **internal** or **same-node** that a tunnel connector reaches.
+3. A database or admin image published on all interfaces.
+4. A tunnel connector, with its provider, scope, the services it reaches, and what Sencho cannot verify.
+5. A stack that publishes ports or is reachable through a tunnel but has no exposure intent set.
+6. A published port that the Stack Dossier's documented access URLs do not mention.
+7. Reverse-proxy labels with no documented URL or reverse-proxy intent set.
 
 See [Compose Doctor](/features/compose-doctor) for the complete check set and severity levels.
 
@@ -242,7 +265,7 @@ After the network is created, the Networking tab refreshes automatically. The ne
     The node-wide operator page: full network inventory, an interactive topology graph, and cross-stack findings, independent of which stack they belong to.
   </Card>
   <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
-    Runs preflight checks against the same effective model, including the five exposure-aware findings that rely on the intents set in the Networking tab.
+    Runs preflight checks against the same effective model, including the exposure-aware findings that rely on the intents set in the Networking tab.
   </Card>
   <Card title="Drift Detection" icon="code-compare" href="/features/stack-drift">
     Shows the same four runtime drift types with a persistent history, so you can see when drift first appeared and when it cleared.

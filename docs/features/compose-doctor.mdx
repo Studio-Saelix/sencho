@@ -157,13 +157,15 @@ The rules in this category (except "Node-state checks skipped" itself) read live
 
 ### Exposure intent
 
-These rules activate when the stack publishes at least one host port. They use the exposure intent you set in the Networking tab and any access URLs documented in the Stack Dossier to flag mismatches. See [Exposure intent checks](#exposure-intent-checks).
+These rules activate when the stack publishes at least one host port or runs a tunnel connector. They use the exposure intent you set in the Networking tab and any access URLs documented in the Stack Dossier to flag mismatches. See [Exposure intent checks](#exposure-intent-checks).
 
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | Classified internal but publishes a host port | High | A service is classified as internal or same-node exposure but publishes a host port that contradicts that intent. |
+| Classified internal but reachable through a tunnel | High or Warning | A service classified as internal or same-node is reachable through a tunnel connector. High when it shares the connector's network namespace; Warning when it only shares a network with it, because the tunnel's routing is unverified. |
 | Sensitive service exposed on all interfaces | High | A service that looks like a database or admin tool (postgres, redis, adminer, and similar) publishes on all interfaces. |
-| Stack publishes ports without an exposure intent | Warning | The stack publishes host ports but no exposure intent has been set in the Networking tab. |
+| Tunnel connector | Info | A Cloudflare Tunnel, Tailscale, or WireGuard connector runs in the stack. The finding names the provider, its scope (public edge or private overlay), the services it reaches, and what Sencho cannot verify. It is a note: it does not change the stack's result. |
+| Stack publishes ports without an exposure intent | Warning | The stack publishes host ports, or a tunnel connector reaches one of its services, but no exposure intent has been set in the Networking tab. |
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
 | Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL, no `sencho.service.url` label, and no reverse-proxy intent. |
 
@@ -175,7 +177,7 @@ These rules activate when the stack publishes at least one host port. They use t
 
 ## Exposure intent checks
 
-The five rules in the [Exposure intent](#exposure-intent) category above cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
+The rules in the [Exposure intent](#exposure-intent) category above cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. They only fire when the stack publishes at least one host port or runs a tunnel connector.
 
 To resolve exposure-related findings:
 
@@ -183,6 +185,16 @@ To resolve exposure-related findings:
 - **Document access URLs** in the [Stack Dossier](/features/stack-dossier). When a dossier URL references a host port, the port-vs-dossier rule uses that to confirm the port is intentional and expected.
 
 Once an intent and access URLs are set, Sencho can detect when the configuration contradicts the documented intent, making future runs more precise.
+
+### Tunnel-exposed services
+
+Tunnels publish no host ports, so Doctor also recognizes Cloudflare Tunnel, Tailscale, and WireGuard connectors in the effective model and the services they reach. It reads image names, variable names, `cap_add`, `devices`, mount targets, and network membership only, never a token or auth key. See [Tunnels and private overlays](/features/compose-networking#tunnels-and-private-overlays) for how a connector is recognized.
+
+- A service that shares the connector's network namespace is certainly reachable through the tunnel.
+- A service that only shares a network with the connector can be reached if the tunnel routes there. Cloudflare ingress rules, Tailscale Serve and ACLs, and WireGuard AllowedIPs live outside the Compose file, so Doctor reports that routing as unverified rather than guessing. If the tunnel does not route to a service you classified internal, acknowledge the warning.
+- A connector on the Sencho Mesh network may route to services on other nodes through Mesh aliases. Doctor cannot see those routes and says so in the connector finding.
+
+Record the tunnel's public hostname or tailnet name as an access URL in the Stack Dossier so the access path is documented with the stack.
 
 ## Self-management
 
@@ -276,7 +288,8 @@ There is no tier gate: Compose Doctor is available on all plans.
 - **One run stored per node.** There is no history. Each new run overwrites the previous one for that stack on that node.
 - **Node-state rules require a reachable Docker daemon.** See [Node-state checks and graceful degradation](#node-state-checks-and-graceful-degradation).
 - **Port conflict check excludes the checked stack.** Host ports already held by the stack being checked are ignored, so redeploying a running stack does not generate a false conflict with itself.
-- **Exposure intent rules require published ports.** All five exposure intent rules are skipped entirely when the stack publishes no host ports.
+- **Exposure intent rules require published ports or a tunnel.** The exposure intent rules are skipped entirely when the stack publishes no host ports and runs no tunnel connector.
+- **Tunnel routing is not read.** Doctor sees which services a tunnel connector can reach, not which ones Cloudflare, Tailscale, or WireGuard actually routes to; those are reported as unverified.
 
 ## Troubleshooting
 
@@ -300,7 +313,7 @@ There is no tier gate: Compose Doctor is available on all plans.
     The tab appears when the active node reports that it supports Compose Doctor. A node running an older version of Sencho does not advertise that capability, so the tab is hidden for that node until it is updated.
   </Accordion>
   <Accordion title="Exposure intent rules are firing unexpectedly">
-    The five exposure intent rules activate when the stack publishes at least one host port. The "unclassified" warning clears as soon as you set an exposure intent in the Networking tab. The "port not in dossier" warning clears once you add a matching access URL in the Stack Dossier. If an intent is already set and the finding still fires, check that the intent is configured on the correct node and for the correct service.
+    The exposure intent rules activate when the stack publishes at least one host port or runs a tunnel connector. The "unclassified" warning clears as soon as you set an exposure intent in the Networking tab. The "port not in dossier" warning clears once you add a matching access URL in the Stack Dossier. If an intent is already set and the finding still fires, check that the intent is configured on the correct node and for the correct service.
   </Accordion>
   <Accordion title="Doctor warns about literal dollar signs in a hash or secret">
     Compose treats unescaped `$` in environment values as variable references. Bcrypt hashes and other secrets often contain `$` characters, so an unquoted value in Compose YAML or a double-quoted `.env` line can be partially blanked out at runtime. Doctor flags this as **Literal dollar in value** and names the env key when it can, without showing part of the secret. Fix it by escaping each literal `$` as `$$` in Compose YAML, or by single-quoting the value in an env file.
