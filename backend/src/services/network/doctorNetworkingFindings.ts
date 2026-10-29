@@ -13,7 +13,7 @@ import { ComposeDoctorService } from '../ComposeDoctorService';
 import type { PreflightFinding } from '../preflight/types';
 import type { DependencySnapshot } from '../DockerController';
 import type { StackNetworkFacts } from './types';
-import { describeTunnelConnector } from './tunnelDetection';
+import { describeServiceTunnel, describeTunnelConnector } from './tunnelDetection';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { NETWORKING_SEVERITY_RANK } from './networkingSeverity';
@@ -143,20 +143,24 @@ function isStillPlausible(
   snapshot: DependencySnapshot | null,
 ): boolean {
   if (!facts?.renderable) return true; // can't check; keep cached
-  // The tunnel rules are retired as soon as the current facts lose the tunnel
-  // they described: a connector card once the live connector reads differently
-  // (removed, its reach changed, or its Mesh opt-in toggled), and a reached
-  // service once no connector reaches it.
+  // The tunnel rules are retired as soon as the current facts read differently
+  // from the tunnel they described: a connector card once the live connector
+  // does (removed, its reach changed, or its Mesh opt-in toggled), and a
+  // reached service once its strongest tunnel path does (gone, or a different
+  // connector or path). Both compare the shared message builders' text, so a
+  // copy change retires cached cards too; that is safe because the live
+  // findings always carry the current connector card and path.
   if (f.ruleId === 'tunnel-exposure') {
     return facts.tunnels.some((c) => c.service === f.service && describeTunnelConnector(c).message === f.message);
   }
-  if (f.ruleId === 'exposure-internal-tunneled') return facts.services.some((svc) => svc.name === f.service && svc.tunnel !== undefined);
+  if (f.ruleId === 'exposure-internal-tunneled') {
+    return facts.services.some((svc) => svc.name === f.service && svc.tunnel !== undefined && f.message.endsWith(describeServiceTunnel(svc.tunnel)));
+  }
   switch (kind) {
     case 'network-mode-host':
     case 'exposure-all-interfaces':
     case 'exposure-intent-mismatch':
     case 'exposure-unclassified':
-    case 'tunnel-exposure':
     case 'sensitive-service-broad-exposure':
     case 'port-conflict-node':
     case 'port-conflict-internal': {

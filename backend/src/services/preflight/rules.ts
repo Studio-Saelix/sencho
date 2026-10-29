@@ -1047,7 +1047,7 @@ const exposureInternalTunneled: PreflightRule = {
         service,
         remediation: certain
           ? 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.'
-          : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or stop publishing its port when the connector uses the host network), or reclassify the exposure intent.',
+          : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.',
       });
     }
     return findings;

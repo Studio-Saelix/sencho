@@ -360,10 +360,10 @@ describe('Compose Doctor tunnel rules', () => {
     expect(Object.keys(bySvc).sort()).toEqual(['cloudflared', 'tailscale']);
     expect(findings.every(f => f.severity === 'info')).toBe(true);
     expect(bySvc.cloudflared.title).toBe('Cloudflare Tunnel connector "cloudflared" (public edge)');
-    expect(bySvc.cloudflared.message).toContain('"app" shares a network with it');
+    expect(bySvc.cloudflared.message).toContain('"app" shares a network with the connector and can be reached if the connector\'s routing points there.');
     expect(bySvc.cloudflared.message).toContain('Sencho cannot see');
     expect(bySvc.tailscale.title).toBe('Tailscale connector "tailscale" (private overlay)');
-    expect(bySvc.tailscale.message).toContain('"admin" shares its network namespace');
+    expect(bySvc.tailscale.message).toContain('"admin" shares the connector\'s network namespace');
     expect(isPreflightNoteFinding('tunnel-exposure')).toBe(true);
     expectNoSecrets(findings);
   });
@@ -490,7 +490,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const c = connector(model, 'cloudflared');
     expect(c.attachment).toBe('host');
     expect(reachOf(c)).toEqual({ app: 'host-network' });
-    expect(describeTunnelConnector(c).message).toContain('"app" can be reached over the host network (a published host port or host networking)');
+    expect(describeTunnelConnector(c).message).toContain('"app" can be reached over the host network (a published host port or host networking) if the connector\'s routing points there.');
     const svc = deriveStackExposure(model, 'proj', 1).services.find(s => s.service === 'app');
     expect(svc).toMatchObject({ publiclyExposed: true, reason: 'tunnel', tunnel: { path: 'host-network' } });
   });
@@ -498,7 +498,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
   it('says so when a host-network connector finds no published port', () => {
     const c = connector(render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'host' }, db }), 'cloudflared');
     expect(c.reaches).toEqual([]);
-    expect(describeTunnelConnector(c).message).toContain('It uses the host network, so it can reach any port published on the host');
+    expect(describeTunnelConnector(c).message).toContain('It uses the host network, so it can reach any port published on the host; no other service in this stack publishes one or uses the host network.');
   });
 
   it('reports an unknown reach, not an empty one, for a connector in another container\'s namespace', () => {
@@ -527,6 +527,10 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const c = connector(model, 'cloudflared');
     expect(reachOf(c)).toEqual({ ha: 'host-network', gw: 'host-network', qb: 'host-network' });
     expect(describeTunnelConnector(c).message).not.toContain('no other service in this stack');
+    const ha = byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled').find(f => f.service === 'ha');
+    expect(ha?.message).toContain('The Cloudflare Tunnel connector "cloudflared" can reach it over the host network');
+    expect(ha?.message).not.toContain('publishes');
+    expect(ha?.remediation).toContain('take it off the host network');
   });
 
   it('reaches host ports from a host-network Tailscale node even without a forwarding key', () => {
@@ -538,9 +542,26 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const c = connector(model, 'ts');
     expect(reachOf(c)).toEqual({ web: 'host-network' });
     const message = describeTunnelConnector(c).message;
-    expect(message).toContain('"web" can be reached over the host network');
+    expect(message).toContain('"web" can be reached over the host network (a published host port or host networking) if tailnet ACLs allow it.');
     expect(message).not.toContain('no other service in this stack');
+    expect(describeServiceTunnel(tunnelExposureByService([c]).get('web')!)).toBe(
+      'The Tailscale connector "ts" puts the host on the tailnet, so devices on the tailnet can reach it over the host network if tailnet ACLs allow it; those ACLs are unverified.',
+    );
     expectNoSecrets(c);
+  });
+
+  it('does not treat network_mode: bridge as sharing the stack\'s networks', () => {
+    const bridged = connector(render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'bridge' }, app }), 'cloudflared');
+    expect(bridged.attachment).toBe('networks');
+    expect(bridged.reaches).toEqual([]);
+    expect(describeTunnelConnector(bridged).message).toContain('No other service in this stack shares its network namespace or a network with it.');
+    const sibling = connector(render({ cloudflared: { image: 'cloudflare/cloudflared' }, legacy: { image: 'example/legacy', network_mode: 'bridge' }, app }), 'cloudflared');
+    expect(reachOf(sibling)).toEqual({ app: 'shared-network' });
+    const hosted = connector(render({
+      cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'host' },
+      legacy: { image: 'example/legacy', network_mode: 'bridge', ports: [{ published: '8082', target: 80, protocol: 'tcp' }] },
+    }), 'cloudflared');
+    expect(reachOf(hosted)).toEqual({ legacy: 'host-network' });
   });
 
   it('does not loop or invent a reach on a network_mode cycle', () => {
@@ -636,15 +657,39 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
   it('keeps only the forwarding flag names from TS_EXTRA_ARGS, in list or map form', () => {
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/24 --advertise-tags=tag:x' })).toEqual(['--advertise-routes']);
     expect(tailscaleForwardFlags(['TS_AUTHKEY=k', 'TS_EXTRA_ARGS=--advertise-exit-node --advertise-routes 10.1.0.0/16'])).toEqual(['--advertise-exit-node', '--advertise-routes']);
-    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: null })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_AUTHKEY: 'k' })).toEqual([]);
+    expect(tailscaleForwardFlags(['TS_AUTHKEY=k'])).toEqual([]);
     const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: '--advertise-routes=10.9.8.0/24' } }, db }), 'ts');
     expect(c.signals).toContain('flag:--advertise-routes');
     expect(JSON.stringify(c)).not.toContain('10.9.8.0');
   });
 
+  it('reads TS_EXTRA_ARGS the way tailscale and Compose do: either dash form, explicit off, and the last list entry', () => {
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-routes=10.0.0.0/24 -advertise-exit-node' })).toEqual(['--advertise-routes', '--advertise-exit-node']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=false --advertise-routes=' })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=true' })).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--accept-dns=false', 'TS_EXTRA_ARGS=--advertise-exit-node'])).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--advertise-exit-node', 'TS_EXTRA_ARGS=--accept-dns=false'])).toEqual([]);
+  });
+
+  it('treats a TS_EXTRA_ARGS value it cannot read as forwarding, never as a node that only exposes itself', () => {
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: null })).toEqual(['unresolved']);
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'])).toEqual(['unresolved']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS}' })).toEqual(['unresolved']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=$HOSTNAME' })).toEqual(['unresolved']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=box$$1' })).toEqual([]);
+    const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: null } }, db }), 'ts');
+    expect(reachOf(c)).toEqual({ db: 'shared-network' });
+    expect(c.signals).toContain('flag:unresolved');
+  });
+
   it('does not say a subnet router reaches only itself when no service shares its network', () => {
     const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_ROUTES: '192.168.1.0/24' } } }), 'ts');
     expect(describeTunnelConnector(c).message).toContain('No other service in this stack shares its network namespace or a network with it.');
+    const flagged = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/24' } } }), 'ts');
+    expect(flagged.reaches).toEqual([]);
+    expect(describeTunnelConnector(flagged).message).toContain('No other service in this stack shares its network namespace or a network with it.');
+    expect(describeTunnelConnector(flagged).message).not.toContain('reach the Tailscale node itself');
   });
 
   it('states the Cloudflare Access caveat as its own sentence', () => {
@@ -722,6 +767,21 @@ describe('cached Doctor tunnel findings', () => {
     expect(applyDoctorNetworkingFindings([], options(false)).map(f => f.kind)).toEqual(['tunnel-exposure']);
     // The stack was opted into Mesh after the Doctor run, so the cached message is stale.
     expect(applyDoctorNetworkingFindings([], options(true))).toEqual([]);
+  });
+
+  it('retires a cached internal-but-tunneled card once the service\'s tunnel path changes', () => {
+    const sidecar = render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app' }, app });
+    const cached = runRules(ctx(sidecar, { stackIntent: 'internal' })).filter(f => f.ruleId === 'exposure-internal-tunneled');
+    expect(cached.map(f => [f.service, f.severity])).toEqual([['app', 'high']]);
+    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+      getLatest: vi.fn().mockReturnValue({ status: 'warning', ranAt: 1, findings: cached }),
+    } as unknown as ComposeDoctorService);
+    const merged = (model: EffectiveModel) => applyDoctorNetworkingFindings([], {
+      nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null)], snapshot: null,
+    });
+    expect(merged(sidecar).map(f => f.kind)).toEqual(['exposure-intent-mismatch']);
+    // The sidecar moved onto a shared network: the cached high-severity card no longer describes it.
+    expect(merged(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }))).toEqual([]);
   });
 });
 

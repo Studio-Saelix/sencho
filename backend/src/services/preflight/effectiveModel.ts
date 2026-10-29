@@ -14,7 +14,7 @@
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
-import { cloudflaredCommandHints, tailscaleForwardFlags } from '../network/tunnelDetection';
+import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -104,8 +104,8 @@ export interface EffService {
   devices?: string[];
   /** cloudflared subcommands (`tunnel`, `proxy-dns`, `access`) named by `command`/`entrypoint`; no other token is kept. */
   commandHints?: string[];
-  /** Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`) named by `TS_EXTRA_ARGS`; no other part of the value is kept. */
-  tailscaleFlags?: string[];
+  /** Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`, or `unresolved`) named by `TS_EXTRA_ARGS`; no other part of the value is kept. */
+  tailscaleFlags?: TailscaleForwardFlag[];
   /**
    * True when `sencho.service.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.

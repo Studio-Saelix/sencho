@@ -1,5 +1,5 @@
 import YAML from 'yaml';
-import { cloudflaredCommandHints, tailscaleForwardFlags } from '../services/network/tunnelDetection';
+import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -32,7 +32,7 @@ export interface DeclaredService {
   /** cloudflared subcommands named by `command`/`entrypoint`, for tunnel detection. Absent on hand-built fixtures. */
   commandHints?: string[];
   /** Tailscale forwarding flags named by `TS_EXTRA_ARGS`, for tunnel detection. Absent on hand-built fixtures. */
-  tailscaleFlags?: string[];
+  tailscaleFlags?: TailscaleForwardFlag[];
   /** Service `restart` from raw YAML parse. The effective-model path may set this via normalizeComposeRestartIntent (including deploy.restart_policy). Null when unset. */
   restart?: string | null;
 }

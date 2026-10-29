@@ -35,8 +35,8 @@ export type TunnelScope = 'public-edge' | 'private-overlay';
  *  the connector's own address: overlay peers reach it directly, and a
  *  cloudflared sidecar reaches it on localhost, which Sencho counts as certain.
  *  `shared-network`: they share a Compose network. `host-network`: the
- *  connector uses the host network and the service publishes a host port or is
- *  itself on the host network. For the last two the connector can reach the
+ *  connector uses the host network and the service (or the service whose
+ *  namespace it runs in) publishes a host port or is itself on the host network. For the last two the connector can reach the
  *  service, but whether it routes to it is configured elsewhere. */
 export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
 
@@ -47,10 +47,11 @@ export interface TunnelReach {
   networks: string[];
 }
 
-/** How the connector is attached: to the stack's networks, to the host network,
- *  or to another container's namespace (`container:<x>`), whose reach Sencho
- *  cannot see. A connector with `network_mode: none` has no network and is not
- *  reported. */
+/** How the connector is attached: to the stack's networks (`network_mode:
+ *  bridge` counts here but joins only Docker's default bridge, none of the
+ *  stack's networks), to the host network, or to another container's namespace
+ *  (`container:<x>`), whose reach Sencho cannot see. A connector with
+ *  `network_mode: none` has no network and is not reported. */
 export type TunnelAttachment = 'networks' | 'host' | 'other';
 
 export interface TunnelConnector {
@@ -60,7 +61,8 @@ export interface TunnelConnector {
   scope: TunnelScope;
   attachment: TunnelAttachment;
   /** Structural evidence that identified the connector: `image`, `env:<KEY>`,
-   *  `cap:NET_ADMIN`, `device:/dev/net/tun`, `udp-port`. Never a value. */
+   *  `cap:NET_ADMIN`, `device:/dev/net/tun`, `udp-port`, and for Tailscale
+   *  `flag:<forwarding flag>` (see `TailscaleForwardFlag`). Never a value. */
   signals: string[];
   /** Cloudflare Tunnel only: a cloudflared config directory is mounted, so the
    *  ingress rules live in a local file rather than in Cloudflare. */
@@ -101,7 +103,7 @@ export interface TunnelDetectionService {
   /** Fixed cloudflared subcommands named by `command`/`entrypoint` (see `cloudflaredCommandHints`). */
   commandHints?: string[];
   /** Tailscale forwarding flags named by `TS_EXTRA_ARGS` (see `tailscaleForwardFlags`). */
-  tailscaleFlags?: string[];
+  tailscaleFlags?: TailscaleForwardFlag[];
 }
 
 export interface TunnelDetectionModel {
@@ -160,8 +162,17 @@ const WIREGUARD_SERVER_KEYS = ['WG_HOST', 'PEERS', 'SERVERURL', 'SERVERPORT'];
  *  flag in `TS_EXTRA_ARGS`, a node on the stack's networks only exposes itself. */
 const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP'];
 
-/** `tailscale up` flags that make a node forward to other addresses. */
+/** What `TS_EXTRA_ARGS` says about forwarding: a `tailscale up` flag that makes
+ *  a node forward to other addresses, or `unresolved` when the value cannot be
+ *  read (left to the shell environment, or interpolated from a variable the
+ *  light parse does not expand), which is treated as forwarding. */
+export type TailscaleForwardFlag = '--advertise-routes' | '--advertise-exit-node' | 'unresolved';
+
 const TAILSCALE_FORWARD_FLAGS: ReadonlySet<string> = new Set(['--advertise-routes', '--advertise-exit-node']);
+
+function isTailscaleForwardFlag(name: string): name is Exclude<TailscaleForwardFlag, 'unresolved'> {
+  return TAILSCALE_FORWARD_FLAGS.has(name);
+}
 
 /** cloudflared subcommands Sencho recognizes in `command`/`entrypoint`. */
 const CLOUDFLARED_SUBCOMMANDS: ReadonlySet<string> = new Set(['tunnel', 'proxy-dns', 'access']);
@@ -193,24 +204,33 @@ export function cloudflaredCommandHints(command: unknown, entrypoint: unknown): 
 }
 
 /**
- * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`)
- * named in a service's `TS_EXTRA_ARGS`, from list (`KEY=value`) or map form.
- * Only membership in that fixed set is kept; the routes and every other flag
- * are discarded.
+ * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`,
+ * in Go's single- or double-dash form) named in a service's `TS_EXTRA_ARGS`,
+ * from list (`KEY=value`, last entry wins as in Compose) or map form. A flag
+ * set to `false` or to an empty value does not forward. A key with no readable
+ * value yields `unresolved`. Only membership in that fixed set is kept; the
+ * routes and every other flag are discarded.
  */
-export function tailscaleForwardFlags(environment: unknown): string[] {
+export function tailscaleForwardFlags(environment: unknown): TailscaleForwardFlag[] {
+  let present = false;
   let value: unknown;
   if (Array.isArray(environment)) {
-    const entry = environment.find((e): e is string => typeof e === 'string' && e.startsWith('TS_EXTRA_ARGS='));
-    value = entry?.slice('TS_EXTRA_ARGS='.length);
-  } else if (environment && typeof environment === 'object') {
+    const entry = environment.filter((e): e is string => typeof e === 'string' && (e === 'TS_EXTRA_ARGS' || e.startsWith('TS_EXTRA_ARGS='))).pop();
+    present = entry !== undefined;
+    value = entry?.startsWith('TS_EXTRA_ARGS=') ? entry.slice('TS_EXTRA_ARGS='.length) : undefined;
+  } else if (environment && typeof environment === 'object' && 'TS_EXTRA_ARGS' in environment) {
+    present = true;
     value = (environment as Record<string, unknown>).TS_EXTRA_ARGS;
   }
-  if (typeof value !== 'string') return [];
-  const flags = new Set<string>();
+  if (!present) return [];
+  if (typeof value !== 'string' || /\$\{|\$[A-Za-z_]/.test(value.replace(/\$\$/g, ''))) return ['unresolved'];
+  const flags = new Set<TailscaleForwardFlag>();
   for (const token of value.split(/\s+/)) {
-    const flag = token.split('=')[0];
-    if (TAILSCALE_FORWARD_FLAGS.has(flag)) flags.add(flag);
+    const eq = token.indexOf('=');
+    const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
+    const setting = eq === -1 ? undefined : token.slice(eq + 1).toLowerCase();
+    if (setting === '' || setting === 'false') continue;
+    if (isTailscaleForwardFlag(name)) flags.add(name);
   }
   return [...flags];
 }
@@ -283,16 +303,18 @@ function attachmentOf(owner: TunnelDetectionService | undefined): TunnelAttachme
   return owner?.networkMode === 'host' ? 'host' : 'other';
 }
 
-/** Network keys a namespace owner joins (Compose's implicit `default` when it lists none). */
+/** Stack network keys a namespace owner joins (Compose's implicit `default`
+ *  when it lists none; none on Docker's default bridge). */
 function networksOf(owner: TunnelDetectionService | undefined): string[] {
-  if (!owner || attachmentOf(owner) !== 'networks') return [];
+  if (!owner || !declaresNoNetworkMode(owner)) return [];
   return owner.networks.length > 0 ? owner.networks.map(n => n.key) : ['default'];
 }
 
 /** Whether a connector on the stack's networks carries traffic to services
- *  beyond its own namespace. A Tailscale node forwards only when told to. On the
- *  host network every connector reaches the host's ports, Tailscale included,
- *  because the tailnet node is then the host itself. */
+ *  beyond its own namespace. A Tailscale node forwards only when told to.
+ *  `detectTunnels` does not consult this on the host network, where every
+ *  connector reaches the host's ports, Tailscale included, because the tailnet
+ *  node is then the host itself. */
 function forwardsBeyondNamespace(connector: TunnelDetectionService, provider: TunnelProvider): boolean {
   if (provider !== 'tailscale') return true;
   return connector.envKeys.some(k => TAILSCALE_FORWARD_KEYS.includes(k)) || (connector.tailscaleFlags ?? []).length > 0;
@@ -395,7 +417,8 @@ export function tunnelScopePhrase(provider: TunnelProvider): string {
   }
 }
 
-/** A sentence qualifying that audience, or an empty string when none applies. */
+/** A sentence qualifying that audience, with a leading space for direct
+ *  concatenation, or an empty string when none applies. */
 function audienceCaveat(provider: TunnelProvider): string {
   return provider === 'cloudflared' ? ' Cloudflare Access, where it is set up, can restrict who gets through.' : '';
 }
@@ -456,20 +479,22 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which opens what it reaches to ${tunnelScopePhrase(c.provider)}.${audienceCaveat(c.provider)}`];
   if (certain.length > 0) {
     const { verb, they } = shareVerb(certain);
-    sentences.push(`${quotedList(certain)} ${verb} its network namespace, so ${they} reachable at the connector's own address.`);
+    sentences.push(`${quotedList(certain)} ${verb} the connector's network namespace, so ${they} reachable at the connector's own address.`);
   }
   if (networked.length > 0) {
-    sentences.push(`${quotedList(networked)} ${shareVerb(networked).verb} a network with it and can be reached if its routing points there.`);
+    sentences.push(`${quotedList(networked)} ${shareVerb(networked).verb} a network with the connector and can be reached if the connector's routing points there.`);
   }
   if (hosted.length > 0) {
-    sentences.push(`${quotedList(hosted)} can be reached over the host network (a published host port or host networking) if its routing points there.`);
+    const condition = c.provider === 'tailscale' ? 'tailnet ACLs allow it' : 'the connector\'s routing points there';
+    sentences.push(`${quotedList(hosted)} can be reached over the host network (a published host port or host networking) if ${condition}.`);
   }
   if (c.reaches.length === 0) sentences.push(emptyReachSentence(c));
   sentences.push(tunnelUnverifiedSentence(c));
   return { title: `${label} connector "${c.service}" (${scope})`, message: sentences.join(' ') };
 }
 
-/** One sentence naming the tunnel path to a service, for exposure findings. */
+/** The tunnel path to a service in a sentence (plus the audience caveat, when
+ *  one applies), for exposure findings. */
 export function describeServiceTunnel(e: ServiceTunnelExposure): string {
   const label = TUNNEL_PROVIDER_LABEL[e.provider];
   const who = tunnelScopePhrase(e.provider);
@@ -480,7 +505,9 @@ export function describeServiceTunnel(e: ServiceTunnelExposure): string {
     case 'shared-network':
       return `It shares a network with the ${label} connector "${e.connector}", so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
     case 'host-network':
-      return `The ${label} connector "${e.connector}" can reach it over the host network, so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
+      return e.provider === 'tailscale'
+        ? `The ${label} connector "${e.connector}" puts the host on the tailnet, so ${who} can reach it over the host network if tailnet ACLs allow it; those ACLs are unverified.${caveat}`
+        : `The ${label} connector "${e.connector}" can reach it over the host network, so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
   }
 }
 

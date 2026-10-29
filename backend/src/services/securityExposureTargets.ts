@@ -104,16 +104,25 @@ export function settleTunnelExposure(
   });
 }
 
-/** Parse cached `stack_exposures` rows (skipping malformed ones) and settle
- *  their tunnel exposure. The one way Security reads cached descriptors. */
+/** Parse cached `stack_exposures` rows (skipping, with a warning, any that is
+ *  not JSON or has no services list) and settle their tunnel exposure. The one
+ *  way Security reads cached descriptors. */
 export function readSettledExposures(
   nodeId: number,
   rows: ReadonlyArray<{ descriptor: string }>,
   getContext: typeof getExposureContext = getExposureContext,
 ): StackExposure[] {
   const parsed = rows.map((r) => {
-    try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
+    try {
+      const value: unknown = JSON.parse(r.descriptor);
+      return value && typeof value === 'object' && Array.isArray((value as { services?: unknown }).services) ? value as StackExposure : null;
+    } catch {
+      return null;
+    }
   }).filter((e): e is StackExposure => e !== null);
+  if (parsed.length < rows.length) {
+    console.warn(`[Security] Skipped ${rows.length - parsed.length} unreadable cached exposure descriptor(s) on node ${nodeId}; those stacks show exposure as unknown until their next deploy or update.`);
+  }
   return settleTunnelExposure(nodeId, parsed, getContext);
 }
 
