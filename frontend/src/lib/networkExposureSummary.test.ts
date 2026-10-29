@@ -31,7 +31,7 @@ describe('buildNetworkExposureSummary', () => {
     expect(s).toEqual({
       stackIntent: 'internal',
       networks: [{ name: 'app_backend', external: false, internal: true }],
-      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false }],
+      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false, tunnel: null }],
     });
   });
   it('flags a host-network service as host-exposed even with no published ports', () => {
@@ -39,8 +39,20 @@ describe('buildNetworkExposureSummary', () => {
     expect(s).toEqual({
       stackIntent: null,
       networks: [],
-      services: [{ name: 'app', intent: null, ports: [], hostNetwork: true }],
+      services: [{ name: 'app', intent: null, ports: [], hostNetwork: true, tunnel: null }],
     });
+  });
+  it('documents a service reached only through a tunnel, naming the connector and unverified routing', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [
+        { name: 'cloudflared', publishedPorts: [] },
+        { name: 'app', publishedPorts: [], tunnel: { connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' } },
+      ],
+    }, []);
+    expect(s?.services.find(x => x.name === 'app')?.tunnel).toBe('via Cloudflare Tunnel (cloudflared), routing unverified');
+    expect(networkExposureSection(s)).toContain('- **app:** reachable via Cloudflare Tunnel (cloudflared), routing unverified');
   });
 });
 

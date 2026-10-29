@@ -47,6 +47,8 @@ export interface NetworkFactService {
   publishedPorts: NetworkFactPort[];
   networkMode?: string;
   extraHosts: string[];
+  /** The strongest tunnel path reaching this service, when a connector in the stack reaches it. */
+  tunnel?: import('./tunnelDetection').ServiceTunnelExposure;
 }
 
 /** Runtime-vs-Compose disagreements, computed only when the runtime is available. */

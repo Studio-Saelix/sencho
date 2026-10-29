@@ -16,7 +16,7 @@ import {
   type TunnelConnector,
 } from '../services/network/tunnelDetection';
 import { buildExposedImageMap, deriveStackExposure } from '../services/preflight/exposure';
-import { buildImageExposureContextRows } from '../services/securityExposureTargets';
+import { buildImageExposureContextRows, toPostureTarget } from '../services/securityExposureTargets';
 import { classifyImageExposureBucket } from '../services/securityExposureClassification';
 import { isPreflightNoteFinding, runRules } from '../services/preflight/rules';
 import type { PreflightContext, PreflightFinding } from '../services/preflight/types';
@@ -274,19 +274,19 @@ describe('Security exposure targets with tunnels', () => {
   it('treats an internal intent on a certain tunnel reach as a conflict', () => {
     const app = rows({ app: 'internal' }).find(r => r.serviceName === 'app');
     expect(app?.intentConflict).toBe(true);
-    expect(classifyImageExposureBucket([{ imageRef: 'x', ...app! }])).toBe('conflict');
+    expect(classifyImageExposureBucket([toPostureTarget(app!)])).toBe('conflict');
   });
 
   it('keeps an internal intent on an unverified tunnel reach as a review, not a conflict', () => {
     const dbRow = rows({ db: 'internal' }).find(r => r.serviceName === 'db');
     expect(dbRow).toMatchObject({ exposureReason: 'tunnel', intentStatus: 'set', exposureIntent: 'internal' });
     expect(dbRow?.intentConflict).toBeUndefined();
-    expect(classifyImageExposureBucket([{ imageRef: 'x', ...dbRow! }])).toBe('unclassified');
+    expect(classifyImageExposureBucket([toPostureTarget(dbRow!)])).toBe('unclassified');
   });
 
   it('accepts a deliberate intent on a tunnel-reached service', () => {
     const app = rows({ app: 'lan' }).find(r => r.serviceName === 'app');
-    expect(classifyImageExposureBucket([{ imageRef: 'x', ...app! }])).toBe('intentional');
+    expect(classifyImageExposureBucket([toPostureTarget(app!)])).toBe('intentional');
   });
 });
 
@@ -365,8 +365,11 @@ describe('live Networking findings for tunnels', () => {
     } as unknown as DatabaseService);
   }
 
-  it('carries the connectors on the stack facts', () => {
+  it('carries the connectors and each reached service\'s tunnel path on the stack facts', () => {
     expect(facts.tunnels.map(c => c.service)).toEqual(['cloudflared', 'tailscale']);
+    expect(Object.fromEntries(facts.services.map(s => [s.name, s.tunnel?.path ?? null]))).toEqual({
+      cloudflared: null, app: 'shared-network', tailscale: null, admin: 'shared-namespace',
+    });
     expectNoSecrets(facts);
   });
 

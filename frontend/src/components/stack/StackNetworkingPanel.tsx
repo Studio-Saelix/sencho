@@ -8,7 +8,8 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import type { ExposureIntent } from '@/types/networking';
+import { TUNNEL_PROVIDER_LABEL, TUNNEL_SCOPE_LABEL } from '@/lib/tunnelExposure';
+import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/types/networking';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
 // backend).
@@ -21,6 +22,7 @@ interface NetworkFactService {
   publishedPorts: NetworkFactPort[];
   networkMode?: string;
   extraHosts: string[];
+  tunnel?: ServiceTunnelExposure;
 }
 interface NetworkDriftFacts {
   runtimeOnlyAttachments: { container: string; service: string | null; network: string }[];
@@ -43,6 +45,8 @@ interface StackNetworkFacts {
     blockReason?: string;
     unsupportedFeatures: string[];
   }>;
+  /** Absent from nodes that predate tunnel detection. */
+  tunnels?: TunnelConnector[];
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -63,6 +67,35 @@ function BindingBadge({ port }: { port: NetworkFactPort }) {
     return <span className="rounded border border-success/30 bg-success/[0.06] px-1 py-0.5 font-mono text-[10px] text-success">loopback</span>;
   }
   return <span className="rounded border border-muted bg-card/40 px-1 py-0.5 font-mono text-[10px] text-stat-subtitle">{port.hostIp}</span>;
+}
+
+const CHIP_CLASS = 'rounded border px-1 py-0.5 font-mono text-[10px]';
+
+/** Tunnel facts for one service: the connector it runs, or the tunnel that reaches it. */
+function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunnel?: ServiceTunnelExposure }) {
+  if (!connector && !tunnel) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {connector && (
+        <span className={cn(CHIP_CLASS, 'border-info/40 bg-info/[0.06] text-info')}>
+          {TUNNEL_PROVIDER_LABEL[connector.provider]} connector · {TUNNEL_SCOPE_LABEL[connector.scope]}
+        </span>
+      )}
+      {tunnel && (
+        <>
+          <span className={cn(CHIP_CLASS, tunnel.scope === 'public-edge'
+            ? 'border-warning/40 bg-warning/[0.08] text-warning'
+            : 'border-info/40 bg-info/[0.06] text-info')}
+          >
+            via {TUNNEL_PROVIDER_LABEL[tunnel.provider]} ({tunnel.connector}) · {TUNNEL_SCOPE_LABEL[tunnel.scope]}
+          </span>
+          {tunnel.path === 'shared-network' && (
+            <span className={cn(CHIP_CLASS, 'border-muted bg-card/40 text-stat-subtitle')}>routing unverified</span>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled }: {
@@ -225,6 +258,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
                   ))}
                 </div>
               )}
+              <TunnelBadges connector={facts.tunnels?.find(c => c.service === svc.name)} tunnel={svc.tunnel} />
               {svc.networkMode === 'host' && (
                 // Host networking publishes every container port on the host, so
                 // the service is host-exposed even with no published-port rows.

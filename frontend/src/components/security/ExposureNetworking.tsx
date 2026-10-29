@@ -1,6 +1,7 @@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
+import { tunnelPathLabel } from '@/lib/tunnelExposure';
 import type { ImageExposureContext } from '@/types/security';
 
 function openNetworking(nodeId: number | undefined, stackName: string) {
@@ -36,6 +37,9 @@ function NetworkingContextList({
               <span className="block truncate font-mono text-[11px] text-stat-value">
                 {ctx.stackName}/{ctx.serviceName}
               </span>
+              {ctx.tunnel ? (
+                <span className="block font-mono text-[10px] text-stat-subtitle">{tunnelPathLabel(ctx.tunnel)}</span>
+              ) : null}
               {showConflictHint && ctx.intentConflict ? (
                 <span className="font-mono text-[10px] text-warning">Intent mismatch</span>
               ) : null}

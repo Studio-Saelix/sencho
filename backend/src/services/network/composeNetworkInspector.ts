@@ -24,7 +24,7 @@ import type {
 } from './types';
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
 import { resolveManagedMeshAttachment } from './managedMeshAttachment';
-import { detectTunnels } from './tunnelDetection';
+import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
 import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
 import { getErrorMessage } from '../../utils/errors';
@@ -72,6 +72,8 @@ export function assembleStackNetworkFacts(
     createdByStack: !res.external && key !== 'default',
   }));
 
+  const tunnels = detectTunnels(model);
+  const tunnelByService = tunnelExposureByService(tunnels);
   const services: NetworkFactService[] = model.services.map(s => ({
     name: s.name,
     networks: s.networks.map(n => ({ key: n.key, aliases: n.aliases })),
@@ -85,6 +87,7 @@ export function assembleStackNetworkFacts(
     })),
     networkMode: s.networkMode,
     extraHosts: s.extraHosts,
+    ...(tunnelByService.get(s.name) ? { tunnel: tunnelByService.get(s.name) } : {}),
   }));
 
   const drift = snapshot
@@ -106,7 +109,7 @@ export function assembleStackNetworkFacts(
     services,
     drift,
     missingExternalNetworks,
-    tunnels: detectTunnels(model),
+    tunnels,
   };
 }
 
