@@ -158,6 +158,19 @@ describe('classifyDialError', () => {
         expect(meshReachableReason('auth_failed')).toMatch(/token/);
     });
 
+    it('scopes the private-CA remedy on the node card to the mesh dial', () => {
+        // The card copy has to keep the two settings distinct: the scoped
+        // setting is for the mesh dial, and fleet requests need
+        // NODE_EXTRA_CA_CERTS and a restart.
+        const [meshClause, fleetClause] = meshReachableReason('tls_failed').split(';');
+        expect(meshClause).toContain('SENCHO_MESH_PROXY_CA_FILE for the mesh dial');
+        expect(meshClause).not.toMatch(/fleet|NODE_EXTRA_CA_CERTS/);
+        expect(fleetClause).toMatch(/fleet requests need NODE_EXTRA_CA_CERTS/);
+        expect(fleetClause).toContain('and a restart');
+        expect(fleetClause).not.toContain('SENCHO_MESH_PROXY_CA_FILE');
+        expect(fleetClause).not.toMatch(/restart is not needed|no restart/);
+    });
+
     it('reads the reason through a wrapped unsafe-target error', () => {
         // The guard accepts err.cause, so the reason has to be read the same
         // way; otherwise a wrapped DNS failure is reported as a blocked

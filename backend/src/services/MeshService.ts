@@ -76,7 +76,7 @@ const REACHABLE_REASON: Record<DialFailureCode, string> = {
     refused_unverified: 'the remote or a proxy in front of it refused or redirected the mesh connection without identifying itself; check the node token first, then the access gateway or WAF',
     proxy_upstream_error: 'reverse proxy or tunnel in front of the remote cannot reach Sencho',
     upgrade_rejected: 'WebSocket upgrade refused; check the proxy forwards Upgrade and Connection headers',
-    tls_failed: 'TLS handshake failed; if the certificate is from a private CA set SENCHO_MESH_PROXY_CA_FILE, otherwise check the URL scheme matches the server',
+    tls_failed: 'TLS handshake failed. For a private CA, set SENCHO_MESH_PROXY_CA_FILE for the mesh dial; fleet requests need NODE_EXTRA_CA_CERTS pointed at the same file and a restart. Otherwise check the URL scheme matches the server',
     dns_failed: 'remote hostname does not resolve',
     connection_refused: 'connection refused by remote host',
     timeout: 'remote did not answer in time',
