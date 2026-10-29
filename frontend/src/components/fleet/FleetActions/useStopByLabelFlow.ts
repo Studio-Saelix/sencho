@@ -266,14 +266,19 @@ function snapshotOf(label: string, apiResults: FleetStopNodeResult[]): DryRunSna
   const targets: ResolvedTarget[] = [];
   let failed = 0;
   for (const n of apiResults) {
-    if (!n.reachable || !n.matched) continue;
+    if (!n.reachable) continue;
     if (!Array.isArray(n.stackResults)) {
-      failed += 1;
+      if (n.matched) failed += 1;
       continue;
     }
     // A stack whose dry run errored is not part of the blast radius Stop may run against.
-    const resolved = n.stackResults.filter(s => s.success);
-    failed += n.stackResults.length - resolved.length;
+    const resolved = n.matched ? n.stackResults.filter(s => s.success) : [];
+    // A matched node counts every unresolved stack. An unmatched node normally
+    // carries no results; if a remote still returns failed rows, count them
+    // rather than dropping the failure along with the non-match.
+    failed += n.matched
+      ? n.stackResults.length - resolved.length
+      : n.stackResults.filter(s => !s.success).length;
     if (resolved.length > 0) targets.push({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: resolved.map(s => s.stackName) });
   }
   const unreachable = apiResults
@@ -311,8 +316,9 @@ function reportStop(
   const stacksTouched = apiResults.flatMap(n => Array.isArray(n.stackResults) ? n.stackResults : []);
   const ok = stacksTouched.filter(s => s.success).length;
   const failed = stacksTouched.length - ok;
-  // Everything the plan left out of the stop: unreachable nodes, plus stacks a
-  // dry run could not resolve. None of them appear in the response.
+  // Everything the answer must name beyond the per-stack rows: plan-left-out
+  // nodes and unresolved stacks (absent from the response), plus nodes the stop
+  // attempted but could not reach (present in the response).
   const partialNotes = [
     leftOut.length > 0 && `${plural(leftOut.length, 'node')} unreachable, left out.`,
     attemptedUnreachable.length > 0 && `${plural(attemptedUnreachable.length, 'node')} unreachable.`,
@@ -327,10 +333,11 @@ function reportStop(
   }
   if (matchedNodes === 0) {
     if (reachable.length === 0) toast.warning(`No reachable nodes.${partialSuffix}`);
-    // A confirmed node can lose the label between preview and stop; its
-    // confirmed stacks come back as failures. That is a failed stop, not a
-    // benign "no node carries the label" no-op.
-    else if (failed > 0) toast.warning(`${ok} stopped, ${failed} failed. See the result.${partialSuffix}`);
+    // A failed result is never a benign "no node carries the label" no-op,
+    // whether it came from a dry run or from a confirmed node that lost the
+    // label between preview and stop.
+    else if (failed > 0 && dryRun) toast.warning(`Resolved ${plural(ok, 'stack')}; ${failed} could not be resolved.${partialSuffix}`);
+    else if (!dryRun && failed > 0) toast.warning(`${ok} stopped, ${failed} failed. See the result.${partialSuffix}`);
     else toast.info(`No reachable node carries a stack label by that name.${partialSuffix}`);
   } else if (dryRun && failed > 0) toast.warning(`Resolved ${plural(ok, 'stack')}; ${failed} could not be resolved.${partialSuffix}`);
   else if (dryRun) toast.success(`Resolved ${plural(ok, 'stack')} across ${plural(matchedNodes, 'node')}.${partialSuffix}`);

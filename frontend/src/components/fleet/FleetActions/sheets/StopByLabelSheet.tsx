@@ -165,9 +165,9 @@ function stopAnswer(targets: ResolvedTarget[], marker: string | undefined, denie
 function OutcomePath({ outcome }: { outcome: StopOutcome }) {
   const { ok, failed, unreachable, leftOut, unresolved, matchedNodes, label } = outcome;
   // `unreachable` counts nodes the stop tried to reach; `leftOut` counts nodes
-  // and `unresolved` counts stacks the plan excluded before the stop ran. All
-  // three make the result partial, and the answer must carry the excluded ones
-  // because the response never mentions them.
+  // and `unresolved` counts stacks the plan could not include before the stop
+  // ran. All three make the result partial, and the answer must carry the
+  // plan-excluded ones because the response never mentions them.
   const totalUnreachable = unreachable + leftOut.length;
   const marker = [
     leftOut.length > 0 ? `${plural(leftOut.length, 'node')} unreachable, left out` : undefined,

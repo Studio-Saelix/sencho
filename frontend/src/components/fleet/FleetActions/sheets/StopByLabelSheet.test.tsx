@@ -545,6 +545,42 @@ it('keeps a node left out of the plan on the stop result and toast', async () =>
   expect(toastSuccess).not.toHaveBeenCalled();
 });
 
+it('warns when a planned node becomes unreachable at execution and nothing else failed', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(previewOf([
+        centralWeb,
+        { nodeId: 2, nodeName: 'edge-1', reachable: true, labelExists: true, stackCount: 1, stackNames: ['api'] },
+      ], { nodes: 2, stacks: 2 }));
+    }
+    if (url === '/fleet/labels/fleet-stop') {
+      // edge-1 dropped after the plan resolved; the stop attempted it and got
+      // no stack results back, while central stopped cleanly.
+      return Promise.resolve(jsonResponse(200, {
+        results: [
+          { nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] },
+          { nodeId: 2, nodeName: 'edge-1', reachable: false, matched: false, stackResults: [], error: 'Pilot tunnel is disconnected' },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop stacks' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), WAIT);
+  await user.click(stopBtn);
+
+  expect(await screen.findByText('Stopped 1 stack')).toBeInTheDocument();
+  expect(screen.getByTestId('status-answer')).toHaveAttribute('data-tone', 'warning');
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable');
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Stopped 1 stack across 1 node. 1 node unreachable.',
+  ));
+  expect(toastSuccess).not.toHaveBeenCalled();
+});
+
 it('carries a dry-run snapshot\'s left-out node into the real stop result', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string, init?: { body?: string }) => {
@@ -740,6 +776,71 @@ it('does not report a stop that only hit unreachable nodes as "no stack carried 
   expect(screen.queryByText(/No stack carried/)).not.toBeInTheDocument();
 });
 
+it('keeps the left-out marker when nothing stopped because the plan excluded the node', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(previewOf([
+        centralWeb,
+        { nodeId: 2, nodeName: 'edge-1', reachable: false, labelExists: false, stackCount: 0, stackNames: [], error: 'Pilot tunnel is disconnected' },
+      ], { nodes: 1, stacks: 1, unreachable: 1 }));
+    }
+    if (url === '/fleet/labels/fleet-stop') {
+      // The reachable node reports the label with no stack results, so nothing
+      // stopped; the plan's left-out node must still be marked.
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop stacks' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), WAIT);
+  await user.click(stopBtn);
+
+  expect(await screen.findByText('Nothing was stopped')).toBeInTheDocument();
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Nothing was stopped. 1 node unreachable, left out.',
+  ));
+});
+
+it('keeps the unresolved marker when nothing stopped because the dry run resolved nothing', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string, init?: { body?: string }) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      const body = JSON.parse(init?.body ?? '{}');
+      if (body.dryRun) {
+        return Promise.resolve(jsonResponse(200, {
+          results: [{
+            nodeId: 1, nodeName: 'central', reachable: true, matched: true,
+            stackResults: [{ stackName: 'web', success: true, dryRun: true }, { stackName: 'db', success: false, error: 'dry run failed' }],
+          }],
+        }));
+      }
+      // The resolved stack reports no result on the real run, so nothing stopped.
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Stop stacks' }));
+
+  expect(await screen.findByText('Nothing was stopped')).toBeInTheDocument();
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 stack could not be resolved');
+  expect(screen.getByText('1 stack could not be resolved, so they were not stopped.')).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
+    'Nothing was stopped. 1 stack could not be resolved.',
+  ));
+});
+
 it('leaves out stacks whose dry run failed and keeps the unreachable nodes on the answer', async () => {
   const user = userEvent.setup();
   mockedFetch.mockImplementation((url: string) => {
@@ -865,6 +966,25 @@ it('does not call a dry run where every stack failed "no stacks match"', async (
   expect(screen.getByText('1 stack carrying this label failed their dry run.')).toBeInTheDocument();
   expect(screen.queryByText('No stacks match')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Stop stacks' })).toBeDisabled();
+});
+
+it('reports a dry run whose only results failed as unresolved, not as a no-match', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/fleet-stop') {
+      // A remote that reports no label match but still returns a failed result.
+      return Promise.resolve(jsonResponse(200, {
+        results: [{ nodeId: 1, nodeName: 'central', reachable: true, matched: false, stackResults: [{ stackName: 'web', success: false, error: 'busy' }] }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  renderSheet();
+  await user.type(screen.getByPlaceholderText(PLACEHOLDER), 'prod');
+  await user.click(await screen.findByRole('button', { name: 'Resolve with dry run' }, WAIT));
+  expect(await screen.findByText('Nothing could be resolved')).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalledWith('Resolved 0 stacks; 1 could not be resolved.'));
+  expect(toastInfo).not.toHaveBeenCalledWith(expect.stringContaining('No reachable node carries'));
 });
 
 it('counts a node with a malformed dry-run body as failed instead of dropping it', async () => {

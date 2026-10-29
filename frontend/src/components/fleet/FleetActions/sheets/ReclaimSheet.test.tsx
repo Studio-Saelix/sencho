@@ -288,9 +288,14 @@ it('reports an execution-time stale race and offers to review the new plan', asy
 
 it('warns when another node mutated before an execution-time stale result', async () => {
   const user = userEvent.setup();
-  const twoNodes = [...nodes, { id: 2, name: 'edge', status: 'online' }] as unknown as FleetNode[];
+  const threeNodes = [
+    ...nodes,
+    { id: 2, name: 'edge', status: 'online' },
+    { id: 3, name: 'pilot', status: 'offline' },
+  ] as unknown as FleetNode[];
   const edgePlan = { ...planResult, nodeId: 2, nodeName: 'edge', fingerprint: 'edge-fingerprint' };
-  routePrune(() => jsonResponse(200, { results: [planResult, edgePlan] }), () => jsonResponse(200, {
+  const pilotDown = { nodeId: 3, nodeName: 'pilot', reachable: false, error: 'Pilot tunnel is disconnected', reclaimableBytes: 0, targets: [] };
+  routePrune(() => jsonResponse(200, { results: [planResult, edgePlan, pilotDown] }), () => jsonResponse(200, {
     results: [
       removedResult,
       {
@@ -299,13 +304,14 @@ it('warns when another node mutated before an execution-time stale result', asyn
       },
     ],
   }));
-  renderSheet({ nodes: twoNodes });
+  renderSheet({ nodes: threeNodes });
   await pruneNow(user);
 
   await waitFor(() => expect(toastWarning).toHaveBeenCalledWith(
-    'Fleet prune partially completed: 4 KB reclaimed before the plan changed on “edge”. Review the new plan.',
+    'Fleet prune partially completed: 4 KB reclaimed before the plan changed on “edge”. 1 node unreachable, left out. Review the new plan.',
   ));
   expect(await screen.findByText('Partly pruned, 4 KB reclaimed')).toBeInTheDocument();
+  expect(screen.getByTestId('status-marker')).toHaveTextContent('1 node unreachable, left out');
 });
 
 it('names skipped items on the result without hiding the reclaimed bytes', async () => {
