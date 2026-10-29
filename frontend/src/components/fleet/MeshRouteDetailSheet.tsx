@@ -77,13 +77,17 @@ export function MeshRouteDetailSheet({ open, onOpenChange, alias, canManage, fle
     const runProbe = async () => {
         if (!alias) return;
         setProbing(true);
-        setProbe(null);
         try {
             const res = await apiFetch(`/mesh/aliases/${encodeURIComponent(alias)}/test`, {
                 method: 'POST', localOnly: true,
             });
+            // An error body is not a probe result: it says nothing about the
+            // route, so it must not drive the chip or the failure sentence.
+            if (!res.ok) throw new Error(`status ${res.status}`);
             const body = await res.json() as MeshProbeResult;
             setProbe(body);
+        } catch {
+            toast.error('Could not run the test. Try again.');
         } finally {
             setProbing(false);
         }

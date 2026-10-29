@@ -243,13 +243,13 @@ describe('describeMeshMembershipImpact', () => {
         const status = [node(1, 'home', ['pg']), node(2, 'vps', ['app'], { reachableMode: 'pilot', pilotConnected: false })];
         const optOut = { kind: 'opt-out' as const, nodeId: 2, stackName: 'app' };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, optOut), optOut))
-            .toBe('app on vps cannot be removed from the mesh while that node is unreachable, so nothing restarts.');
+            .toBe('app on vps cannot be removed from the mesh while that node is unreachable.');
         const optIn = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, optIn), optIn))
-            .toBe('api on vps cannot be added to the mesh while that node is unreachable, so nothing restarts.');
+            .toBe('api on vps cannot be added to the mesh while that node is unreachable.');
         const disable = { kind: 'disable-node' as const, nodeId: 2 };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact(status, disable), disable))
-            .toBe('app on this node cannot leave the mesh while that node is unreachable, so nothing restarts.');
+            .toBe('app on this node cannot leave the mesh while that node is unreachable.');
     });
 
     it('names a stopped stack of the node being turned off apart from the running ones', () => {
@@ -316,6 +316,24 @@ describe('a stopped stack is named once', () => {
         expect(meshChangeNeedsConfirmation(impact)).toBe(true);
     });
 
+    it('keeps direct, others, started and skipped pairwise disjoint', () => {
+        const status = [
+            node(1, 'home', [{ stackName: 'pg', running: true }, { stackName: 'legacy', running: false }]),
+            node(2, 'vps', ['app', { stackName: 'old', running: false }]),
+            node(3, 'edge', ['proxy', { stackName: 'dead', running: false }], { reachableMode: 'pilot', pilotConnected: false }),
+        ];
+        for (const change of [
+            { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' },
+            { kind: 'opt-out' as const, nodeId: 2, stackName: 'old' },
+            { kind: 'disable-node' as const, nodeId: 1 },
+        ]) {
+            const impact = computeMeshMembershipImpact(status, change);
+            const keys = [impact.direct, impact.others, impact.started, impact.skipped]
+                .flatMap((list) => list.map((x) => `${x.nodeName}:${x.stackName}`));
+            expect(new Set(keys).size).toBe(keys.length);
+        }
+    });
+
     it('says no other stack is affected only when none is restarted, started or skipped', () => {
         const change = { kind: 'opt-in' as const, nodeId: 2, stackName: 'api' };
         expect(describeMeshMembershipImpact(computeMeshMembershipImpact([node(2, 'vps', [])], change), change))
@@ -337,6 +355,15 @@ describe('a change blocked by an unreachable node', () => {
     it('is blocked on a proxy node whose dial failed', () => {
         const status = [node(1, 'home', ['pg']), node(2, 'edge', ['app'], { reachableMode: 'unreachable', reachableReason: 'api token missing' })];
         expect(meshChangeBlocked(computeMeshMembershipImpact(status, { kind: 'opt-out', nodeId: 2, stackName: 'app' }))).toBe(true);
+    });
+
+    it('is blocked for a stopped stack on an unreachable node, and says so', () => {
+        const status = [node(1, 'home', ['pg']), down([{ stackName: 'old', running: false }])];
+        const change = { kind: 'opt-out' as const, nodeId: 2, stackName: 'old' };
+        const impact = computeMeshMembershipImpact(status, change);
+        expect(meshChangeBlocked(impact)).toBe(true);
+        expect(describeMeshMembershipImpact(impact, change))
+            .toBe('old on vps cannot be removed from the mesh while that node is unreachable.');
     });
 
     it('is not blocked when the changed stack\'s node is reachable, or when nothing is changed directly', () => {

@@ -7,7 +7,7 @@
  * must never issue the mutation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { MeshNodeStatus, MeshStackEntry } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -121,13 +121,14 @@ describe('MeshOptInSheet cascade confirmation', () => {
         const down = { ...meshNode(1, 'node-alpha', ['other']), reachableMode: 'pilot' as const, pilotConnected: false };
         renderSheet(true, [down, meshNode(2, 'node-beta', ['api'])]);
         fireEvent.click(await screen.findByRole('button', { name: /Add to mesh/i }));
-        expectVisibleInDialog(/db on node-alpha cannot be added to the mesh while that node is unreachable, so nothing restarts\./);
+        expectVisibleInDialog(/db on node-alpha cannot be added to the mesh while that node is unreachable\./);
         expect(screen.queryByText(/restarts now/)).not.toBeInTheDocument();
         // The action the dialog just called impossible is not offered, and
         // Close backs out without a request.
         expect(screen.getByRole('button', { name: /Add and restart/i })).toBeDisabled();
         const calls = vi.mocked(apiFetch).mock.calls.length;
         fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
         expect(vi.mocked(apiFetch).mock.calls.length).toBe(calls);
     });
 
@@ -135,7 +136,7 @@ describe('MeshOptInSheet cascade confirmation', () => {
         const down = { ...meshNode(1, 'node-alpha', ['web']), reachableMode: 'pilot' as const, pilotConnected: false };
         renderSheet(true, [down]);
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
-        expectVisibleInDialog(/web on node-alpha cannot be removed from the mesh while that node is unreachable, so nothing restarts\./);
+        expectVisibleInDialog(/web on node-alpha cannot be removed from the mesh while that node is unreachable\./);
         expect(screen.getByRole('button', { name: /Remove and restart/i })).toBeDisabled();
     });
 

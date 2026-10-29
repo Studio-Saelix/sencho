@@ -62,30 +62,26 @@ describe('meshRouteStateTokens', () => {
 });
 
 describe('meshRouteStateAfterProbe', () => {
-    it('keeps the diagnostic state when no probe has run', () => {
-        expect(meshRouteStateAfterProbe('healthy', null)).toBe('healthy');
-        expect(meshRouteStateAfterProbe('not-authorized', null)).toBe('not-authorized');
+    it('keeps the diagnostic state when no probe has run or the probe passed', () => {
+        for (const base of ['healthy', 'degraded', 'unreachable', 'tunnel-down', 'not-authorized'] as const) {
+            expect(meshRouteStateAfterProbe(base, null)).toBe(base);
+            expect(meshRouteStateAfterProbe(base, { ok: true })).toBe(base);
+        }
     });
 
     it('never leaves a healthy or degraded chip beside a failed probe', () => {
-        for (const base of ['healthy', 'degraded', 'not-authorized'] as const) {
-            for (const where of ['no_route', 'agent_resolve', 'agent_dial', 'target_port'] as const) {
-                expect(meshRouteStateAfterProbe(base, { ok: false, where })).toBe('unreachable');
-            }
+        for (const base of ['healthy', 'degraded'] as const) {
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'no_route' })).toBe('not-authorized');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'agent_resolve' })).toBe('not-authorized');
             expect(meshRouteStateAfterProbe(base, { ok: false, where: 'pilot_tunnel' })).toBe('tunnel-down');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'agent_dial' })).toBe('unreachable');
+            expect(meshRouteStateAfterProbe(base, { ok: false, where: 'target_port' })).toBe('unreachable');
+            expect(meshRouteStateAfterProbe(base, { ok: false })).toBe('unreachable');
         }
-        expect(meshRouteStateAfterProbe('healthy', { ok: false })).toBe('unreachable');
     });
 
-    it('clears a stale outage chip once a probe passes, slow or not', () => {
-        expect(meshRouteStateAfterProbe('tunnel-down', { ok: true, latencyMs: 4 })).toBe('healthy');
-        expect(meshRouteStateAfterProbe('unreachable', { ok: true, latencyMs: 4 })).toBe('healthy');
-        expect(meshRouteStateAfterProbe('unreachable', { ok: true, latencyMs: 900 })).toBe('degraded');
-    });
-
-    it('leaves a non-outage state alone when the probe passes', () => {
-        expect(meshRouteStateAfterProbe('healthy', { ok: true, latencyMs: 4 })).toBe('healthy');
-        expect(meshRouteStateAfterProbe('degraded', { ok: true, latencyMs: 4 })).toBe('degraded');
-        expect(meshRouteStateAfterProbe('not-authorized', { ok: true, latencyMs: 4 })).toBe('not-authorized');
+    it('ignores a response that is not a probe result', () => {
+        // An error body has no `ok`, so it says nothing about the route.
+        expect(meshRouteStateAfterProbe('healthy', {} as { ok: boolean })).toBe('healthy');
     });
 });

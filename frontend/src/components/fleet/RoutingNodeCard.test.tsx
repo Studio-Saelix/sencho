@@ -7,7 +7,7 @@
  * after enable, and must not fire after a disable or after unmount.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import type { MeshNodeStatus } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -243,10 +243,20 @@ describe('RoutingNodeCard disable confirmation', () => {
         });
         renderDisable(status, [status]);
         await act(async () => { fireEvent.click(screen.getByRole('switch')); });
-        expectVisibleInDialog(/pg on this node cannot leave the mesh while that node is unreachable, so nothing restarts\./);
+        expectVisibleInDialog(/pg on this node cannot leave the mesh while that node is unreachable\./);
         expect(screen.getByRole('button', { name: /Turn off and restart/i })).toBeDisabled();
         await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
         expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not block turning off an unreachable node that has no meshed stacks of its own', async () => {
+        const status = node({ enabled: true, reachableMode: 'pilot', pilotConnected: false, optedInStacks: [] });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        // Nothing to confirm: no stack leaves and no hostname changes.
+        await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' })));
     });
 
     it('names a stopped meshed stack once, as started', async () => {

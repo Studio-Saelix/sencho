@@ -82,10 +82,8 @@ export function describeMembershipError(httpStatus: number, backendError?: strin
         case 404:
             return detail ?? 'The stack or node no longer exists. Refresh and try again.';
         default:
-            // A server error carries no cause of its own ("Opt-out failed"), so
-            // point at the one place that does.
             return detail
-                ? `Mesh update failed: ${detail}${httpStatus >= 500 ? '. The mesh activity log has details.' : ''}`
+                ? `Mesh update failed: ${detail}`
                 : `Mesh update failed (HTTP ${httpStatus}). The mesh activity log has details.`;
     }
 }

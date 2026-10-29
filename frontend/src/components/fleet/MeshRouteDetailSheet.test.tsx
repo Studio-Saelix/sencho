@@ -181,7 +181,7 @@ describe('MeshRouteDetailSheet remove gate', () => {
             <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
         );
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
-        expectVisibleInDialog(/api on peer-a cannot be removed from the mesh while that node is unreachable, so nothing restarts\./);
+        expectVisibleInDialog(/api on peer-a cannot be removed from the mesh while that node is unreachable\./);
         expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/restarts now/);
     });
 
@@ -201,43 +201,80 @@ describe('MeshRouteDetailSheet remove gate', () => {
 });
 
 describe('MeshRouteDetailSheet state chip after a probe', () => {
-    const probeBody = (body: object) => {
+    const answer = (diag: object, probe: { status?: number; body: object } | (() => Promise<Response>)) => {
         vi.mocked(apiFetch).mockImplementation(async (url: string, init?: { method?: string }) => {
             if (url.endsWith('/test') && init?.method === 'POST') {
-                return { ok: true, status: 200, json: async () => body } as unknown as Response;
+                if (typeof probe === 'function') return probe();
+                const status = probe.status ?? 200;
+                return { ok: status < 400, status, json: async () => probe.body } as unknown as Response;
             }
-            return { ok: true, status: 200, json: async () => ({ ...DIAG, events: [] }) } as unknown as Response;
+            return { ok: true, status: 200, json: async () => ({ ...diag, events: [] }) } as unknown as Response;
         });
     };
+    const runTest = () => fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
 
     it('does not keep a healthy chip beside a failed no_route probe', async () => {
-        probeBody({ ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' });
+        answer(DIAG, { body: { ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' } });
         renderSheet(true);
         expect(await screen.findByText('healthy')).toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        runTest();
         expect(await screen.findByText('test failed')).toBeInTheDocument();
         expect(screen.queryByText('healthy')).not.toBeInTheDocument();
-        expect(screen.getByText('unreachable')).toBeInTheDocument();
+        expect(screen.getByText('not authorized')).toBeInTheDocument();
     });
 
     it('shows tunnel down when the probe failed in the tunnel', async () => {
-        probeBody({ ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no bridge' });
+        answer(DIAG, { body: { ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no bridge' } });
         renderSheet(true);
         await screen.findByText('healthy');
-        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        runTest();
         expect(await screen.findByText('tunnel down')).toBeInTheDocument();
         expect(screen.queryByText('healthy')).not.toBeInTheDocument();
     });
 
-    it('clears a stale outage chip once the probe passes', async () => {
-        probeBody({ ok: true, latencyMs: 4 });
-        vi.mocked(apiFetch).mockImplementationOnce(async () => ({ ok: true, status: 200, json: async () => ({ ...DIAG, state: 'tunnel down', events: [] }) } as unknown as Response));
+    it('shows unreachable when the probe reached the node but not the container', async () => {
+        answer(DIAG, { body: { ok: false, where: 'agent_dial', code: 'unreachable', message: 'refused' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        expect(await screen.findByText('unreachable')).toBeInTheDocument();
+    });
+
+    it('leaves the diagnostic chip alone when the probe passes', async () => {
+        answer({ ...DIAG, state: 'tunnel down' }, { body: { ok: true, latencyMs: 4 } });
         renderSheet(true);
         expect(await screen.findByText('tunnel down')).toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+        runTest();
         expect(await screen.findByText('ok 4ms')).toBeInTheDocument();
-        expect(screen.queryByText('tunnel down')).not.toBeInTheDocument();
+        expect(screen.getByText('tunnel down')).toBeInTheDocument();
+    });
+
+    it('keeps the last result visible while the next probe runs', async () => {
+        answer(DIAG, { body: { ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        await screen.findByText('test failed');
+        let release: (r: Response) => void = () => {};
+        answer(DIAG, () => new Promise<Response>((resolve) => { release = resolve; }));
+        runTest();
+        await screen.findByRole('button', { name: /Probing/i });
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+        await act(async () => {
+            release({ ok: true, status: 200, json: async () => ({ ok: true, latencyMs: 5 }) } as unknown as Response);
+        });
+        expect(await screen.findByText('ok 5ms')).toBeInTheDocument();
+    });
+
+    it('does not read an error response as a failed probe', async () => {
+        vi.mocked(toast.error).mockClear();
+        answer(DIAG, { status: 500, body: { error: 'Probe failed' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not run the test. Try again.'));
         expect(screen.getByText('healthy')).toBeInTheDocument();
+        expect(screen.queryByText('test failed')).not.toBeInTheDocument();
     });
 });
 

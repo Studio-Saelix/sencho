@@ -16,7 +16,7 @@ export type MeshMembershipChange =
 export interface MeshMembershipImpact {
     /** Stacks changed directly by this action. */
     direct: Array<{ nodeName: string; stackName: string }>;
-    /** False when the node holding `direct` is one the cascade cannot reach: the change cannot be applied there, so nothing restarts. An unknown node counts as reachable. */
+    /** False when the node holding `direct` is one the cascade cannot reach, so the call that edits its override cannot land there. An unknown node counts as reachable. */
     directReachable: boolean;
     /** Stacks in `direct` that are not running right now, so the redeploy of the changed stack starts them instead of restarting them. */
     directStopped: Array<{ nodeName: string; stackName: string }>;
@@ -31,7 +31,7 @@ export interface MeshMembershipImpact {
      * dialog errs towards warning.
      */
     hostnamesChange: boolean;
-    /** Other running meshed stacks the cascade can reach. They restart to refresh hostnames when `hostnamesChange` is true. */
+    /** Other running meshed stacks on nodes the cascade can reach. Being listed does not mean a restart: they restart only when `hostnamesChange` is true. */
     others: Array<{ nodeName: string; stackName: string }>;
     /** Other reachable meshed stacks that are not running, so the cascade starts them (a deploy brings up anything stopped, whether or not hostnames change). Never also in `others`: a stack is restarted or started, not both. */
     started: Array<{ nodeName: string; stackName: string }>;
@@ -42,8 +42,8 @@ export interface MeshMembershipImpact {
 /**
  * Whether the fleet-wide cascade can reach a node at all.
  *
- * A pilot node with no open tunnel and a proxy node whose dial failed both
- * report a live mesh membership, but the per-stack redeploy is a cross-node
+ * A pilot node with no open tunnel and a node whose proxy dial failed
+ * (`reachableMode: 'unreachable'`) both report a live mesh membership, but the per-stack redeploy is a cross-node
  * call that cannot land there. Counting their stacks as "also restart" would
  * promise restarts that never happen.
  */
@@ -113,10 +113,10 @@ export function meshChangeNeedsConfirmation(impact: MeshMembershipImpact): boole
 }
 
 /**
- * Whether the change cannot be applied at all: the node holding the changed
- * stack is unreachable, so the call that edits its override would fail and
- * the backend stops before changing anything. The confirmation then has
- * nothing to confirm.
+ * Whether the confirmation has nothing to offer: the node holding the changed
+ * stack is unreachable, so the call that edits its override cannot land.
+ * Callers disable the confirm action instead of sending a request the
+ * dialog has just called impossible.
  */
 export function meshChangeBlocked(impact: MeshMembershipImpact): boolean {
     return !impact.directReachable && impact.direct.length > 0;
@@ -135,19 +135,20 @@ function describeStacks(items: Array<{ nodeName: string; stackName: string }>): 
 }
 
 /**
- * One to four plain sentences for the confirmation dialog, naming every
+ * A few plain sentences for the confirmation dialog, naming every
  * stack involved, e.g. "api on opsix restarts now. db on opsix; web on
  * home also restart to refresh hostnames, so expect brief connection drops."
  */
 export function describeMeshMembershipImpact(impact: MeshMembershipImpact, change: MeshMembershipChange): string {
     // The changed stack's own node has to take part: removing or adding its
-    // override is a call to that node, and the backend stops before changing
-    // anything when it fails. Nothing restarts, so say that and nothing else.
-    if (!impact.directReachable && impact.direct.length > 0) {
+    // override is a call to that node, which cannot land while it is
+    // unreachable. The confirm is withdrawn, so say why and promise nothing
+    // about what the backend would have done.
+    if (meshChangeBlocked(impact)) {
         const what = change.kind === 'disable-node'
             ? `${joinNames(impact.direct.map((d) => d.stackName))} on this node cannot leave the mesh`
             : `${impact.direct[0].stackName} on ${impact.direct[0].nodeName} cannot be ${change.kind === 'opt-in' ? 'added to' : 'removed from'} the mesh`;
-        return `${what} while that node is unreachable, so nothing restarts.`;
+        return `${what} while that node is unreachable.`;
     }
     const stoppedKeys = new Set(impact.directStopped.map((d) => `${d.nodeName}:${d.stackName}`));
     const running = impact.direct.filter((d) => !stoppedKeys.has(`${d.nodeName}:${d.stackName}`));

@@ -59,11 +59,6 @@ describe('describeMembershipError', () => {
         expect(describeMembershipError(403)).toMatch(/administrator/);
     });
 
-    it('points a bare server error at the activity log instead of repeating it alone', () => {
-        expect(describeMembershipError(500, 'Opt-out failed')).toBe('Mesh update failed: Opt-out failed. The mesh activity log has details.');
-        expect(describeMembershipError(400, 'Stack not found')).toBe('Mesh update failed: Stack not found');
-    });
-
     it('never shows a bare status code without guidance', () => {
         expect(describeMembershipError(500)).toMatch(/activity log/);
     });
