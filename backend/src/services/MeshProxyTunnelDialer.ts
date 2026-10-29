@@ -62,8 +62,8 @@ export type DialFailureCode =
     | 'tier_denied'
     /**
      * Refused or redirected by something in front of the remote Sencho, with
-     * evidence that identifies it: an access-gateway login redirect or a 407
-     * proxy-authentication challenge.
+     * evidence that identifies it: a redirect to the Cloudflare Access login
+     * host, or a 407 proxy-authentication challenge.
      */
     | 'blocked_by_proxy'
     /** The remote Sencho itself refused the upgrade for a reason it did not classify. */
@@ -594,16 +594,27 @@ function headerValue(headers: UpgradeFailure['httpHeaders'], name: string): stri
  * forwards, including the remote's own refusal, so they prove transit and
  * nothing about which hop produced the status code. They must not upgrade an
  * unmarked refusal or an arbitrary redirect into a gateway diagnosis.
+ *
+ * A scheme-relative Location (`//team.cloudflareaccess.com/...`) is a valid
+ * network-path reference to that host, and a trailing-dot FQDN is the same
+ * name in absolute form, so both are parsed against a placeholder base and a
+ * normalized host. Any other relative destination resolves to the placeholder
+ * and stays unrecognized.
  */
+const LOCATION_PARSE_BASE = 'https://sencho.invalid/';
+
 function isCloudflareAccessLogin(location: string | undefined): boolean {
     if (!location) return false;
     try {
-        const host = new URL(location).hostname.toLowerCase();
+        const host = new URL(location, LOCATION_PARSE_BASE).hostname.toLowerCase().replace(/\.$/, '');
         return host === 'cloudflareaccess.com' || host.endsWith('.cloudflareaccess.com');
     } catch {
         return false;
     }
 }
+
+/** Statuses that carry a redirect destination. 304 is not a redirect. */
+const REDIRECT_STATUSES = new Set([300, 301, 302, 303, 305, 307, 308]);
 
 export function classifyDialError(err: unknown): { code: DialFailureCode; message: string } {
     const outbound = err instanceof UnsafeOutboundTargetError
@@ -627,13 +638,14 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
         if (senchoReason === 'tier') return { code: 'tier_denied', message: 'remote refused: license tier does not include mesh' };
         // A Sencho rejection marker identifies the remote as the component
         // that answered, so it outranks the status-based branches below. That
-        // includes `forbidden`, which would otherwise lose to a 3xx or 404
-        // and report an unidentified hop instead of the remote Sencho.
+        // includes `forbidden`, which would otherwise become
+        // `endpoint_not_found` on a 404 or be blamed on the gateway or left
+        // unidentified on a redirect.
         if (senchoReason === 'forbidden') {
             return { code: 'remote_refused', message: 'remote refused the mesh upgrade without a stated reason' };
         }
         if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
-        if (httpStatus >= 300 && httpStatus < 400) {
+        if (REDIRECT_STATUSES.has(httpStatus)) {
             const location = headerValue(headers, 'location');
             if (isCloudflareAccessLogin(location)) {
                 return {

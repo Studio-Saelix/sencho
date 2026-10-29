@@ -124,6 +124,7 @@ describe('classifyDialError', () => {
 
     it.each([
         ['a generic destination', { location: 'https://app.example.com/login' }],
+        ['a scheme-relative destination', { location: '//app.example.com/login' }],
         ['a relative destination', { location: '/api/mesh/proxy-tunnel/' }],
         ['a malformed destination', { location: 'not a url' }],
         ['an empty destination', { location: '' }],
@@ -175,13 +176,24 @@ describe('classifyDialError', () => {
     });
 
     it.each([
-        // The Access host itself.
+        // The Access host itself, including the network-path form and the
+        // absolute trailing-dot FQDN of the same name.
         'https://team.cloudflareaccess.com/cdn-cgi/access/login',
         'https://cloudflareaccess.com/login',
+        '//team.cloudflareaccess.com/cdn-cgi/access/login',
+        'https://team.cloudflareaccess.com./login',
     ])('treats a redirect to %s as Access', (location) => {
         const out = classifyDialError(upgradeFailure(302, { location }));
         expect(out.code).toBe('blocked_by_proxy');
         expect(out.message).toMatch(/Cloudflare Access/);
+    });
+
+    it('does not describe a non-redirect 3xx as a redirect', () => {
+        // 304 is not a redirect, so it must not claim a destination was
+        // missing or unusable.
+        const out = classifyDialError(upgradeFailure(304, { location: '/api/mesh/proxy-tunnel/' }));
+        expect(out.code).toBe('upgrade_rejected');
+        expect(out.message).not.toMatch(/redirected/);
     });
 
     it.each([
