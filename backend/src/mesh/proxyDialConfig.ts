@@ -18,8 +18,9 @@ import { X509Certificate } from 'crypto';
  * mesh dial consumes it; see docs/features/sencho-mesh.mdx for the
  * fleet-management trust option.
  *
- * Both settings are loaded once, by the dialer on the first proxy-mode dial,
- * and kept for the process; environment changes need a restart.
+ * Both settings are loaded by the dialer on the first proxy-mode dial and
+ * kept for the process once a load succeeds; a failed load is retried on the
+ * next dial. Changing a loaded configuration needs a restart.
  */
 export const MESH_PROXY_HEADERS_ENV = 'SENCHO_MESH_PROXY_HEADERS';
 export const MESH_PROXY_CA_FILE_ENV = 'SENCHO_MESH_PROXY_CA_FILE';

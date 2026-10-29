@@ -14,7 +14,7 @@ import os from 'os';
 import path from 'path';
 import tls from 'tls';
 import type { AddressInfo } from 'net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { withLoopbackTargetProtection } from './helpers/allowLoopbackTargets';
 
@@ -304,16 +304,22 @@ describe('MeshProxyTunnelDialer', () => {
         // The configuration docs say NODE_EXTRA_CA_CERTS is read at process
         // start while SENCHO_MESH_PROXY_CA_FILE is read when the dial
         // configuration is first loaded, on the first proxy-mode dial, and
-        // that a change needs a restart. Pin both halves: nothing is parsed
-        // before a dial, and a loaded config is not re-read afterwards.
+        // kept once it parses. Pin both halves: the file is not opened before
+        // a dial, a failed parse is retried on the next dial, and a loaded
+        // config is not re-read afterwards.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-lazy-'));
         const file = path.join(dir, 'ca.pem');
-        process.env.SENCHO_MESH_PROXY_CA_FILE = file;
-        fs.writeFileSync(file, 'not a cert');
+        const server = await startUpgradeRefusal('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        const caReads = vi.spyOn(fs, 'readFileSync');
         try {
+            process.env.SENCHO_MESH_PROXY_CA_FILE = file;
+            fs.writeFileSync(file, 'not a cert');
+            const reads = (): number => caReads.mock.calls.filter((args) => String(args[0]) === file).length;
+
             // Constructed with the corrupt file already configured: creation
-            // must not read it, the first dial must.
+            // must not open it, the first dial must.
             const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            expect(reads()).toBe(0);
             const db = DatabaseService.getInstance();
             const addNode = (name: string): number => db.addNode({
                 name,
@@ -321,31 +327,43 @@ describe('MeshProxyTunnelDialer', () => {
                 compose_dir: '',
                 is_default: false,
                 mode: 'proxy',
-                api_url: 'https://proxy-test.invalid',
+                api_url: `http://127.0.0.1:${server.port}`,
                 api_token: 'test-token',
             });
 
             const corruptId = addNode('proxy-test-lazy-ca-corrupt');
             expect(await dialer.ensureBridge(corruptId)).toBeNull();
-            expect(dialer.getRecentFailure(corruptId)?.code).toBe('config_invalid');
+            const corruptFailure = dialer.getRecentFailure(corruptId);
+            expect(corruptFailure?.code).toBe('config_invalid');
+            expect(corruptFailure?.message).toContain('SENCHO_MESH_PROXY_CA_FILE');
+            expect(corruptFailure?.message).toContain('does not contain a PEM certificate');
+            expect(reads()).toBe(1);
+            expect(server.seen).toHaveLength(0);
 
             // A failed load is not a loaded config: repairing the file lets
-            // the next dial read and keep it.
+            // the next dial read and keep it. The node has no gateway
+            // credential, so the dial reaches the upgrade and is refused.
             fs.writeFileSync(file, tls.rootCertificates[0]);
             const repairedId = addNode('proxy-test-lazy-ca-repaired');
             expect(await dialer.ensureBridge(repairedId)).toBeNull();
-            expect(dialer.getRecentFailure(repairedId)?.code).not.toBe('config_invalid');
+            expect(dialer.getRecentFailure(repairedId)?.code).toBe('upgrade_rejected');
+            expect(reads()).toBe(2);
+            expect(server.seen).toHaveLength(1);
 
             // The parsed bundle is cached now: corrupting the file does not
             // change later dials until central restarts.
             fs.writeFileSync(file, 'not a cert');
             const cachedId = addNode('proxy-test-lazy-ca-cached');
             expect(await dialer.ensureBridge(cachedId)).toBeNull();
-            expect(dialer.getRecentFailure(cachedId)?.code).not.toBe('config_invalid');
+            expect(dialer.getRecentFailure(cachedId)?.code).toBe('upgrade_rejected');
+            expect(reads()).toBe(2);
+            expect(server.seen).toHaveLength(2);
         } finally {
             delete process.env.SENCHO_MESH_PROXY_CA_FILE;
             MeshProxyTunnelDialer.resetForTest(0);
+            caReads.mockRestore();
             fs.rmSync(dir, { recursive: true, force: true });
+            await server.close();
         }
     });
 

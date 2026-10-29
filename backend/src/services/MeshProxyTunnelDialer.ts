@@ -386,7 +386,7 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         return bridge;
     }
 
-    /** Loaded lazily on the first dial and cached per dialer; env changes need a restart like other settings. */
+    /** Loaded lazily on the first dial and cached once it parses; a failed parse is retried on the next dial, and changing a loaded configuration needs a restart. */
     private dialConfig: MeshProxyDialConfig | null = null;
 
     private getDialConfig(): MeshProxyDialConfig {
