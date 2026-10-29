@@ -17,6 +17,9 @@ import { X509Certificate } from 'crypto';
  * the default roots, for remotes whose TLS chain uses a private CA. Only the
  * mesh dial consumes it; see docs/features/sencho-mesh.mdx for the
  * fleet-management trust option.
+ *
+ * Both settings are loaded once, by the dialer on the first proxy-mode dial,
+ * and kept for the process; environment changes need a restart.
  */
 export const MESH_PROXY_HEADERS_ENV = 'SENCHO_MESH_PROXY_HEADERS';
 export const MESH_PROXY_CA_FILE_ENV = 'SENCHO_MESH_PROXY_CA_FILE';

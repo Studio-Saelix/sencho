@@ -12,6 +12,7 @@ import fs from 'fs';
 import http from 'http';
 import os from 'os';
 import path from 'path';
+import tls from 'tls';
 import type { AddressInfo } from 'net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -296,6 +297,55 @@ describe('MeshProxyTunnelDialer', () => {
             MeshProxyTunnelDialer.resetForTest(0);
             if (dir) fs.rmSync(dir, { recursive: true, force: true });
             await new Promise<void>((r) => server.close(() => r()));
+        }
+    });
+
+    it('reads the CA file on the first dial and keeps the parsed config for the process', async () => {
+        // The configuration docs say NODE_EXTRA_CA_CERTS is read at process
+        // start while SENCHO_MESH_PROXY_CA_FILE is read when the dial
+        // configuration is first loaded, on the first proxy-mode dial, and
+        // that a change needs a restart. Pin both halves: nothing is parsed
+        // before a dial, and a loaded config is not re-read afterwards.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-ca-lazy-'));
+        const file = path.join(dir, 'ca.pem');
+        process.env.SENCHO_MESH_PROXY_CA_FILE = file;
+        fs.writeFileSync(file, 'not a cert');
+        try {
+            // Constructed with the corrupt file already configured: creation
+            // must not read it, the first dial must.
+            const dialer = MeshProxyTunnelDialer.resetForTest(0);
+            const db = DatabaseService.getInstance();
+            const addNode = (name: string): number => db.addNode({
+                name,
+                type: 'remote',
+                compose_dir: '',
+                is_default: false,
+                mode: 'proxy',
+                api_url: 'https://proxy-test.invalid',
+                api_token: 'test-token',
+            });
+
+            const corruptId = addNode('proxy-test-lazy-ca-corrupt');
+            expect(await dialer.ensureBridge(corruptId)).toBeNull();
+            expect(dialer.getRecentFailure(corruptId)?.code).toBe('config_invalid');
+
+            // A failed load is not a loaded config: repairing the file lets
+            // the next dial read and keep it.
+            fs.writeFileSync(file, tls.rootCertificates[0]);
+            const repairedId = addNode('proxy-test-lazy-ca-repaired');
+            expect(await dialer.ensureBridge(repairedId)).toBeNull();
+            expect(dialer.getRecentFailure(repairedId)?.code).not.toBe('config_invalid');
+
+            // The parsed bundle is cached now: corrupting the file does not
+            // change later dials until central restarts.
+            fs.writeFileSync(file, 'not a cert');
+            const cachedId = addNode('proxy-test-lazy-ca-cached');
+            expect(await dialer.ensureBridge(cachedId)).toBeNull();
+            expect(dialer.getRecentFailure(cachedId)?.code).not.toBe('config_invalid');
+        } finally {
+            delete process.env.SENCHO_MESH_PROXY_CA_FILE;
+            MeshProxyTunnelDialer.resetForTest(0);
+            fs.rmSync(dir, { recursive: true, force: true });
         }
     });
 
