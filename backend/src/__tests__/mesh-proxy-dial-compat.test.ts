@@ -52,7 +52,13 @@ describe('classifyDialError', () => {
         [upgradeFailure(302, { location: 'not a url at all' }), 'refused_unverified'],
         [upgradeFailure(302, { server: 'cloudflare' }), 'refused_unverified'],
         [upgradeFailure(302, { 'cf-ray': 'abc' }), 'refused_unverified'],
+        [upgradeFailure(302, { location: '' }), 'refused_unverified'],
         [upgradeFailure(302, { server: 'cloudflare', 'cf-ray': 'abc', location: 'https://app.example.com/login' }), 'refused_unverified'],
+        // A Sencho marker identifies the component that answered, so it
+        // outranks a status-based branch even when a redirect destination
+        // would otherwise look like a gateway.
+        [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login', 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
+        [upgradeFailure(302, { location: 'https://app.example.com/login', 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
         // Markerless 401/403/429: an older Sencho receiver emits its
         // credential refusals without a marker too, so the hop is unknown.
         [upgradeFailure(401), 'refused_unverified'],
@@ -116,12 +122,14 @@ describe('classifyDialError', () => {
         ['a generic destination', { location: 'https://app.example.com/login' }],
         ['a relative destination', { location: '/api/mesh/proxy-tunnel/' }],
         ['a malformed destination', { location: 'not a url' }],
+        ['an empty destination', { location: '' }],
         ['no destination', {}],
         ['no destination with Cloudflare edge headers', { server: 'cloudflare', 'cf-ray': 'abc' }],
     ])('keeps a redirect with %s out of the gateway label', (_label, headers) => {
         const out = classifyDialError(upgradeFailure(302, headers));
         expect(out.code).toBe('refused_unverified');
         expect(out.message).toMatch(/neither the destination nor the response headers identify the hop that redirected/);
+        expect(out.message).not.toMatch(/Cloudflare Access/);
         expect(meshReachableReason(out.code)).toMatch(/refused or redirected/);
         expect(meshReachableReason(out.code)).not.toMatch(/blocked by an access proxy/);
     });

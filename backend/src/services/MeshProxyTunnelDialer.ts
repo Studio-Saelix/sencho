@@ -625,6 +625,13 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
         if (senchoReason === 'unauthorized') return { code: 'auth_failed', message: 'api token rejected by remote' };
         if (senchoReason === 'scope') return { code: 'scope_denied', message: 'remote refused: node token is not full-admin' };
         if (senchoReason === 'tier') return { code: 'tier_denied', message: 'remote refused: license tier does not include mesh' };
+        // A Sencho rejection marker identifies the remote as the component
+        // that answered, so it outranks the status-based branches below. That
+        // includes `forbidden`, which would otherwise lose to a 3xx or 404
+        // and report an unidentified hop instead of the remote Sencho.
+        if (senchoReason === 'forbidden') {
+            return { code: 'remote_refused', message: 'remote refused the mesh upgrade without a stated reason' };
+        }
         if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
         if (httpStatus >= 300 && httpStatus < 400) {
             const location = headerValue(headers, 'location');
@@ -641,11 +648,8 @@ export function classifyDialError(err: unknown): { code: DialFailureCode; messag
                 code: 'refused_unverified',
                 message: location
                     ? `redirected with HTTP ${httpStatus} to a destination that is not a recognized access-gateway login, so neither the destination nor the response headers identify the hop that redirected`
-                    : `redirected with HTTP ${httpStatus} without a Location header, so neither the destination nor the response headers identify the hop that redirected`,
+                    : `redirected with HTTP ${httpStatus} without a usable Location header, so neither the destination nor the response headers identify the hop that redirected`,
             };
-        }
-        if (senchoReason === 'forbidden') {
-            return { code: 'remote_refused', message: 'remote refused the mesh upgrade without a stated reason' };
         }
         if (httpStatus === 407) {
             // 407 is by definition a proxy authentication challenge, so this
