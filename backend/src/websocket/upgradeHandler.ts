@@ -15,6 +15,7 @@ import { handleHostConsoleWs } from './hostConsole';
 import { handleGenericWs, attachGenericConnectionHandlers } from './generic';
 import { ROLE_PERMISSIONS } from '../middleware/permissions';
 import { rejectUpgrade as reject } from './reject';
+import { MESH_REJECT_HEADER } from '../mesh/rejectReason';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
 import { isDebugEnabled } from '../utils/debug';
@@ -146,6 +147,17 @@ export function attachUpgrade(
       // URL parse error falls through and will be rejected below.
     }
 
+    // Rejections on the mesh proxy-tunnel path carry a marker header so the
+    // dialing central can tell this Sencho's refusal apart from one issued
+    // by a reverse proxy or access gateway in front of it (Cloudflare
+    // Access, Authelia, ...), and explain the right fix to the operator.
+    let isMeshTunnelPath = false;
+    try {
+      isMeshTunnelPath = new URL(req.url || '/', 'http://localhost').pathname === '/api/mesh/proxy-tunnel';
+    } catch { /* not the mesh path */ }
+    const rejectWith = (status: number, message: string, meshReason: 'unauthorized' | 'scope' | 'tier' | 'forbidden'): void =>
+      reject(socket, status, message, isMeshTunnelPath ? { [MESH_REJECT_HEADER]: meshReason } : undefined);
+
     const cookies = parseCookies(req);
     const cookieToken = cookies[COOKIE_NAME];
     const authHeader = req.headers['authorization'] as string | undefined;
@@ -155,7 +167,7 @@ export function attachUpgrade(
     // different instance's JWT secret.
     const token = bearerToken || cookieToken;
 
-    if (!token) return reject(socket, 401, 'Unauthorized');
+    if (!token) return rejectWith(401, 'Unauthorized', 'unauthorized');
 
     try {
       // Opaque sen_sk_ API tokens: handled before jwt.verify. Prefix +
@@ -175,7 +187,7 @@ export function attachUpgrade(
         const validation = validateApiToken(token);
         if (!validation.ok) {
           if (isDebugEnabled()) console.log('[Auth:diag] WS API token rejected:', validation.reason);
-          return reject(socket, 401, 'Unauthorized');
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
         }
         touchApiTokenLastUsed(validation.token);
         wsApiTokenScope = validation.token.scope;
@@ -184,7 +196,16 @@ export function attachUpgrade(
         const settings = DatabaseService.getInstance().getGlobalSettings();
         const jwtSecret = settings.auth_jwt_secret;
         if (!jwtSecret) throw new Error('No JWT secret');
-        decoded = jwt.verify(token, jwtSecret) as typeof decoded;
+        try {
+          decoded = jwt.verify(token, jwtSecret) as typeof decoded;
+        } catch {
+          // Expired, malformed, or wrong-signature JWTs are credential
+          // failures, not the generic handler exception the outer catch
+          // classifies as `forbidden`. Reporting them as `forbidden` told the
+          // dialing central this Sencho refused for an unstated reason
+          // instead of `unauthorized`.
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
+        }
       }
 
       // Node proxy tokens are machine-to-machine credentials and must never be
@@ -198,12 +219,12 @@ export function attachUpgrade(
       let wsResolvedUser: { username: string; role: UserRole; token_version: number } | undefined;
       if (!decoded.scope && decoded.username) {
         const dbUser = DatabaseService.getInstance().getUserByUsername(decoded.username);
-        if (!dbUser) return reject(socket, 401, 'Unauthorized');
+        if (!dbUser) return rejectWith(401, 'Unauthorized', 'unauthorized');
         // Missing `tv` is a pre-migration legacy token at version 1, same default
         // as `authMiddleware`; a bumped account version must reject it.
         if (dbUser.token_version !== (decoded.tv ?? 1)) {
           console.log('[Auth] WS session rejected: token version mismatch for:', decoded.username);
-          return reject(socket, 401, 'Unauthorized');
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
         }
         wsResolvedUser = {
           username: dbUser.username,
@@ -225,7 +246,7 @@ export function attachUpgrade(
         decoded.scope === MFA_PENDING_SCOPE
         || decoded.scope === 'pilot_enroll'
       ) {
-        return reject(socket, 403, 'Forbidden');
+        return rejectWith(403, 'Forbidden', 'forbidden');
       }
 
       const parsedUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
@@ -236,20 +257,20 @@ export function attachUpgrade(
       if (isConsoleSessionScope(decoded.scope)) {
         const requiredPath = consoleSessionPathForPathname(pathname);
         if (!requiredPath || decoded.path !== requiredPath) {
-          return reject(socket, 403, 'Forbidden');
+          return rejectWith(403, 'Forbidden', 'forbidden');
         }
         if (typeof decoded.exp !== 'number' || typeof decoded.jti !== 'string' || !decoded.jti) {
-          return reject(socket, 401, 'Unauthorized');
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
         }
         if (!consumeConsoleSessionJti(decoded.jti, decoded.exp * 1000)) {
-          return reject(socket, 401, 'Unauthorized');
+          return rejectWith(401, 'Unauthorized', 'unauthorized');
         }
       }
 
       // Gate WebSocket paths by API token scope
       if (wsApiTokenScope) {
         if (wsApiTokenScope === 'read-only' || wsApiTokenScope === 'deploy-only') {
-          if (!isLogsPath(pathname) && !isNotificationsPath(pathname)) return reject(socket, 403, 'Forbidden');
+          if (!isLogsPath(pathname) && !isNotificationsPath(pathname)) return rejectWith(403, 'Forbidden', 'scope');
         }
       }
 
@@ -264,7 +285,7 @@ export function attachUpgrade(
       // a forwarded x-sencho-tier header affects this upgrade.
       if (pathname === '/api/mesh/proxy-tunnel') {
         if (!isProxyToken && wsApiTokenScope !== 'full-admin') {
-          return reject(socket, 403, 'Forbidden');
+          return rejectWith(403, 'Forbidden', 'scope');
         }
         await handleMeshProxyTunnel(req, socket, head);
         return;
@@ -361,7 +382,10 @@ export function attachUpgrade(
 
       handleGenericWs(req, socket, head, wss, { decoded, isProxyToken });
     } catch {
-      return reject(socket, 401, 'Unauthorized');
+      // Deliberately not `unauthorized`: an exception here says nothing about
+      // the credential, and claiming otherwise sends the operator off to
+      // replace a token that may be perfectly valid.
+      return rejectWith(401, 'Unauthorized', 'forbidden');
     }
   });
 }
