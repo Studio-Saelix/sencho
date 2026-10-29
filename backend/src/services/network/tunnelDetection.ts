@@ -7,10 +7,12 @@
  *
  * Signals are structural only: the image name, environment KEY names,
  * `cap_add`, `devices`, bind-mount targets, `network_mode`, network membership,
- * published-port protocols, and whether `command`/`entrypoint` name one of a
- * fixed set of cloudflared subcommands. No environment value, label value,
- * other command argument, or file content is read, so a tunnel token can never
- * reach a finding or a log.
+ * whether a service publishes ports and their protocols, whether
+ * `command`/`entrypoint` name one of a fixed set of cloudflared subcommands, and
+ * whether `TS_EXTRA_ARGS` names one of two Tailscale forwarding flags. Command
+ * tokens and that one value are scanned for those fixed names and nothing else
+ * is kept; no other environment value, label value, or file content is read,
+ * so a tunnel token can never reach a finding or a log.
  *
  * Which services a connector actually routes to is configured outside the
  * Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard
@@ -29,12 +31,13 @@ export type TunnelProvider = 'cloudflared' | 'tailscale' | 'wireguard';
 export type TunnelScope = 'public-edge' | 'private-overlay';
 
 /** How a connector reaches a service. `shared-namespace`: the two share one
- *  network namespace (`network_mode: service:<x>`), so the service is reachable
- *  at the connector's own address and the reach is certain. `shared-network`:
- *  they share a Compose network. `host-network`: the connector uses the host
- *  network and the service publishes a host port. For the last two the
- *  connector can reach the service, but whether it routes to it is configured
- *  elsewhere. */
+ *  network namespace (`network_mode: service:<x>`), so the service listens on
+ *  the connector's own address: overlay peers reach it directly, and a
+ *  cloudflared sidecar reaches it on localhost, which Sencho counts as certain.
+ *  `shared-network`: they share a Compose network. `host-network`: the
+ *  connector uses the host network and the service publishes a host port or is
+ *  itself on the host network. For the last two the connector can reach the
+ *  service, but whether it routes to it is configured elsewhere. */
 export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
 
 export interface TunnelReach {
@@ -45,8 +48,9 @@ export interface TunnelReach {
 }
 
 /** How the connector is attached: to the stack's networks, to the host network,
- *  or to another container's namespace (`container:<x>`, `none`), whose reach
- *  Sencho cannot see. */
+ *  or to another container's namespace (`container:<x>`), whose reach Sencho
+ *  cannot see. A connector with `network_mode: none` has no network and is not
+ *  reported. */
 export type TunnelAttachment = 'networks' | 'host' | 'other';
 
 export interface TunnelConnector {
@@ -96,6 +100,8 @@ export interface TunnelDetectionService {
   devices?: string[];
   /** Fixed cloudflared subcommands named by `command`/`entrypoint` (see `cloudflaredCommandHints`). */
   commandHints?: string[];
+  /** Tailscale forwarding flags named by `TS_EXTRA_ARGS` (see `tailscaleForwardFlags`). */
+  tailscaleFlags?: string[];
 }
 
 export interface TunnelDetectionModel {
@@ -104,7 +110,7 @@ export interface TunnelDetectionModel {
 }
 
 export interface TunnelDetectionOptions {
-  /** The stack is opted into Sencho Mesh, so every service without a
+  /** The stack is opted into Sencho Mesh, so every service that declares no
    *  `network_mode` joins the Mesh network at deploy. */
   meshManaged?: boolean;
 }
@@ -149,10 +155,13 @@ const ENV_HINTS: Record<TunnelProvider, readonly string[]> = {
  *  `wireguard` image is most often an outbound VPN client, which exposes nothing. */
 const WIREGUARD_SERVER_KEYS = ['WG_HOST', 'PEERS', 'SERVERURL', 'SERVERPORT'];
 
-/** Tailscale keys under which a node may forward to other containers (subnet
- *  routes, Serve, a destination IP, or flags passed through `TS_EXTRA_ARGS`).
- *  Without one, tailnet peers reach the Tailscale node itself. */
-const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP', 'TS_EXTRA_ARGS'];
+/** Tailscale keys under which a node forwards to other containers (subnet
+ *  routes, Serve, a destination IP). With none of them, and neither forwarding
+ *  flag in `TS_EXTRA_ARGS`, a node on the stack's networks only exposes itself. */
+const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP'];
+
+/** `tailscale up` flags that make a node forward to other addresses. */
+const TAILSCALE_FORWARD_FLAGS: ReadonlySet<string> = new Set(['--advertise-routes', '--advertise-exit-node']);
 
 /** cloudflared subcommands Sencho recognizes in `command`/`entrypoint`. */
 const CLOUDFLARED_SUBCOMMANDS: ReadonlySet<string> = new Set(['tunnel', 'proxy-dns', 'access']);
@@ -183,6 +192,29 @@ export function cloudflaredCommandHints(command: unknown, entrypoint: unknown): 
   return [...hints];
 }
 
+/**
+ * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`)
+ * named in a service's `TS_EXTRA_ARGS`, from list (`KEY=value`) or map form.
+ * Only membership in that fixed set is kept; the routes and every other flag
+ * are discarded.
+ */
+export function tailscaleForwardFlags(environment: unknown): string[] {
+  let value: unknown;
+  if (Array.isArray(environment)) {
+    const entry = environment.find((e): e is string => typeof e === 'string' && e.startsWith('TS_EXTRA_ARGS='));
+    value = entry?.slice('TS_EXTRA_ARGS='.length);
+  } else if (environment && typeof environment === 'object') {
+    value = (environment as Record<string, unknown>).TS_EXTRA_ARGS;
+  }
+  if (typeof value !== 'string') return [];
+  const flags = new Set<string>();
+  for (const token of value.split(/\s+/)) {
+    const flag = token.split('=')[0];
+    if (TAILSCALE_FORWARD_FLAGS.has(flag)) flags.add(flag);
+  }
+  return [...flags];
+}
+
 function providerOf(svc: TunnelDetectionService): { provider: TunnelProvider; byImage: boolean } | null {
   const fromImage = svc.image ? IMAGE_PROVIDER[imageBaseName(svc.image)] : undefined;
   if (fromImage) return { provider: fromImage, byImage: true };
@@ -199,7 +231,8 @@ function hasCloudflaredConfigMount(svc: TunnelDetectionService): boolean {
 
 /** Whether the matched service actually exposes something. A WireGuard client,
  *  a cloudflared DNS proxy (`proxy-dns`, or `TUNNEL_DNS_*` settings), and a
- *  cloudflared `access` client all connect outward only. */
+ *  cloudflared `access` client all connect outward only. An explicit
+ *  subcommand is the strongest evidence; then a token or a mounted config. */
 function isExposingConnector(svc: TunnelDetectionService, provider: TunnelProvider, byImage: boolean): boolean {
   if (provider === 'wireguard') {
     if (svc.image && imageBaseName(svc.image) === 'wg-easy') return true;
@@ -208,11 +241,10 @@ function isExposingConnector(svc: TunnelDetectionService, provider: TunnelProvid
   }
   if (provider === 'cloudflared') {
     const hints = svc.commandHints ?? [];
-    const tunnelSignal = hints.includes('tunnel') || hasCloudflaredConfigMount(svc)
-      || svc.envKeys.some(k => k === 'TUNNEL_TOKEN' || k === 'TUNNEL_TOKEN_FILE');
-    const clientOnly = hints.includes('proxy-dns') || hints.includes('access')
-      || svc.envKeys.some(k => k.startsWith('TUNNEL_DNS'));
-    return tunnelSignal || !clientOnly;
+    if (hints.includes('tunnel')) return true;
+    if (hints.includes('proxy-dns') || hints.includes('access')) return false;
+    if (hasCloudflaredConfigMount(svc) || svc.envKeys.some(k => k === 'TUNNEL_TOKEN' || k === 'TUNNEL_TOKEN_FILE')) return true;
+    return !svc.envKeys.some(k => k.startsWith('TUNNEL_DNS'));
   }
   return true;
 }
@@ -224,6 +256,7 @@ function signalsOf(svc: TunnelDetectionService, provider: TunnelProvider, byImag
   if ((svc.capAdd ?? []).some(c => c.toUpperCase().replace(/^CAP_/, '') === 'NET_ADMIN')) signals.push('cap:NET_ADMIN');
   if ((svc.devices ?? []).includes('/dev/net/tun')) signals.push('device:/dev/net/tun');
   if (provider === 'wireguard' && svc.ports.some(p => p.protocol === 'udp')) signals.push('udp-port');
+  if (provider === 'tailscale') for (const flag of svc.tailscaleFlags ?? []) signals.push(`flag:${flag}`);
   return signals;
 }
 
@@ -240,10 +273,14 @@ function namespaceRoot(name: string, byName: Map<string, TunnelDetectionService>
   return current;
 }
 
+/** No `network_mode` declared: Compose attaches the service to its networks. */
+function declaresNoNetworkMode(owner: TunnelDetectionService | undefined): boolean {
+  return owner?.networkMode === undefined || owner.networkMode === '';
+}
+
 function attachmentOf(owner: TunnelDetectionService | undefined): TunnelAttachment {
-  const mode = owner?.networkMode;
-  if (mode === undefined || mode === '' || mode === 'bridge') return 'networks';
-  return mode === 'host' ? 'host' : 'other';
+  if (declaresNoNetworkMode(owner) || owner?.networkMode === 'bridge') return 'networks';
+  return owner?.networkMode === 'host' ? 'host' : 'other';
 }
 
 /** Network keys a namespace owner joins (Compose's implicit `default` when it lists none). */
@@ -252,10 +289,18 @@ function networksOf(owner: TunnelDetectionService | undefined): string[] {
   return owner.networks.length > 0 ? owner.networks.map(n => n.key) : ['default'];
 }
 
-/** Whether the provider can carry traffic to services beyond its own namespace. */
+/** Whether a connector on the stack's networks carries traffic to services
+ *  beyond its own namespace. A Tailscale node forwards only when told to. On the
+ *  host network every connector reaches the host's ports, Tailscale included,
+ *  because the tailnet node is then the host itself. */
 function forwardsBeyondNamespace(connector: TunnelDetectionService, provider: TunnelProvider): boolean {
   if (provider !== 'tailscale') return true;
-  return connector.envKeys.some(k => TAILSCALE_FORWARD_KEYS.includes(k));
+  return connector.envKeys.some(k => TAILSCALE_FORWARD_KEYS.includes(k)) || (connector.tailscaleFlags ?? []).length > 0;
+}
+
+/** Tailscale signals that mean the node forwards beyond itself. */
+function tailscaleForwards(c: Pick<TunnelConnector, 'signals'>): boolean {
+  return c.signals.some(s => TAILSCALE_FORWARD_KEYS.some(k => s === `env:${k}`) || s.startsWith('flag:'));
 }
 
 /** Detect every tunnel connector in the model and the services it reaches. */
@@ -271,6 +316,8 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
 
     const root = namespaceRoot(svc.name, byName);
     const owner = byName.get(root);
+    // With no network at all the connector cannot reach its edge or any service.
+    if (owner?.networkMode === 'none') continue;
     const attachment = attachmentOf(owner);
     const connectorNetworks = new Set(networksOf(owner));
     const forwards = forwardsBeyondNamespace(svc, provider);
@@ -283,12 +330,16 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
         reaches.push({ service: other.name, path: 'shared-namespace', networks: [] });
         continue;
       }
-      if (!forwards) continue;
+      const otherOwner = byName.get(otherRoot);
       if (attachment === 'host') {
-        if (other.ports.length > 0) reaches.push({ service: other.name, path: 'host-network', networks: [] });
+        // A published host port, or a service that is itself on the host network.
+        if ((otherOwner?.ports.length ?? 0) > 0 || attachmentOf(otherOwner) === 'host') {
+          reaches.push({ service: other.name, path: 'host-network', networks: [] });
+        }
         continue;
       }
-      const shared = networksOf(byName.get(otherRoot)).filter(key => connectorNetworks.has(key));
+      if (!forwards) continue;
+      const shared = networksOf(otherOwner).filter(key => connectorNetworks.has(key));
       if (shared.length > 0) reaches.push({ service: other.name, path: 'shared-network', networks: shared });
     }
 
@@ -303,7 +354,7 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
       localConfig: provider === 'cloudflared' && hasCloudflaredConfigMount(svc),
       serveConfig: provider === 'tailscale' && svc.envKeys.includes('TS_SERVE_CONFIG'),
       meshAttached: keys.some(key => networkName(key) === SENCHO_MESH_NETWORK)
-        || (options.meshManaged === true && attachment === 'networks'),
+        || (options.meshManaged === true && declaresNoNetworkMode(owner)),
       externalNetworks: keys
         .filter(key => model.networks[key]?.external === true && networkName(key) !== SENCHO_MESH_NETWORK)
         .map(networkName),
@@ -338,10 +389,15 @@ export function tunnelExposureByService(connectors: TunnelConnector[]): Map<stri
 /** Who can reach a service through this connector, in one phrase. */
 export function tunnelScopePhrase(provider: TunnelProvider): string {
   switch (provider) {
-    case 'cloudflared': return 'anyone on the internet through Cloudflare\'s edge, unless Cloudflare Access restricts it';
+    case 'cloudflared': return 'anyone on the internet through Cloudflare\'s edge';
     case 'tailscale': return 'devices on the tailnet';
     case 'wireguard': return 'WireGuard peers';
   }
+}
+
+/** A sentence qualifying that audience, or an empty string when none applies. */
+function audienceCaveat(provider: TunnelProvider): string {
+  return provider === 'cloudflared' ? ' Cloudflare Access, where it is set up, can restrict who gets through.' : '';
 }
 
 /** What Sencho cannot see about this connector's routing, in one or more sentences. */
@@ -383,8 +439,8 @@ function shareVerb(names: string[]): { verb: string; they: string } {
 /** Why no other service in the stack shows up as reached, in one sentence. */
 function emptyReachSentence(c: TunnelConnector): string {
   if (c.attachment === 'other') return 'It runs in another container\'s network namespace, so Sencho cannot see which services it reaches.';
-  if (c.attachment === 'host') return 'It uses the host network, so it can reach any port published on the host; no other service in this stack publishes one.';
-  if (c.provider === 'tailscale') return 'Tailnet peers reach the Tailscale node itself; no other service in this stack shares its network namespace.';
+  if (c.attachment === 'host') return 'It uses the host network, so it can reach any port published on the host; no other service in this stack publishes one or uses the host network.';
+  if (c.provider === 'tailscale' && !tailscaleForwards(c)) return 'Tailnet peers reach the Tailscale node itself; no other service in this stack shares its network namespace.';
   return 'No other service in this stack shares its network namespace or a network with it.';
 }
 
@@ -397,7 +453,7 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const certain = byPath('shared-namespace');
   const networked = byPath('shared-network');
   const hosted = byPath('host-network');
-  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which opens what it reaches to ${tunnelScopePhrase(c.provider)}.`];
+  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which opens what it reaches to ${tunnelScopePhrase(c.provider)}.${audienceCaveat(c.provider)}`];
   if (certain.length > 0) {
     const { verb, they } = shareVerb(certain);
     sentences.push(`${quotedList(certain)} ${verb} its network namespace, so ${they} reachable at the connector's own address.`);
@@ -406,7 +462,7 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
     sentences.push(`${quotedList(networked)} ${shareVerb(networked).verb} a network with it and can be reached if its routing points there.`);
   }
   if (hosted.length > 0) {
-    sentences.push(`${quotedList(hosted)} ${hosted.length > 1 ? 'publish' : 'publishes'} a host port it can reach over the host network if its routing points there.`);
+    sentences.push(`${quotedList(hosted)} can be reached over the host network (a published host port or host networking) if its routing points there.`);
   }
   if (c.reaches.length === 0) sentences.push(emptyReachSentence(c));
   sentences.push(tunnelUnverifiedSentence(c));
@@ -416,13 +472,15 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
 /** One sentence naming the tunnel path to a service, for exposure findings. */
 export function describeServiceTunnel(e: ServiceTunnelExposure): string {
   const label = TUNNEL_PROVIDER_LABEL[e.provider];
+  const who = tunnelScopePhrase(e.provider);
+  const caveat = audienceCaveat(e.provider);
   switch (e.path) {
     case 'shared-namespace':
-      return `It shares the network namespace of the ${label} connector "${e.connector}", so ${tunnelScopePhrase(e.provider)} can reach it.`;
+      return `It shares the network namespace of the ${label} connector "${e.connector}", so ${who} can reach it.${caveat}`;
     case 'shared-network':
-      return `It shares a network with the ${label} connector "${e.connector}", so ${tunnelScopePhrase(e.provider)} can reach it if the tunnel routes there; that routing is unverified.`;
+      return `It shares a network with the ${label} connector "${e.connector}", so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
     case 'host-network':
-      return `It publishes a host port that the ${label} connector "${e.connector}" can reach over the host network, so ${tunnelScopePhrase(e.provider)} can reach it if the tunnel routes there; that routing is unverified.`;
+      return `The ${label} connector "${e.connector}" can reach it over the host network, so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
   }
 }
 

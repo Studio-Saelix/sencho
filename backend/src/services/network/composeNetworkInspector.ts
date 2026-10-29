@@ -159,9 +159,9 @@ export async function buildStackNetworkFacts(
     }
   }
 
-  const managedNetworkAttachment = snapshot && model
-    ? await resolveManagedMeshAttachment(nodeId, stackName)
-    : undefined;
   const meshManaged = model ? await isStackMeshManaged(nodeId, stackName) : false;
+  const managedNetworkAttachment = snapshot && model
+    ? await resolveManagedMeshAttachment(nodeId, stackName, meshManaged)
+    : undefined;
   return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment, meshManaged);
 }

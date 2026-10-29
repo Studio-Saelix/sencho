@@ -13,6 +13,7 @@ import { ComposeDoctorService } from '../ComposeDoctorService';
 import type { PreflightFinding } from '../preflight/types';
 import type { DependencySnapshot } from '../DockerController';
 import type { StackNetworkFacts } from './types';
+import { describeTunnelConnector } from './tunnelDetection';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { NETWORKING_SEVERITY_RANK } from './networkingSeverity';
@@ -143,8 +144,12 @@ function isStillPlausible(
 ): boolean {
   if (!facts?.renderable) return true; // can't check; keep cached
   // The tunnel rules are retired as soon as the current facts lose the tunnel
-  // they described (the connector removed, or the service no longer reached).
-  if (f.ruleId === 'tunnel-exposure') return facts.tunnels.some((c) => c.service === f.service);
+  // they described: a connector card once the live connector reads differently
+  // (removed, its reach changed, or its Mesh opt-in toggled), and a reached
+  // service once no connector reaches it.
+  if (f.ruleId === 'tunnel-exposure') {
+    return facts.tunnels.some((c) => c.service === f.service && describeTunnelConnector(c).message === f.message);
+  }
   if (f.ruleId === 'exposure-internal-tunneled') return facts.services.some((svc) => svc.name === f.service && svc.tunnel !== undefined);
   switch (kind) {
     case 'network-mode-host':

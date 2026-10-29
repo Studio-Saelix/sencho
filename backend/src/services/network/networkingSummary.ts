@@ -45,6 +45,7 @@ function tunneledServices(declared: DeclaredCompose): Set<string> {
       networks: s.networks.map(key => ({ key })),
       ports: s.ports,
       commandHints: s.commandHints,
+      tailscaleFlags: s.tailscaleFlags,
     })),
     networks: Object.fromEntries(Object.entries(declared.networks).map(([key, r]) => [key, { name: r.name ?? key, external: r.external }])),
   });

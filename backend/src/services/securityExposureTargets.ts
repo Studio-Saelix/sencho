@@ -75,9 +75,9 @@ function effectiveIntent(
  * the host network) and classified internal or same-node is taken at the
  * operator's word and not counted as exposed; Compose Doctor still asks them to
  * confirm the routing. A certain reach (a shared network namespace) stays
- * exposed and conflicts with that intent. Every caller that reads cached
- * descriptors for Security runs them through this first, so the exposed-image
- * map and the exposure targets agree.
+ * exposed and conflicts with that intent. Security reads cached descriptors
+ * through `readSettledExposures`, so the exposed-image map and the exposure
+ * targets agree.
  */
 export function settleTunnelExposure(
   nodeId: number,
@@ -102,6 +102,19 @@ export function settleTunnelExposure(
       services: exp.services.map((svc) => (settled.has(svc.service) ? { ...svc, publiclyExposed: false } : svc)),
     };
   });
+}
+
+/** Parse cached `stack_exposures` rows (skipping malformed ones) and settle
+ *  their tunnel exposure. The one way Security reads cached descriptors. */
+export function readSettledExposures(
+  nodeId: number,
+  rows: ReadonlyArray<{ descriptor: string }>,
+  getContext: typeof getExposureContext = getExposureContext,
+): StackExposure[] {
+  const parsed = rows.map((r) => {
+    try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
+  }).filter((e): e is StackExposure => e !== null);
+  return settleTunnelExposure(nodeId, parsed, getContext);
 }
 
 function rowKey(imageRef: string, stackName: string, serviceName: string): string {
@@ -244,7 +257,8 @@ export function buildImageExposureContextRows(
         exposureReason: svc.reason,
         intentStatus: 'unavailable',
       };
-      if (svc.tunnel) row.tunnel = svc.tunnel;
+      // Name the tunnel only when it is why the service counts as exposed.
+      if (svc.reason === 'tunnel' && svc.tunnel) row.tunnel = svc.tunnel;
 
       if (ctx.available) {
         const intent = effectiveIntent(svc.service, ctx.stackIntent, ctx.serviceIntents);

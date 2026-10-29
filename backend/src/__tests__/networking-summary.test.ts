@@ -72,6 +72,19 @@ describe('networking summary', () => {
     expect(classified.body.unknownExposure.stacks).not.toContain(STACK);
   });
 
+  it('counts a Tailscale subnet router only when TS_EXTRA_ARGS advertises routes', async () => {
+    const compose = (extraArgs: string) =>
+      `services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      - TS_AUTHKEY=tskey-secret\n      - TS_EXTRA_ARGS=${extraArgs}\n  app:\n    image: example/app:1\n`;
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('--advertise-tags=tag:container'));
+    const tagsOnly = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(tagsOnly.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('--advertise-routes=172.20.0.0/16'));
+    const router = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(router.body.exposed.stacks).toContain(STACK);
+    expect(JSON.stringify(router.body)).not.toContain('tskey-secret');
+  });
+
   it('does not count a cloudflared DNS proxy as exposure', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  dns:\n    image: cloudflare/cloudflared:latest\n    command: proxy-dns\n  pihole:\n    image: pihole/pihole\n');

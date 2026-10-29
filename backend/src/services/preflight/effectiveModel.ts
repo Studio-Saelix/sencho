@@ -6,14 +6,15 @@
  * finite whitelist of Docker socket-proxy API flags, whether the rendered
  * value is exactly `1` (stored as enabled flag names only). `command`,
  * `entrypoint`, and `DOCKER_HOST` are read for `tcp://` endpoint host names
- * only, and `command`/`entrypoint` for a fixed set of cloudflared subcommands.
+ * only, `command`/`entrypoint` for a fixed set of cloudflared subcommands, and
+ * `TS_EXTRA_ARGS` for two Tailscale forwarding flag names.
  * `cap_add` names and `devices` host paths are kept. Render errors are handled
  * by the caller, not here.
  */
 
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
-import { cloudflaredCommandHints } from '../network/tunnelDetection';
+import { cloudflaredCommandHints, tailscaleForwardFlags } from '../network/tunnelDetection';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
@@ -103,6 +104,8 @@ export interface EffService {
   devices?: string[];
   /** cloudflared subcommands (`tunnel`, `proxy-dns`, `access`) named by `command`/`entrypoint`; no other token is kept. */
   commandHints?: string[];
+  /** Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`) named by `TS_EXTRA_ARGS`; no other part of the value is kept. */
+  tailscaleFlags?: string[];
   /**
    * True when `sencho.service.url` is a validated http(s) URL. The URL string
    * itself stays off this model; anatomy is the reader that returns it.
@@ -547,6 +550,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       capAdd: stringList(svc.cap_add),
       devices: deviceHostPaths(svc.devices),
       commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
+      tailscaleFlags: tailscaleForwardFlags(svc.environment),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }

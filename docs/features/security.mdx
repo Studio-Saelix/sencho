@@ -129,8 +129,9 @@ WireGuard connector in the same stack that can reach the service) carry a **Netw
 label on the row during ordinary browsing, not only after a posture drill-down. That label means the
 Compose model makes the service reachable beyond loopback; it is not a claim that the service is
 reachable from the Internet. It reflects the Compose model captured at the stack's last deploy or update.
-For a tunnel, the label reads **Network exposed · tunnel** (or the networking list under it names the
-connector) and says when the tunnel's routing is unverified. A service you classified internal or
+When a tunnel is why the service counts as exposed, the label reads **Network exposed · tunnel** and its
+tooltip names the connector and says when the tunnel's routing is unverified; with several contexts, the
+networking list under the label names the connector instead. A service you classified internal or
 same-node that a tunnel can reach only with unverified routing is taken at your word and not counted as
 exposed; one that shares the connector's network namespace is, and shows an intent mismatch. When Networking exposure intent is
 available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
