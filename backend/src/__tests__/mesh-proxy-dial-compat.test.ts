@@ -55,10 +55,14 @@ describe('classifyDialError', () => {
         [upgradeFailure(302, { location: '' }), 'refused_unverified'],
         [upgradeFailure(302, { server: 'cloudflare', 'cf-ray': 'abc', location: 'https://app.example.com/login' }), 'refused_unverified'],
         // A Sencho marker identifies the component that answered, so it
-        // outranks a status-based branch even when a redirect destination
-        // would otherwise look like a gateway.
+        // outranks every status-based branch, not only redirects.
+        [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login', 'x-sencho-mesh-reject': 'unauthorized' }), 'auth_failed'],
+        [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login', 'x-sencho-mesh-reject': 'scope' }), 'scope_denied'],
+        [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login', 'x-sencho-mesh-reject': 'tier' }), 'tier_denied'],
         [upgradeFailure(302, { location: 'https://team.cloudflareaccess.com/login', 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
         [upgradeFailure(302, { location: 'https://app.example.com/login', 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
+        [upgradeFailure(404, { 'x-sencho-mesh-reject': 'forbidden' }), 'remote_refused'],
+        [upgradeFailure(407, { 'x-sencho-mesh-reject': 'tier' }), 'tier_denied'],
         // Markerless 401/403/429: an older Sencho receiver emits its
         // credential refusals without a marker too, so the hop is unknown.
         [upgradeFailure(401), 'refused_unverified'],
@@ -129,6 +133,9 @@ describe('classifyDialError', () => {
         const out = classifyDialError(upgradeFailure(302, headers));
         expect(out.code).toBe('refused_unverified');
         expect(out.message).toMatch(/neither the destination nor the response headers identify the hop that redirected/);
+        // An empty Location is present but unusable; do not tell the operator
+        // the header was absent.
+        expect(out.message).not.toMatch(/without a Location header/);
         expect(out.message).not.toMatch(/Cloudflare Access/);
         expect(meshReachableReason(out.code)).toMatch(/refused or redirected/);
         expect(meshReachableReason(out.code)).not.toMatch(/blocked by an access proxy/);
