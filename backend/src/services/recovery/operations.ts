@@ -174,11 +174,9 @@ export class RecoveryOperationStore {
       WHERE id = ? AND state = 'queued' AND process_epoch = ?
     `).run(now, id, this.processEpoch);
     const op = this.require(id);
-    if (result.changes === 0 && !(op.state === 'running' && op.processEpoch === this.processEpoch)) {
-      if (!isTerminal(op.state) && op.processEpoch !== this.processEpoch) this.refuseOtherProcess('start', op);
-      throw new RecoveryError('invalid_request');
-    }
-    return op;
+    if (result.changes > 0 || (op.state === 'running' && op.processEpoch === this.processEpoch)) return op;
+    if (!isTerminal(op.state) && op.processEpoch !== this.processEpoch) this.refuseOtherProcess('start', op);
+    throw new RecoveryError('invalid_request');
   }
 
   /**
@@ -212,6 +210,8 @@ export class RecoveryOperationStore {
     } else if (outcome.state === 'completion_unknown') {
       errorClass = 'interrupted';
     }
+    // These endings need the operation's points finalized first; the rest settle them.
+    const pointsFinalizedFirst = outcome.state === 'succeeded' || outcome.state === 'partial';
     const db = recoveryDb();
     const logLate = (stored: RecoveryOperation): void => {
       if (stored.state !== outcome.state || stored.errorClass !== errorClass) {
@@ -231,7 +231,7 @@ export class RecoveryOperationStore {
         return current;
       }
       if (current.processEpoch !== this.processEpoch) this.refuseOtherProcess('finish', current);
-      if (outcome.state === 'succeeded' || outcome.state === 'partial') {
+      if (pointsFinalizedFirst) {
         const pending = db.prepare(
           "SELECT 1 FROM recovery_points WHERE source_operation_id = ? AND status = 'pending'",
         ).get(id);
@@ -255,7 +255,7 @@ export class RecoveryOperationStore {
           UPDATE recovery_points SET status = 'failed', failure_class = ?, completed_at = ?
           WHERE source_operation_id = ? AND status = 'pending'
         `).run(errorClass, now, id);
-      } else if (outcome.state !== 'succeeded' && outcome.state !== 'partial') {
+      } else if (!pointsFinalizedFirst) {
         db.prepare(`
           UPDATE recovery_points SET status = 'completion_unknown', failure_class = 'interrupted', completed_at = ?
           WHERE source_operation_id = ? AND status = 'pending'
@@ -340,12 +340,11 @@ export class RecoveryOperationStore {
     const settled = db.transaction((): StartupReconciliation => {
       // One conditional statement, so an operation that already reached a
       // terminal state is never rewritten.
-      const interrupted = db.prepare(`
+      const interruptedOperations = db.prepare(`
         UPDATE recovery_operations
         SET state = 'completion_unknown', error_class = 'interrupted', updated_at = ?, completed_at = ?
         WHERE state IN ('queued','running') AND process_epoch <> ?
-        RETURNING id
-      `).all(now, now, this.processEpoch);
+      `).run(now, now, this.processEpoch).changes;
       // A pending point whose operation is no longer live was cut off mid-capture,
       // including one whose operation row was never written.
       const unknownPoints = db.prepare(`
@@ -357,7 +356,7 @@ export class RecoveryOperationStore {
       const staleLocks = db.prepare(`
         UPDATE recovery_locks SET stale_since = ? WHERE process_epoch <> ? AND stale_since IS NULL
       `).run(now, this.processEpoch).changes;
-      return { interruptedOperations: interrupted.length, unknownPoints, staleLocks };
+      return { interruptedOperations, unknownPoints, staleLocks };
     }).immediate();
     this.reconciled = true;
     return settled;
