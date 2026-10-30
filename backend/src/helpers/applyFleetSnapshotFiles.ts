@@ -1,4 +1,5 @@
 import path from 'path';
+import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
@@ -55,6 +56,15 @@ function codedError(message: string, code: string): CodedError {
   return Object.assign(new Error(message), { code });
 }
 
+function assertNoBlockingDeletionForRestore(nodeId: number, stackName: string): void {
+  if (DatabaseService.getInstance().hasBlockingDeletionIntent(nodeId, stackName)) {
+    throw codedError(
+      `Stack "${stackName}" has a deletion in progress and cannot be restored until cleanup finishes.`,
+      'stack_deletion_in_progress',
+    );
+  }
+}
+
 async function writeApplyFile(
   fsSvc: FileSystemService,
   stackName: string,
@@ -95,6 +105,7 @@ export async function applyFleetSnapshotFiles(
     'backup',
     actor,
     async () => {
+      assertNoBlockingDeletionForRestore(nodeId, stackName);
       const fsSvc = FileSystemService.getInstance(nodeId);
       const exists = await fsSvc.hasComposeFile(path.join(fsSvc.getBaseDir(), stackName));
       let capturedGenerationId: string | null = null;

@@ -298,6 +298,40 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(fs.readFileSync(envPath('restore-absent'), 'utf-8')).toContain('RECOVERED=1');
     });
 
+    it('returns 409 stack_deletion_in_progress when compose still exists but deletion is pending', async () => {
+        const db = DatabaseService.getInstance();
+        const now = Date.now();
+        db.insertCleanupPending({
+            id: randomUUID(),
+            node_id: LOCAL_NODE_ID,
+            stack_name: 'restore-deletion-pending',
+            status: 'prepared',
+            target_kind: 'local_socket',
+            rollback_tags_json: '[]',
+            override_paths_json: '[]',
+            prune_volumes_requested: 0,
+            required_blueprint_id: null,
+            created_at: now,
+            updated_at: now,
+        });
+        const id = db.createSnapshot('restore-deletion-block', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-deletion-pending', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+        ]);
+        const preCompose = 'services:\n  live: {}\n';
+        seedStackDir('restore-deletion-pending');
+        fs.writeFileSync(composePath('restore-deletion-pending'), preCompose);
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-deletion-pending' });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'stack_deletion_in_progress' });
+        expect(fs.readFileSync(composePath('restore-deletion-pending'), 'utf-8')).toBe(preCompose);
+    });
+
     it('returns 409 when the deploy policy blocks the redeploy', async () => {
         vi.spyOn(policyGate, 'runPolicyGate').mockImplementation(async (_req, res) => {
             res.status(409).json({ error: 'Policy "block-criticals" blocked deploy' });

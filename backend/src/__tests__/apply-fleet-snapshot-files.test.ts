@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { applyFleetSnapshotFiles, fleetSnapshotApplyConflictCode, selectFleetSnapshotApplyFiles, type FleetSnapshotApplyFile } from '../helpers/applyFleetSnapshotFiles';
+import { DatabaseService } from '../services/DatabaseService';
 import { StackOpLockService } from '../services/StackOpLockService';
 
 const mocks = vi.hoisted(() => ({
@@ -186,5 +187,13 @@ describe('applyFleetSnapshotFiles', () => {
     expect(fleetSnapshotApplyConflictCode(
       Object.assign(new Error('deletion in progress'), { code: 'stack_deletion_in_progress' }),
     )).toBe('stack_deletion_in_progress');
+  });
+
+  it('refuses restore when a deletion intent exists even if compose is still on disk', async () => {
+    vi.spyOn(DatabaseService.getInstance(), 'hasBlockingDeletionIntent').mockReturnValue(true);
+    await expect(applyWeb()).rejects.toMatchObject({ code: 'stack_deletion_in_progress' });
+    expect(mocks.captureCurrentBackup).not.toHaveBeenCalled();
+    expect(mocks.saveStackContent).not.toHaveBeenCalled();
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
   });
 });
