@@ -23,6 +23,7 @@ import type { GitSourceManifestState } from '../types/gitProjectManifest';
 import type { RollbackOperationKind } from '../types/rollbackGeneration';
 import { collectImageIds, parseServicesJsonStrict } from './recoveryServicesJson';
 import { GITOPS_DUE_INDEX_SQL, GITOPS_SCHEMA_SQL } from './gitops/schema';
+import { applyRecoverySchema, type RecoverySchemaOutcome } from './recovery/schema';
 import { PLACEMENT_POLICY_REASONS } from './gitops/placementPolicy';
 import type { DismissalMode } from './findingDismissals/types';
 
@@ -1249,6 +1250,7 @@ export class DatabaseService {
     private auditLogBuffer: Array<Omit<AuditLogEntry, 'id'>> = [];
     private auditLogFlushTimer: ReturnType<typeof setTimeout> | null = null;
     private auditLogInsertStmt: Database.Statement | null = null;
+    private recoverySchemaOutcome: RecoverySchemaOutcome = { kind: 'failed' };
 
     private constructor() {
         const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -1309,6 +1311,7 @@ export class DatabaseService {
         this.migrateNodeSealingKeys();
         this.migrateStackAlertServiceScope();
         this.migrateGitOpsSourcePolicy();
+        this.migrateRecoverySchema();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1325,6 +1328,31 @@ export class DatabaseService {
 
     public getDb(): Database.Database {
         return this.db;
+    }
+
+    /** Whether this build applied the recovery schema; recovery stores refuse work otherwise. */
+    public getRecoverySchemaOutcome(): RecoverySchemaOutcome {
+        return this.recoverySchemaOutcome;
+    }
+
+    /**
+     * Recovery has no live feature depending on it at boot, so a failed or
+     * newer recovery schema leaves recovery unavailable rather than stopping
+     * Sencho. The stores read the outcome and fail closed.
+     */
+    private migrateRecoverySchema(): void {
+        try {
+            this.recoverySchemaOutcome = applyRecoverySchema(this.db);
+            if (this.recoverySchemaOutcome.kind === 'newer') {
+                console.warn(
+                    '[DatabaseService] Recovery records were written by a newer build (schema %d); recovery is unavailable on this build',
+                    this.recoverySchemaOutcome.storedVersion,
+                );
+            }
+        } catch (e) {
+            this.recoverySchemaOutcome = { kind: 'failed' };
+            console.error('[DatabaseService] Recovery schema migration failed; recovery is unavailable:', (e as Error).message);
+        }
     }
 
     /**
