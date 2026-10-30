@@ -298,6 +298,103 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(fs.readFileSync(envPath('restore-absent'), 'utf-8')).toContain('RECOVERED=1');
     });
 
+    describe('absent stack whose snapshot has no compose.yaml', () => {
+        function envOnlySnapshot(label: string, stackName: string, nodeId = LOCAL_NODE_ID): number {
+            const db = DatabaseService.getInstance();
+            const id = db.createSnapshot(label, 'admin', 1, 1, '[]', '[]');
+            db.insertSnapshotFiles(id, [
+                { nodeId, nodeName: 'n', stackName, filename: '.env', content: 'ONLY=env\n' },
+            ]);
+            return id;
+        }
+
+        it('refuses a single restore with 409 and leaves nothing that blocks Create Stack', async () => {
+            const id = envOnlySnapshot('restore-env-only', 'restore-env-only');
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-env-only' });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+            expect(fs.existsSync(path.dirname(envPath('restore-env-only')))).toBe(false);
+            await expect(FileSystemService.getInstance(LOCAL_NODE_ID).createStack('restore-env-only')).resolves.toBeUndefined();
+        });
+
+        it('records the stack as failed in restore-all, creates no directory, and restores its siblings', async () => {
+            const db = DatabaseService.getInstance();
+            const id = db.createSnapshot('restore-all-env-only', 'admin', 1, 2, '[]', '[]');
+            db.insertSnapshotFiles(id, [
+                { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-env-only', filename: '.env', content: 'ONLY=env\n' },
+                { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-env-sibling', filename: 'compose.yaml', content: 'services:\n  sibling: {}\n' },
+            ]);
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore-all`)
+                .set('Cookie', adminCookie)
+                .send({});
+
+            expect(res.status).toBe(200);
+            expect(res.body.restored).toBe(1);
+            expect(res.body.failed).toBe(1);
+            const failed = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>)
+                .find(r => r.stackName === 'all-env-only');
+            expect(failed?.success).toBe(false);
+            expect(failed?.error).toContain('no compose.yaml');
+            expect(fs.existsSync(path.dirname(envPath('all-env-only')))).toBe(false);
+            expect(fs.readFileSync(composePath('all-env-sibling'), 'utf-8')).toContain('sibling: {}');
+        });
+
+        it('answers 409 from the receiving node route and creates no directory', async () => {
+            const res = await request(app)
+                .post('/api/stacks/receiver-env-only/fleet-snapshot-apply')
+                .set('Cookie', adminCookie)
+                .send({ files: [{ filename: '.env', content: 'ONLY=env\n' }] });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+            expect(fs.existsSync(path.dirname(envPath('receiver-env-only')))).toBe(false);
+        });
+
+        it('removes the directory the receiving node route created when a file write fails', async () => {
+            vi.spyOn(FileSystemService.prototype, 'saveEnvContent')
+                .mockRejectedValue(new Error('disk full'));
+
+            const res = await request(app)
+                .post('/api/stacks/receiver-half-written/fleet-snapshot-apply')
+                .set('Cookie', adminCookie)
+                .send({ files: [
+                    { filename: 'compose.yaml', content: 'services:\n  half: {}\n' },
+                    { filename: '.env', content: 'HALF=1\n' },
+                ] });
+
+            expect(res.status).toBe(500);
+            expect(fs.existsSync(path.dirname(composePath('receiver-half-written')))).toBe(false);
+        });
+
+        it('propagates the receiving node refusal through the remote proxy as 409', async () => {
+            const db = DatabaseService.getInstance();
+            const remoteId = db.addNode({ name: 'remote-env-only', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+            const id = envOnlySnapshot('restore-remote-env-only', 'remote-env-only', remoteId);
+            vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+            vi.stubGlobal('fetch', vi.fn(async () => ({
+                ok: false,
+                status: 409,
+                text: async () => JSON.stringify({ error: 'no compose.yaml', code: 'snapshot_compose_missing' }),
+            }) as unknown as Response));
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: remoteId, stackName: 'remote-env-only' });
+            vi.unstubAllGlobals();
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+        });
+    });
+
     it('returns 409 stack_deletion_in_progress when compose still exists but deletion is pending', async () => {
         const db = DatabaseService.getInstance();
         const now = Date.now();
