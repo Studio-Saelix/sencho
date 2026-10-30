@@ -78,6 +78,8 @@ export interface EffService {
   user?: string;
   /** Environment KEY names only. Values are never extracted. */
   envKeys: string[];
+  /** The `envKeys` Compose rendered as `null`, which it leaves out of the container's environment. */
+  unsetEnvKeys?: string[];
   /**
    * Names of recognized Docker socket-proxy API flags whose rendered value is
    * exactly `1` (after trim). Matches the upstream images, which grant a group
@@ -310,9 +312,7 @@ function parseStorageMounts(volumes: unknown, tmpfs: unknown): EffStorageMount[]
   return mounts;
 }
 
-/** Environment KEY names only. Never returns a value. A rendered `KEY: null` is
- *  a variable Compose could not resolve and leaves out of the container's
- *  environment, so it names no key. */
+/** Environment KEY names only. Never returns a value. */
 function envKeysOf(env: unknown): string[] {
   if (Array.isArray(env)) {
     return env
@@ -322,9 +322,16 @@ function envKeysOf(env: unknown): string[] {
       .filter(Boolean);
   }
   if (env && typeof env === 'object') {
-    return Object.entries(env as Record<string, unknown>).filter(([, value]) => value !== null).map(([key]) => key);
+    return Object.keys(env as Record<string, unknown>);
   }
   return [];
+}
+
+/** Map-form KEYs rendered as `null`: a variable Compose could not resolve and
+ *  leaves out of the container's environment. A list entry is always a value. */
+function unsetEnvKeysOf(env: unknown): string[] {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return [];
+  return Object.entries(env as Record<string, unknown>).filter(([, value]) => value === null).map(([key]) => key);
 }
 
 /**
@@ -546,6 +553,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       containerName: str(svc.container_name),
       user: str(svc.user),
       envKeys: envKeysOf(svc.environment),
+      unsetEnvKeys: unsetEnvKeysOf(svc.environment),
       enabledProxyApiFlags: enabledProxyApiFlagsOf(svc.environment),
       dockerEndpointHosts: dockerEndpointHostsOf(svc.command, svc.entrypoint, svc.environment),
       networks: parseServiceNetworks(svc.networks),

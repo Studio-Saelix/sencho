@@ -21,6 +21,8 @@ export interface DeclaredEnvFile {
   required: boolean;
   /** `format: raw` keeps values literal: no quotes, escapes, or interpolation. */
   raw?: boolean;
+  /** Any other `format:`, which Compose refuses or this reader cannot resolve. */
+  unsupportedFormat?: boolean;
 }
 
 export interface DeclaredService {
@@ -122,15 +124,18 @@ interface EnvironmentKeys {
  *  never kept. With no lookup, such a key counts as set. */
 function environmentKeys(env: unknown, lookup?: ComposeEnvLookup): EnvironmentKeys {
   const keys: EnvironmentKeys = { set: [], unset: [], needsLookup: false };
+  // A key listed twice resolves to its last entry, as in Compose, so a name is
+  // in exactly one of the two arrays.
+  const place = (key: string, isSet: boolean): void => {
+    const [into, from] = isSet ? [keys.set, keys.unset] : [keys.unset, keys.set];
+    const at = from.indexOf(key);
+    if (at !== -1) from.splice(at, 1);
+    if (!into.includes(key)) into.push(key);
+  };
   const add = (key: string, valued: boolean): void => {
     if (!key) return;
-    if (valued) {
-      keys.set.push(key);
-      return;
-    }
-    keys.needsLookup = true;
-    if (!lookup || lookup(key) !== undefined) keys.set.push(key);
-    else keys.unset.push(key);
+    if (!valued) keys.needsLookup = true;
+    place(key, valued || !lookup || lookup(key) !== undefined);
   };
   if (Array.isArray(env)) {
     for (const entry of env) {
@@ -213,7 +218,10 @@ function envFileEntries(value: unknown): DeclaredEnvFile[] {
       const obj = entry as Record<string, unknown>;
       const filePath = asString(obj.path);
       if (filePath !== undefined) {
-        return { path: filePath, required: obj.required !== false, ...(obj.format === 'raw' ? { raw: true } : {}) };
+        // Compose reads `raw` and refuses any other format; a templated format
+        // is not resolved here, so it is no more readable than an unknown one.
+        const format = obj.format === undefined ? {} : obj.format === 'raw' ? { raw: true } : { unsupportedFormat: true };
+        return { path: filePath, required: obj.required !== false, ...format };
       }
     }
     return null;
@@ -577,7 +585,7 @@ function unionKeys(a: string[] | undefined, b: string[] | undefined): string[] {
  * replaces an earlier one, `ports` and `env_file` entries append, and the other
  * lists (`depends_on`, networks, volumes, `cap_add`, `devices`) union.
  * `environment` is represented by its KEY names, so later layers add keys and
- * a later value-less entry removes an earlier one;
+ * a later value-less entry the environment does not answer removes an earlier one;
  * `command`, `entrypoint`, and `TS_EXTRA_ARGS` replace when the later layer
  * declares them.
  */

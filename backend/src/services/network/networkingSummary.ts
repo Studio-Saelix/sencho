@@ -10,12 +10,14 @@
  * the deploy spec's layers, `COMPOSE_FILE`, auto-discovered override files,
  * YAML merge keys, the names a service's `env_file` entries and `environment`
  * set (a key with no value is set only when the interpolation environment
- * answers it, and then overrides an `env_file`) plus the one `TS_EXTRA_ARGS`
- * value (parsed with the stack's interpolation environment, then discarded),
- * and interpolation, and follows networks and namespaces the same way the
- * detailed views do. When an input cannot be read completely (a required env
- * file, an include or extends, a `!reset` or `!override` tag, an unresolved
- * template or value-less key in a detection field, or a layer selector it cannot reproduce), the
+ * answers it, and left unset it still overrides an `env_file`) plus the one
+ * `TS_EXTRA_ARGS` value (parsed with the stack's interpolation environment,
+ * then discarded), and interpolation, and follows networks and namespaces the
+ * same way the detailed views do. When an input cannot be read completely (a
+ * required env file or one in a format other than raw, an include or extends, a
+ * `!reset` or `!override` tag, an unresolved template in a detection field, a
+ * value-less key or env_file reference with no interpolation environment to
+ * answer it, or a layer selector it cannot reproduce), the
  * stack is reported as unreadable rather than counted as not exposed. It does
  * not apply Compose profiles, so a profile-gated connector counts as present.
  */
@@ -300,7 +302,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     // env_file, even one with no value that leaves the key unset. The files are
     // read in order with the stack's interpolation environment (the reader's
     // base lookup), so a name that only inherits an unset variable is absent.
-    // With no lookup, a file that needed one cannot be judged.
+    // With no lookup, a file that consulted it cannot be judged.
     let lookupNeeded = false;
     const reader = new ComposeEnvFiles(lookup ?? (() => {
       lookupNeeded = true;
@@ -308,7 +310,12 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     }));
     for (const envFile of service.envFiles ?? []) {
       if (holdsTemplate(envFile.path)) {
-        noteUnreadable(stack, 'a service env_file path is an unresolved template');
+        noteUnreadable(stack, `service ${sanitizeForLog(service.name)} has an env_file path that is an unresolved template`);
+        unreadable = true;
+        continue;
+      }
+      if (envFile.unsupportedFormat) {
+        noteUnreadable(stack, `service ${sanitizeForLog(service.name)} has an env_file with a format other than raw`);
         unreadable = true;
         continue;
       }
@@ -317,7 +324,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       } catch (error) {
         if (!envFile.required && isMissingFile(error)) continue;
         // Keys and flags this file would add are unknown, so no absence can be claimed.
-        noteUnreadable(stack, 'a service env_file cannot be read', error);
+        noteUnreadable(stack, `service ${sanitizeForLog(service.name)} has an env_file that cannot be read`, error);
         unreadable = true;
       }
     }

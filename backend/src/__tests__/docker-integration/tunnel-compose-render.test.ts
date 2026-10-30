@@ -45,7 +45,10 @@ function reachedServices(stackDir: string, files: string[]): string[] {
  * summary must report as exposed (and, with no intent set, unknown), and the
  * summary must not call the stack unreadable. The cases are the input variants
  * the summary adapts: port protocols, env-file assignments and formats, unset
- * variables, and repeated Tailscale flags.
+ * variables, and repeated Tailscale flags. The oracle covers what Compose
+ * renders; the flag cases also pass through `tailscaleForwardFlags` on both
+ * sides, so Tailscale's own flag kinds are pinned by the flag-table test in
+ * `tunnel-exposure.test.ts`, not here.
  */
 interface ParityCase {
   name: string;
@@ -152,6 +155,45 @@ const PARITY: ParityCase[] = [
     files: { 'compose.yaml': CUSTOM('    environment:\n      TUNNEL_TOKEN:'), 'override.yaml': 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN: tunnel-secret\n' },
     layers: ['compose.yaml', 'override.yaml'],
     reached: ['app'],
+  },
+
+  // Duplicate environment entries, several env files, and literal dollar signs.
+  { name: 'a list key with a value, then the same key with none', files: { 'compose.yaml': CUSTOM('    environment:\n      - TUNNEL_TOKEN=tunnel-secret\n      - TUNNEL_TOKEN') }, reached: [] },
+  { name: 'a list key with no value, then the same key with a value', files: { 'compose.yaml': CUSTOM('    environment:\n      - TUNNEL_TOKEN\n      - TUNNEL_TOKEN=tunnel-secret') }, reached: ['app'] },
+  {
+    name: 'a second env file that overrides the flag the first set',
+    files: { 'compose.yaml': TAILSCALE('    env_file:\n      - ./ts.env\n      - ./ts2.env'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n', 'ts2.env': 'TS_EXTRA_ARGS=--accept-dns=false\n' },
+    reached: [],
+  },
+  {
+    name: 'a second env file that assigns the name the first left bare',
+    files: { 'compose.yaml': CUSTOM('    env_file:\n      - ./edge.env\n      - ./edge2.env'), 'edge.env': 'TUNNEL_TOKEN\n', 'edge2.env': 'TUNNEL_TOKEN=tunnel-secret\n' },
+    reached: ['app'],
+  },
+  {
+    name: 'a bare name in the second env file that inherits the first file\'s value',
+    files: { 'compose.yaml': CUSTOM('    env_file:\n      - ./edge.env\n      - ./edge2.env'), 'edge.env': 'TUNNEL_TOKEN=tunnel-secret\n', 'edge2.env': 'TUNNEL_TOKEN\n' },
+    reached: ['app'],
+  },
+  {
+    name: 'a literal dollar sign after a disabled flag in a raw env file',
+    files: { 'compose.yaml': TAILSCALE('    env_file:\n      - path: ./ts.env\n        format: raw'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b\n' },
+    reached: [],
+  },
+  {
+    name: 'a literal dollar sign after a disabled flag in a single-quoted value',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env'), 'ts.env': "TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS='--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b'\n" },
+    reached: [],
+  },
+  {
+    name: 'a raw env file that starts with a byte order mark',
+    files: { 'compose.yaml': CUSTOM('    env_file:\n      - path: ./edge.env\n        format: raw'), 'edge.env': '\ufeffTUNNEL_TOKEN=tunnel-secret\n' },
+    reached: ['app'],
+  },
+  {
+    name: 'a null TS_EXTRA_ARGS over an env file value',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env\n    environment:\n      TS_EXTRA_ARGS:'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n' },
+    reached: [],
   },
 
   // Repeated forwarding flags with a boolean between them.

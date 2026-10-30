@@ -17,6 +17,8 @@ import {
   detectTunnels,
   imageBaseName,
   isCertainTunnelPath,
+  TAILSCALE_BOOLEAN_FLAGS,
+  TAILSCALE_VALUE_FLAGS,
   tailscaleForwardFlags,
   tunnelExposureByService,
   type TunnelConnector,
@@ -929,18 +931,45 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(forwarding('--advertise-routes --advertise-exit-node=false --advertise-exit-node')).toEqual(['--advertise-routes', '--advertise-exit-node']);
   });
 
-  it('says so when a flag it does not know leaves a forwarding occurrence ambiguous', () => {
+  it('never reads less forwarding than the real parse could give after a flag it does not know', () => {
     const forwarding = (args: string) => tailscaleForwardFlags({ TS_EXTRA_ARGS: args });
-    // The unknown flag may take the next token, or be a boolean: the exit node is on or off.
-    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node=false')).toEqual(['--advertise-exit-node', 'unresolved']);
-    expect(forwarding('--advertise-exit-node=false --from-a-newer-tailscale --advertise-exit-node')).toEqual(['--advertise-exit-node', 'unresolved']);
-    // When both readings agree there is nothing to say.
-    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node')).toEqual(['--advertise-exit-node']);
+    // The unknown flag may take the next token, so a disabling repeat may be its value and cannot switch the flag off.
+    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node=false')).toEqual(['--advertise-exit-node']);
+    // An enabling repeat counts either way.
+    expect(forwarding('--advertise-exit-node=false --from-a-newer-tailscale --advertise-exit-node')).toEqual(['--advertise-exit-node']);
     expect(forwarding('--from-a-newer-tailscale --advertise-exit-node=false')).toEqual([]);
     // After a flag written with `=` the next token is its own flag.
     expect(forwarding('--advertise-exit-node --from-a-newer-tailscale=1 --advertise-exit-node=false')).toEqual([]);
+    // A value flag right after the unknown flag may itself be the unknown flag's value, so what follows it may be a flag.
+    expect(forwarding('--from-a-newer-tailscale --hostname --advertise-exit-node')).toEqual(['--advertise-exit-node']);
+    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --hostname --advertise-exit-node=false')).toEqual(['--advertise-exit-node']);
+    // Without an unknown flag in front, the value flag takes the next token.
+    expect(forwarding('--hostname --advertise-exit-node')).toEqual([]);
+    expect(forwarding('--advertise-exit-node --hostname --advertise-exit-node=false')).toEqual(['--advertise-exit-node']);
     const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: '--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node=false' } }, db }), 'ts');
-    expect(c.signals).toEqual(expect.arrayContaining(['flag:--advertise-exit-node', 'flag:unresolved']));
+    expect(c.signals).toContain('flag:--advertise-exit-node');
+    expect(c.signals).not.toContain('flag:unresolved');
+  });
+
+  it('reads every registered tailscale up flag by its kind, in both dash forms', () => {
+    const args = (flag: string, dash: string) => `--advertise-exit-node ${dash}${flag} --advertise-exit-node=false`;
+    for (const flag of TAILSCALE_BOOLEAN_FLAGS) {
+      const name = flag.slice(2);
+      for (const dash of ['--', '-']) {
+        // A boolean takes no value, so the final disabling occurrence is a flag and wins.
+        expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: args(name, dash) }), flag + dash).toEqual([]);
+      }
+    }
+    for (const flag of TAILSCALE_VALUE_FLAGS) {
+      const name = flag.slice(2);
+      for (const dash of ['--', '-']) {
+        // A value flag takes the next token whatever it looks like, so it cannot switch the flag off.
+        const value = tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node ${dash}${name} --advertise-exit-node=false` });
+        // `--advertise-routes` is itself the other forwarding flag, so it may add to the list.
+        expect(value, flag + dash).toContain('--advertise-exit-node');
+      }
+    }
+    expect([...TAILSCALE_BOOLEAN_FLAGS].filter(flag => TAILSCALE_VALUE_FLAGS.has(flag))).toEqual([]);
   });
 
   it('applies the final-occurrence rule through list, map and interpolated forms, and in a rendered model', () => {
@@ -1026,9 +1055,13 @@ describe('a rendered model reads Compose\'s unset variables and port protocols a
     expect(reachOf(ts({ TS_AUTHKEY: TS_KEY, TS_ROUTES: '192.168.1.0/24' }))).toEqual({ app: 'shared-network' });
   });
 
-  it('keeps a null key out of the model every detector consumer reads', () => {
+  it('lists a null key as unset but still declared, so the env inventory and the uid rule keep reading it', () => {
     const model = render({ edge: { image: 'example/edge:1', environment: { TUNNEL_TOKEN: null, KEPT: 'x' } }, app });
-    expect(model.services.find(service => service.name === 'edge')?.envKeys).toEqual(['KEPT']);
+    const edge = model.services.find(service => service.name === 'edge');
+    expect(edge?.envKeys).toEqual(['TUNNEL_TOKEN', 'KEPT']);
+    expect(edge?.unsetEnvKeys).toEqual(['TUNNEL_TOKEN']);
+    // A list entry has no null form: Compose renders a value-less list entry as `KEY: null` in map form.
+    expect(render({ edge: { image: 'example/edge:1', environment: ['PUID=1000', 'PGID'] }, app }).services[0].unsetEnvKeys).toEqual([]);
   });
 
   it('recognizes a UDP port however its protocol is cased', () => {

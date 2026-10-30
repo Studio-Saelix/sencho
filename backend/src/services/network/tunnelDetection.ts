@@ -108,6 +108,9 @@ export interface TunnelDetectionService {
   name: string;
   image?: string;
   envKeys: string[];
+  /** Names `envKeys` also lists that Compose left out of the container's
+   *  environment (a rendered `KEY: null`). Detection reads them as absent. */
+  unsetEnvKeys?: string[];
   networkMode?: string;
   networks: { key: string }[];
   ports: { protocol: string }[];
@@ -182,9 +185,7 @@ const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP'];
  *  a node forward to other addresses, or `unresolved` when the value cannot be
  *  read, which is treated as forwarding: a key with no value or a `${VAR}` with
  *  no lookup to answer it, a value that is not a string, or a template Compose
- *  refuses (malformed, or a required `${VAR:?}` with no value). It is also added
- *  beside a named flag when a flag Sencho does not know leaves it unclear
- *  whether a later occurrence is a flag or that flag's value. */
+ *  refuses (malformed, or a required `${VAR:?}` with no value). */
 export type TailscaleForwardFlag = '--advertise-routes' | '--advertise-exit-node' | 'unresolved';
 
 const TAILSCALE_FORWARD_FLAGS: ReadonlySet<string> = new Set(['--advertise-routes', '--advertise-exit-node']);
@@ -265,9 +266,10 @@ function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined)
 /**
  * The `tailscale up` flags that take no value argument (Go's `IsBoolFlag`), so
  * the token after one is always its own flag. `--host-routes` is hidden but
- * registered the same way.
+ * registered the same way. A flag in neither this set nor `TAILSCALE_VALUE_FLAGS`
+ * (an older or newer spelling) is unknown, and the token after it may be either.
  */
-const TAILSCALE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+export const TAILSCALE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   '--accept-dns', '--accept-routes', '--advertise-connector', '--advertise-exit-node',
   '--exit-node-allow-lan-access', '--force-reauth', '--host-routes', '--json', '--qr',
   '--report-posture', '--reset', '--shields-up', '--snat-subnet-routes', '--ssh',
@@ -279,7 +281,7 @@ const TAILSCALE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
  * their value, even when it starts with a dash (Go's flag package). `--authkey`
  * is the pre-1.60 spelling of `--auth-key`.
  */
-const TAILSCALE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+export const TAILSCALE_VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--accept-risk', '--advertise-routes', '--advertise-tags', '--audience', '--auth-key',
   '--authkey', '--client-id', '--client-secret', '--exit-node', '--hostname', '--id-token',
   '--login-server', '--netfilter-mode', '--nickname', '--operator', '--qr-format', '--timeout',
@@ -295,10 +297,10 @@ const TAILSCALE_VALUE_FLAGS: ReadonlySet<string> = new Set([
  * list, so such a spelling there is an invalid route that makes `tailscale up`
  * fail, which forwards nothing either.
  * A flag written without `=` takes the next token as its value unless it is a
- * boolean, so that token is not a flag. Sencho knows `tailscale up`'s flags;
- * after a flag it does not know, the next token may be either, so a forwarding
- * occurrence there that would change the result adds `unresolved` (forwarding,
- * like every value it cannot read) instead of being decided by guesswork.
+ * boolean, so that token is not a flag. After a flag Sencho does not know, the
+ * next token may be either: an enabling occurrence there counts as forwarding
+ * and a disabling one does not switch an earlier occurrence off, so the result
+ * is never less forwarding than the real parse could give.
  * `lookup` expands an uninterpolated value (the raw YAML) and, when given, is
  * the complete variable environment: a `TS_EXTRA_ARGS` key it does not answer
  * is unset and names no flag. Without it, or when the value still cannot be
@@ -323,12 +325,13 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
   const text = readableExtraArgs(value, lookup);
   if (text === null) return ['unresolved'];
   const flags = new Map<Exclude<TailscaleForwardFlag, 'unresolved'>, boolean>();
-  let ambiguous = false;
-  // What the previous token, a flag written without `=`, makes of this one.
+  // What the previous token, a flag written without `=`, makes of this one:
+  // its value, its own flag, or either (after a flag Sencho does not know, or a
+  // value flag that was itself possibly an unknown flag's value).
   let previous: 'flag' | 'value' | 'unknown' = 'flag';
   for (const token of text.split(/\s+/)) {
     if (token === '') continue;
-    const mayBeValue = previous === 'unknown';
+    const mayBeValue: boolean = previous === 'unknown';
     if (previous === 'value') {
       previous = 'flag';
       continue;
@@ -338,16 +341,16 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
     const eq = token.indexOf('=');
     const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
     if (eq === -1 && !TAILSCALE_BOOLEAN_FLAGS.has(name)) {
-      previous = TAILSCALE_VALUE_FLAGS.has(name) ? 'value' : 'unknown';
+      previous = TAILSCALE_VALUE_FLAGS.has(name) && !mayBeValue ? 'value' : 'unknown';
     }
     if (!isTailscaleForwardFlag(name)) continue;
     const setting = eq === -1 ? undefined : token.slice(eq + 1);
     const enabled = setting !== '' && !(setting !== undefined && GO_FALSE.has(setting));
-    if (mayBeValue && enabled !== (flags.get(name) === true)) ambiguous = true;
+    // A disabling occurrence that may be a flag's value does not switch an
+    // earlier one off; an enabling one always counts.
     if (enabled || !mayBeValue) flags.set(name, enabled);
   }
-  const forwarding: TailscaleForwardFlag[] = [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
-  return ambiguous ? [...forwarding, 'unresolved'] : forwarding;
+  return [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
 }
 
 function providerOf(svc: TunnelDetectionService): { provider: TunnelProvider; byImage: boolean } | null {
@@ -461,10 +464,14 @@ function tailscaleForwards(c: Pick<TunnelConnector, 'signals'>): boolean {
 
 /** Detect every tunnel connector in the model and the services it reaches. */
 export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetectionOptions = {}): TunnelConnector[] {
-  const byName = new Map(model.services.map(s => [s.name, s]));
+  const services = model.services.map(svc => {
+    const unset = svc.unsetEnvKeys ?? [];
+    return unset.length > 0 ? { ...svc, envKeys: svc.envKeys.filter(key => !unset.includes(key)) } : svc;
+  });
+  const byName = new Map(services.map(s => [s.name, s]));
   const connectors: TunnelConnector[] = [];
 
-  for (const svc of model.services) {
+  for (const svc of services) {
     const match = providerOf(svc);
     if (!match) continue;
     const { provider, byImage } = match;
@@ -479,7 +486,7 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
     const forwards = forwardsBeyondNamespace(svc, provider);
     const reaches: TunnelReach[] = [];
 
-    for (const other of model.services) {
+    for (const other of services) {
       if (other.name === svc.name) continue;
       const otherRoot = namespaceRoot(other.name, byName);
       if (otherRoot === root) {

@@ -1,6 +1,7 @@
 /**
  * The environment-file reader Compose uses for a project's interpolation
- * environment, restricted to what layer selection needs.
+ * environment, and for the `env_file` values a service's container receives
+ * (`ComposeEnvFiles.assigned`, `format: raw` included).
  *
  * Compose does not read these files with a dotenv(1) parser. A quoted value may
  * span lines, a double-quoted value expands backslash escapes and then `${VAR}`
@@ -20,6 +21,8 @@
  * unknown rather than a guessed layer set.
  *
  * Mirrors compose-go dotenv/parser.go, dotenv/env.go, and template/template.go.
+ * The raw reader has no upstream file to mirror: it follows what `docker compose
+ * config` renders for a `format: raw` file.
  */
 
 /** Resolves a name: a string when set (possibly empty), undefined when unset. */
@@ -471,10 +474,9 @@ export class ComposeEnvFiles {
   private readRaw(content: string): void {
     // Compose's raw reader skips blank lines and lines whose first non-space
     // character is `#`, rejects a name that is empty or holds whitespace, and
-    // lets a line with no `=` inherit the name's value. Whether it drops a
-    // leading BOM, as it does for a dotenv file, is unverified, so this reader
-    // refuses one rather than guess.
-    if (content.startsWith(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file starts with a byte order mark');
+    // lets a line with no `=` inherit the name's value. It drops a leading BOM
+    // as it does for a dotenv file (a rendered `\ufeffBOM=1` names `BOM`); the
+    // `trimStart` below, which treats U+FEFF as whitespace, does the same here.
     for (const line of content.split('\n')) {
       const entry = (line.endsWith('\r') ? line.slice(0, -1) : line).trimStart();
       if (entry === '' || entry.startsWith(COMMENT)) continue;

@@ -165,8 +165,20 @@ describe('parseComposeDependencies - environment keys', () => {
     expect(svc.envFiles).toEqual([
       { path: 'plain.env', required: true },
       { path: 'raw.env', required: true, raw: true },
-      { path: 'dotenv.env', required: true },
+      { path: 'dotenv.env', required: true, unsupportedFormat: true },
     ]);
+  });
+
+  it('lets the last entry for a key decide whether it is set, in either order', () => {
+    const keys = (entries: string[], lookup?: (name: string) => string | undefined) => {
+      const svc = parseComposeDependencies(`services:\n  a:\n    image: a\n    environment:\n${entries.map(e => `      - ${e}\n`).join('')}`, { lookup }).services[0];
+      return { set: svc.envKeys, unset: svc.unsetEnvKeys };
+    };
+    const none = () => undefined;
+    expect(keys(['K=1', 'K'], none)).toEqual({ set: [], unset: ['K'] });
+    expect(keys(['K', 'K=1'], none)).toEqual({ set: ['K'], unset: [] });
+    expect(keys(['K=1', 'K'], name => (name === 'K' ? 'v' : undefined))).toEqual({ set: ['K'], unset: [] });
+    expect(keys(['K', 'K'], none)).toEqual({ set: [], unset: ['K'] });
   });
 });
 

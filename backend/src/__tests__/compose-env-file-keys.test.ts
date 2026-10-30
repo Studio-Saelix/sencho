@@ -68,8 +68,15 @@ describe('service env_file assigned names', () => {
       expect(files.assignedNames()).toEqual(['SET']);
     });
 
+    it('drops a leading byte order mark, as Compose does for a raw file', () => {
+      const files = new ComposeEnvFiles(none);
+      files.read('\ufeffA=1\nB=$2\n', { raw: true });
+      expect(files.assignedNames()).toEqual(['A', 'B']);
+      expect(files.assigned('B')).toBe('$2');
+    });
+
     it('refuses what Compose refuses or reads differently from a dotenv file', () => {
-      for (const bad of ['B = 2\n', 'export D=4\n', '=x\n', '﻿A=1\n']) {
+      for (const bad of ['B = 2\n', 'export D=4\n', '=x\n']) {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
       }
     });

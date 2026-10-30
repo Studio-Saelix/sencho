@@ -763,6 +763,14 @@ describe('networking summary', () => {
       ['a list-form key with no value that the project environment answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n'), '.env': 'TUNNEL_TOKEN=t\n' }, true],
       ['a null TS_EXTRA_ARGS over an env_file value', { 'compose.yaml': ts('    env_file: ./ts.env\n    environment:\n      TS_EXTRA_ARGS:\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n' }, false],
       ['a later boolean flag between repeated forwarding flags', { 'compose.yaml': ts('    environment:\n      TS_AUTHKEY: k\n      TS_EXTRA_ARGS: --advertise-exit-node=true --accept-dns --advertise-exit-node=false\n') }, false],
+      ['a list-form key with a value, then the same key with none that nothing answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN=t\n      - TUNNEL_TOKEN\n') }, false],
+      ['a list-form key with no value that nothing answers, then the same key with a value', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n      - TUNNEL_TOKEN=t\n') }, true],
+      ['a literal dollar sign after a disabled flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b\n' }, false],
+      ['a literal dollar sign after a disabled flag in a single-quoted env_file value', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': "TS_AUTHKEY=k\nTS_EXTRA_ARGS='--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b'\n" }, false],
+      ['a second env_file that overrides the first value', { 'compose.yaml': ts('    env_file:\n      - ./ts.env\n      - ./ts2.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n', 'ts2.env': 'TS_EXTRA_ARGS=--accept-dns=false\n' }, false],
+      ['a second env_file that assigns a name the first left bare', { 'compose.yaml': edge('    env_file:\n      - ./edge.env\n      - ./edge2.env\n'), 'edge.env': 'TUNNEL_TOKEN\n', 'edge2.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a bare name that inherits the first env_file value', { 'compose.yaml': edge('    env_file:\n      - ./edge.env\n      - ./edge2.env\n'), 'edge.env': 'TUNNEL_TOKEN=t\n', 'edge2.env': 'TUNNEL_TOKEN\n' }, true],
+      ['a raw env_file that starts with a byte order mark', { 'compose.yaml': edge('    env_file:\n      - path: ./edge.env\n        format: raw\n'), 'edge.env': '\ufeffTUNNEL_TOKEN=t\n' }, true],
       ['a later boolean flag between repeated flags in an env_file', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-routes=10.0.0.0/8 --accept-routes --advertise-routes=\n' }, false],
     ])('%s', async (_label, files, exposed) => {
       for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);
@@ -800,6 +808,17 @@ describe('networking summary', () => {
       for (const [file, content] of Object.entries(extra)) fs.writeFileSync(path.join(stackDir, file), content);
       const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
       expect(res.body.unreadable.stacks).toContain(STACK);
+    });
+
+    it.each(['dotenv', '${FMT:-raw}'])('reports an env_file with format %s as unreadable', async (format) => {
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), 'TUNNEL_TOKEN=t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge(`    env_file:\n      - path: ./edge.env\n        format: "${format}"\n`));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+      // The log names the service and the fixed reason, never the file's contents.
+      expect(warn.mock.calls.flat().join(' ')).toMatch(/service edge has an env_file with a format other than raw/);
+      expect(JSON.stringify(res.body)).not.toContain('TUNNEL_TOKEN=t');
     });
 
     it('reports a raw env_file it cannot read the way Compose does as unreadable', async () => {
