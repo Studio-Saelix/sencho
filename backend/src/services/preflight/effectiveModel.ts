@@ -12,17 +12,24 @@
  * by the caller, not here.
  */
 
+import { isContainerPort, isDynamicHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
 
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
+  /** First host port, or 0 when `dynamic`. */
   startPort: number;
+  /** Last host port, or 0 when `dynamic`. */
   endPort: number;
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
   protocol: string;
+  /** Docker assigns the host port at start (container-only entry, empty or `0`
+   *  host port), so no number is known. The container is still published;
+   *  conflict, drift, and documented-port checks skip it (see `fixedPorts` in composePortSpec). */
+  dynamic?: true;
 }
 
 export interface EffBind {
@@ -176,28 +183,34 @@ function parsePortRange(raw: string): { startPort: number; endPort: number } | n
   return { startPort: start, endPort: Number.isFinite(end) && end >= start ? end : start };
 }
 
-/** Parse one rendered `ports:` entry (long object form, with a short-string fallback). */
+/**
+ * Parse one rendered `ports:` entry (long object form, with a short-string
+ * fallback). An entry with no host port, or host port 0, is published on a port
+ * Docker assigns, so it is kept as `dynamic` rather than dropped.
+ */
 function parsePortSpec(entry: unknown): EffPortSpec | null {
   if (entry && typeof entry === 'object') {
     const o = entry as Record<string, unknown>;
+    const hostIp = str(o.host_ip) ?? '';
+    const protocol = str(o.protocol) ?? 'tcp';
     const publishedRaw = str(o.published);
-    if (publishedRaw === undefined || publishedRaw === '') return null; // container-only
-    const range = parsePortRange(publishedRaw);
-    if (!range) return null;
-    return { ...range, hostIp: str(o.host_ip) ?? '', protocol: str(o.protocol) ?? 'tcp' };
+    if (isDynamicHostPort(publishedRaw)) {
+      return isContainerPort(str(o.target)) ? { startPort: 0, endPort: 0, hostIp, protocol, dynamic: true } : null;
+    }
+    const range = parsePortRange(publishedRaw as string);
+    return range ? { ...range, hostIp, protocol } : null;
   }
   const short = str(entry);
   if (short === undefined) return null;
-  const [spec, proto] = short.split('/');
-  const parts = spec.split(':');
-  let hostIp = '';
-  let hostPart: string | undefined;
-  if (parts.length >= 3) { hostIp = parts[0]; hostPart = parts[1]; }
-  else if (parts.length === 2) { hostPart = parts[0]; }
-  else return null; // container-only EXPOSE
-  const range = parsePortRange(hostPart ?? '');
-  if (!range) return null;
-  return { ...range, hostIp, protocol: proto || 'tcp' };
+  const spec = splitShortPortSpec(short);
+  if (!spec) return null;
+  if (isDynamicHostPort(spec.hostPart)) {
+    return isContainerPort(spec.container)
+      ? { startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true }
+      : null;
+  }
+  const range = parsePortRange(spec.hostPart);
+  return range ? { ...range, hostIp: spec.hostIp, protocol: spec.protocol } : null;
 }
 
 /** Split a service `volumes:` list into bind mounts and named-volume sources. */

@@ -83,6 +83,7 @@ export function assembleStackNetworkFacts(
       startPort: p.startPort,
       endPort: p.endPort,
       protocol: p.protocol,
+      ...(p.dynamic ? { dynamic: true as const } : {}),
       allInterfaces: isAllInterfaces(p.hostIp),
       loopbackOnly: isLoopback(p.hostIp),
     })),

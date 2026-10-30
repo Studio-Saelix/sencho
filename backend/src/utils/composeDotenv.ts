@@ -108,6 +108,13 @@ function trimRightUnicodeSpace(text: string): string {
   return text.slice(0, end);
 }
 
+/** Trim the whitespace Go trims from the start of a line. */
+function trimLeftUnicodeSpace(text: string): string {
+  let start = 0;
+  while (start < text.length && isUnicodeSpace(text[start])) start++;
+  return text.slice(start);
+}
+
 function isNameStart(char: string): boolean {
   return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char === '_';
 }
@@ -473,19 +480,21 @@ export class ComposeEnvFiles {
 
   private readRaw(content: string): void {
     // Compose's raw reader skips blank lines and lines whose first non-space
-    // character is `#`, rejects a name that is empty or holds whitespace, and
-    // lets a line with no `=` inherit the name's value. It drops a BOM at the
-    // start of the file, as it does for a dotenv file; anywhere else the BOM
-    // stays in the name (a rendered ` \ufeffSP=1` names `\ufeffSP`), which
-    // `trimStart` below would hide, so that file is refused.
+    // character is `#`, rejects a name that holds a space or a tab, and lets a
+    // line with no `=` inherit the name's value. "Space" at the start of a line
+    // is Go's unicode.IsSpace, so a leading U+0085 (NEL), which JavaScript's
+    // `trimStart` leaves in place, is trimmed. It drops a BOM at the start of
+    // the file, as it does for a dotenv file; anywhere else the BOM stays in
+    // the name (a rendered ` \ufeffSP=1` names `\ufeffSP`). That file is
+    // refused rather than read, so a name carrying a BOM is never guessed at.
     const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
     if (text.includes(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file has a byte order mark past its start');
     for (const line of text.split('\n')) {
-      const entry = (line.endsWith('\r') ? line.slice(0, -1) : line).trimStart();
+      const entry = trimLeftUnicodeSpace(line.endsWith('\r') ? line.slice(0, -1) : line);
       if (entry === '' || entry.startsWith(COMMENT)) continue;
       const eq = entry.indexOf('=');
       const name = eq === -1 ? entry : entry.slice(0, eq);
-      if (name === '' || /\s/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains whitespace');
+      if (name === '' || /[ \t]/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains whitespace');
       if (eq !== -1) {
         this.values.set(name, entry.slice(eq + 1));
         continue;

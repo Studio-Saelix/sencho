@@ -23,7 +23,7 @@ interface FindingFacts {
 }
 
 function portTargets(ports: readonly NetworkFactPort[]): string[] {
-  return ports.map(port => `${port.hostIp}:${port.startPort}-${port.endPort}/${port.protocol}`);
+  return ports.map(port => `${port.hostIp}:${port.dynamic ? 'auto' : `${port.startPort}-${port.endPort}`}/${port.protocol}`);
 }
 
 function finding(

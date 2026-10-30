@@ -41,6 +41,14 @@ describe('service env_file assigned names', () => {
     expect(() => new ComposeEnvFiles(none).read('TS_EXTRA_ARGS=${ARGS:?must set ARGS}\n')).toThrow(ComposeEnvFileError);
   });
 
+  it('trims leading U+0085 (NEL) before a dotenv assignment, comment, or export, as Compose does', () => {
+    for (const lead of ['\u0085', ' \u0085']) {
+      const files = new ComposeEnvFiles(none);
+      files.read(`${lead}TUNNEL_TOKEN=a\n${lead}# note\n${lead}export Y=2\n`);
+      expect(files.assignedNames(), JSON.stringify(lead)).toEqual(['TUNNEL_TOKEN', 'Y']);
+    }
+  });
+
   describe('format: raw', () => {
     it('keeps quotes, dollar signs and comments in a value literally', () => {
       const files = new ComposeEnvFiles(none);
@@ -75,6 +83,33 @@ describe('service env_file assigned names', () => {
       expect(files.assigned('B')).toBe('$2');
     });
 
+    it('trims the leading space Go trims, U+0085 (NEL) included, which trimStart leaves in the name', () => {
+      for (const lead of ['\u0085', ' \u0085', '\u0085 ', '\u00a0', '\u2028', '\u3000', '\u1680', '  ']) {
+        const files = new ComposeEnvFiles(none);
+        files.read(`${lead}TUNNEL_TOKEN=t\n${lead}TS_EXTRA_ARGS=--advertise-exit-node\n`, { raw: true });
+        expect(files.assignedNames(), JSON.stringify(lead)).toEqual(['TUNNEL_TOKEN', 'TS_EXTRA_ARGS']);
+        expect(files.assigned('TS_EXTRA_ARGS')).toBe('--advertise-exit-node');
+      }
+    });
+
+    it('skips a line that is only Go space, and a comment after it', () => {
+      const files = new ComposeEnvFiles(none);
+      files.read('\u0085\n \u0085 \n\u0085# note\nA=1\n', { raw: true });
+      expect(files.assignedNames()).toEqual(['A']);
+    });
+
+    it('lets a NEL-led line with no equals sign inherit a variable that is set', () => {
+      const files = new ComposeEnvFiles(name => (name === 'TUNNEL_TOKEN' ? 't' : undefined));
+      files.read('\u0085TUNNEL_TOKEN\n\u0085UNSET\n', { raw: true });
+      expect(files.assignedNames()).toEqual(['TUNNEL_TOKEN']);
+    });
+
+    it('keeps what Go does not trim as part of the name, as Compose does', () => {
+      const files = new ComposeEnvFiles(none);
+      files.read('\u200bA=1\nB\u0085=2\nC\u0085D=3\nE\u00a0F=4\n', { raw: true });
+      expect(files.assignedNames()).toEqual(['\u200bA', 'B\u0085', 'C\u0085D', 'E\u00a0F']);
+    });
+
     it('refuses a byte order mark past the start of the file, which Compose keeps in the name', () => {
       for (const bad of ['A=1\n\ufeffA=2\n', ' \ufeffA=1\n', '\ufeff\ufeffA=1\n']) {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
@@ -82,7 +117,7 @@ describe('service env_file assigned names', () => {
     });
 
     it('refuses what Compose refuses or reads differently from a dotenv file', () => {
-      for (const bad of ['B = 2\n', 'export D=4\n', '=x\n']) {
+      for (const bad of ['B = 2\n', 'B\t=2\n', 'export D=4\n', '=x\n', '\u0085=x\n']) {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
       }
     });

@@ -50,7 +50,9 @@ function interfaceOverlap(a: string, b: string): boolean {
   return isAllInterfaces(a) || isAllInterfaces(b) || a === b;
 }
 
+/** Every host port a spec claims; none for a dynamic one, whose number Docker picks at start. */
 function portsOf(spec: EffPortSpec): number[] {
+  if (spec.dynamic) return [];
   const end = Math.min(spec.endPort, spec.startPort + MAX_RANGE - 1);
   const out: number[] = [];
   for (let p = spec.startPort; p <= end; p++) out.push(p);
@@ -58,7 +60,13 @@ function portsOf(spec: EffPortSpec): number[] {
 }
 
 function specLabel(spec: EffPortSpec): string {
+  if (spec.dynamic) return 'an auto-assigned host port';
   return spec.startPort === spec.endPort ? `${spec.startPort}` : `${spec.startPort}-${spec.endPort}`;
+}
+
+/** The distinct labels of a service's specs, so several auto-assigned ports read once. */
+function specLabels(specs: readonly EffPortSpec[]): string {
+  return [...new Set(specs.map(specLabel))].join(', ');
 }
 
 /** True when the image reference resolves to a moving `latest` tag. */
@@ -312,16 +320,24 @@ const portExposedAllInterfaces: PreflightRule = {
     if (!ctx.model) return [];
     const findings: PreflightFinding[] = [];
     for (const svc of ctx.model.services) {
+      const dynamicSeen = new Set<string>();
       for (const spec of svc.ports) {
         if (!isAllInterfaces(spec.hostIp)) continue;
+        // Auto-assigned ports have no number to tell them apart: one finding per protocol.
+        if (spec.dynamic) {
+          if (dynamicSeen.has(spec.protocol)) continue;
+          dynamicSeen.add(spec.protocol);
+        }
         findings.push({
           ruleId: 'port-exposed-all-interfaces',
           severity: 'high',
-          title: `Port ${specLabel(spec)} exposed on all interfaces`,
-          message: `Service "${svc.name}" publishes ${specLabel(spec)}/${spec.protocol} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
+          title: spec.dynamic
+            ? `An auto-assigned ${spec.protocol} port is exposed on all interfaces`
+            : `Port ${specLabel(spec)} exposed on all interfaces`,
+          message: `Service "${svc.name}" publishes ${spec.dynamic ? `${specLabel(spec)} (${spec.protocol})` : `${specLabel(spec)}/${spec.protocol}`} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
           sourcePath: svc.name,
           service: svc.name,
-          remediation: `Bind to a specific interface, e.g. 127.0.0.1:${spec.startPort}, if this should not be public.`,
+          remediation: `Bind to a specific interface, e.g. 127.0.0.1${spec.dynamic ? '' : `:${spec.startPort}`}, if this should not be public.`,
         });
       }
     }
@@ -438,7 +454,7 @@ const dockerSocketProxyPublished: PreflightRule = {
         ruleId: 'docker-socket-proxy-published',
         severity: 'high' as const,
         title: 'Docker socket proxy publishes a host port',
-        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${svc.ports.map(specLabel).join(', ')} to the host, which can make the proxy reachable beyond the Compose network.`,
+        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${specLabels(svc.ports)} to the host, which can make the proxy reachable beyond the Compose network.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Remove host port mappings from the proxy and let dependents reach it only over an internal Compose network.',
@@ -1005,7 +1021,7 @@ const exposureInternalPublished: PreflightRule = {
         ruleId: 'exposure-internal-published',
         severity: 'high',
         title: `"${svc.name}" is classified ${intent} but publishes a host port`,
-        message: `Service "${svc.name}" is classified as ${intent} exposure, but it publishes ${offending.map(specLabel).join(', ')} to the host, which contradicts that intent.`,
+        message: `Service "${svc.name}" is classified as ${intent} exposure, but it publishes ${specLabels(offending)} to the host, which contradicts that intent.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: intent === 'same-node'
@@ -1187,7 +1203,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
         ruleId: 'sensitive-service-broad-exposure',
         severity: 'high',
         title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
-        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${broad.map(specLabel).join(', ')} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',

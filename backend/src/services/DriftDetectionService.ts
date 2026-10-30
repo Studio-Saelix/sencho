@@ -3,6 +3,7 @@ import type { DependencyContainer, DependencyNetwork } from './DockerController'
 import { FileSystemService } from './FileSystemService';
 import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
+import { fixedPorts } from '../helpers/composePortSpec';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import {
@@ -303,7 +304,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     // every port in the range, so a range can read as a mismatch. That errs
     // toward reporting drift rather than hiding it, consistent with the engine's
     // philosophy.
-    const declaredPorts = new Set(svc.ports.map((p) => portKey(p.publishedPort, p.protocol)));
+    const declaredPorts = new Set(fixedPorts(svc.ports).map((p) => portKey(p.publishedPort, p.protocol)));
     if (!setsEqual(declaredPorts, runtime.ports)) {
       findings.push({
         kind: 'ports-mismatch',

@@ -79,6 +79,12 @@ describe('computeStackHashes', () => {
     expect(v2.renderedHash).not.toBe(v1.renderedHash);
   });
 
+  it('leaves the rendered hash alone for a port Docker assigns, which has no number to compare', () => {
+    const plain = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n');
+    const withDynamic = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n      - "51820/udp"\n');
+    expect(withDynamic.renderedHash).toBe(plain.renderedHash);
+  });
+
   it('returns a null rendered hash when the model cannot be parsed', () => {
     // No services => the local parser reports a parse error and cannot model it.
     const h = computeStackHashes('not_a_compose_key: true\n');

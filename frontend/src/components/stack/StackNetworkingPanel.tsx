@@ -15,7 +15,7 @@ import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/t
 // backend).
 
 interface NetworkFactNetwork { key: string; name: string; external: boolean; internal: boolean; createdByStack: boolean }
-interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
+interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; dynamic?: boolean; allInterfaces: boolean; loopbackOnly: boolean }
 interface NetworkFactService {
   name: string;
   networks: { key: string; aliases: string[] }[];
@@ -54,6 +54,8 @@ const ACTION_CLASS = 'inline-flex items-center gap-1 font-mono text-[10px] upper
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 function portLabel(p: NetworkFactPort): string {
+  // Docker assigns the host port at start, so no number exists to show.
+  if (p.dynamic) return `auto-assigned/${p.protocol}`;
   const range = p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
   return `${range}/${p.protocol}`;
 }

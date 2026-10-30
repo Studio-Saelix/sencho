@@ -17,14 +17,15 @@ export interface NetworkExposureSummary {
 
 // Loose input shapes: the builder reads the raw parsed /networking and
 // /exposure JSON, so it stays decoupled from the panel's local interfaces.
-interface FactsPort { startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
+interface FactsPort { startPort: number; endPort: number; protocol: string; dynamic?: boolean; allInterfaces: boolean; loopbackOnly: boolean }
 interface FactsService { name: string; publishedPorts?: FactsPort[]; networkMode?: string; tunnel?: ServiceTunnelExposure }
 interface FactsNetwork { name: string; external: boolean; internal: boolean }
 export interface NetworkFactsInput { renderable?: boolean; networks?: FactsNetwork[]; services?: FactsService[] }
 export interface ExposureIntentInput { service: string; intent: string }
 
 function portLabel(p: FactsPort): string {
-  const range = p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
+  // Docker assigns the host port at start, so no number exists to show.
+  const range = p.dynamic ? 'auto-assigned' : p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
   const scope = p.allInterfaces ? ' (all interfaces)' : p.loopbackOnly ? ' (loopback)' : '';
   return `${range}/${p.protocol}${scope}`;
 }

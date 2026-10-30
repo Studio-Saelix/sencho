@@ -34,6 +34,17 @@ describe('buildNetworkExposureSummary', () => {
       services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false, tunnel: null }],
     });
   });
+  it('names a port Docker assigns as auto-assigned, with no invented number', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'vpn', publishedPorts: [
+        { startPort: 0, endPort: 0, protocol: 'udp', dynamic: true, allInterfaces: true, loopbackOnly: false },
+        { startPort: 0, endPort: 0, protocol: 'tcp', dynamic: true, allInterfaces: false, loopbackOnly: true },
+      ] }],
+    }, []);
+    expect(s?.services[0].ports).toEqual(['auto-assigned/udp (all interfaces)', 'auto-assigned/tcp (loopback)']);
+  });
   it('flags a host-network service as host-exposed even with no published ports', () => {
     const s = buildNetworkExposureSummary({ renderable: true, networks: [], services: [{ name: 'app', publishedPorts: [], networkMode: 'host' }] }, []);
     expect(s).toEqual({

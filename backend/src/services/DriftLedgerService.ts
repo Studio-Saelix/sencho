@@ -2,6 +2,7 @@ import { DatabaseService } from './DatabaseService';
 import type { StackDriftFindingRow } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
+import { fixedPorts } from '../helpers/composePortSpec';
 import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 import { sha256Hex } from '../utils/hashing';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -95,7 +96,7 @@ function stableModelString(model: DeclaredCompose): string | null {
             dependsOn: [...s.dependsOn].sort(),
             networks: [...s.networks].sort(),
             volumes: [...s.volumes].sort(),
-            ports: s.ports.map(p => `${p.hostIp}:${p.publishedPort}/${p.protocol}`).sort(),
+            ports: fixedPorts(s.ports).map(p => `${p.hostIp}:${p.publishedPort}/${p.protocol}`).sort(),
         }));
     const networks = Object.keys(model.networks).sort().map(k => ({ key: k, ...model.networks[k] }));
     const volumes = Object.keys(model.volumes).sort().map(k => ({ key: k, ...model.volumes[k] }));

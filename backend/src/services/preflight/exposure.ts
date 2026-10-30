@@ -14,7 +14,7 @@
  * (no cached descriptor). It is an escalation input for the Security
  * posture, never an auto-suppression.
  */
-import type { EffectiveModel } from './effectiveModel';
+import type { EffectiveModel, EffPortSpec } from './effectiveModel';
 import { isLoopback, isHostNetwork } from '../network/normalize';
 import { detectTunnels, tunnelExposureByService, type ServiceTunnelExposure } from '../network/tunnelDetection';
 
@@ -42,8 +42,9 @@ export interface StackExposure {
 }
 
 /** Build a port-range label: "8080" for a single port, "8080-8090" for a range. */
-function portLabel(startPort: number, endPort: number): string {
-  return startPort === endPort ? `${startPort}` : `${startPort}-${endPort}`;
+function portLabel(port: EffPortSpec): string {
+  if (port.dynamic) return 'auto';
+  return port.startPort === port.endPort ? `${port.startPort}` : `${port.startPort}-${port.endPort}`;
 }
 
 /**
@@ -67,7 +68,7 @@ export function deriveStackExposure(
     const publiclyExposed = nonLoopbackPorts.length > 0 || hostNetwork || tunnel !== undefined;
 
     const bindings = nonLoopbackPorts.map(
-      (p) => `${p.hostIp || '0.0.0.0'}:${portLabel(p.startPort, p.endPort)}/${p.protocol}`,
+      (p) => `${p.hostIp || '0.0.0.0'}:${portLabel(p)}/${p.protocol}`,
     );
 
     return {

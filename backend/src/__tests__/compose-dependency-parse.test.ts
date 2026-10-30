@@ -87,9 +87,46 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 5353, protocol: 'udp' }]);
   });
 
-  it('drops a container-only port (no host publish)', () => {
+  it('keeps a container-only port as a dynamic publication, and `expose` as none', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "80"'));
+    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+    expect(parseComposeDependencies(svc('web', 'expose:\n  - "80"')).services[0].ports).toEqual([]);
+  });
+
+  it.each<[string, string, { hostIp: string; protocol: string }]>([
+    ['a container-only UDP port', '"51820/udp"', { hostIp: '', protocol: 'udp' }],
+    ['an empty host port after an interface', '"127.0.0.1::51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp' }],
+    ['host port 0 after an interface', '"127.0.0.1:0:51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp' }],
+    ['host port 0', '"0:80"', { hostIp: '', protocol: 'tcp' }],
+    ['an empty host port', '":80"', { hostIp: '', protocol: 'tcp' }],
+    ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"', { hostIp: '::1', protocol: 'udp' }],
+    ['a container port range', '"9000-9002"', { hostIp: '', protocol: 'tcp' }],
+    ['a long entry with no published port', '{ target: 51820, protocol: udp }', { hostIp: '', protocol: 'udp' }],
+    ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp, host_ip: 127.0.0.1 }', { hostIp: '127.0.0.1', protocol: 'udp' }],
+    ['a long entry published as an empty string', '{ target: 80, published: "" }', { hostIp: '', protocol: 'tcp' }],
+  ])('keeps %s as a dynamic publication with no invented port number', (_label, entry, expected) => {
+    const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
+    expect(r.services[0].ports).toEqual([{ ...expected, publishedPort: 0, dynamic: true }]);
+  });
+
+  it.each<[string, string, { hostIp: string; publishedPort: number }]>([
+    ['a bracketed IPv6 interface', '"[::1]:51820:51820/udp"', { hostIp: '::1', publishedPort: 51820 }],
+    ['an unbracketed IPv6 interface', '"::1:51820:51820/udp"', { hostIp: '::1', publishedPort: 51820 }],
+    ['a bracketed wildcard IPv6 interface', '"[::]:8443:443"', { hostIp: '::', publishedPort: 8443 }],
+  ])('reads %s as the interface and a fixed host port', (_label, entry, expected) => {
+    const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
+    expect(r.services[0].ports).toEqual([expect.objectContaining(expected)]);
+    expect(r.services[0].ports[0].dynamic).toBeUndefined();
+  });
+
+  it.each(['"[::1]:80"', '"abc:80"', '"web"', '""'])('drops %s, which Compose refuses', (entry) => {
+    const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
     expect(r.services[0].ports).toEqual([]);
+  });
+
+  it('expands a template that leaves the host port empty into a dynamic publication', () => {
+    const r = parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_PORT}:51820/udp"'), { lookup: () => undefined });
+    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'udp', dynamic: true }]);
   });
 
   it('takes the low end of a published range', () => {

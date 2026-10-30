@@ -38,6 +38,7 @@ export function declaredFromEffectiveModel(model: EffectiveModel): DeclaredCompo
         hostIp: p.hostIp,
         publishedPort: p.startPort,
         protocol: p.protocol,
+        ...(p.dynamic ? { dynamic: true as const } : {}),
       }),
     ),
     image: s.image,

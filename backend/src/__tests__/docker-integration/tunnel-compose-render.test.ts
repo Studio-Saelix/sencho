@@ -219,6 +219,118 @@ const PARITY: ParityCase[] = [
   },
 ];
 
+/**
+ * Host ports Docker assigns at start are still published. Each form below
+ * renders with no `published` value, or `"0"`, and the authored reader must keep
+ * it as the rendered adapter does. Fixed-port and `expose` controls sit beside
+ * them so a dynamic form is not read as every port, or as none.
+ */
+const DYNAMIC_PORTS: Array<[string, string]> = [
+  ['a container-only short entry', '"51820/udp"'],
+  ['an interface with an empty host port', '"127.0.0.1::51820/udp"'],
+  ['an interface with host port 0', '"127.0.0.1:0:51820/udp"'],
+  ['a long entry with no published port', '{ target: 51820, protocol: udp }'],
+  ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp }'],
+  ['an empty host port with no interface', '":51820/udp"'],
+  ['a bracketed IPv6 interface with a fixed host port', '"[::1]:51820:51820/udp"'],
+  ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"'],
+  ['an unbracketed IPv6 interface with a fixed host port', '"::1:51820:51820/udp"'],
+  ['a long entry on an IPv6 interface', '{ target: 51820, published: 51820, host_ip: "::1", protocol: udp }'],
+];
+
+const DYNAMIC_PORT_CASES: ParityCase[] = [
+  ...DYNAMIC_PORTS.map(([name, port]): ParityCase => ({
+    name: `WireGuard published through ${name}`,
+    files: { 'compose.yaml': WIREGUARD(`      - ${port}`) },
+    reached: ['app'],
+  })),
+  { name: 'WireGuard with a dynamic TCP port is not a server', files: { 'compose.yaml': WIREGUARD('      - "127.0.0.1::51820"') }, reached: [], publishes: true },
+  {
+    name: 'WireGuard with `expose` only is not published',
+    files: { 'compose.yaml': 'services:\n  wireguard:\n    image: lscr.io/linuxserver/wireguard:latest\n    expose:\n      - "51820/udp"\n  app:\n    image: busybox:1.36.1\n' },
+    reached: [],
+  },
+];
+
+const HOST_CONNECTORS: Array<[string, string]> = [
+  ['Cloudflare', '    image: cloudflare/cloudflared:latest\n    command: tunnel run\n    network_mode: host\n    environment:\n      TUNNEL_TOKEN: tunnel-secret'],
+  ['Tailscale', '    image: tailscale/tailscale\n    network_mode: host\n    environment:\n      TS_AUTHKEY: tskey-secret'],
+  ['WireGuard', '    image: ghcr.io/wg-easy/wg-easy:15\n    network_mode: host'],
+];
+
+const HOST_APP_PORTS: Array<[string, string]> = [
+  ['a container-only entry', '"8080"'],
+  ['an interface with an empty host port', '"127.0.0.1::8080"'],
+  ['an interface with host port 0', '"127.0.0.1:0:8080"'],
+  ['a long entry with no published port', '{ target: 8080 }'],
+  ['a long entry published at 0', '{ target: 8080, published: 0 }'],
+  ['a fixed port', '"127.0.0.1:8080:8080"'],
+];
+
+const HOST_NETWORK_PORT_CASES: ParityCase[] = HOST_CONNECTORS.flatMap(([provider, edge]) =>
+  HOST_APP_PORTS.map(([name, port]): ParityCase => ({
+    name: `a ${provider} host-network connector reaches an app published through ${name}`,
+    files: { 'compose.yaml': `services:\n  edge:\n${edge}\n  app:\n    image: busybox:1.36.1\n    ports:\n      - ${port}\n` },
+    reached: ['app'],
+  })));
+
+/**
+ * A raw env file is trimmed the way Go trims a line: U+0085 (NEL) is leading
+ * space to Compose and not to JavaScript's `trimStart`. Every key the summary
+ * reads from a raw file must survive it. A connector in the namespace of `app`
+ * reaches it by any provider key; the forwarding keys need a bridge network.
+ */
+const NEL = '\u0085';
+const RAW_KEYS: Array<{ name: string; image: string; line: string; namespace: boolean }> = [
+  { name: 'TUNNEL_TOKEN', image: 'example/edge:1', line: 'TUNNEL_TOKEN=tunnel-secret', namespace: true },
+  { name: 'TUNNEL_TOKEN_FILE', image: 'example/edge:1', line: 'TUNNEL_TOKEN_FILE=/run/secrets/token', namespace: true },
+  { name: 'TS_AUTHKEY', image: 'example/edge:1', line: 'TS_AUTHKEY=tskey-secret', namespace: true },
+  { name: 'TS_AUTH_KEY', image: 'example/edge:1', line: 'TS_AUTH_KEY=tskey-secret', namespace: true },
+  { name: 'WG_HOST', image: 'example/edge:1', line: 'WG_HOST=vpn.example.com', namespace: true },
+  { name: 'PEERS on a WireGuard image', image: 'lscr.io/linuxserver/wireguard:latest', line: 'PEERS=3', namespace: true },
+  { name: 'TS_ROUTES', image: 'tailscale/tailscale', line: 'TS_ROUTES=10.0.0.0/8', namespace: false },
+  { name: 'TS_SERVE_CONFIG', image: 'tailscale/tailscale', line: 'TS_SERVE_CONFIG=/config/serve.json', namespace: false },
+  { name: 'TS_DEST_IP', image: 'tailscale/tailscale', line: 'TS_DEST_IP=10.0.0.5', namespace: false },
+  { name: 'TS_EXTRA_ARGS', image: 'tailscale/tailscale', line: 'TS_EXTRA_ARGS=--advertise-exit-node', namespace: false },
+];
+
+const rawEdge = (image: string, namespace: boolean): string => [
+  'services:',
+  '  edge:',
+  `    image: ${image}`,
+  '    env_file:',
+  '      - path: ./edge.env',
+  '        format: raw',
+  '  app:',
+  '    image: busybox:1.36.1',
+  ...(namespace ? ['    network_mode: service:edge'] : []),
+  '',
+].join('\n');
+
+const RAW_WHITESPACE_CASES: ParityCase[] = [
+  ...[['a leading NEL', NEL], ['a space then NEL', ` ${NEL}`]].flatMap(([what, lead]) => RAW_KEYS.map(({ name, image, line, namespace }): ParityCase => ({
+    name: `${name} after ${what} in a raw env file`,
+    files: { 'compose.yaml': rawEdge(image, namespace), 'edge.env': `${lead}${line}\n` },
+    reached: ['app'],
+  }))),
+  // Controls: the spaces Compose and JavaScript both trim, and the ones neither trims.
+  ...[['ASCII indentation', '  '], ['a no-break space', ' '], ['a line separator', ' '], ['an ideographic space', '　']].map(([what, lead]): ParityCase => ({
+    name: `a key after ${what} in a raw env file`,
+    files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': `${lead}TUNNEL_TOKEN=tunnel-secret\n` },
+    reached: ['app'],
+  })),
+  {
+    name: 'a key after a NEL-indented comment in a raw env file',
+    files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': `${NEL}# note\nTUNNEL_TOKEN=tunnel-secret\n` },
+    reached: ['app'],
+  },
+  {
+    name: 'a zero-width space is part of the key, not leading space',
+    files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': '​TUNNEL_TOKEN=tunnel-secret\n' },
+    reached: [],
+  },
+];
+
 describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs Compose renders', () => {
   let tmpDir: string;
   let stackDir: string;
@@ -340,7 +452,7 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     expect(summary.exposed.stacks).not.toContain(STACK);
   });
 
-  it.each(PARITY)('$name', async ({ files, layers = ['compose.yaml'], reached, publishes = false }) => {
+  it.each([...PARITY, ...DYNAMIC_PORT_CASES, ...HOST_NETWORK_PORT_CASES, ...RAW_WHITESPACE_CASES])('$name', async ({ files, layers = ['compose.yaml'], reached, publishes = false }) => {
     fs.rmSync(stackDir, { recursive: true, force: true });
     fs.mkdirSync(stackDir, { recursive: true });
     for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);

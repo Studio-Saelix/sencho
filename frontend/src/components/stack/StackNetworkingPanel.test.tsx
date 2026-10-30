@@ -64,6 +64,19 @@ describe('StackNetworkingPanel', () => {
     expect(screen.getByText(/runtime matches compose/i)).toBeInTheDocument(); // no-drift success card
   });
 
+  it('labels a port Docker assigns as auto-assigned instead of port 0', async () => {
+    mockApi(facts({
+      services: [{
+        name: 'vpn', networks: [], extraHosts: [],
+        publishedPorts: [{ hostIp: '', startPort: 0, endPort: 0, protocol: 'udp', dynamic: true, allInterfaces: true, loopbackOnly: false }],
+      }],
+    }));
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    expect(await screen.findByText('auto-assigned/udp')).toBeInTheDocument();
+    expect(screen.getByText('all interfaces')).toBeInTheDocument();
+    expect(screen.queryByText('0/udp')).not.toBeInTheDocument();
+  });
+
   it('marks a host-network service as host-exposed', async () => {
     mockApi(facts({
       services: [{ name: 'app', networks: [], publishedPorts: [], networkMode: 'host', extraHosts: [] }],

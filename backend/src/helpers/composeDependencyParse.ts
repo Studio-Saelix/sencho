@@ -1,6 +1,7 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
 import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
+import { isContainerPort, isDynamicHostPort, splitShortPortSpec } from './composePortSpec';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -11,8 +12,13 @@ const MAX_COMPOSE_PARSE_BYTES = 1_048_576; // 1 MiB
 export interface DeclaredPort {
   /** Host interface ('' means all interfaces). */
   hostIp: string;
+  /** The host port, or 0 when `dynamic`. */
   publishedPort: number;
   protocol: string;
+  /** Docker assigns the host port at start, so no number is known. The entry
+   *  still publishes the container; port-conflict and drift consumers skip it
+   *  (see `fixedPorts` in composePortSpec). */
+  dynamic?: true;
 }
 
 /** A service `env_file:` entry. `required: false` tolerates a missing file. */
@@ -357,38 +363,39 @@ function namedVolumeSource(entry: unknown): string | null {
   return null;
 }
 
-/** Parses a service `ports:` entry into a host-published port, or null. */
+/**
+ * Parses a service `ports:` entry into a host-published port, or null. An entry
+ * whose host port Docker assigns (container port only, an empty or `0` host
+ * port, a long form with no `published`) is returned as `dynamic`.
+ */
 function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort | null {
   const raw = asString(entry);
   const short = raw === undefined ? undefined : interpolateString(raw, lookup);
   if (short !== undefined) {
-    const [spec, proto] = short.split('/');
-    const parts = spec.split(':');
-    let hostIp = '';
-    let hostPart: string | undefined;
-    if (parts.length >= 3) {
-      hostIp = parts[0];
-      hostPart = parts[1];
-    } else if (parts.length === 2) {
-      hostPart = parts[0];
-    } else {
-      return null; // container-only EXPOSE, not host-published
+    const spec = splitShortPortSpec(short);
+    if (!spec) return null;
+    if (isDynamicHostPort(spec.hostPart)) {
+      return isContainerPort(spec.container)
+        ? { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true }
+        : null;
     }
-    const published = parseInt((hostPart ?? '').split('-')[0], 10);
-    if (!Number.isFinite(published) || published <= 0) return null;
-    return { hostIp, publishedPort: published, protocol: proto || 'tcp' };
+    const published = parseInt(spec.hostPart.split('-')[0], 10);
+    if (!Number.isFinite(published) || published < 0) return null;
+    return { hostIp: spec.hostIp, publishedPort: published, protocol: spec.protocol };
   }
   if (entry && typeof entry === 'object') {
     const obj = entry as Record<string, unknown>;
     const publishedRaw = interpolateString(asString(obj.published), lookup);
-    if (publishedRaw === undefined) return null; // not host-published
-    const published = parseInt(publishedRaw.split('-')[0], 10);
-    if (!Number.isFinite(published) || published <= 0) return null;
-    return {
-      hostIp: interpolateString(asString(obj.host_ip), lookup) ?? '',
-      publishedPort: published,
-      protocol: interpolateString(asString(obj.protocol), lookup) || 'tcp',
-    };
+    const hostIp = interpolateString(asString(obj.host_ip), lookup) ?? '';
+    const protocol = interpolateString(asString(obj.protocol), lookup) || 'tcp';
+    if (isDynamicHostPort(publishedRaw)) {
+      return isContainerPort(interpolateString(asString(obj.target), lookup))
+        ? { hostIp, publishedPort: 0, protocol, dynamic: true }
+        : null;
+    }
+    const published = parseInt((publishedRaw as string).split('-')[0], 10);
+    if (!Number.isFinite(published) || published < 0) return null;
+    return { hostIp, publishedPort: published, protocol };
   }
   return null;
 }

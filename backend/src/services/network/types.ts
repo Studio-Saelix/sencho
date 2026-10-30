@@ -30,9 +30,13 @@ export interface NetworkFactNetwork {
 export interface NetworkFactPort {
   /** '' / '0.0.0.0' / '::' means all interfaces. */
   hostIp: string;
+  /** First host port, or 0 when `dynamic`. */
   startPort: number;
+  /** Last host port, or 0 when `dynamic`. */
   endPort: number;
   protocol: string;
+  /** Docker assigns the host port at start, so no number is known. Older nodes never send it. */
+  dynamic?: true;
   /** Bound on every interface (broad exposure). */
   allInterfaces: boolean;
   /** Bound only to loopback (127.0.0.1 / ::1). */

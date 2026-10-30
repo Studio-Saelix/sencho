@@ -234,12 +234,32 @@ describe('parseEffectiveModel', () => {
     expect(JSON.stringify(fromEnv)).not.toContain('admin');
   });
 
-  it('parses the short-string port form and drops container-only EXPOSE', () => {
+  it('parses the short-string port form, keeping a container-only entry as dynamic', () => {
     const m = parseEffectiveModel({ services: { s: { ports: ['127.0.0.1:8080:80/udp', '8443:443', '90'] } } }, 'p');
     expect(m.services[0].ports).toEqual([
       { startPort: 8080, endPort: 8080, hostIp: '127.0.0.1', protocol: 'udp' },
       { startPort: 8443, endPort: 8443, hostIp: '', protocol: 'tcp' },
+      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true },
     ]);
+  });
+
+  it.each<[string, unknown, { hostIp: string; protocol: string }]>([
+    ['no published key', { target: 51820, protocol: 'udp' }, { hostIp: '', protocol: 'udp' }],
+    ['no published key on an interface', { target: 51820, host_ip: '127.0.0.1', protocol: 'udp' }, { hostIp: '127.0.0.1', protocol: 'udp' }],
+    ['published "0"', { target: 51820, published: '0', protocol: 'udp' }, { hostIp: '', protocol: 'udp' }],
+    ['published 0 as a number', { target: 51820, published: 0, host_ip: '127.0.0.1' }, { hostIp: '127.0.0.1', protocol: 'tcp' }],
+    ['an empty published value', { target: 80, published: '' }, { hostIp: '', protocol: 'tcp' }],
+    ['a short entry with an empty host port', '127.0.0.1::51820/udp', { hostIp: '127.0.0.1', protocol: 'udp' }],
+    ['a short entry with host port 0', '0:80', { hostIp: '', protocol: 'tcp' }],
+    ['a short IPv6 entry with an empty host port', '[::1]::51820/udp', { hostIp: '::1', protocol: 'udp' }],
+  ])('keeps %s as a dynamic publication', (_label, entry, expected) => {
+    const m = parseEffectiveModel({ services: { s: { ports: [entry] } } }, 'p');
+    expect(m.services[0].ports).toEqual([{ ...expected, startPort: 0, endPort: 0, dynamic: true }]);
+  });
+
+  it('keeps a bracketed IPv6 short entry with a fixed host port, and drops entries with no target or a bad port', () => {
+    const m = parseEffectiveModel({ services: { s: { ports: ['[::1]:51820:51820/udp', { published: '' }, { target: 'x', published: 0 }, { target: 80, published: 'abc' }, '[::1]:80'] } } }, 'p');
+    expect(m.services[0].ports).toEqual([{ startPort: 51820, endPort: 51820, hostIp: '::1', protocol: 'udp' }]);
   });
 
   it('treats a disabled healthcheck as none', () => {

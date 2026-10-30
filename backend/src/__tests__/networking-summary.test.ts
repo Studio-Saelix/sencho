@@ -784,6 +784,87 @@ describe('networking summary', () => {
       }
     });
 
+    // A port Docker assigns at start still publishes; the summary must agree with
+    // the rendered model on every form (see the Docker-backed parity cases).
+    it.each([
+      ['a container-only UDP port', '"51820/udp"'],
+      ['an empty host port after an interface', '"127.0.0.1::51820/udp"'],
+      ['host port 0 after an interface', '"127.0.0.1:0:51820/udp"'],
+      ['a long entry with no published port', '{ target: 51820, protocol: udp }'],
+      ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp }'],
+      ['a bracketed IPv6 interface with a fixed host port', '"[::1]:51820:51820/udp"'],
+      ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"'],
+      ['an unbracketed IPv6 interface with a fixed host port', '"::1:51820:51820/udp"'],
+    ])('finds a WireGuard server published through %s', async (_label, port) => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), WG(port));
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+      expect(res.body.exposed.stacks).toContain(STACK);
+      expect(res.body.unknownExposure.stacks).toContain(STACK);
+    });
+
+    it('does not take a dynamic TCP port, or `expose`, for a WireGuard server', async () => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), WG('"127.0.0.1::51820"'));
+      const tcp = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(tcp.body.exposed.stacks).not.toContain(STACK);
+      expect(tcp.body.unknownExposure.stacks).toContain(STACK); // it still publishes, on loopback
+
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+        'services:\n  wg:\n    image: lscr.io/linuxserver/wireguard:latest\n    expose:\n      - "51820/udp"\n  app:\n    image: example/app:1\n');
+      const expose = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(expose.body.exposed.stacks).not.toContain(STACK);
+      expect(expose.body.unknownExposure.stacks).not.toContain(STACK);
+    });
+
+    it.each([
+      ['cloudflared', 'image: cloudflare/cloudflared:latest\n    command: tunnel run\n    environment:\n      TUNNEL_TOKEN: t'],
+      ['tailscale', 'image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: k'],
+      ['wireguard', 'image: ghcr.io/wg-easy/wg-easy:15'],
+    ])('lets a %s host-network connector reach an app whose port Docker assigns', async (_provider, edgeService) => {
+      const compose = (appPort: string) =>
+        `services:\n  edge:\n    ${edgeService}\n    network_mode: host\n  app:\n    image: example/app:1\n    ports:\n      - ${appPort}\n`;
+      for (const port of ['"8080"', '"127.0.0.1::8080"', '"127.0.0.1:0:8080"', '{ target: 8080 }', '{ target: 8080, published: 0 }']) {
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose(port));
+        const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+        expect(res.body.exposed.stacks, port).toContain(STACK);
+        expect(res.body.unknownExposure.stacks, port).toContain(STACK);
+      }
+    });
+
+    // Compose trims U+0085 (NEL) as leading space in a raw env file; every name the
+    // summary reads from one has to survive it (see the Docker-backed parity cases).
+    const NEL = '\u0085';
+    const rawEdge = (image: string, namespace: boolean) =>
+      `services:\n  edge:\n    image: ${image}\n    env_file:\n      - path: ./edge.env\n        format: raw\n  app:\n    image: example/app:1\n${namespace ? '    network_mode: service:edge\n' : ''}`;
+    it.each([
+      ['TUNNEL_TOKEN', 'example/edge:1', 'TUNNEL_TOKEN=t', true],
+      ['TUNNEL_TOKEN_FILE', 'example/edge:1', 'TUNNEL_TOKEN_FILE=/run/secrets/t', true],
+      ['TS_AUTHKEY', 'example/edge:1', 'TS_AUTHKEY=k', true],
+      ['TS_AUTH_KEY', 'example/edge:1', 'TS_AUTH_KEY=k', true],
+      ['WG_HOST', 'example/edge:1', 'WG_HOST=vpn.example.com', true],
+      ['PEERS on a WireGuard image', 'lscr.io/linuxserver/wireguard:latest', 'PEERS=3', true],
+      ['TS_ROUTES', 'tailscale/tailscale', 'TS_ROUTES=10.0.0.0/8', false],
+      ['TS_SERVE_CONFIG', 'tailscale/tailscale', 'TS_SERVE_CONFIG=/config/serve.json', false],
+      ['TS_DEST_IP', 'tailscale/tailscale', 'TS_DEST_IP=10.0.0.5', false],
+      ['TS_EXTRA_ARGS', 'tailscale/tailscale', 'TS_EXTRA_ARGS=--advertise-exit-node', false],
+    ])('reads %s after leading NEL space in a raw env_file', async (_name, image, line, namespace) => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge(image, namespace));
+      for (const lead of [NEL, ` ${NEL}`, '  ', ' ', '　']) {
+        fs.writeFileSync(path.join(stackDir, 'edge.env'), `${lead}${line}\n`);
+        const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+        expect(res.body.unreadable.stacks, JSON.stringify(lead)).not.toContain(STACK);
+        expect(res.body.exposed.stacks, JSON.stringify(lead)).toContain(STACK);
+      }
+    });
+
+    it('does not trim a zero-width space off a raw env_file name, as Compose does not', async () => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge('example/edge:1', true));
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), '​TUNNEL_TOKEN=t\n');
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.exposed.stacks).not.toContain(STACK);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+    });
+
     it('lets a later layer unset a key an earlier layer set, and set one it left unset', async () => {
       fs.writeFileSync(path.join(stackDir, 'override.yaml'), 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN:\n');
       fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    environment:\n      TUNNEL_TOKEN: t\n'));
