@@ -242,7 +242,7 @@ export class RecoveryOperationStore {
         WHERE id = ? AND state IN ('queued','running') AND process_epoch = ?
       `).run(outcome.state, errorClass, now, now, id, this.processEpoch);
       if (ended.changes === 0) {
-        // Defensive: the transaction holds the write lock from its first read,
+        // Defensive: the transaction holds the write lock from its start,
         // so this is not reachable today. If another writer did end the
         // operation after it was read, its outcome and its locks stand.
         const stored = this.require(id);

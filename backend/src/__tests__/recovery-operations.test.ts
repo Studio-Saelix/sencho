@@ -345,7 +345,7 @@ describe('restart reconciliation', () => {
       { state: 'cancelled' as const },
       { state: 'completion_unknown' as const },
     ]) {
-      // The queued operation has no point, so this ending is refused for its owner alone.
+      // Both are refused for belonging to another epoch. The queued one has no pending point, so its refusal is never the pending-point guard.
       expect(classOf(() => after.finish(queued.id, ending))).toBe('interrupted');
       expect(classOf(() => after.finish(running.id, ending))).toBe('interrupted');
       expect(after.get(running.id)).toMatchObject({ state: 'running', errorClass: null, completedAt: null, processEpoch: 'epoch-crashed' });
