@@ -146,11 +146,11 @@ describe('applyFleetSnapshotFiles', () => {
 
   it('refuses a compose-less existing directory the same way and leaves it alone', async () => {
     mocks.hasComposeFile.mockResolvedValue(false);
-    mocks.ensureStackDir.mockResolvedValue(false);
 
     await expect(applyWeb({ stackName: 'leftover', files: [FILES[1]] }))
       .rejects.toMatchObject({ code: 'snapshot_compose_missing' });
 
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
     expect(mocks.saveEnvContent).not.toHaveBeenCalled();
     expect(mocks.deleteStack).not.toHaveBeenCalled();
   });
@@ -170,7 +170,7 @@ describe('applyFleetSnapshotFiles', () => {
     await expect(applyWeb({ stackName: 'half-written' })).rejects.toThrow('disk full');
 
     expect(mocks.deleteStack).toHaveBeenCalledWith('half-written');
-    expect(mocks.invalidateNodeCaches).not.toHaveBeenCalled();
+    expect(mocks.invalidateNodeCaches).toHaveBeenCalledWith(1);
   });
 
   it('removes the created directory when the compose write itself fails', async () => {

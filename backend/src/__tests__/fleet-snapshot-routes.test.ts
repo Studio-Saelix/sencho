@@ -299,6 +299,8 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
     });
 
     describe('absent stack whose snapshot has no compose.yaml', () => {
+        afterEach(() => vi.unstubAllGlobals());
+
         function envOnlySnapshot(label: string, stackName: string, nodeId = LOCAL_NODE_ID): number {
             const db = DatabaseService.getInstance();
             const id = db.createSnapshot(label, 'admin', 1, 1, '[]', '[]');
@@ -388,7 +390,6 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
                 .post(`/api/fleet/snapshots/${id}/restore`)
                 .set('Cookie', adminCookie)
                 .send({ nodeId: remoteId, stackName: 'remote-env-only' });
-            vi.unstubAllGlobals();
 
             expect(res.status).toBe(409);
             expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });

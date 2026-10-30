@@ -3007,8 +3007,10 @@ function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
 // Writes a snapshot stack's files back to its node. Existing stacks capture a
 // recovery generation before the first write; capture failure aborts with no
 // mutation. A later write failure can leave live files changed; the captured
-// generation remains. Throws SnapshotProxyTargetError when the remote has no
-// proxy target. A non-OK apply response becomes an Error with the remote
+// generation remains. A stack missing on the node is created only when the
+// snapshot holds its compose.yaml (otherwise snapshot_compose_missing), and a
+// directory created for it is removed again when a write fails. Throws
+// SnapshotProxyTargetError when the remote has no proxy target. A non-OK apply response becomes an Error with the remote
 // status and body (capture, lock, or write).
 async function applySnapshotStackFiles(
   node: Node,

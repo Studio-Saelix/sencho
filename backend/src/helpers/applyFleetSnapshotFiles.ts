@@ -156,7 +156,10 @@ export async function applyFleetSnapshotFiles(
       } catch (error) {
         // Remove only a directory this restore created; a half-written new
         // stack must not outlive the failed request.
-        if (createdDir) await removeCreatedStackDir(fsSvc, stackName);
+        if (createdDir) {
+          await removeCreatedStackDir(fsSvc, stackName);
+          invalidateNodeCaches(nodeId);
+        }
         throw error;
       }
       invalidateNodeCaches(nodeId);
