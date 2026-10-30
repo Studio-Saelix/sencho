@@ -71,11 +71,12 @@ function effectiveIntent(
 
 /**
  * Settle unverified tunnel exposure against the operator's intent. A service
- * exposed only by a tunnel whose routing Sencho cannot see (a shared network or
- * the host network) and classified internal or same-node is taken at the
- * operator's word and not counted as exposed; Compose Doctor still asks them to
- * confirm the routing. A certain reach (a shared network namespace) stays
- * exposed and conflicts with that intent. Security reads cached descriptors
+ * exposed only by a tunnel whose routing Sencho cannot see (a Cloudflare
+ * namespace, a shared network, or the host network) and classified internal or
+ * same-node is taken at the operator's word and not counted as exposed; Compose
+ * Doctor still asks them to confirm the routing. A certain reach (a shared
+ * network namespace behind a Tailscale or WireGuard connector) stays exposed
+ * and conflicts with that intent. Security reads cached descriptors
  * through `readSettledExposures`, so the exposed-image map and the exposure
  * targets agree.
  */
@@ -86,7 +87,7 @@ export function settleTunnelExposure(
 ): StackExposure[] {
   return exposures.map((exp) => {
     const unverified = exp.services.filter((svc) =>
-      svc.reason === 'tunnel' && svc.tunnel !== undefined && !isCertainTunnelPath(svc.tunnel.path));
+      svc.reason === 'tunnel' && svc.tunnel !== undefined && !isCertainTunnelPath(svc.tunnel));
     if (unverified.length === 0) return exp;
     const ctx = getContext(nodeId, exp.stack);
     if (!ctx.available) return exp;

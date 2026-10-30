@@ -93,12 +93,20 @@ describe('tunnel path labels', () => {
     }, []);
     expect(s?.services[0]?.tunnel).toBe('via Cloudflare Tunnel (cf), routing unverified');
   });
-  it('omits the caveat for a shared namespace', () => {
+  it('omits the caveat for a Tailscale shared namespace', () => {
     const s = buildNetworkExposureSummary({
       renderable: true,
       networks: [],
       services: [{ name: 'admin', publishedPorts: [], tunnel: { connector: 'ts', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' } }],
     }, []);
     expect(s?.services[0]?.tunnel).toBe('via Tailscale (ts)');
+  });
+  it('keeps the caveat for a cloudflared shared namespace', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'app', publishedPorts: [], tunnel: { connector: 'cf', provider: 'cloudflared', scope: 'public-edge', path: 'shared-namespace' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Cloudflare Tunnel (cf), routing unverified');
   });
 });

@@ -133,7 +133,7 @@ When a tunnel is why the service counts as exposed, the label reads **Network ex
 tooltip names the connector and says when the tunnel's routing is unverified; with several contexts, the
 networking list under the label names the connector instead. A service you classified internal or
 same-node that a tunnel can reach only with unverified routing is taken at your word and not counted as
-exposed; one that shares the connector's network namespace is, and shows an intent mismatch. When Networking exposure intent is
+exposed; one that a Tailscale or WireGuard connector reaches directly from a shared network namespace is, and shows an intent mismatch. A service in a cloudflared sidecar's namespace can be reached on localhost, but Cloudflare's ingress still decides what incoming requests reach, so that path stays unverified like a shared network. When Networking exposure intent is
 available, the row also shows compact intent evidence (for example Intent: public, Intent mismatch,
 or Intent: not classified). Open Networking from that evidence to review or correct classification
 for the matching stack. Intentional exposure raises the security relevance of vulnerable findings

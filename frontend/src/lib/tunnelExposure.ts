@@ -18,17 +18,24 @@ export const TUNNEL_SCOPE_LABEL: Record<TunnelScope, string> = {
 
 /** Provider label, falling back to the raw provider for one a newer node reports. */
 export function tunnelProviderLabel(provider: TunnelProvider): string {
-  return TUNNEL_PROVIDER_LABEL[provider] ?? provider;
+  return Object.prototype.hasOwnProperty.call(TUNNEL_PROVIDER_LABEL, provider)
+    ? TUNNEL_PROVIDER_LABEL[provider]
+    : provider;
 }
 
 /** Scope label, falling back to the raw scope for one a newer node reports. */
 export function tunnelScopeLabel(scope: TunnelScope): string {
-  return TUNNEL_SCOPE_LABEL[scope] ?? scope;
+  return Object.prototype.hasOwnProperty.call(TUNNEL_SCOPE_LABEL, scope)
+    ? TUNNEL_SCOPE_LABEL[scope]
+    : scope;
 }
 
-/** Only a shared network namespace makes a tunnel reach certain. */
-export function isRoutingUnverified(e: Pick<ServiceTunnelExposure, 'path'>): boolean {
-  return e.path !== 'shared-namespace';
+/** A shared namespace is certain only behind a Tailscale or WireGuard
+ *  connector, whose peers reach the service at the connector's own address. A
+ *  cloudflared sidecar can reach it on localhost, but Cloudflare's ingress
+ *  independently chooses the origin, so that path stays unverified. */
+export function isRoutingUnverified(e: Pick<ServiceTunnelExposure, 'provider' | 'path'>): boolean {
+  return !(e.path === 'shared-namespace' && e.provider !== 'cloudflared');
 }
 
 /** "via Cloudflare Tunnel (cloudflared), routing unverified" style phrase. */

@@ -87,6 +87,109 @@ describe('networking summary', () => {
     expect(JSON.stringify(router.body)).not.toContain('tskey-secret');
   });
 
+  it('does not invent a connector from an inherited image or environment name', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: registry.example/constructor:1\n    environment:\n      toString: ordinary\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('counts a connector whose provider key and flags come from a service env_file', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('counts a custom image identified by a provider key from an env_file, with an environment override', async () => {
+    fs.writeFileSync(path.join(stackDir, 'edge.env'), 'TUNNEL_TOKEN=tunnel-secret\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    env_file: ./edge.env\n    environment:\n      TUNNEL_TOKEN_FILE: /run/secrets/cf\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tunnel-secret');
+  });
+
+  it('interpolates an image reference from the stack .env before identifying the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'CF_IMAGE=cloudflare/cloudflared:latest\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cf:\n    image: ${CF_IMAGE}\n    command: tunnel run\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reads every authored layer from the deploy spec, including one that adds the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'override.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: --advertise-routes=10.0.0.0/24\n');
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'override.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('reads COMPOSE_FILE layers, including one that adds the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'base.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'extra.yaml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=base.yaml:extra.yaml\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, not unexposed, when a required env_file is missing', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./missing.env\n  app:\n    image: example/app:1\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).not.toContain('missing.env');
+  });
+
+  it('tolerates a missing optional env_file and still reads the rest', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: cloudflare/cloudflared\n    env_file:\n      - path: ./missing.env\n        required: false\n    environment:\n      TUNNEL_TOKEN: tunnel-secret\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, not unexposed, when COMPOSE_FILE cannot be read', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=missing-layer.yaml\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).not.toContain('missing-layer.yaml');
+  });
+
+  it('reports a stack with include or extends as unreadable rather than unexposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'include:\n  - other.yaml\nservices:\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
   it('reads an interpolated TS_EXTRA_ARGS from the stack .env, as the rendered views do', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:-}\n  app:\n    image: example/app:1\n');

@@ -144,14 +144,20 @@ describe('GET /api/security/image-summaries', () => {
 
   it('settles a cached tunnel reach with unverified routing against the stack intent', async () => {
     const now = Date.now();
-    for (const ref of ['tun:1', 'tun-ns:1']) seedScan(ref, now);
-    const tunnel = (path: string) => ({ connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path });
+    for (const ref of ['tun:1', 'tun-ns:1', 'tun-cf-ns:1']) seedScan(ref, now);
+    const tunnel = (path: string, provider: 'cloudflared' | 'tailscale' = 'cloudflared') => ({
+      connector: provider,
+      provider,
+      scope: provider === 'cloudflared' ? 'public-edge' : 'private-overlay',
+      path,
+    });
     db().upsertStackExposure(1, 'web', JSON.stringify({
       stack: 'web',
       computedAt: now,
       services: [
         { service: 'app', image: 'tun:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-network') },
-        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace') },
+        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace', 'tailscale') },
+        { service: 'cf-admin', image: 'tun-cf-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace') },
       ],
     }), now);
 
@@ -162,7 +168,10 @@ describe('GET /api/security/image-summaries', () => {
     const internal = await request(app).get('/api/security/image-summaries').set('Cookie', adminCookie);
     expect(internal.status).toBe(200);
     expect(internal.body['tun:1']).toMatchObject({ publicly_exposed: false });
+    // A Tailscale namespace reach is certain; a cloudflared one only proves
+    // local reachability, so the operator's internal intent settles it.
     expect(internal.body['tun-ns:1']).toMatchObject({ publicly_exposed: true });
+    expect(internal.body['tun-cf-ns:1']).toMatchObject({ publicly_exposed: false });
   });
 
   it('settles the scan sheet badge the same way', async () => {

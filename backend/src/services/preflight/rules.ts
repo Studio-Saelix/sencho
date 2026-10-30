@@ -1036,7 +1036,7 @@ const exposureInternalTunneled: PreflightRule = {
     for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx))) {
       const intent = effectiveIntent(ctx, service);
       if (intent !== 'internal' && intent !== 'same-node') continue;
-      const certain = isCertainTunnelPath(tunnel.path);
+      const certain = isCertainTunnelPath(tunnel);
       findings.push({
         ruleId: 'exposure-internal-tunneled',
         // A shared network or the host network only means the tunnel could route here.

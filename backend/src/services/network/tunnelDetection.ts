@@ -16,11 +16,15 @@
  *
  * Which services a connector actually routes to is configured outside the
  * Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard
- * AllowedIPs). Only a shared network namespace makes the reach certain; a
- * shared network or the host network means the connector can reach the
- * service, with routing unverified. Reach is computed within one stack: a
- * connector on an external network or the Sencho Mesh network may also reach
- * services elsewhere, which is reported as unknown rather than guessed.
+ * AllowedIPs). A shared network namespace makes the reach locally certain: a
+ * Tailscale or WireGuard peer reaches the service at the connector's own
+ * address. A cloudflared sidecar reaches the service on localhost too, but
+ * Cloudflare's ingress independently chooses which origin and port an incoming
+ * request reaches, and Sencho cannot read those rules, so that path stays
+ * unverified like a shared network or the host network. Reach is computed
+ * within one stack: a connector on an external network or the Sencho Mesh
+ * network may also reach services elsewhere, which is reported as unknown
+ * rather than guessed.
  */
 import { SENCHO_MESH_NETWORK } from '../MeshComposeOverride';
 import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../../utils/composeDotenv';
@@ -33,12 +37,14 @@ export type TunnelScope = 'public-edge' | 'private-overlay';
 
 /** How a connector reaches a service. `shared-namespace`: the two share one
  *  network namespace (`network_mode: service:<x>`), so the service listens on
- *  the connector's own address: overlay peers reach it directly, and a
- *  cloudflared sidecar reaches it on localhost, which Sencho counts as certain.
- *  `shared-network`: they share a Compose network, or both use Docker's
- *  default bridge (`network_mode: bridge` or `default`). `host-network`: the
- *  connector uses the host network and the service (or the service whose
- *  namespace it runs in) publishes a host port or is itself on the host network. For the last two the connector can reach the
+ *  the connector's own address: Tailscale and WireGuard peers reach it
+ *  directly. A cloudflared sidecar reaches it on localhost, but Cloudflare's
+ *  ingress still decides what an incoming request reaches, so that path is
+ *  locally reachable and unverified. `shared-network`: they share a Compose
+ *  network, or both use Docker's default bridge (`network_mode: bridge` or
+ *  `default`). `host-network`: the connector uses the host network and the
+ *  service (or the service whose namespace it runs in) publishes a host port or
+ *  is itself on the host network. For the last two the connector can reach the
  *  service, but whether it routes to it is configured elsewhere. */
 export type TunnelPath = 'shared-namespace' | 'shared-network' | 'host-network';
 
@@ -134,22 +140,24 @@ const PROVIDER_SCOPE: Record<TunnelProvider, TunnelScope> = {
   wireguard: 'private-overlay',
 };
 
-/** Image repository base names, matched against the last path segment. */
-const IMAGE_PROVIDER: Record<string, TunnelProvider> = {
-  cloudflared: 'cloudflared',
-  tailscale: 'tailscale',
-  'wg-easy': 'wireguard',
-  wireguard: 'wireguard',
-};
+/** Image repository base names, matched against the last path segment. A Map
+ *  so an arbitrary image name can never resolve to an inherited property. */
+const IMAGE_PROVIDER = new Map<string, TunnelProvider>([
+  ['cloudflared', 'cloudflared'],
+  ['tailscale', 'tailscale'],
+  ['wg-easy', 'wireguard'],
+  ['wireguard', 'wireguard'],
+]);
 
-/** Environment key names that identify a provider on their own (custom images). */
-const ENV_PROVIDER: Record<string, TunnelProvider> = {
-  TUNNEL_TOKEN: 'cloudflared',
-  TUNNEL_TOKEN_FILE: 'cloudflared',
-  TS_AUTHKEY: 'tailscale',
-  TS_AUTH_KEY: 'tailscale',
-  WG_HOST: 'wireguard',
-};
+/** Environment key names that identify a provider on their own (custom images).
+ *  A Map for the same reason as `IMAGE_PROVIDER`. */
+const ENV_PROVIDER = new Map<string, TunnelProvider>([
+  ['TUNNEL_TOKEN', 'cloudflared'],
+  ['TUNNEL_TOKEN_FILE', 'cloudflared'],
+  ['TS_AUTHKEY', 'tailscale'],
+  ['TS_AUTH_KEY', 'tailscale'],
+  ['WG_HOST', 'wireguard'],
+]);
 
 /** Supporting environment key names, reported as signals once a provider is known. */
 const ENV_HINTS: Record<TunnelProvider, readonly string[]> = {
@@ -213,6 +221,18 @@ export function cloudflaredCommandHints(command: unknown, entrypoint: unknown): 
  *  accepts for the boolean `--advertise-exit-node`. */
 const GO_FALSE: ReadonlySet<string> = new Set(['0', 'f', 'F', 'false', 'FALSE', 'False']);
 
+/** Expand a list entry the way Compose interpolates it, keeping it as written
+ *  when no lookup answers or Compose would refuse the template. */
+function interpolateTunnelEntry(value: string, lookup: ComposeEnvLookup | undefined): string {
+  if (!lookup || !/\$(?:\{|\$|[A-Za-z_])/.test(value.replace(/\$\$/g, ''))) return value;
+  try {
+    return expandComposeEnvTemplate(value, lookup);
+  } catch (error) {
+    if (error instanceof ComposeEnvFileError) return value;
+    throw error;
+  }
+}
+
 /** `TS_EXTRA_ARGS` as text, or null when it cannot be read. A raw value that
  *  still holds `${VAR}`/`$VAR` is expanded with `lookup` the way Compose
  *  interpolates it; a key with no value takes the variable of the same name. */
@@ -234,11 +254,12 @@ function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined)
 /**
  * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`,
  * in Go's single- or double-dash form) named in a service's `TS_EXTRA_ARGS`,
- * from list (`KEY=value`, last entry wins as in Compose) or map form. A flag
- * set to an empty value does not forward, nor does `--advertise-exit-node` set
- * to a Go spelling of false. `--advertise-routes` takes a route list, so such a
- * spelling there is an invalid route that makes `tailscale up` fail, which
- * forwards nothing either.
+ * from list (`KEY=value`, last entry wins as in Compose) or map form. Go's flag
+ * setters overwrite, so the last occurrence of a flag decides: a later empty
+ * value, or `--advertise-exit-node` set to a Go spelling of false, turns an
+ * earlier enabled occurrence off again. `--advertise-routes` takes a route
+ * list, so such a spelling there is an invalid route that makes `tailscale up`
+ * fail, which forwards nothing either.
  * `lookup` expands an uninterpolated value (the raw YAML); without it, or when
  * the value still cannot be read, the result is `unresolved`. Only membership
  * in that fixed set is kept; the routes and every other flag are discarded.
@@ -247,7 +268,10 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
   let present = false;
   let value: unknown;
   if (Array.isArray(environment)) {
-    const entry = environment.filter((e): e is string => typeof e === 'string' && (e === 'TS_EXTRA_ARGS' || e.startsWith('TS_EXTRA_ARGS='))).pop();
+    const entries = environment
+      .filter((e): e is string => typeof e === 'string')
+      .map((entry) => interpolateTunnelEntry(entry, lookup));
+    const entry = entries.filter((e) => e === 'TS_EXTRA_ARGS' || e.startsWith('TS_EXTRA_ARGS=')).pop();
     present = entry !== undefined;
     value = entry?.startsWith('TS_EXTRA_ARGS=') ? entry.slice('TS_EXTRA_ARGS='.length) : undefined;
   } else if (environment && typeof environment === 'object' && 'TS_EXTRA_ARGS' in environment) {
@@ -257,22 +281,23 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
   if (!present) return [];
   const text = readableExtraArgs(value, lookup);
   if (text === null) return ['unresolved'];
-  const flags = new Set<TailscaleForwardFlag>();
+  const flags = new Map<Exclude<TailscaleForwardFlag, 'unresolved'>, boolean>();
   for (const token of text.split(/\s+/)) {
     const eq = token.indexOf('=');
     const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
+    if (!isTailscaleForwardFlag(name)) continue;
     const setting = eq === -1 ? undefined : token.slice(eq + 1);
-    if (setting === '' || (setting !== undefined && GO_FALSE.has(setting))) continue;
-    if (isTailscaleForwardFlag(name)) flags.add(name);
+    const enabled = setting !== '' && !(setting !== undefined && GO_FALSE.has(setting));
+    flags.set(name, enabled);
   }
-  return [...flags];
+  return [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
 }
 
 function providerOf(svc: TunnelDetectionService): { provider: TunnelProvider; byImage: boolean } | null {
-  const fromImage = svc.image ? IMAGE_PROVIDER[imageBaseName(svc.image)] : undefined;
+  const fromImage = svc.image ? IMAGE_PROVIDER.get(imageBaseName(svc.image)) : undefined;
   if (fromImage) return { provider: fromImage, byImage: true };
   for (const key of svc.envKeys) {
-    const fromEnv = ENV_PROVIDER[key];
+    const fromEnv = ENV_PROVIDER.get(key);
     if (fromEnv) return { provider: fromEnv, byImage: false };
   }
   return null;
@@ -436,10 +461,13 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
   return connectors;
 }
 
-/** Ranks a path by certainty first (a shared namespace), then by audience (a
- *  public edge over a private overlay). */
+/** Ranks a path by certainty first (a shared namespace reachable directly by
+ *  overlay peers), then by audience (a public edge over a private overlay). A
+ *  cloudflared namespace is reachable locally but its ingress is unverified, so
+ *  it ranks above another unverified path but below a certain one. */
 function strength(e: ServiceTunnelExposure): number {
-  return (e.path === 'shared-namespace' ? 2 : 0) + (e.scope === 'public-edge' ? 1 : 0);
+  const certainty = isCertainTunnelPath(e) ? 2 : e.path === 'shared-namespace' ? 1 : 0;
+  return certainty * 2 + (e.scope === 'public-edge' ? 1 : 0);
 }
 
 /** The strongest tunnel path to each reached service: a certain reach beats an
@@ -525,10 +553,12 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const certain = byPath('shared-namespace');
   const networked = byPath('shared-network');
   const hosted = byPath('host-network');
-  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which opens what it reaches to ${tunnelScopePhrase(c.provider)}.${audienceCaveat(c.provider)}`];
+  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${c.provider === 'cloudflared' ? 'can publish what it reaches to anyone on the internet through Cloudflare\'s edge, wherever the tunnel\'s ingress routes there' : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`}.${audienceCaveat(c.provider)}`];
   if (certain.length > 0) {
     const { verb, they } = shareVerb(certain);
-    sentences.push(`${quotedList(certain)} ${verb} the connector's network namespace, so ${they} reachable at the connector's own address.`);
+    sentences.push(c.provider === 'cloudflared'
+      ? `${quotedList(certain)} ${verb} the connector's network namespace, so the connector can reach ${certain.length > 1 ? 'them' : 'it'} on localhost; whether Cloudflare's ingress routes incoming requests there is unverified.`
+      : `${quotedList(certain)} ${verb} the connector's network namespace, so ${they} reachable at the connector's own address.`);
   }
   if (networked.length > 0) {
     sentences.push(`${quotedList(networked)} ${shareVerb(networked).verb} a network with the connector and can be reached if the connector's routing points there.`);
@@ -550,7 +580,9 @@ export function describeServiceTunnel(e: ServiceTunnelExposure): string {
   const caveat = audienceCaveat(e.provider);
   switch (e.path) {
     case 'shared-namespace':
-      return `It shares the network namespace of the ${label} connector "${e.connector}", so ${who} can reach it.${caveat}`;
+      return e.provider === 'cloudflared'
+        ? `It shares the network namespace of the ${label} connector "${e.connector}", so the connector can reach it on localhost; whether Cloudflare's ingress routes incoming requests there is unverified.${caveat}`
+        : `It shares the network namespace of the ${label} connector "${e.connector}", so ${who} can reach it.${caveat}`;
     case 'shared-network':
       return `It shares a network with the ${label} connector "${e.connector}", so ${who} can reach it if the tunnel routes there; that routing is unverified.${caveat}`;
     case 'host-network':
@@ -560,7 +592,11 @@ export function describeServiceTunnel(e: ServiceTunnelExposure): string {
   }
 }
 
-/** True when the reach is certain (a shared namespace); every other path is unverified. */
-export function isCertainTunnelPath(path: TunnelPath): boolean {
-  return path === 'shared-namespace';
+/** True when the reach is certain: the service listens on the connector's own
+ *  address and only the provider's peer routing, not a separate ingress map,
+ *  decides what reaches it. A shared namespace is certain for Tailscale and
+ *  WireGuard, whose overlay peers address the connector directly, but not for
+ *  Cloudflare, whose ingress independently maps each hostname to an origin. */
+export function isCertainTunnelPath(e: Pick<ServiceTunnelExposure, 'provider' | 'path'>): boolean {
+  return e.path === 'shared-namespace' && e.provider !== 'cloudflared';
 }

@@ -291,12 +291,14 @@ function skipToStatement(text: string, from: number): number {
 
 /**
  * Read one file's assignments into `assign`, resolving references through
- * `lookup` (the process environment, then everything already read).
+ * `lookup` (the process environment, then everything already read). `onKey` is
+ * told every assignment name it sees, including one that only inherits a value.
  */
 function parseEnvFileText(
   content: string,
   lookup: ComposeEnvLookup,
   assign: (name: string, value: string) => void,
+  onKey?: (name: string) => void,
 ): void {
   let cursor = 0;
   for (;;) {
@@ -341,6 +343,7 @@ function parseEnvFileText(
 
     const key = trimRightUnicodeSpace(statement.slice(0, keyEnd));
     if (key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
+    onKey?.(key);
     cursor += keyEnd + 1;
 
     if (inherited) {
@@ -409,6 +412,19 @@ function readQuotedValue(text: string, openIndex: number, quote: string): { raw:
     return { raw, next: i + 1 };
   }
   throw new ComposeEnvFileError('unterminated quoted value');
+}
+
+/**
+ * The assignment KEY names of an env file, in file order, without their values.
+ * Throws `ComposeEnvFileError` when the file uses syntax this Compose reader
+ * cannot reproduce, so a caller never treats a partially understood file as
+ * complete.
+ */
+export function composeEnvFileKeyNames(content: string): string[] {
+  const keys: string[] = [];
+  const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
+  parseEnvFileText(text, () => undefined, () => undefined, name => keys.push(name));
+  return [...new Set(keys)];
 }
 
 /**

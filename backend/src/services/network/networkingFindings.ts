@@ -222,7 +222,7 @@ function addTunnelExposureFindings(
     } else if ((intent === 'internal' || intent === 'same-node') && !flagged('exposure-intent-mismatch', service)) {
       out.push(finding(
         'exposure-intent-mismatch',
-        isCertainTunnelPath(tunnel.path) ? 'high' : 'medium',
+        isCertainTunnelPath(tunnel) ? 'high' : 'medium',
         intent === 'internal' ? 'Internal intent with tunnel access' : 'Same-node intent with tunnel access',
         `Service "${service}" is classified ${intent}. ${via}`,
         { stack: facts.stack, service },

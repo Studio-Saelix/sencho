@@ -16,6 +16,7 @@ import {
   DEFAULT_BRIDGE_KEY,
   detectTunnels,
   imageBaseName,
+  isCertainTunnelPath,
   tailscaleForwardFlags,
   tunnelExposureByService,
   type TunnelConnector,
@@ -75,6 +76,28 @@ describe('imageBaseName', () => {
   });
 });
 
+describe('provider dictionaries only match own keys', () => {
+  const names = ['constructor', 'toString', 'hasOwnProperty', 'valueOf'];
+
+  it('does not invent a connector from an inherited image or environment name', () => {
+    for (const name of names) {
+      for (const model of [
+        render({ edge: { image: `registry.example/${name}:1` }, app }),
+        render({ edge: { image: 'example/edge:1', environment: Object.fromEntries([[name, 'ordinary']]) }, app }),
+      ]) {
+        expect(detectTunnels(model)).toEqual([]);
+        const exposure = deriveStackExposure(model, 'proj', 1);
+        expect(exposure.services.some(service => service.tunnel !== undefined)).toBe(false);
+        expect(byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'tunnel-exposure')).toEqual([]);
+        expect(byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled')).toEqual([]);
+        const facts = assembleStackNetworkFacts('proj', model, null, null);
+        expect(facts.tunnels).toEqual([]);
+        expect(facts.services.every(service => service.tunnel === undefined)).toBe(true);
+      }
+    }
+  });
+});
+
 describe('detectTunnels: Cloudflare Tunnel', () => {
   it('detects a remotely managed connector and every service it shares a network with, routing unverified', () => {
     const model = render({
@@ -92,9 +115,15 @@ describe('detectTunnels: Cloudflare Tunnel', () => {
     expectNoSecrets(describeTunnelConnector(c));
   });
 
-  it('treats a cloudflared sidecar in the app namespace as a certain reach', () => {
+  it('keeps a cloudflared sidecar in the app namespace locally reachable but unverified', () => {
     const model = render({ app, cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app', environment: { TUNNEL_TOKEN: CF_TOKEN } }, db });
-    expect(reachOf(connector(model, 'cloudflared'))).toEqual({ app: 'shared-namespace', db: 'shared-network' });
+    const c = connector(model, 'cloudflared');
+    expect(reachOf(c)).toEqual({ app: 'shared-namespace', db: 'shared-network' });
+    const tunnel = tunnelExposureByService([c]).get('app')!;
+    expect(tunnel.path).toBe('shared-namespace');
+    expect(isCertainTunnelPath(tunnel)).toBe(false);
+    expect(describeServiceTunnel(tunnel)).toContain('whether Cloudflare\'s ingress routes incoming requests there is unverified');
+    expect(describeTunnelConnector(c).message).toContain('whether Cloudflare\'s ingress routes incoming requests there is unverified');
   });
 
   it('notes a locally configured tunnel when a cloudflared config directory is mounted', () => {
@@ -596,6 +625,36 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(reachOf(c)).toEqual({ legacy: 'shared-network', sidecar: 'shared-network' });
   });
 
+  it('keeps Cloudflare ingress unverified in both namespace directions', () => {
+    const directions = [
+      // The connector runs in the application's namespace.
+      render({ app, cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app', environment: { TUNNEL_TOKEN: CF_TOKEN } }, db }),
+      // The application runs in the connector's namespace.
+      render({ app: { ...app, network_mode: 'service:cloudflared' }, cloudflared: { image: 'cloudflare/cloudflared', environment: { TUNNEL_TOKEN: CF_TOKEN } }, db }),
+    ];
+    for (const model of directions) {
+      const c = connector(model, 'cloudflared');
+      expect(reachOf(c)).toEqual({ app: 'shared-namespace', db: 'shared-network' });
+      const tunnel = tunnelExposureByService([c]).get('app')!;
+      expect(tunnel).toMatchObject({ provider: 'cloudflared', path: 'shared-namespace' });
+      expect(isCertainTunnelPath(tunnel)).toBe(false);
+      const exposure = deriveStackExposure(model, 'proj', 1);
+      const settled = settleTunnelExposure(1, [exposure], () => ({ available: true, stackIntent: null, serviceIntents: { app: 'internal' }, accessUrlPorts: new Set(), hasAccessUrls: false }));
+      expect(settled[0].services.find(service => service.service === 'app')?.publiclyExposed).toBe(false);
+      const findings = byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled');
+      expect(findings.find(finding => finding.service === 'app')?.severity).toBe('warning');
+      expect(findings.find(finding => finding.service === 'app')?.remediation).toContain('Confirm the tunnel does not route');
+      const facts = assembleStackNetworkFacts('proj', model, null, null);
+      vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+        getStackExposureIntents: vi.fn().mockReturnValue([{ service: '', intent: 'internal' }]),
+        getStackDossier: vi.fn().mockReturnValue(null),
+      } as unknown as DatabaseService);
+      const live = buildNodeNetworkingFindings(1, null, [facts], []).filter(finding => finding.kind === 'exposure-intent-mismatch');
+      expect(live.find(finding => finding.service === 'app')?.severity).toBe('medium');
+      vi.restoreAllMocks();
+    }
+  });
+
   it('does not loop or invent a reach on a network_mode cycle', () => {
     const model = render({
       cloudflared: { image: 'cloudflare/cloudflared' },
@@ -714,6 +773,26 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--advertise-exit-node', 'TS_EXTRA_ARGS=--accept-dns=false'])).toEqual([]);
   });
 
+  it('honors the final occurrence of a repeated forwarding flag', () => {
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=true --advertise-exit-node=false' })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=false --advertise-exit-node=true' })).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/24 --advertise-routes=' })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes= --advertise-routes=10.0.0.0/24' })).toEqual(['--advertise-routes']);
+    // Both dash forms, and a later occurrence in the other form still wins.
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-routes=10.0.0.0/24 --advertise-routes=' })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-exit-node --advertise-exit-node=0' })).toEqual([]);
+    // The final value is what Compose interpolates, map or list form.
+    const lookup = (name: string) => name === 'ARGS' ? '--advertise-routes=10.0.0.0/24 --advertise-routes=' : undefined;
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${ARGS}' }, lookup)).toEqual([]);
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=${ARGS}'], lookup)).toEqual([]);
+    expect(tailscaleForwardFlags(['TS_AUTHKEY=k', '${TS_ENV}'], (name) => name === 'TS_ENV' ? 'TS_EXTRA_ARGS=--advertise-exit-node' : undefined)).toEqual(['--advertise-exit-node']);
+    const model = render({
+      ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/24 --advertise-routes=' } },
+      db,
+    });
+    expect(tunnelExposureByService(detectTunnels(model)).has('db')).toBe(false);
+  });
+
   it('expands an uninterpolated TS_EXTRA_ARGS with the stack\'s variables the way Compose does', () => {
     const vars: Record<string, string> = { TS_ARGS: '--advertise-routes=10.0.0.0/24', QUIET: '--accept-dns=false', EMPTY: '' };
     const lookup = (name: string) => vars[name];
@@ -757,7 +836,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const c = connector(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }), 'cloudflared');
     const via = describeServiceTunnel(tunnelExposureByService([c]).get('app')!);
     expect(via).toBe('It shares a network with the Cloudflare Tunnel connector "cloudflared", so anyone on the internet through Cloudflare\'s edge can reach it if the tunnel routes there; that routing is unverified. Cloudflare Access, where it is set up, can restrict who gets through.');
-    expect(describeTunnelConnector(c).message).toContain('through Cloudflare\'s edge. Cloudflare Access, where it is set up, can restrict who gets through.');
+    expect(describeTunnelConnector(c).message).toContain('through Cloudflare\'s edge, wherever the tunnel\'s ingress routes there. Cloudflare Access, where it is set up, can restrict who gets through.');
   });
 });
 
@@ -833,7 +912,7 @@ describe('cached Doctor tunnel findings', () => {
   it('retires a cached internal-but-tunneled card once the service\'s tunnel path changes', () => {
     const sidecar = render({ cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app' }, app });
     const cached = runRules(ctx(sidecar, { stackIntent: 'internal' })).filter(f => f.ruleId === 'exposure-internal-tunneled');
-    expect(cached.map(f => [f.service, f.severity])).toEqual([['app', 'high']]);
+    expect(cached.map(f => [f.service, f.severity])).toEqual([['app', 'warning']]);
     vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
       getLatest: vi.fn().mockReturnValue({ status: 'warning', ranAt: 1, findings: cached }),
     } as unknown as ComposeDoctorService);
@@ -841,7 +920,7 @@ describe('cached Doctor tunnel findings', () => {
       nodeId: 1, stackNames: ['proj'], stackFacts: [assembleStackNetworkFacts('proj', model, null, null)], snapshot: null,
     });
     expect(merged(sidecar).map(f => f.kind)).toEqual(['exposure-intent-mismatch']);
-    // The sidecar moved onto a shared network: the cached high-severity card no longer describes it.
+    // The sidecar moved onto a shared network: the cached cloudflared-namespace card no longer describes it.
     expect(merged(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }))).toEqual([]);
   });
 });
@@ -915,7 +994,47 @@ describe('Networking overview counters with tunnels', () => {
 
     const aggregate = await buildNodeNetworkingAggregate(90_684, {});
     expect(aggregate.networks.find(n => n.name === 'proj_default')?.exposureSummary?.unclassifiedStackCount).toBe(1);
+    expect(aggregate.overview.unknownExposureStackCount).toBe(1);
     const card = aggregate.findings.find(f => f.kind === 'tunnel-exposure');
     expect(card?.message).toContain('It is also on the Sencho Mesh network');
+  });
+
+  it('completes the aggregate for an inherited image or environment name without inventing a connector', async () => {
+    const { buildNodeNetworkingAggregate } = await import('../services/network/networkingAggregate');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const DockerController = (await import('../services/DockerController')).default;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({ getStacks: vi.fn().mockResolvedValue(['proj']) } as unknown as ReturnType<typeof FileSystemService.getInstance>);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({
+        rendered: JSON.stringify({
+          name: 'proj',
+          services: {
+            edge: { image: 'registry.example/constructor:1', environment: Object.fromEntries([['toString', 'ordinary']]), networks: { default: null } },
+            app: { image: 'example/app', networks: { default: null } },
+          },
+          networks: { default: { name: 'proj_default' } },
+        }),
+        stderr: '',
+      }),
+    } as unknown as ReturnType<typeof ComposeService.getInstance>);
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      getStackExposureIntents: vi.fn().mockReturnValue([]),
+      getStackDossier: vi.fn().mockReturnValue(null),
+      isMeshStackEnabled: vi.fn().mockReturnValue(false),
+      getNodeStackActivity: vi.fn().mockReturnValue([]),
+    } as unknown as DatabaseService);
+    vi.spyOn(ComposeDoctorService, 'getInstance').mockReturnValue({
+      getLatest: vi.fn().mockReturnValue({ status: 'never-run', ranAt: null, findings: [] }),
+    } as unknown as ComposeDoctorService);
+
+    const aggregate = await buildNodeNetworkingAggregate(90_685, {});
+    expect(aggregate.overview.exposedStackCount).toBe(0);
+    expect(aggregate.overview.unknownExposureStackCount).toBe(0);
+    expect(aggregate.stackFacts[0].tunnels).toEqual([]);
   });
 });

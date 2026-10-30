@@ -639,7 +639,7 @@ describe('GET /api/security/overview', () => {
     });
   });
 
-  it('settles cached tunnel exposure against the intent: unverified routing is taken at its word, a shared namespace conflicts', async () => {
+  it('settles cached tunnel exposure against the intent: unverified routing is taken at its word, a certain namespace conflicts', async () => {
     const now = Date.now();
     for (const ref of ['tun-net:1', 'tun-ns:1']) {
       const scanId = db().createVulnerabilityScan({
@@ -660,7 +660,7 @@ describe('GET /api/security/overview', () => {
       computedAt: now,
       services: [
         { service: 'app', image: 'tun-net:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-network') },
-        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: tunnel('shared-namespace') },
+        { service: 'admin', image: 'tun-ns:1', publiclyExposed: true, reason: 'tunnel', bindings: [], tunnel: { connector: 'tailscale', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' } },
       ],
     }), now);
     db().setStackExposureIntent(1, 'web', '', 'internal', 'admin');

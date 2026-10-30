@@ -2,21 +2,46 @@
  * A cheap per-node networking summary for the Fleet view filter: which stacks
  * are exposed beyond loopback (published ports, host networking, or a tunnel
  * connector), which are exposed without an exposure intent,
- * and which have network drift. It reads each stack's compose with the light
- * dependency parser (no `docker compose config` render) and one Docker snapshot,
- * so it stays inexpensive across a node's full stack set.
+ * and which have network drift. It reads each stack's authored Compose layers
+ * with the light dependency parser (no `docker compose config` render) and one
+ * Docker snapshot, so it stays inexpensive across a node's full stack set.
+ *
+ * Tunnel detection needs the inputs Compose actually uses. The summary resolves
+ * the deploy spec's layers, `COMPOSE_FILE`, auto-discovered override files,
+ * service `env_file` KEY names, and interpolation, and follows networks and
+ * namespaces the same way the detailed views do. When an input cannot be read
+ * completely (a required env file, an include or extends, an unresolved
+ * template in a detection field, or a layer selector it cannot reproduce), the
+ * stack is reported as unreadable rather than counted as not exposed.
  */
+import path from 'path';
 import DockerController, { type DependencySnapshot } from '../DockerController';
 import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
-import { parseComposeDependencies, type DeclaredCompose } from '../../helpers/composeDependencyParse';
-import { detectTunnels, tunnelExposureByService } from './tunnelDetection';
+import { NodeRegistry } from '../NodeRegistry';
+import {
+  mergeDeclaredCompose,
+  parseComposeDependencies,
+  type DeclaredCompose,
+} from '../../helpers/composeDependencyParse';
+import {
+  detectTunnels,
+  tailscaleForwardFlags,
+  tunnelExposureByService,
+  type TailscaleForwardFlag,
+  type TunnelDetectionModel,
+} from './tunnelDetection';
 import { assembleStackDrift } from '../DriftDetectionService';
 import { resolveManagedMeshAttachment } from './managedMeshAttachment';
 import { isHostNetwork, isLoopback } from './normalize';
 import { getErrorMessage } from '../../utils/errors';
-import { composeInterpolation } from '../../utils/authoredComposeArgs';
-import { ComposeEnvFileError } from '../../utils/composeDotenv';
+import {
+  authoredComposeFileArgs,
+  composeFileEnvVarSelection,
+  composeInterpolation,
+} from '../../utils/authoredComposeArgs';
+import { COMPOSE_OVERRIDE_FILENAMES } from '../../utils/composeFilenames';
+import { ComposeEnvFileError, ComposeEnvFiles, composeEnvFileKeyNames, type ComposeEnvLookup } from '../../utils/composeDotenv';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { isDebugEnabled } from '../../utils/debug';
 
@@ -33,42 +58,163 @@ export interface NodeNetworkingSummary {
   unknownExposure: NetworkingSummaryBucket;
   /** Stacks whose running networking disagrees with the Compose file. */
   networkDrift: NetworkingSummaryBucket;
+  /** Stacks whose effective Compose inputs could not be fully read, so tunnel
+   *  exposure is unknown rather than absent. Absent from a node that predates
+   *  this field. */
+  unreadable?: NetworkingSummaryBucket;
 }
 
 const bucket = (stacks: string[]): NetworkingSummaryBucket => ({ count: stacks.length, stacks });
 
-/** Services a tunnel connector reaches, from the light parse (raw YAML; `TS_EXTRA_ARGS` may be interpolated, see `withTailscaleArgsInterpolated`). */
-function tunneledServices(declared: DeclaredCompose): Set<string> {
-  const connectors = detectTunnels({
-    services: declared.services.map(s => ({
-      name: s.name,
-      image: s.image,
-      envKeys: s.envKeys ?? [],
-      networkMode: s.networkMode,
-      networks: s.networks.map(key => ({ key })),
-      ports: s.ports,
-      commandHints: s.commandHints,
-      tailscaleFlags: s.tailscaleFlags,
-    })),
-    networks: Object.fromEntries(Object.entries(declared.networks).map(([key, r]) => [key, { name: r.name ?? key, external: r.external }])),
-  });
-  return new Set(tunnelExposureByService(connectors).keys());
+interface ComposeLayer {
+  name: string;
+  content: string;
+}
+
+interface ComposeContents {
+  layers: ComposeLayer[];
+  /** Compose's project directory, where relative `env_file:` paths resolve. */
+  projectDir: string;
+  /** A layer selector or override could not be read, so the layer set is incomplete. */
+  opaque: boolean;
+}
+
+interface TunnelInputs {
+  declared: DeclaredCompose;
+  tunneled: Set<string>;
+  unreadable: boolean;
+}
+
+function isMissingFile(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function holdsTemplate(value: string | undefined): boolean {
+  return value !== undefined && /\$(?:\{|\$|[A-Za-z_])/.test(value.replace(/\$\$/g, ''));
+}
+
+/** A post-parse field that can still hide a connector behind an unexpanded template. */
+function unresolvedDetectionField(declared: DeclaredCompose): boolean {
+  return declared.services.some(service =>
+    holdsTemplate(service.image)
+    || holdsTemplate(service.networkMode)
+    || service.networks.some(holdsTemplate)
+    || (service.envKeys ?? []).some(holdsTemplate)
+    || (service.envFiles ?? []).some(entry => holdsTemplate(entry.path)),
+  );
+}
+
+/** Read the primary compose file plus the auto-discovered override, if any. */
+async function readMainLayers(nodeId: number, stack: string, stackDir: string, opaque: boolean): Promise<ComposeContents> {
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const main = await fsSvc.getStackContentWithMtime(stack);
+  const layers: ComposeLayer[] = [{ name: main.filename, content: main.content }];
+  let incomplete = opaque;
+  if (!opaque) {
+    const family = main.filename.startsWith('docker-compose.') ? 'docker-compose' : 'compose';
+    for (const override of COMPOSE_OVERRIDE_FILENAMES.filter((name) => name.startsWith(family))) {
+      const absolute = path.join(stackDir, override);
+      try {
+        await fsSvc.access(absolute);
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        incomplete = true;
+        continue;
+      }
+      try {
+        layers.push({ name: override, content: await fsSvc.readEnvFile(absolute) });
+      } catch {
+        incomplete = true;
+      }
+    }
+  }
+  return { layers, projectDir: stackDir, opaque: incomplete };
 }
 
 /**
- * Re-parse with the stack's interpolation variables when a Tailscale
- * `TS_EXTRA_ARGS` is `unresolved` in the raw YAML (a `${VAR}`, or a key with no
- * value), so these counters read the flags Compose Doctor and the stack views
- * read from the rendered model. The value stays unresolved, and counts as
- * forwarding, when no lookup describes the run (see `ComposeInterpolation`),
- * Compose would refuse the template, or the deploy spec or project env-file
- * selection cannot be read.
+ * The compose layers a run loads, in order, and the project directory relative
+ * `env_file:` paths resolve against. A selector that cannot be read falls back
+ * to the primary file and marks the result opaque, so known signals still
+ * count while absence is never claimed.
  */
-async function withTailscaleArgsInterpolated(nodeId: number, stack: string, content: string, declared: DeclaredCompose): Promise<DeclaredCompose> {
-  if (!declared.services.some(s => s.tailscaleFlags?.includes('unresolved'))) return declared;
+async function readComposeContents(nodeId: number, stack: string): Promise<ComposeContents> {
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId), stack);
+  let spec;
+  try {
+    spec = DatabaseService.getInstance().getGitSource(stack)?.applied_deploy_spec ?? null;
+  } catch {
+    return readMainLayers(nodeId, stack, stackDir, true);
+  }
+
+  if (spec && spec.files.length > 0) {
+    try {
+      const args = authoredComposeFileArgs(stack, nodeId);
+      const files: string[] = [];
+      let contextDir: string | undefined;
+      for (let index = 0; index < args.length; index += 1) {
+        if (args[index] === '-f' && args[index + 1] !== undefined) {
+          files.push(args[index + 1]);
+          index += 1;
+        } else if (args[index] === '--project-directory' && args[index + 1] !== undefined) {
+          contextDir = args[index + 1];
+          index += 1;
+        }
+      }
+      if (files.length > 0) {
+        const layers: ComposeLayer[] = [];
+        for (const file of files) {
+          layers.push({ name: file, content: await fsSvc.readEnvFile(path.resolve(stackDir, file)) });
+        }
+        return {
+          layers,
+          projectDir: contextDir ?? path.dirname(path.resolve(stackDir, files[0])),
+          opaque: false,
+        };
+      }
+    } catch {
+      return readMainLayers(nodeId, stack, stackDir, true);
+    }
+    return readMainLayers(nodeId, stack, stackDir, true);
+  }
+
+  let selection;
+  try {
+    selection = await composeFileEnvVarSelection(stack, nodeId);
+  } catch {
+    return readMainLayers(nodeId, stack, stackDir, true);
+  }
+  if (selection.kind === 'value') {
+    const files = selection.value.split(selection.pathSeparator).filter(Boolean);
+    try {
+      const layers: ComposeLayer[] = [];
+      for (const file of files) {
+        layers.push({ name: file, content: await fsSvc.readEnvFile(path.resolve(stackDir, file)) });
+      }
+      if (layers.length > 0) {
+        return {
+          layers,
+          projectDir: path.dirname(path.resolve(stackDir, files[0])),
+          opaque: false,
+        };
+      }
+    } catch {
+      return readMainLayers(nodeId, stack, stackDir, true);
+    }
+  }
+  return readMainLayers(nodeId, stack, stackDir, selection.kind === 'unknown' || selection.kind === 'invalid');
+}
+
+/**
+ * The stack's interpolation variables when a detection field needs them, with
+ * the same warnings the counters always gave when a value cannot be read. A
+ * failed lookup leaves the template in place, which `unresolvedDetectionField`
+ * then reports as unreadable.
+ */
+async function interpolationLookup(nodeId: number, stack: string): Promise<ComposeEnvLookup | undefined> {
   try {
     const interpolation = await composeInterpolation(stack, nodeId);
-    if (interpolation.kind === 'lookup') return parseComposeDependencies(content, { lookup: interpolation.lookup });
+    if (interpolation.kind === 'lookup') return interpolation.lookup;
     if (interpolation.reason === 'unreadable') {
       console.warn('[NetworkingSummary] Stack %s env files cannot be read the way Compose reads them; TS_EXTRA_ARGS left unresolved.',
         sanitizeForLog(stack));
@@ -76,7 +222,7 @@ async function withTailscaleArgsInterpolated(nodeId: number, stack: string, cont
       // Ordinary configurations this reader does not model, so not a warning.
       console.log('[NetworkingSummary:diag] Stack %s TS_EXTRA_ARGS left unresolved: %s.', sanitizeForLog(stack), interpolation.reason);
     }
-    return declared;
+    return undefined;
   } catch (error) {
     // A deploy spec or project env-file selection this run cannot read, or a
     // defect. Those messages carry stack names and paths, never an env value. A
@@ -86,8 +232,83 @@ async function withTailscaleArgsInterpolated(nodeId: number, stack: string, cont
       : error instanceof Error ? `${error.name}: ${error.message}` : 'unknown';
     console.warn('[NetworkingSummary] Stack %s interpolation failed; TS_EXTRA_ARGS left unresolved:',
       sanitizeForLog(stack), sanitizeForLog(detail));
-    return declared;
+    return undefined;
   }
+}
+
+/** The tunnel-reached services in the stack's effective inputs, and whether
+ *  those inputs were complete enough to establish absence. */
+async function readTunnelInputs(nodeId: number, stack: string, contents: ComposeContents): Promise<TunnelInputs | null> {
+  const initial = contents.layers.map(layer => parseComposeDependencies(layer.content));
+  if (initial.some(layer => layer.parseError)) return null;
+
+  const needsLookup = initial.some(layer => layer.services.some(service =>
+    service.needsInterpolation === true || service.tailscaleFlags?.includes('unresolved')));
+  const lookup = needsLookup ? await interpolationLookup(nodeId, stack) : undefined;
+  const parsed = lookup
+    ? contents.layers.map(layer => parseComposeDependencies(layer.content, { lookup }))
+    : initial;
+  if (parsed.some(layer => layer.parseError)) return null;
+
+  const declared = mergeDeclaredCompose(parsed);
+  let unreadable = contents.opaque || declared.hasInclude === true || declared.hasExtends === true;
+  if (!lookup && initial.some(layer => layer.services.some(service => service.needsInterpolation === true))) {
+    unreadable = true;
+  }
+  if (lookup && unresolvedDetectionField(declared)) unreadable = true;
+
+  const fsSvc = FileSystemService.getInstance(nodeId);
+  for (const service of declared.services) {
+    const keys = new Set(service.envKeys ?? []);
+    // Compose merges env_file values into the container environment, so a
+    // Tailscale forwarding flag can live there too. Later files override the
+    // same key; a service `environment` entry overrides every env_file.
+    let envFileFlags: TailscaleForwardFlag[] | undefined;
+    for (const envFile of service.envFiles ?? []) {
+      if (holdsTemplate(envFile.path)) {
+        unreadable = true;
+        continue;
+      }
+      try {
+        const content = await fsSvc.readEnvFile(path.resolve(contents.projectDir, envFile.path));
+        for (const key of composeEnvFileKeyNames(content)) keys.add(key);
+        const reader = new ComposeEnvFiles(() => undefined);
+        reader.read(content);
+        const extraArgs = reader.lookup('TS_EXTRA_ARGS');
+        if (extraArgs !== undefined) envFileFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
+      } catch (error) {
+        if (!envFile.required && isMissingFile(error)) continue;
+        // Keys and flags this file would add are unknown, so no absence can be claimed.
+        unreadable = true;
+      }
+    }
+    service.envKeys = [...keys];
+    if (!service.tailscaleArgsDeclared && envFileFlags !== undefined) service.tailscaleFlags = envFileFlags;
+  }
+
+  const model: TunnelDetectionModel = {
+    services: declared.services.map(service => ({
+      name: service.name,
+      image: service.image,
+      envKeys: service.envKeys ?? [],
+      networkMode: service.networkMode,
+      networks: service.networks.map(key => ({ key })),
+      ports: service.ports,
+      binds: (service.binds ?? []).map(target => ({ target })),
+      capAdd: service.capAdd,
+      devices: service.devices,
+      commandHints: service.commandHints,
+      tailscaleFlags: service.tailscaleFlags,
+    })),
+    networks: Object.fromEntries(Object.entries(declared.networks)
+      .map(([key, resource]) => [key, { name: resource.name ?? key, external: resource.external }])),
+  };
+
+  return {
+    declared,
+    tunneled: new Set(tunnelExposureByService(detectTunnels(model)).keys()),
+    unreadable,
+  };
 }
 
 export async function computeNodeNetworkingSummary(nodeId: number): Promise<NodeNetworkingSummary> {
@@ -95,8 +316,8 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
   const db = DatabaseService.getInstance();
   const stacks = await fsSvc.getStacks();
 
-  // One snapshot for the whole node; absent when Docker is unreachable, in which
-  // case drift is simply not computed (the declared signals still work).
+  // One snapshot for the whole node; absent when Docker is unreachable, in
+  // which case drift is simply not computed (the declared signals still work).
   let snapshot: DependencySnapshot | null = null;
   try {
     snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(stacks);
@@ -108,34 +329,36 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
   const exposed: string[] = [];
   const unknownExposure: string[] = [];
   const networkDrift: string[] = [];
+  const unreadable: string[] = [];
 
   for (const stack of stacks) {
-    let content: string;
+    let contents: ComposeContents;
     try {
-      content = await fsSvc.getStackContent(stack);
+      contents = await readComposeContents(nodeId, stack);
     } catch (error) {
       // Unreadable compose (missing, a dangling link or one outside its stack dir, or an I/O error).
       console.warn('[NetworkingSummary] Skipped stack %s, compose file unreadable:',
         sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
       continue;
     }
-    let declared = parseComposeDependencies(content);
-    if (declared.parseError) {
+    const inputs = await readTunnelInputs(nodeId, stack, contents);
+    if (inputs === null) {
       console.warn('[NetworkingSummary] Skipped stack %s, compose file does not parse.', sanitizeForLog(stack));
       continue;
     }
-    declared = await withTailscaleArgsInterpolated(nodeId, stack, content, declared);
+    if (inputs.unreadable) unreadable.push(stack);
+
+    const declared = inputs.declared;
 
     // A host-network service publishes every container port directly on the host,
     // so it counts as exposed (beyond loopback) and as publishing even with no
     // declared `ports:`. This keeps the summary honest about host networking,
     // matching the Compose Doctor's host-network finding.
     // A service a tunnel connector reaches is exposed without a published port.
-    const tunneled = tunneledServices(declared);
     const publishes = (s: typeof declared.services[number]): boolean =>
-      s.ports.length > 0 || isHostNetwork(s.networkMode) || tunneled.has(s.name);
+      s.ports.length > 0 || isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name);
     const publishesPort = declared.services.some(publishes);
-    if (declared.services.some(s => isHostNetwork(s.networkMode) || tunneled.has(s.name) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
+    if (declared.services.some(s => isHostNetwork(s.networkMode) || inputs.tunneled.has(s.name) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
 
     if (publishesPort) {
       // Unknown only when a publishing service is effectively unclassified: a
@@ -167,5 +390,10 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     }
   }
 
-  return { exposed: bucket(exposed), unknownExposure: bucket(unknownExposure), networkDrift: bucket(networkDrift) };
+  return {
+    exposed: bucket(exposed),
+    unknownExposure: bucket(unknownExposure),
+    networkDrift: bucket(networkDrift),
+    unreadable: bucket(unreadable),
+  };
 }

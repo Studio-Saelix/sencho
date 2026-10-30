@@ -65,10 +65,10 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         try {
             const res = await apiFetch('/fleet/networking-summary', { localOnly: true, signal: controller.signal });
             if (!res.ok) return;
-            const data = await res.json() as { nodes?: { nodeId: number; summary: { exposed: { count: number }; unknownExposure: { count: number }; networkDrift: { count: number } } | null }[] };
+            const data = await res.json() as { nodes?: { nodeId: number; summary: { exposed: { count: number }; unknownExposure: { count: number }; networkDrift: { count: number }; unreadable?: { count: number } } | null }[] };
             const map = new Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>();
             for (const n of data.nodes ?? []) {
-                if (n.summary) map.set(n.nodeId, { exposed: n.summary.exposed.count > 0, unknown: n.summary.unknownExposure.count > 0, drift: n.summary.networkDrift.count > 0 });
+                if (n.summary) map.set(n.nodeId, { exposed: n.summary.exposed.count > 0, unknown: n.summary.unknownExposure.count > 0 || (n.summary.unreadable?.count ?? 0) > 0, drift: n.summary.networkDrift.count > 0 });
             }
             setNetworkingByNode(map);
         } catch (error) {
