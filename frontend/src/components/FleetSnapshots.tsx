@@ -366,7 +366,7 @@ export default function FleetSnapshots() {
             } else {
                 const err = await res.json().catch(() => null);
                 if (res.status === 409 && err?.code === 'SNAPSHOT_MAPPING_CHANGED') {
-                    toast.error(err?.error || 'The destination mapping changed. Reload the snapshot and confirm again.');
+                    toast.error(err?.error || 'The confirmed destination is no longer current. Reload the snapshot and confirm again.');
                     // The confirmation is stale: reload so the operator sees the
                     // destination that is current before restoring anything.
                     await handleViewDetail(snapshot);
@@ -448,7 +448,7 @@ export default function FleetSnapshots() {
             } else {
                 const err = await res.json().catch(() => null);
                 if (res.status === 409 && err?.code === 'SNAPSHOT_MAPPING_CHANGED') {
-                    toast.error(err?.error || 'The destination mapping changed. Reload the snapshot and confirm again.');
+                    toast.error(err?.error || 'The confirmed destination is no longer current. Reload the snapshot and confirm again.');
                     await handleViewDetail(snapshot);
                 } else {
                     toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore snapshot.');

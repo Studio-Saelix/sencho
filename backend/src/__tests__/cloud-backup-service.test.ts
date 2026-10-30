@@ -628,6 +628,45 @@ describe('CloudBackupService archive fidelity', () => {
         expect(db.getSnapshot(importedId)?.stack_count).toBe(1000);
     });
 
+    it('round-trips long multibyte paths in plaintext and sealed archives', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        // Non-ASCII names long enough to force PAX records in the tar.
+        const nodeName = '復旧'.repeat(40);
+        const stackName = `stäck-${'x'.repeat(90)}`;
+        const snapshotId = db.createSnapshot('Long multibyte paths', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 7, nodeName, stackName, filename: 'compose.yaml', content: 'services: { web: {} }\n' },
+        ]);
+
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const plaintext = putObjectInput();
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(plaintext.Body) };
+            return {};
+        });
+        const importedPlain = await CloudBackupService.getInstance().importSnapshot(plaintext.Key);
+        const plainFile = db.getSnapshotFiles(importedPlain).find(file => file.filename === 'compose.yaml');
+        expect(plainFile?.node_name).toBe(nodeName);
+        expect(plainFile?.stack_name).toBe(stackName);
+
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const sealed = putObjectInput();
+        expect(isEncryptedArchive(sealed.Body)).toBe(true);
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(sealed.Body) };
+            return {};
+        });
+        const importedSealed = await CloudBackupService.getInstance().importSnapshot(sealed.Key, ARCHIVE_PASSPHRASE);
+        const sealedFile = db.getSnapshotFiles(importedSealed).find(file => file.filename === 'compose.yaml');
+        expect(sealedFile?.node_name).toBe(nodeName);
+        expect(sealedFile?.stack_name).toBe(stackName);
+    });
+
     it('refuses to publish an archive the importer would reject', async () => {
         seedCustomBucket();
         const db = DatabaseService.getInstance();

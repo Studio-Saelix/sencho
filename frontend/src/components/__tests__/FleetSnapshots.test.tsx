@@ -172,7 +172,7 @@ describe('FleetSnapshots restore destination binding', () => {
           ok: false,
           status: 409,
           json: async () => ({
-            error: 'The destination mapping changed after the snapshot details loaded. Reload the snapshot and confirm the destinations again.',
+            error: 'The destination mapping for this snapshot is not the one this request confirmed. Reload the snapshot and confirm the destinations again.',
             code: 'SNAPSHOT_MAPPING_CHANGED',
           }),
         } as unknown as Response;
@@ -198,7 +198,7 @@ describe('FleetSnapshots restore destination binding', () => {
       expectedTargetNodeId: 1,
     }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
-      'The destination mapping changed after the snapshot details loaded. Reload the snapshot and confirm the destinations again.',
+      'The destination mapping for this snapshot is not the one this request confirmed. Reload the snapshot and confirm the destinations again.',
     ));
     // The stale confirmation sends the operator back to the current mapping.
     await waitFor(() => expect(detailLoads).toBeGreaterThan(1));

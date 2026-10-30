@@ -3201,7 +3201,7 @@ function planSnapshotRestoreTargets(
 /** The mapping the operator confirmed changed before the request arrived. */
 const SNAPSHOT_MAPPING_CHANGED = 'SNAPSHOT_MAPPING_CHANGED';
 const SNAPSHOT_MAPPING_CHANGED_ERROR =
-  'The destination mapping changed after the snapshot details loaded. Reload the snapshot and confirm the destinations again.';
+  'The destination mapping for this snapshot is not the one this request confirmed. Reload the snapshot and confirm the destinations again.';
 
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
 // when no usable dossier entry exists for that stack (no documentation, an
