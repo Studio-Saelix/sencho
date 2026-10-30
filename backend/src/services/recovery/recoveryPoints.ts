@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
-import { assertMetadataOnly, RecoveryError, redactRecoveryLogText } from './redaction';
+import { assertMetadataOnly, isRecoveryErrorClass, RecoveryError, redactRecoveryLogText } from './redaction';
 import { RECOVERY_POINT_SCHEMA_VERSION, VOLUME_PROTECTION_CAPABILITY_VERSION } from './types';
 import type {
   CaptureSummary,
@@ -160,6 +160,9 @@ const CONSISTENCY_CLASSES: ReadonlySet<ConsistencyClass> = new Set<ConsistencyCl
   'crash_consistent_live', 'crash_consistent_stopped', 'unknown',
 ]);
 
+/** Engine snapshot ids are short hashes; anything longer is not one. */
+const MAX_SNAPSHOT_ID_LENGTH = 128;
+
 const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
 
 /**
@@ -171,6 +174,7 @@ const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isI
  */
 function sanitizeEvidence(evidence: PointCaptureEvidence): PointCaptureEvidence {
   if (typeof evidence?.snapshotId !== 'string' || evidence.snapshotId.trim() === '') throw new Error('snapshot id missing');
+  if (evidence.snapshotId.length > MAX_SNAPSHOT_ID_LENGTH) throw new Error('snapshot id too long');
   if (!CONSISTENCY_CLASSES.has(evidence.consistency)) throw new Error('consistency class invalid');
   const c = evidence.capture;
   if (!c || !isCount(c.fileCount) || !isCount(c.byteCount) || !isCount(c.skippedCount)) throw new Error('capture counts invalid');
@@ -192,7 +196,7 @@ function sanitizeEvidence(evidence: PointCaptureEvidence): PointCaptureEvidence 
 function loggableSnapshot(outcome: PointFinalization): string {
   if (outcome.status !== 'succeeded' && outcome.status !== 'partial') return '';
   const id: unknown = outcome.evidence?.snapshotId;
-  if (typeof id !== 'string' || id.length > 128 || redactRecoveryLogText(id) !== id) return '';
+  if (typeof id !== 'string' || id.length > MAX_SNAPSHOT_ID_LENGTH || redactRecoveryLogText(id) !== id) return '';
   return ` (snapshot ${sanitizeForLog(id)})`;
 }
 
@@ -259,7 +263,8 @@ export class RecoveryPointStore {
     const current = this.require(pointId);
     if (current.status !== 'pending') {
       // The snapshot an engine reports late may exist in the repository with no
-      // record pointing at it; its id goes in the log so it can be found.
+      // record pointing at it; its id goes in the log, when it is safe to print,
+      // so it can be found.
       console.warn(
         '[Recovery] Ignored a late %s completion for point %s, already %s%s',
         outcome.status, pointId, current.status, loggableSnapshot(outcome),
@@ -287,6 +292,9 @@ export class RecoveryPointStore {
         JSON.stringify(evidence.exclusions), now, pointId,
       );
     } else {
+      if (outcome.status === 'failed' && !isRecoveryErrorClass(outcome.errorClass)) {
+        throw new RecoveryError('invalid_request');
+      }
       db.prepare(`
         UPDATE recovery_points SET status = ?, failure_class = ?, completed_at = ? WHERE id = ?
       `).run(

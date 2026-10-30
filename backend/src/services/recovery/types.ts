@@ -383,9 +383,9 @@ export type CreatePointRequest = {
 
 /**
  * Restore targets. Overwrite of a live destination is a separate, staged mode,
- * pinned to the generation token the operator saw (as a point's `begin` is), so
- * a volume recreated since then is refused even before the identity store has
- * observed the recreate.
+ * pinned to the generation token the operator saw. The executor must compare it
+ * with a fresh observation of the storage, not only the stored identity, so a
+ * volume recreated since then is refused.
  */
 export type RestoreTarget =
   | { mode: 'new_volume'; volumeName: string }

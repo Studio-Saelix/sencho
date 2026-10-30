@@ -35,7 +35,7 @@ import type {
  * (for a queued or a running operation) and a lock owner's re-acquire both
  * require the current epoch, so even if boot reconciliation failed, an
  * interrupted operation and its locks stay closed until a later boot settles
- * them or someone reviews the lock.
+ * them (after which a stale lock can be released on review).
  */
 
 interface OperationRow {
@@ -185,9 +185,10 @@ export class RecoveryOperationStore {
    * a late or duplicated completion cannot turn a failure into a success; one
    * that disagrees with the stored outcome is logged. An operation cannot end
    * `succeeded` or `partial` while one of its points is still pending: the point
-   * is finalized first. Any other ending settles the operation's pending points
-   * in the same transaction (`failed` with the operation's class, otherwise
-   * `completion_unknown`), so a point never outlives its operation as pending.
+   * is finalized first. Any other ending settles the operation's own pending
+   * points in the same transaction (`failed` with the operation's class,
+   * otherwise `completion_unknown`). A point begun after its operation finished
+   * stays pending until the next boot settles it.
    * Locks are released on a known outcome and turned stale on
    * `completion_unknown`, which needs review before the storage is reused.
    */
@@ -206,8 +207,8 @@ export class RecoveryOperationStore {
       if (isTerminal(current.state)) {
         if (current.state !== outcome.state || current.errorClass !== errorClass) {
           console.warn(
-            '[Recovery] Ignored a late %s completion for operation %s, already %s',
-            outcome.state, id, current.state,
+            '[Recovery] Ignored a late %s (%s) completion for operation %s, already %s (%s)',
+            outcome.state, errorClass ?? 'no class', id, current.state, current.errorClass ?? 'no class',
           );
         }
         return current;

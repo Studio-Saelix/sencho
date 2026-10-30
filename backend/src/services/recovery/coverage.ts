@@ -136,8 +136,9 @@ export function evaluateCoverage(input: CoverageInput): CoverageVerdict {
 
   // Shared storage is one root however many aliases reach it. When aliases
   // disagree, the worst answer wins (unknown evidence over a plain uncovered
-  // reason over covered); between two of equal rank the first is kept, and both
-  // lead to the same verdict, so the verdict does not depend on input order.
+  // reason over covered); between two of equal rank the first is kept. Both
+  // lead to the same state and reason, so the verdict does not depend on input
+  // order (the kept root's own reason may).
   const byKey = new Map<string, RootCoverage>();
   const roots: RootCoverage[] = [];
   for (const root of input.roots) {

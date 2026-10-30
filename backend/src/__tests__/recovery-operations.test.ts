@@ -102,9 +102,16 @@ describe('operations', () => {
     expect(failed.errorDetail).toBe('The recovery point failed its integrity check.');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(s.finish(operation.id, { state: 'succeeded' }, 200)).toMatchObject({ state: 'failed', completedAt: 100 });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'succeeded', operation.id, 'failed');
-    warn.mockRestore();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'succeeded', 'no class', operation.id, 'failed', 'integrity_mismatch');
+    warn.mockClear();
+    // Same ending with a different class is a disagreement too, and is logged.
+    expect(s.finish(operation.id, { state: 'failed', errorClass: 'internal' }, 250)).toMatchObject({ errorClass: 'integrity_mismatch' });
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockClear();
+    // An exact duplicate is silent.
     expect(s.finish(operation.id, { state: 'failed', errorClass: 'integrity_mismatch' }, 300)).toMatchObject({ completedAt: 100 });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
     expect(classOf(() => s.markRunning(operation.id))).toBe('invalid_request');
   });
 
@@ -138,6 +145,15 @@ describe('operations', () => {
       s.finish(op.id, ending);
       expect(points.RecoveryPointStore.getInstance().get(p.id)).toMatchObject({ status: 'completion_unknown', failureClass: 'interrupted' });
     }
+    // Another operation's pending point is left alone and can still finish.
+    const bystander = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    const bystanderPoint = beginPoint(st.id, 'g', repo.id, bystander.id);
+    const another = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    s.finish(another.id, { state: 'failed', errorClass: 'internal' });
+    const third = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    s.finish(third.id, { state: 'cancelled' });
+    expect(points.RecoveryPointStore.getInstance().get(bystanderPoint.id)?.status).toBe('pending');
+    expect(points.RecoveryPointStore.getInstance().finalize(bystanderPoint.id, { status: 'succeeded', evidence: evidence() }).status).toBe('succeeded');
     // A late success for the settled point is refused.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(classOf(() => points.RecoveryPointStore.getInstance().finalize(failedPoint.id, { status: 'succeeded', evidence: evidence() }))).toBe('invalid_request');

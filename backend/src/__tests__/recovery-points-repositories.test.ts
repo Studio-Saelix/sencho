@@ -87,6 +87,17 @@ describe('RecoveryPointStore', () => {
   it('records a failure with its class and no evidence', () => {
     const failed = store().finalize(beginRoot().id, { status: 'failed', errorClass: 'source_unreadable' });
     expect(failed).toMatchObject({ status: 'failed', failureClass: 'source_unreadable', snapshotId: null, capture: null });
+    const untyped = beginRoot();
+    expect(() => store().finalize(untyped.id, { status: 'failed' } as never)).toThrow(expect.objectContaining({ errorClass: 'invalid_request' }));
+    expect(store().get(untyped.id)?.status).toBe('pending');
+  });
+
+  it('logs the snapshot id of a late completion so the orphaned snapshot can be found', () => {
+    const p = store().finalize(beginRoot().id, { status: 'failed', errorClass: 'internal' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => store().finalize(p.id, { status: 'succeeded', evidence: evidence({ snapshotId: 'snap-late-1' }) })).toThrow(redaction.RecoveryError);
+    expect(warn.mock.calls[0]).toContain(' (snapshot snap-late-1)');
+    warn.mockRestore();
   });
 
   it('keeps path points scoped inside the root', () => {
@@ -145,7 +156,7 @@ describe('RecoveryPointStore', () => {
     expect(recoveryDb().prepare('DELETE FROM recovery_points WHERE id = ?').run(p.id).changes).toBe(1);
   });
 
-  it('ends a point failed when its evidence carries a secret, instead of leaving it pending', () => {
+  it('drops unknown evidence fields and ends a point failed on invalid or credential-shaped evidence', () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     // A field the contract does not know is dropped, never stored.
     const keyed = store().finalize(beginRoot().id, {
@@ -161,6 +172,12 @@ describe('RecoveryPointStore', () => {
       evidence: evidence({ snapshotId: 'RESTIC_PASSWORD=hunter2' }),
     })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
     expect(store().get(texted.id)?.status).toBe('failed');
+    // The refusal is logged without the credential-shaped snapshot id.
+    expect(JSON.stringify(err.mock.calls)).not.toContain('hunter2');
+    const oversized = beginRoot();
+    expect(() => store().finalize(oversized.id, {
+      status: 'succeeded', evidence: evidence({ snapshotId: 'a'.repeat(129) }),
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
     const malformed = beginRoot();
     expect(() => store().finalize(malformed.id, {
       status: 'succeeded',

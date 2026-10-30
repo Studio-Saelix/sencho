@@ -9,8 +9,9 @@ import type { RecoveryErrorClass } from './types';
  * API responses, audit rows and notifications carry a fixed error class and
  * its fixed sentence (`errorDetailFor`), never an engine message. A node-local
  * log line that carries engine output goes through `redactRecoveryLogText` or
- * `errorMessageForLog`. Point evidence is checked by `assertMetadataOnly`
- * before it is stored.
+ * `errorMessageForLog`. Point evidence is rebuilt from its known fields, and
+ * its snapshot id and consistency are checked by `assertMetadataOnly`, before
+ * it is stored.
  */
 
 const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
