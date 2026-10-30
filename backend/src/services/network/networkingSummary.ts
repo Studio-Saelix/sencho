@@ -8,11 +8,14 @@
  *
  * Tunnel detection needs the inputs Compose actually uses. The summary resolves
  * the deploy spec's layers, `COMPOSE_FILE`, auto-discovered override files,
- * service `env_file` KEY names, and interpolation, and follows networks and
- * namespaces the same way the detailed views do. When an input cannot be read
- * completely (a required env file, an include or extends, an unresolved
+ * YAML merge keys, service `env_file` KEY names plus the one `TS_EXTRA_ARGS`
+ * value (parsed with the stack's interpolation environment, then discarded),
+ * and interpolation, and follows networks and namespaces the same way the
+ * detailed views do. When an input cannot be read completely (a required env
+ * file, an include or extends, a `!reset` or `!override` tag, an unresolved
  * template in a detection field, or a layer selector it cannot reproduce), the
- * stack is reported as unreadable rather than counted as not exposed.
+ * stack is reported as unreadable rather than counted as not exposed. It does
+ * not apply Compose profiles, so a profile-gated connector counts as present.
  */
 import path from 'path';
 import DockerController, { type DependencySnapshot } from '../DockerController';
@@ -58,9 +61,11 @@ export interface NodeNetworkingSummary {
   unknownExposure: NetworkingSummaryBucket;
   /** Stacks whose running networking disagrees with the Compose file. */
   networkDrift: NetworkingSummaryBucket;
-  /** Stacks whose effective Compose inputs could not be fully read, so tunnel
-   *  exposure is unknown rather than absent. Absent from a node that predates
-   *  this field. */
+  /** Stacks whose effective Compose inputs could not be fully read (or whose
+   *  Compose file is missing or does not parse), so their exposure is unknown
+   *  rather than absent. A stack here can also sit in another bucket for what
+   *  was readable. Absent from a node that predates this field, whose
+   *  unreadable stacks are then not reported at all. */
   unreadable?: NetworkingSummaryBucket;
 }
 
@@ -83,6 +88,15 @@ interface TunnelInputs {
   declared: DeclaredCompose;
   tunneled: Set<string>;
   unreadable: boolean;
+}
+
+/** Why a stack is reported unreadable: a fixed reason and the error's code or
+ *  class name. Never the message, which can hold a path or an env value. */
+function noteUnreadable(stack: string, reason: string, error?: unknown): void {
+  const cause = error === undefined
+    ? ''
+    : ` (${sanitizeForLog(typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : error instanceof Error ? error.name : 'unknown')})`;
+  console.warn('[NetworkingSummary] Stack %s reported unreadable: %s%s.', sanitizeForLog(stack), reason, cause);
 }
 
 function isMissingFile(error: unknown): boolean {
@@ -122,12 +136,14 @@ async function readMainLayers(nodeId: number, stack: string, stackDir: string, o
         await fsSvc.access(absolute);
       } catch (error) {
         if (isMissingFile(error)) continue;
+        noteUnreadable(stack, 'the auto-discovered override cannot be checked', error);
         incomplete = true;
         break;
       }
       try {
         layers.push({ name: override, content: await fsSvc.readEnvFile(absolute) });
-      } catch {
+      } catch (error) {
+        noteUnreadable(stack, 'the auto-discovered override cannot be read', error);
         incomplete = true;
       }
       break;
@@ -148,7 +164,8 @@ async function readComposeContents(nodeId: number, stack: string): Promise<Compo
   let spec;
   try {
     spec = DatabaseService.getInstance().getGitSource(stack)?.applied_deploy_spec ?? null;
-  } catch {
+  } catch (error) {
+    noteUnreadable(stack, 'the deploy spec cannot be read', error);
     return readMainLayers(nodeId, stack, stackDir, true);
   }
 
@@ -177,16 +194,19 @@ async function readComposeContents(nodeId: number, stack: string): Promise<Compo
           opaque: false,
         };
       }
-    } catch {
+    } catch (error) {
+      noteUnreadable(stack, 'a deploy spec layer cannot be read', error);
       return readMainLayers(nodeId, stack, stackDir, true);
     }
+    noteUnreadable(stack, 'the deploy spec names no compose file');
     return readMainLayers(nodeId, stack, stackDir, true);
   }
 
   let selection;
   try {
     selection = await composeFileEnvVarSelection(stack, nodeId);
-  } catch {
+  } catch (error) {
+    noteUnreadable(stack, 'the COMPOSE_FILE selection cannot be read', error);
     return readMainLayers(nodeId, stack, stackDir, true);
   }
   if (selection.kind === 'value') {
@@ -203,9 +223,13 @@ async function readComposeContents(nodeId: number, stack: string): Promise<Compo
           opaque: false,
         };
       }
-    } catch {
+    } catch (error) {
+      noteUnreadable(stack, 'a COMPOSE_FILE layer cannot be read', error);
       return readMainLayers(nodeId, stack, stackDir, true);
     }
+  }
+  if (selection.kind === 'unknown' || selection.kind === 'invalid') {
+    noteUnreadable(stack, `the COMPOSE_FILE selection is ${selection.kind}`);
   }
   return readMainLayers(nodeId, stack, stackDir, selection.kind === 'unknown' || selection.kind === 'invalid');
 }
@@ -258,7 +282,13 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
   if (parsed.some(layer => layer.parseError)) return null;
 
   const declared = mergeDeclaredCompose(parsed);
-  let unreadable = contents.opaque || declared.hasInclude === true || declared.hasExtends === true;
+  let unreadable = contents.opaque
+    || declared.hasInclude === true
+    || declared.hasExtends === true
+    || declared.hasLayerTags === true;
+  if (declared.hasInclude || declared.hasExtends || declared.hasLayerTags) {
+    noteUnreadable(stack, 'the compose files use include, extends, or a !reset/!override tag');
+  }
   if (!lookup && initial.some(layer => layer.services.some(service => service.needsInterpolation === true))) {
     unreadable = true;
   }
@@ -277,6 +307,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     let envFileTemplate = false;
     for (const envFile of service.envFiles ?? []) {
       if (holdsTemplate(envFile.path)) {
+        noteUnreadable(stack, 'a service env_file path is an unresolved template');
         unreadable = true;
         continue;
       }
@@ -288,6 +319,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       } catch (error) {
         if (!envFile.required && isMissingFile(error)) continue;
         // Keys and flags this file would add are unknown, so no absence can be claimed.
+        noteUnreadable(stack, 'a service env_file cannot be read', error);
         unreadable = true;
       }
     }
@@ -312,8 +344,8 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       commandHints: [...(service.commandHints ?? []), ...(service.entrypointHints ?? [])],
       tailscaleFlags: service.tailscaleFlags,
     })),
-    networks: Object.fromEntries(Object.entries(declared.networks)
-      .map(([key, resource]) => [key, { name: resource.name ?? key, external: resource.external }])),
+    networks: Object.assign(Object.create(null) as TunnelDetectionModel['networks'], Object.fromEntries(Object.entries(declared.networks)
+      .map(([key, resource]) => [key, { name: resource.name ?? key, external: resource.external }]))),
   };
 
   return {
@@ -354,9 +386,17 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
       unreadable.push(stack);
       continue;
     }
-    const inputs = await readTunnelInputs(nodeId, stack, contents);
+    let inputs: TunnelInputs | null;
+    try {
+      inputs = await readTunnelInputs(nodeId, stack, contents);
+    } catch (error) {
+      // A defect in one stack's inputs must not hide every other stack's summary.
+      noteUnreadable(stack, 'reading its tunnel inputs failed', error);
+      unreadable.push(stack);
+      continue;
+    }
     if (inputs === null) {
-      console.warn('[NetworkingSummary] Skipped stack %s, compose file does not parse.', sanitizeForLog(stack));
+      console.warn('[NetworkingSummary] Skipped stack %s, a compose layer does not parse.', sanitizeForLog(stack));
       unreadable.push(stack);
       continue;
     }
@@ -390,7 +430,9 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     }
 
     if (snapshot) {
-      // declared.parseError is already excluded above, so the drift report is authoritative.
+      // Drift compares the runtime with what was read. A stack in the unreadable
+      // bucket may therefore show drift for a network a layer it could not read
+      // would have declared; the unreadable bucket is the caveat.
       const containers = snapshot.containers.filter(c => c.stack === stack);
       const managedNetworkAttachment = await resolveManagedMeshAttachment(nodeId, stack);
       const report = assembleStackDrift({

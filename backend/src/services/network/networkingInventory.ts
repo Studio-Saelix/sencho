@@ -112,7 +112,7 @@ function buildExposureSummary(
       if (!attachedToNetwork(svc, networkName, facts, byName)) continue;
       const owner = namespaceOwner(svc.name, byName);
       const publishes = svc.publishedPorts.length > 0 || isHostNetwork(owner?.networkMode) || svc.tunnel !== undefined;
-      // A public-edge tunnel reaches the internet, so the network carries
+      // A public-edge tunnel can reach the internet, so the network carries
       // exposure beyond loopback even when no host port is published.
       if (svc.publishedPorts.some(p => p.allInterfaces) || isHostNetwork(owner?.networkMode) || svc.tunnel?.scope === 'public-edge') stackBroad = true;
       const intent = byService.get(svc.name) ?? stackIntent;

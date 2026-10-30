@@ -11,8 +11,10 @@
  * `command`/`entrypoint` name one of a fixed set of cloudflared subcommands, and
  * whether `TS_EXTRA_ARGS` names one of two Tailscale forwarding flags. Command
  * tokens and that one value are scanned for those fixed names and nothing else
- * is kept; no other environment value, label value, or file content is read,
- * so a tunnel token can never reach a finding or a log.
+ * is kept. The detector is handed environment KEY names and that one value; it
+ * reads no other environment value, label value, or file content. (The node
+ * summary parses a service's env files to supply them and discards the rest.)
+ * A tunnel token therefore never reaches a finding or a log.
  *
  * Which services a connector actually routes to is configured outside the
  * Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard
@@ -222,9 +224,13 @@ export function cloudflaredCommandHints(command: unknown, entrypoint: unknown): 
 const GO_FALSE: ReadonlySet<string> = new Set(['0', 'f', 'F', 'false', 'FALSE', 'False']);
 
 /** Expand a list entry the way Compose interpolates it, keeping it as written
- *  when no lookup answers or Compose would refuse the template. */
+ *  when no lookup is supplied or Compose would refuse the template. */
 function interpolateTunnelEntry(value: string, lookup: ComposeEnvLookup | undefined): string {
-  if (!lookup || !/\$(?:\{|\$|[A-Za-z_])/.test(value.replace(/\$\$/g, ''))) return value;
+  // Only an entry whose name is itself a template (`${ENTRY}`) is expanded here;
+  // a plain `TS_EXTRA_ARGS=<value>` keeps its value for the single expansion in
+  // `readableExtraArgs`, so a `$` the first pass produces is not expanded again.
+  const name = value.split('=')[0];
+  if (!lookup || !/\$(?:\{|\$|[A-Za-z_])/.test(name.replace(/\$\$/g, ''))) return value;
   try {
     return expandComposeEnvTemplate(value, lookup);
   } catch (error) {
@@ -439,7 +445,8 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
       }
     }
 
-    const networkName = (key: string) => model.networks[key]?.name ?? key;
+    const declaredNetwork = (key: string) => (Object.prototype.hasOwnProperty.call(model.networks, key) ? model.networks[key] : undefined);
+    const networkName = (key: string) => declaredNetwork(key)?.name ?? key;
     const keys = [...connectorNetworks].filter(key => key !== DEFAULT_BRIDGE_KEY);
     connectors.push({
       service: svc.name,
@@ -452,7 +459,7 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
       meshAttached: keys.some(key => networkName(key) === SENCHO_MESH_NETWORK)
         || (options.meshManaged === true && declaresNoNetworkMode(owner)),
       externalNetworks: keys
-        .filter(key => model.networks[key]?.external === true && networkName(key) !== SENCHO_MESH_NETWORK)
+        .filter(key => declaredNetwork(key)?.external === true && networkName(key) !== SENCHO_MESH_NETWORK)
         .map(networkName),
       reaches,
     });
@@ -553,7 +560,7 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const certain = byPath('shared-namespace');
   const networked = byPath('shared-network');
   const hosted = byPath('host-network');
-  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${c.provider === 'cloudflared' ? 'can publish what it reaches to anyone on the internet through Cloudflare\'s edge, wherever the tunnel\'s ingress routes there' : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`}.${audienceCaveat(c.provider)}`];
+  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${c.provider === 'cloudflared' ? 'can publish whatever its ingress routes to, to anyone on the internet through Cloudflare\'s edge' : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`}.${audienceCaveat(c.provider)}`];
   if (certain.length > 0) {
     const { verb, they } = shareVerb(certain);
     sentences.push(c.provider === 'cloudflared'

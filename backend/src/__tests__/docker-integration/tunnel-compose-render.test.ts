@@ -119,6 +119,27 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     expect(summary.unreadable?.stacks).not.toContain(STACK);
   });
 
+  it('reads a service built from a YAML merge key the way Compose renders it', async () => {
+    fs.rmSync(path.join(stackDir, '.env'), { force: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'x-cf: &cf',
+      '  image: cloudflare/cloudflared:latest',
+      '  command: tunnel run',
+      'services:',
+      '  tun:',
+      '    <<: *cf',
+      '  app:',
+      '    image: busybox:1.36.1',
+      '    network_mode: service:tun',
+      '',
+    ].join('\n'));
+
+    expect(reachedServices(stackDir, ['compose.yaml'])).toEqual(['app']);
+    const summary = await computeNodeNetworkingSummary(1);
+    expect(summary.exposed.stacks).toContain(STACK);
+    expect(summary.unreadable?.stacks).not.toContain(STACK);
+  });
+
   it('reports an input Compose itself cannot render as unreadable, never as unexposed', async () => {
     fs.rmSync(path.join(stackDir, '.env'), { force: true });
     fs.rmSync(path.join(stackDir, 'override.yaml'), { force: true });

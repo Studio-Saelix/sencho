@@ -584,15 +584,6 @@ describe('networking summary', () => {
     expect(res.body.exposed.stacks).not.toContain(STACK);
   });
 
-  it('reports a required long-form port template as unreadable when the lookup is available but the value is not', async () => {
-    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
-    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
-      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
-    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
-    expect(res.body.unreadable.stacks).toContain(STACK);
-    expect(res.body.exposed.stacks).not.toContain(STACK);
-  });
-
   it('reports an unresolved detection field as unreadable when the interpolation lookup is unavailable', async () => {
     fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
@@ -600,6 +591,126 @@ describe('networking summary', () => {
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(res.body.unreadable.stacks).toContain(STACK);
     expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('resolves a YAML merge key before looking for a connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'x-cf: &cf',
+      '  image: cloudflare/cloudflared:latest',
+      '  command: tunnel run',
+      '  environment:',
+      '    - TUNNEL_TOKEN=tunnel-secret',
+      'services:',
+      '  tun:',
+      '    <<: *cf',
+      '  app:',
+      '    image: example/app:1',
+      '    network_mode: service:tun',
+      '',
+    ].join('\n'));
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tunnel-secret');
+  });
+
+  it('reports a layer that uses !reset or !override as unreadable rather than unexposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    network_mode: none\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  edge:\n    image: cloudflare/cloudflared:latest\n    network_mode: !reset null\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reads the mount target of a volume whose source is a template, and claims no absence when it cannot', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    volumes:\n      - ${CF_DIR:-./cf}:/etc/cloudflared\n  app:\n    image: example/app:1\n');
+    const readable = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(readable.body.unreadable.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    const opaque = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(opaque.body.unreadable.stacks).toContain(STACK);
+    expect(opaque.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('does not mistake a $$ escape for an unresolved template', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'IMG=example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: ${IMG}\n    command: ["sh", "-c", "exec app --home $$HOME"]\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, with its cause logged, when the deploy spec cannot be read', async () => {
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockImplementation(() => { throw new Error('database is locked'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(warn.mock.calls.some(call => format(...call).includes('deploy spec') && format(...call).includes(STACK))).toBe(true);
+  });
+
+  it('reports a stack as unreadable when the auto-discovered override cannot be read', async () => {
+    const override = path.join(stackDir, 'compose.override.yaml');
+    fs.writeFileSync(override, 'services:\n  ts:\n    image: tailscale/tailscale\n');
+    fs.chmodSync(override, 0o000);
+    try {
+      if (process.getuid?.() === 0) return;
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    } finally {
+      fs.chmodSync(override, 0o644);
+    }
+  });
+
+  it('reports a stack as unreadable when an optional env_file exists but cannot be read', async () => {
+    const envFile = path.join(stackDir, 'ts.env');
+    fs.writeFileSync(envFile, 'TS_AUTHKEY=tskey-secret\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file:\n      - path: ./ts.env\n        required: false\n  app:\n    image: example/app:1\n');
+    fs.chmodSync(envFile, 0o000);
+    try {
+      if (process.getuid?.() === 0) return;
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    } finally {
+      fs.chmodSync(envFile, 0o644);
+    }
+  });
+
+  it('reports a template in an env_file as unreadable when the interpolation lookup is unavailable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${ARGS}\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('keeps one stack\'s unexpected failure from failing the whole node summary', async () => {
+    const other = `${STACK}-other`;
+    const otherDir = path.join(process.env.COMPOSE_DIR as string, other);
+    fs.mkdirSync(otherDir, { recursive: true });
+    fs.writeFileSync(path.join(otherDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "0.0.0.0:8081:80"\n');
+    const parser = await import('../helpers/composeDependencyParse');
+    const real = parser.parseComposeDependencies;
+    const spy = vi.spyOn(parser, 'parseComposeDependencies').mockImplementation((content, options) => {
+      if (content.includes('8080')) throw new Error('unexpected');
+      return real(content, options);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+      expect(res.body.exposed.stacks).toContain(other);
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
   });
 
   it('rejects an unauthenticated request to the node-local summary', async () => {

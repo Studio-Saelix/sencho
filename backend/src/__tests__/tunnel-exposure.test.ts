@@ -691,6 +691,67 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(settled[0].services.find(service => service.service === 'constructor')?.publiclyExposed).toBe(false);
   });
 
+  it('does not let an inherited service name shadow the stack intent in the live findings', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared', environment: { TUNNEL_TOKEN: CF_TOKEN } },
+      constructor: { image: 'example/app:1' },
+    });
+    const facts = assembleStackNetworkFacts('proj', model, null, null);
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      getStackExposureIntents: vi.fn().mockReturnValue([{ service: '', intent: 'internal' }]),
+      getStackDossier: vi.fn().mockReturnValue(null),
+    } as unknown as DatabaseService);
+    const live = buildNodeNetworkingFindings(1, null, [facts], []).filter(finding => finding.kind === 'exposure-intent-mismatch');
+    vi.restoreAllMocks();
+    expect(live.find(finding => finding.service === 'constructor')?.severity).toBe('medium');
+  });
+
+  it('ranks a cloudflared namespace above a cloudflared shared network, and below a certain Tailscale reach', () => {
+    const model = render({
+      cf1: { image: 'cloudflare/cloudflared' },
+      cf2: { image: 'cloudflare/cloudflared', network_mode: 'service:app' },
+      app: { image: 'example/app:1', networks: { default: null } },
+    });
+    const picked = tunnelExposureByService(detectTunnels(model)).get('app');
+    expect(picked).toMatchObject({ provider: 'cloudflared', path: 'shared-namespace' });
+    const mixed = render({
+      cf: { image: 'cloudflare/cloudflared', network_mode: 'service:app' },
+      ts: { image: 'tailscale/tailscale', network_mode: 'service:app', environment: { TS_AUTHKEY: TS_KEY } },
+      app: { image: 'example/app:1', networks: { default: null } },
+    });
+    expect(tunnelExposureByService(detectTunnels(mixed)).get('app')).toMatchObject({ provider: 'tailscale', path: 'shared-namespace' });
+  });
+
+  it('keeps a cloudflared namespace chain locally reachable and unverified for every service in it', () => {
+    const model = render({
+      cf: { image: 'cloudflare/cloudflared', network_mode: 'service:base' },
+      base: { image: 'example/base:1', networks: { default: null } },
+      app: { image: 'example/app:1', network_mode: 'service:base' },
+    });
+    const reached = tunnelExposureByService(detectTunnels(model));
+    for (const name of ['base', 'app']) {
+      expect(reached.get(name)).toMatchObject({ provider: 'cloudflared', path: 'shared-namespace' });
+      expect(isCertainTunnelPath(reached.get(name)!)).toBe(false);
+    }
+    const settled = settleTunnelExposure(1, [deriveStackExposure(model, 'proj', 1)], () => ({
+      available: true, stackIntent: 'internal', serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
+    }));
+    for (const name of ['base', 'app']) expect(settled[0].services.find(service => service.service === name)?.publiclyExposed).toBe(false);
+  });
+
+  it('keeps a cloudflared namespace service exposed after settlement when its intent is public or unset', () => {
+    const model = render({
+      cf: { image: 'cloudflare/cloudflared', network_mode: 'service:app' },
+      app: { image: 'example/app:1', networks: { default: null } },
+    });
+    for (const intent of ['public', null] as const) {
+      const settled = settleTunnelExposure(1, [deriveStackExposure(model, 'proj', 1)], () => ({
+        available: true, stackIntent: intent, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
+      }));
+      expect(settled[0].services.find(service => service.service === 'app')?.publiclyExposed).toBe(true);
+    }
+  });
+
   it('does not loop or invent a reach on a network_mode cycle', () => {
     const model = render({
       cloudflared: { image: 'cloudflare/cloudflared' },
@@ -872,7 +933,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const c = connector(render({ cloudflared: { image: 'cloudflare/cloudflared' }, app }), 'cloudflared');
     const via = describeServiceTunnel(tunnelExposureByService([c]).get('app')!);
     expect(via).toBe('It shares a network with the Cloudflare Tunnel connector "cloudflared", so anyone on the internet through Cloudflare\'s edge can reach it if the tunnel routes there; that routing is unverified. Cloudflare Access, where it is set up, can restrict who gets through.');
-    expect(describeTunnelConnector(c).message).toContain('through Cloudflare\'s edge, wherever the tunnel\'s ingress routes there. Cloudflare Access, where it is set up, can restrict who gets through.');
+    expect(describeTunnelConnector(c).message).toContain('through Cloudflare\'s edge. Cloudflare Access, where it is set up, can restrict who gets through.');
   });
 });
 

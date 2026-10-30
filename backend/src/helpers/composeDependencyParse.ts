@@ -1,6 +1,6 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
-import { expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
+import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -84,6 +84,9 @@ export interface DeclaredCompose {
   hasInclude?: boolean;
   /** A service declares `extends:`, which this light parser does not follow. */
   hasExtends?: boolean;
+  /** The file uses a custom YAML tag such as Compose's `!reset` or `!override`,
+   *  which change how layers merge and which this light parser does not apply. */
+  hasLayerTags?: boolean;
   /** Set when the file could not be parsed; the other fields are then empty. */
   parseError?: string;
 }
@@ -109,13 +112,31 @@ function envKeyNames(env: unknown, lookup?: ComposeEnvLookup): string[] {
 
 /** A detection-relevant string, expanded the way Compose interpolates it. On a
  *  template Compose refuses the raw value is kept, so a caller that needs a
- *  complete answer can see the unresolved `$`. */
+ *  complete answer can see the unresolved `$`. Any other failure is a defect
+ *  and propagates. */
 function interpolateString(value: string | undefined, lookup?: ComposeEnvLookup): string | undefined {
   if (value === undefined || !lookup || !/\$(?:\{|\$|[A-Za-z_])/.test(value)) return value;
   try {
     return expandComposeEnvTemplate(value, lookup);
-  } catch {
-    return value;
+  } catch (error) {
+    if (error instanceof ComposeEnvFileError) return value;
+    throw error;
+  }
+}
+
+/** Whether Compose would expand `value` completely: it holds no template, or
+ *  the lookup answers it without Compose refusing the template. Judged on the
+ *  raw value, so a `$$` escape that expands to a literal `$` is not mistaken
+ *  for a template that stayed unresolved. */
+function expandsFully(value: string | undefined, lookup?: ComposeEnvLookup): boolean {
+  if (!holdsTemplate(value)) return true;
+  if (!lookup || value === undefined) return false;
+  try {
+    expandComposeEnvTemplate(value, lookup);
+    return true;
+  } catch (error) {
+    if (error instanceof ComposeEnvFileError) return false;
+    throw error;
   }
 }
 
@@ -172,14 +193,33 @@ function envFileEntries(value: unknown): DeclaredEnvFile[] {
   return [];
 }
 
-/** Volume targets (bind or named) a service mounts, for structural checks. */
-function volumeTargets(volumes: unknown): string[] {
+/** Volume entries as written, for interpolation detection: a short-form string
+ *  whole, since its source can hold the `:` of a `${VAR:-default}`, or a
+ *  long-form target. */
+function volumeStrings(volumes: unknown): string[] {
+  if (!Array.isArray(volumes)) return [];
+  const out: string[] = [];
+  for (const v of volumes) {
+    const short = asString(v);
+    if (short !== undefined) out.push(short);
+    else if (v && typeof v === 'object') {
+      const target = asString((v as Record<string, unknown>).target);
+      if (target !== undefined) out.push(target);
+    }
+  }
+  return out;
+}
+
+/** Volume targets (bind or named) a service mounts, for structural checks. A
+ *  short-form entry is expanded before it is split, so a `${VAR:-default}`
+ *  source does not shift the target. */
+function volumeTargets(volumes: unknown, lookup?: ComposeEnvLookup): string[] {
   if (!Array.isArray(volumes)) return [];
   const out: string[] = [];
   for (const v of volumes) {
     const short = asString(v);
     if (short !== undefined) {
-      const parts = short.split(':');
+      const parts = (interpolateString(short, lookup) ?? short).split(':');
       if (parts.length >= 2) out.push(parts[1]);
       continue;
     }
@@ -355,9 +395,15 @@ export function parseComposeDependencies(
     return { services: [], networks: {}, volumes: {}, parseError: 'Compose file is too large to parse.' };
   }
 
+  // Compose resolves YAML merge keys (`<<: *anchor`), so a service built from
+  // an anchor must read as it renders.
   let parsed: unknown;
+  let hasLayerTags = false;
   try {
-    parsed = YAML.parse(content);
+    const document = YAML.parseDocument(content, { merge: true });
+    if (document.errors.length > 0) throw document.errors[0];
+    hasLayerTags = document.warnings.some(warning => warning.code === 'TAG_RESOLVE_FAILED');
+    parsed = document.toJS();
   } catch (error) {
     return { services: [], networks: {}, volumes: {}, parseError: `Could not parse compose file: ${(error as Error).message}` };
   }
@@ -367,7 +413,9 @@ export function parseComposeDependencies(
   if (root.services === undefined) {
     // A layer that only declares top-level networks, volumes, anchors, or a
     // project name is valid Compose. The summary merges it with the layers that
-    // do declare services; only a file with nothing at all is a parse error.
+    // do declare services. An empty file, or one with a top-level key outside
+    // that list (such as a newer Compose section), is a parse error so the
+    // stack is reported unreadable instead of unexposed.
     const topLevel = Object.keys(root);
     const knownTopLevel = topLevel.every(key => ['name', 'networks', 'volumes', 'configs', 'secrets', 'include', 'version'].includes(key) || key.startsWith('x-'));
     if (options.allowEmptyServices && topLevel.length > 0 && knownTopLevel) {
@@ -378,6 +426,7 @@ export function parseComposeDependencies(
         projectName: asString(root.name),
         hasInclude: root.include !== undefined,
         hasExtends: false,
+        hasLayerTags,
       };
     }
     return { services: [], networks: {}, volumes: {}, parseError: 'No services found in this file.' };
@@ -409,7 +458,9 @@ export function parseComposeDependencies(
       .flatMap(value => (Array.isArray(value) ? value : [value]))
       .map(asString)
       .filter((v): v is string => v !== undefined);
-    const needsInterpolation = [
+    // Every field detection reads, as written. Whether one needs interpolation,
+    // and whether the lookup answers it, is judged on the raw text.
+    const detectionInputs: Array<string | undefined> = [
       asString(svc.image),
       asString(svc.network_mode),
       ...collectKeys(svc.networks),
@@ -418,22 +469,11 @@ export function parseComposeDependencies(
       ...envFileEntries(svc.env_file).map(entry => entry.path),
       ...stringList(svc.cap_add),
       ...deviceHostPaths(svc.devices),
-      ...volumeTargets(svc.volumes),
+      ...volumeStrings(svc.volumes),
       ...portStrings(svc.ports),
-    ].some(holdsTemplate);
-    const detectionValues: Array<string | undefined> = [
-      interpolateString(asString(svc.image), lookup),
-      interpolateString(asString(svc.network_mode), lookup),
-      ...interpolateKeys(collectKeys(svc.networks), lookup),
-      ...envKeyNames(svc.environment, lookup),
-      ...envFiles.map(entry => entry.path),
-      ...rawCommandParts.map(part => interpolateString(part, lookup)),
-      ...interpolateKeys(stringList(svc.cap_add), lookup),
-      ...interpolateKeys(deviceHostPaths(svc.devices), lookup),
-      ...interpolateKeys(volumeTargets(svc.volumes), lookup),
-      ...portStrings(svc.ports).map(port => interpolateString(port, lookup)),
     ];
-    const unresolvedDetection = needsInterpolation && detectionValues.some(holdsTemplate);
+    const needsInterpolation = detectionInputs.some(holdsTemplate);
+    const unresolvedDetection = needsInterpolation && detectionInputs.some(value => !expandsFully(value, lookup));
     services.push({
       name,
       dependsOn: collectKeys(svc.depends_on),
@@ -450,7 +490,7 @@ export function parseComposeDependencies(
       entrypointDeclared,
       tailscaleArgsDeclared: declaresEnvKey(svc.environment, 'TS_EXTRA_ARGS', lookup),
       tailscaleFlags: tailscaleForwardFlags(svc.environment, lookup),
-      binds: interpolateKeys(volumeTargets(svc.volumes), lookup),
+      binds: interpolateKeys(volumeTargets(svc.volumes, lookup), lookup),
       capAdd: interpolateKeys(stringList(svc.cap_add), lookup),
       devices: interpolateKeys(deviceHostPaths(svc.devices), lookup),
       needsInterpolation,
@@ -466,7 +506,16 @@ export function parseComposeDependencies(
     projectName: asString(root.name),
     hasInclude: root.include !== undefined,
     hasExtends,
+    hasLayerTags,
   };
+}
+
+/** A later layer's top-level resource over an earlier one, field by field, as
+ *  Compose merges mappings: an override that sets only `name:` keeps the base
+ *  layer's `external: true`. */
+function mergeResource(prior: DeclaredResource | undefined, next: DeclaredResource): DeclaredResource {
+  if (!prior) return next;
+  return { ...prior, ...(next.name !== undefined ? { name: next.name } : {}), external: prior.external || next.external };
 }
 
 function unionKeys(a: string[] | undefined, b: string[] | undefined): string[] {
@@ -476,7 +525,8 @@ function unionKeys(a: string[] | undefined, b: string[] | undefined): string[] {
 /**
  * Merge the parsed layers of a multi-file Compose run in load order, applying
  * the parts of Compose's merge rules that tunnel detection reads: maps merge by
- * key, lists append, and a later scalar replaces an earlier one. `environment`
+ * key (top-level networks and volumes merge field by field), lists append, and
+ * a later scalar replaces an earlier one. `environment`
  * is represented by its KEY names, so later layers add keys; `command` and
  * `TS_EXTRA_ARGS` replace when the later layer declares them.
  */
@@ -490,13 +540,15 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
   let projectName: string | undefined;
   let hasInclude = false;
   let hasExtends = false;
+  let hasLayerTags = false;
 
   for (const layer of layers) {
-    Object.assign(networks, layer.networks);
-    Object.assign(volumes, layer.volumes);
+    for (const [key, resource] of Object.entries(layer.networks)) networks[key] = mergeResource(networks[key], resource);
+    for (const [key, resource] of Object.entries(layer.volumes)) volumes[key] = mergeResource(volumes[key], resource);
     projectName = layer.projectName ?? projectName;
     hasInclude = hasInclude || layer.hasInclude === true;
     hasExtends = hasExtends || layer.hasExtends === true;
+    hasLayerTags = hasLayerTags || layer.hasLayerTags === true;
     for (const svc of layer.services) {
       const prior = byName.get(svc.name);
       if (!prior) {
@@ -550,5 +602,6 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
     ...(projectName !== undefined ? { projectName } : {}),
     hasInclude,
     hasExtends,
+    hasLayerTags,
   };
 }

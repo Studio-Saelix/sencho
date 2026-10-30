@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { mergeDeclaredCompose, parseComposeDependencies } from '../helpers/composeDependencyParse';
+import { fromDeclaredCompose } from '../services/network/normalize';
 
 const svc = (name: string, body: string) => `services:\n  ${name}:\n${body.split('\n').map((l) => l ? '    ' + l : l).join('\n')}\n`;
 
@@ -166,5 +167,65 @@ describe('parseComposeDependencies - fail soft', () => {
   it('reports a parseError for an oversized file', () => {
     const r = parseComposeDependencies('x'.repeat(1_048_577));
     expect(r.parseError).toBe('Compose file is too large to parse.');
+  });
+});
+
+describe('parseComposeDependencies - what Compose resolves before the services are read', () => {
+  it('resolves a YAML merge key into the service', () => {
+    const r = parseComposeDependencies([
+      'x-cf: &cf',
+      '  image: cloudflare/cloudflared:latest',
+      '  command: tunnel run',
+      '  environment:',
+      '    - TUNNEL_TOKEN=secret',
+      'services:',
+      '  tun:',
+      '    <<: *cf',
+      '',
+    ].join('\n'));
+    expect(r.services[0]).toMatchObject({ name: 'tun', image: 'cloudflare/cloudflared:latest', envKeys: ['TUNNEL_TOKEN'], commandHints: ['tunnel'] });
+  });
+
+  it('flags a layer that uses a !reset or !override tag, and carries the flag through a merge', () => {
+    const tagged = parseComposeDependencies('services:\n  edge:\n    network_mode: !reset null\n');
+    expect(tagged.hasLayerTags).toBe(true);
+    expect(parseComposeDependencies('services:\n  edge:\n    image: a\n').hasLayerTags).toBe(false);
+    const plain = parseComposeDependencies('services:\n  edge:\n    image: a\n');
+    expect(mergeDeclaredCompose([plain, tagged]).hasLayerTags).toBe(true);
+    expect(mergeDeclaredCompose([plain, plain]).hasLayerTags).toBe(false);
+  });
+
+  it('expands a volume source template before reading the mount target', () => {
+    const lookup = (name: string) => (name === 'CF_DIR' ? '/srv/cf' : undefined);
+    const r = parseComposeDependencies('services:\n  edge:\n    image: a\n    volumes:\n      - ${CF_DIR:-./cf}:/etc/cloudflared\n', { lookup });
+    expect(r.services[0].binds).toEqual(['/etc/cloudflared']);
+    expect(r.services[0].unresolvedDetection).toBe(false);
+  });
+
+  it('marks a volume source template unresolved when no lookup is given', () => {
+    const r = parseComposeDependencies('services:\n  edge:\n    image: a\n    volumes:\n      - ${CF_DIR:-./cf}:/etc/cloudflared\n');
+    expect(r.services[0].needsInterpolation).toBe(true);
+    expect(r.services[0].unresolvedDetection).toBe(true);
+  });
+
+  it('does not treat a $$ escape as a template that stayed unresolved', () => {
+    const lookup = (name: string) => (name === 'IMG' ? 'example/app:1' : undefined);
+    const r = parseComposeDependencies('services:\n  app:\n    image: ${IMG}\n    command: ["sh", "-c", "exec app --home $$HOME"]\n', { lookup });
+    expect(r.services[0].needsInterpolation).toBe(true);
+    expect(r.services[0].unresolvedDetection).toBe(false);
+  });
+
+  it('keeps external: true from the base layer when an override only sets a name', () => {
+    const base = parseComposeDependencies('services:\n  a:\n    image: a\nnetworks:\n  shared:\n    external: true\n');
+    const override = parseComposeDependencies('networks:\n  shared:\n    name: lan\n', { allowEmptyServices: true });
+    const merged = mergeDeclaredCompose([base, override]);
+    expect(merged.networks.shared).toEqual({ name: 'lan', external: true });
+  });
+
+  it('keeps a network keyed __proto__ as plain data when normalizing', () => {
+    const r = parseComposeDependencies('services:\n  a:\n    image: a\nnetworks:\n  constructor: {}\n');
+    const model = fromDeclaredCompose(r, 'proj');
+    expect(Object.keys(model.networks)).toEqual(['constructor']);
+    expect(Object.getPrototypeOf(model.networks)).toBeNull();
   });
 });

@@ -341,7 +341,7 @@ function parseEnvFileText(
     }
     if (keyEnd === -1) {
       // Compose treats a file that ends right after a name as an inherited
-      // assignment (`export NAME` without a line break).
+      // assignment (a bare `NAME`, or `export NAME`, with no line break).
       const key = trimRightUnicodeSpace(statement);
       if (key === '' || key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
       onKey?.(key);

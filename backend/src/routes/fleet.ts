@@ -1064,7 +1064,8 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
  * hub's summary in-process and reaches each remote through its node-local
  * /api/networking/summary route. A remote on an older version (no route) returns
  * 404 and degrades to a skip, so one unreachable or unsupported node never fails
- * the filter for the rest.
+ * the filter for the rest. A remote that has the route but predates the
+ * `unreadable` bucket is accepted without it, and reports no unreadable stacks.
  */
 fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
