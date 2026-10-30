@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CloudBackupSection } from '../CloudBackupSection';
 import { toast } from '@/components/ui/toast-store';
@@ -382,7 +382,7 @@ describe('CloudBackupSection recovery from another instance', () => {
         await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
         await user.click(screen.getByRole('button', { name: 'Recover' }));
 
-        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as a new local snapshot.'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as an imported snapshot. Find it in Fleet → Snapshots.'));
         const recoverCall = apiFetch.mock.calls.find(call => call[0] === '/cloud-backup/recover');
         expect(JSON.parse(String(recoverCall?.[1]?.body))).toEqual({
             object_key: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
@@ -486,7 +486,7 @@ describe('CloudBackupSection recovery from another instance', () => {
         expect(recover).toBeDisabled();
 
         pending.resolve(json({ snapshot_id: 9 }, 201));
-        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as a new local snapshot.'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as an imported snapshot. Find it in Fleet → Snapshots.'));
     });
 
     it('keeps a failed recovery in the dialog with the archive still selected', async () => {
@@ -506,6 +506,45 @@ describe('CloudBackupSection recovery from another instance', () => {
         expect(await screen.findByText('Archive could not be recovered')).toBeInTheDocument();
         expect(archive).toHaveAttribute('aria-pressed', 'true');
         expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it('puts a failed recovery alert above the archive list and scrolls it into view', async () => {
+        const scrollIntoView = vi.fn();
+        const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+        Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+            configurable: true,
+            writable: true,
+            value: scrollIntoView,
+        });
+        const entries = Array.from({ length: 7 }, (_, index) => ({
+            ...recoveryEntry,
+            objectKey: `sencho/instances/old-instance/snapshots/${index + 1}_2026-01-01_old.tar.gz.senc`,
+        }));
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => json({ entries, truncated: false }),
+            recover: () => json({ error: 'Passphrase is incorrect', code: 'INVALID_PASSPHRASE' }, 400),
+        });
+
+        try {
+            render(<CloudBackupSection />);
+            const user = userEvent.setup();
+            await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+            await user.click(await screen.findByRole('button', { name: /7_2026-01-01_old\.tar\.gz\.senc/ }));
+            await user.type(screen.getByLabelText('Passphrase for this archive'), 'wrong-passphrase');
+            await user.click(screen.getByRole('button', { name: 'Recover' }));
+
+            const alert = await screen.findByRole('alert');
+            expect(alert).toHaveTextContent('Passphrase is incorrect');
+            expect(scrollIntoView).toHaveBeenCalled();
+            const list = within(screen.getByRole('dialog')).getByRole('list');
+            expect(alert.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        } finally {
+            Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+                configurable: true,
+                writable: true,
+                value: originalScrollIntoView,
+            });
+        }
     });
 
     it('issues one recovery request when Recover is clicked twice before the dialog re-renders', async () => {
@@ -531,7 +570,7 @@ describe('CloudBackupSection recovery from another instance', () => {
         expect(button).toBeDisabled();
 
         recover.resolve(json({ snapshot_id: 9 }, 201));
-        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as a new local snapshot.'));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as an imported snapshot. Find it in Fleet → Snapshots.'));
     });
 
     it('keeps a failed recovery in the dialog without reporting success or hiding the listing', async () => {

@@ -1277,6 +1277,25 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Create a stack directory when it is absent, without publishing a compose
+   * file. Fleet snapshot restore uses this so an archive can be applied to a
+   * stack that does not exist on the target node yet, which every stack on a
+   * fresh instance is.
+   */
+  async ensureStackDir(stackName: string): Promise<boolean> {
+    const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
+    try {
+      await fsPromises.access(stackDir);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    return true;
+  }
+
   async createStack(stackName: string): Promise<void> {
     if (DatabaseService.getInstance().hasBlockingDeletionIntent(this.nodeId, stackName)) {
       throw new Error(

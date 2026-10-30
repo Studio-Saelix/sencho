@@ -275,6 +275,26 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(fs.readFileSync(envPath('restore-web'), 'utf-8')).toContain('SECRET=restored-value');
     });
 
+    it('creates a stack that does not exist on the target, as on a fresh instance', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-fresh-instance', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-absent', filename: 'compose.yaml', content: 'services:\n  recovered: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-absent', filename: '.env', content: 'RECOVERED=1\n' },
+        ]);
+        expect(fs.existsSync(path.dirname(composePath('restore-absent')))).toBe(false);
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-absent' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.redeployed).toBe(false);
+        expect(fs.readFileSync(composePath('restore-absent'), 'utf-8')).toContain('recovered: {}');
+        expect(fs.readFileSync(envPath('restore-absent'), 'utf-8')).toContain('RECOVERED=1');
+    });
+
     it('returns 409 when the deploy policy blocks the redeploy', async () => {
         vi.spyOn(policyGate, 'runPolicyGate').mockImplementation(async (_req, res) => {
             res.status(409).json({ error: 'Policy "block-criticals" blocked deploy' });

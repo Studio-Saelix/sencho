@@ -48,9 +48,9 @@ This is off by default. Turn it on in **Settings → Infrastructure → Fleet** 
 The snapshot list shows each snapshot in a table with the following columns:
 
 - **Date** - when the snapshot was taken
-- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Recovery Vault (or a custom off-site target) is configured, an upload icon in this column marks snapshots that have been mirrored off-site.
+- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Recovery Vault (or a custom off-site target) is configured, an upload icon in this column marks snapshots that have been mirrored off-site. An **Imported** badge marks a snapshot that came from an off-site archive (imported or recovered) rather than a capture on this instance; open it to map its archived nodes before restoring.
 - **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
-- **Warnings** - a warning icon with a count if any nodes or stacks were skipped, or "None"
+- **Warnings** - a warning icon with a count if any nodes or stacks were skipped, "Unknown" when the archive was made before Sencho recorded those warnings, or "None"
 - **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Recovery Vault or custom off-site target, and a delete button for admins
 
 The list paginates at 10 snapshots per page; use the arrows next to **Create Snapshot** to page through history.
@@ -156,7 +156,7 @@ The **Cloud Snapshots** panel in **Settings → Infrastructure → Recovery Vaul
 
 ### Restoring from a cloud snapshot
 
-For in-place rollback, use the **Restore** action on the snapshot detail view as described above. The local copy is the source of truth for live restore. To bring a cloud archive back onto this instance, use **Import** in **Settings → Infrastructure → Recovery Vault**, or **Recover archive** when the archive came from a different instance. Either way, the archive becomes a local snapshot without needing the instance key that wrapped the original database rows, and it does not change live stack files. Apply those files with **Restore** after import. You can also download the `.tar.gz` and unpack it yourself.
+For in-place rollback, use the **Restore** action on the snapshot detail view as described above. The local copy is the source of truth for live restore. To bring a cloud archive back onto this instance, use **Import** in **Settings → Infrastructure → Recovery Vault**, or **Recover archive** when the archive came from a different instance. Either way, the archive becomes a local snapshot without needing the instance key that wrapped the original database rows, and it does not change live stack files. Apply those files with **Restore** after import. A restore creates the stack on the target node when it does not exist there, so an imported snapshot can be restored on a fresh instance without creating the stacks first. You can also download the `.tar.gz` and unpack it yourself.
 
 An imported snapshot keeps the node identities of the instance that captured it. When that instance is this one, its node numbers still name this fleet and restore works as usual. When the archive came from another instance, those numbers mean nothing here, so the snapshot detail view asks you to choose a destination node for each archived node before restoring. Restore and Restore all stay blocked for any archived node without a mapping, and each destination node can receive at most one archived node. The mapping is saved with the snapshot and stays until you change it. A restore is confirmed against the mapping that was on screen: if another session changes it before the restore reaches the server, the request is refused instead of being sent to a destination you did not pick, and the detail view reloads with the current mapping so you can confirm again.
 

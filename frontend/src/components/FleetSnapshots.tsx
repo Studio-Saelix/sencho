@@ -35,6 +35,8 @@ interface FleetSnapshot {
     created_at: number;
     has_documentation?: number;
     source_instance_id?: string | null;
+    /** 'imported' when the row came from an off-site archive rather than a capture here. */
+    origin?: 'local' | 'imported';
     warnings_known?: number;
 }
 
@@ -596,6 +598,14 @@ export default function FleetSnapshots() {
                                         Documentation captured
                                     </Badge>
                                 )}
+                                {selectedSnapshot.origin === 'imported' && (
+                                    <Badge
+                                        variant="outline"
+                                        title="Imported from an archive rather than captured on this instance"
+                                    >
+                                        Imported
+                                    </Badge>
+                                )}
                             </div>
                         </div>
 
@@ -1039,6 +1049,15 @@ export default function FleetSnapshots() {
                                                         aria-label="Uploaded to cloud"
                                                     />
                                                 )}
+                                                {snapshot.origin === 'imported' && (
+                                                    <Badge
+                                                        variant="outline"
+                                                        className="h-4 px-1.5 py-0 text-[10px] font-mono shrink-0"
+                                                        title="Imported from an archive rather than captured on this instance"
+                                                    >
+                                                        Imported
+                                                    </Badge>
+                                                )}
                                             </div>
                                         </TableCell>
                                         <TableCell className="text-xs font-mono tabular-nums text-muted-foreground whitespace-nowrap">
@@ -1054,6 +1073,13 @@ export default function FleetSnapshots() {
                                                 >
                                                     <AlertTriangle className="w-3.5 h-3.5" />
                                                     <span className="text-xs font-mono tabular-nums">{warningCount}</span>
+                                                </span>
+                                            ) : snapshot.warnings_known === 0 ? (
+                                                <span
+                                                    className="text-xs text-warning"
+                                                    title="This archive was made before Sencho recorded which stacks were skipped, so an empty list does not mean the capture was complete."
+                                                >
+                                                    Unknown
                                                 </span>
                                             ) : (
                                                 <span className="text-xs text-muted-foreground">None</span>

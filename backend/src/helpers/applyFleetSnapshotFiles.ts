@@ -104,6 +104,11 @@ export async function applyFleetSnapshotFiles(
           stackName,
           createdBy: actor,
         })).id;
+      } else {
+        // A restore may target a stack this node does not have yet (every stack
+        // on a fresh instance after recovering an archive). Create its directory
+        // so the captured files can be written there.
+        await fsSvc.ensureStackDir(stackName);
       }
       for (const file of files) {
         await writeApplyFile(fsSvc, stackName, file);

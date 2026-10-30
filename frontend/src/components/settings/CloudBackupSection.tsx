@@ -138,6 +138,10 @@ export function CloudBackupSection() {
     // Discovery can be restarted (reopen, retry) while an earlier listing is
     // still in flight; only the newest request may write its result.
     const recoveryListSeqRef = useRef(0);
+    // The recovery error sits above the archive list, so a failed passphrase is
+    // visible even when the operator scrolled to the passphrase field at the
+    // bottom of a long list.
+    const recoveryErrorRef = useRef<HTMLParagraphElement | null>(null);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
@@ -193,6 +197,14 @@ export function CloudBackupSection() {
         if (provider !== 'disabled') loadSnapshots();
         else setSnapshots([]);
     }, [provider, loadSnapshots]);
+
+    useEffect(() => {
+        if (!recoveryError) return;
+        const error = recoveryErrorRef.current;
+        if (error && typeof error.scrollIntoView === 'function') {
+            error.scrollIntoView({ block: 'nearest' });
+        }
+    }, [recoveryError]);
 
     const handleProviderChange = async (next: string) => {
         const nextProvider = next as Provider;
@@ -440,7 +452,7 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Recovery failed');
             }
-            toast.success('Archive recovered as a new local snapshot.');
+            toast.success('Archive recovered as an imported snapshot. Find it in Fleet → Snapshots.');
             setRecoveryOpen(false);
             loadSnapshots();
         } catch (err) {
@@ -923,6 +935,15 @@ export function CloudBackupSection() {
                     <p className="text-sm text-stat-subtitle">
                         Archives from other instances in this bucket are listed here. Recovery needs the passphrase that sealed the archive, and the imported snapshot stays unmapped until you choose destination nodes in Fleet → Snapshots.
                     </p>
+                    {recoveryError ? (
+                        <p
+                            ref={recoveryErrorRef}
+                            role="alert"
+                            className="text-sm text-destructive"
+                        >
+                            {recoveryError}
+                        </p>
+                    ) : null}
                     {recoveryLoading ? (
                         <div role="status" aria-busy="true" className="flex items-center gap-2 text-sm text-stat-subtitle">
                             <Loader2 className="w-4 h-4 animate-spin shrink-0" strokeWidth={1.5} />
@@ -978,7 +999,6 @@ export function CloudBackupSection() {
                             }}
                         />
                     </div>
-                    {recoveryError ? <p className="text-sm text-destructive">{recoveryError}</p> : null}
                 </ModalBody>
                 <ModalFooter
                     secondary={<Button variant="outline" onClick={() => setRecoveryOpen(false)} disabled={recoveryBusy}>Cancel</Button>}

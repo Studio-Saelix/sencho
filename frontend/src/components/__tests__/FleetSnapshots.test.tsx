@@ -421,3 +421,81 @@ describe('FleetSnapshots imported snapshot mapping', () => {
     await waitFor(() => expect(screen.getByText(/Partial-capture warnings were not recorded/i)).toBeInTheDocument());
   });
 });
+
+describe('FleetSnapshots list provenance and warning completeness', () => {
+  const row = (overrides: Record<string, unknown>) => ({
+    id: 7,
+    description: 'snapshot',
+    created_by: 'ada',
+    node_count: 1,
+    stack_count: 1,
+    skipped_nodes: '[]',
+    skipped_stacks: '[]',
+    created_at: Date.now(),
+    has_documentation: 0,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    mockedFetch.mockReset();
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return {
+          ok: true,
+          json: async () => ({
+            snapshots: [
+              row({ id: 7, description: 'legacy archive without warnings', warnings_known: 0, origin: 'imported' }),
+              row({ id: 8, description: 'modern local snapshot', warnings_known: 1, origin: 'local' }),
+            ],
+            total: 2,
+          }),
+        } as unknown as Response;
+      }
+      if (path === '/fleet/snapshots/7') {
+        return {
+          ok: true,
+          json: async () => row({
+            id: 7,
+            description: 'legacy archive without warnings',
+            warnings_known: 0,
+            origin: 'imported',
+            nodes: [],
+          }),
+        } as unknown as Response;
+      }
+      if (path === '/cloud-backup/config') {
+        return { ok: true, json: async () => ({ provider: 'disabled' }) } as unknown as Response;
+      }
+      if (path === '/cloud-backup/snapshots') {
+        return { ok: true, json: async () => [] } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({}) } as unknown as Response;
+    });
+  });
+
+  it('shows Unknown instead of None for a row whose warnings were never recorded', async () => {
+    render(<FleetSnapshots />);
+    const legacyRow = (await screen.findByText('legacy archive without warnings')).closest('tr');
+    expect(legacyRow).not.toBeNull();
+    expect(within(legacyRow as HTMLElement).getByText('Unknown')).toBeInTheDocument();
+    expect(within(legacyRow as HTMLElement).queryByText('None')).toBeNull();
+
+    const localRow = screen.getByText('modern local snapshot').closest('tr');
+    expect(localRow).not.toBeNull();
+    expect(within(localRow as HTMLElement).getByText('None')).toBeInTheDocument();
+  });
+
+  it('marks an imported row in the list and in the detail header', async () => {
+    render(<FleetSnapshots />);
+    const importedRow = (await screen.findByText('legacy archive without warnings')).closest('tr');
+    expect(within(importedRow as HTMLElement).getByText('Imported')).toBeInTheDocument();
+
+    const localRow = screen.getByText('modern local snapshot').closest('tr');
+    expect(within(localRow as HTMLElement).queryByText('Imported')).toBeNull();
+
+    fireEvent.click(within(importedRow as HTMLElement).getByRole('button', { name: /View/i }));
+    await waitFor(() => expect(
+      screen.getByTitle('Imported from an archive rather than captured on this instance'),
+    ).toBeInTheDocument());
+  });
+});

@@ -4,6 +4,7 @@ import { StackOpLockService } from '../services/StackOpLockService';
 
 const mocks = vi.hoisted(() => ({
   hasComposeFile: vi.fn(),
+  ensureStackDir: vi.fn(),
   saveStackContent: vi.fn(),
   saveEnvContent: vi.fn(),
   getBaseDir: vi.fn(() => '/tmp/compose'),
@@ -16,6 +17,7 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       getBaseDir: mocks.getBaseDir,
       hasComposeFile: mocks.hasComposeFile,
+      ensureStackDir: mocks.ensureStackDir,
       saveStackContent: mocks.saveStackContent,
       saveEnvContent: mocks.saveEnvContent,
     }),
@@ -57,6 +59,7 @@ describe('applyFleetSnapshotFiles', () => {
   beforeEach(() => {
     StackOpLockService.resetForTests();
     mocks.hasComposeFile.mockReset().mockResolvedValue(true);
+    mocks.ensureStackDir.mockReset().mockResolvedValue(true);
     mocks.saveStackContent.mockReset().mockResolvedValue(undefined);
     mocks.saveEnvContent.mockReset().mockResolvedValue(undefined);
     mocks.captureCurrentBackup.mockReset().mockResolvedValue({ id: 'gen-pre' });
@@ -84,6 +87,7 @@ describe('applyFleetSnapshotFiles', () => {
 
     expect(result.capturedGenerationId).toBe('gen-pre');
     expect(order).toEqual(['capture', 'compose', 'env']);
+    expect(mocks.ensureStackDir).not.toHaveBeenCalled();
     expect(mocks.invalidateNodeCaches).toHaveBeenCalledWith(1);
     expect(mocks.captureCurrentBackup).toHaveBeenCalledWith({
       nodeId: 1,
@@ -99,8 +103,29 @@ describe('applyFleetSnapshotFiles', () => {
 
     expect(result.capturedGenerationId).toBeNull();
     expect(mocks.captureCurrentBackup).not.toHaveBeenCalled();
+    expect(mocks.ensureStackDir).toHaveBeenCalledWith('fresh');
     expect(mocks.saveStackContent).toHaveBeenCalledWith('fresh', FILES[0].content);
     expect(mocks.saveEnvContent).toHaveBeenCalledWith('fresh', FILES[1].content);
+  });
+
+  it('creates the missing stack directory before the first snapshot file is written', async () => {
+    const order: string[] = [];
+    mocks.hasComposeFile.mockResolvedValue(false);
+    mocks.ensureStackDir.mockImplementation(async () => {
+      order.push('mkdir');
+      return true;
+    });
+    mocks.saveStackContent.mockImplementation(async () => {
+      order.push('compose');
+    });
+    mocks.saveEnvContent.mockImplementation(async () => {
+      order.push('env');
+    });
+
+    const result = await applyWeb({ stackName: 'restored-on-fresh-instance' });
+
+    expect(result.capturedGenerationId).toBeNull();
+    expect(order).toEqual(['mkdir', 'compose', 'env']);
   });
 
   it('aborts without writing when capture fails', async () => {
