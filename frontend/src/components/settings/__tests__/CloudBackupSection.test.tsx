@@ -266,7 +266,7 @@ describe('CloudBackupSection recovery from another instance', () => {
                         snapshotId: 2,
                         encrypted: true,
                     }],
-                    truncated: false,
+                    truncated: true,
                 });
             }
             if (path === '/cloud-backup/recover') {
@@ -277,6 +277,7 @@ describe('CloudBackupSection recovery from another instance', () => {
         render(<CloudBackupSection />);
         const user = userEvent.setup();
         await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        expect(await screen.findByText(/stopped at the first 10,000 archives/)).toBeInTheDocument();
         await user.click(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ }));
         await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
         await user.click(screen.getByRole('button', { name: 'Recover' }));

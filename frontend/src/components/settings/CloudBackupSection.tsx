@@ -446,7 +446,7 @@ export function CloudBackupSection() {
     };
 
     const confirmDelete = async () => {
-        if (!deleteKey || deleteBusyRef.current || archiveBusyRef.current) return;
+        if (!deleteKey || deleteBusyRef.current || archiveBusyRef.current || recoveryBusyRef.current) return;
         deleteBusyRef.current = true;
         setDeleteBusy(true);
         try {
@@ -926,7 +926,7 @@ export function CloudBackupSection() {
                     )}
                     {recoveryTruncated && (
                         <p className="text-xs text-warning">
-                            Showing the newest archives only. Use your bucket console to find an older one.
+                            The list stopped at the first 10,000 archives. Use your bucket console to find one that is not listed.
                         </p>
                     )}
                     <div className="space-y-1.5">

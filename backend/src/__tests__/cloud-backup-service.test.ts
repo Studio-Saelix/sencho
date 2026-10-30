@@ -837,6 +837,17 @@ describe('CloudBackupService disaster recovery', () => {
         expect(listing.truncated).toBe(true);
     });
 
+    it('reports an incomplete list when a page truncates without a token', async () => {
+        seedCustomBucket();
+        sentSpy.mockResolvedValue({
+            Contents: [{ Key: 'sencho/instances/old-instance/snapshots/1_a.tar.gz.senc', Size: 1, LastModified: new Date('2026-01-01T00:00:00Z') }],
+            IsTruncated: true,
+        });
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(listing.entries).toHaveLength(1);
+        expect(listing.truncated).toBe(true);
+    });
+
     it('lists only other instances snapshot archives for recovery', async () => {
         seedCustomBucket();
         sentSpy.mockResolvedValue({

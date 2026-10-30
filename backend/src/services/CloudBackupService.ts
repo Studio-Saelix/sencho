@@ -382,7 +382,13 @@ export class CloudBackupService {
                 ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
             }));
             objects.push(...(result.Contents || []));
-            if (!result.IsTruncated || !result.NextContinuationToken) break;
+            if (!result.IsTruncated) break;
+            if (!result.NextContinuationToken) {
+                // A provider that truncates without a token cannot be followed;
+                // report the list as incomplete rather than as complete.
+                truncated = true;
+                break;
+            }
             continuationToken = result.NextContinuationToken;
             truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
         }

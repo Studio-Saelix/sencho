@@ -1893,6 +1893,16 @@ describe('Imported snapshot node mapping', () => {
     expect(res.body.nodes[0].targetNodeName).toBe('Local');
   });
 
+  it('reports identity targets for a snapshot imported from this instance', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: db.getInstanceId(), stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'own-detail' }] });
+    const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.requiresNodeMapping).toBe(false);
+    expect(res.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(res.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
   it('validates the mapping route', async () => {
     const db = DatabaseService.getInstance();
     const foreign = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'validate-web' }] });
