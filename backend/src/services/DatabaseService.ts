@@ -707,6 +707,11 @@ export interface FleetSnapshot {
      *  snapshot; set on import so restore never confuses archived node ids
      *  with this installation's nodes. */
     source_instance_id: string | null;
+    /** 'local' for a snapshot this installation captured, 'imported' for one
+     *  read from an archive. A NULL source_instance_id on an imported row
+     *  means the archive could not name its source, which still requires a
+     *  mapping. */
+    origin: 'local' | 'imported';
     /** 0 when the source archive predates partial-capture warnings, so an
      *  empty skipped_stacks list means "not recorded", not "none skipped". */
     warnings_known: number;
@@ -1531,6 +1536,7 @@ export class DatabaseService {
         documentation TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         source_instance_id TEXT,
+        origin TEXT NOT NULL DEFAULT 'local',
         warnings_known INTEGER NOT NULL DEFAULT 1
       );
 
@@ -2334,9 +2340,16 @@ export class DatabaseService {
         // Captured Stack Dossier metadata (opt-in documentation snapshots)
         maybeAddCol('fleet_snapshots', 'documentation', "TEXT NOT NULL DEFAULT ''");
         // Import provenance and capture evidence. Locally captured rows keep
-        // NULL / 1; an imported archive records the instance that made it and
-        // whether that archive recorded partial-capture warnings.
+        // NULL / 'local' / 1; an imported archive records the instance that
+        // made it, that it was imported, and whether that archive recorded
+        // partial-capture warnings.
         maybeAddCol('fleet_snapshots', 'source_instance_id', 'TEXT');
+        if (addColIfMissing('fleet_snapshots', 'origin', "TEXT NOT NULL DEFAULT 'local'")) {
+            // A row that already carries a source instance id was imported by an
+            // earlier build of this change; mark it so restore never treats its
+            // archived node ids as local ones.
+            this.db.prepare("UPDATE fleet_snapshots SET origin = 'imported' WHERE source_instance_id IS NOT NULL").run();
+        }
         maybeAddCol('fleet_snapshots', 'warnings_known', 'INTEGER NOT NULL DEFAULT 1');
 
         // Scan finding enrichment: scan-intrinsic fields Trivy returns that the
@@ -7392,7 +7405,7 @@ stmt.run('gitops_schema_version', '1');
         const crypto = CryptoService.getInstance();
         const storedDocs = snapshot.documentation === '' ? '' : crypto.encrypt(snapshot.documentation);
         const insertSnap = this.db.prepare(
-            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at, source_instance_id, warnings_known) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO fleet_snapshots (description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, documentation, created_at, source_instance_id, origin, warnings_known) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const insertFile = this.db.prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
@@ -7408,6 +7421,7 @@ stmt.run('gitops_schema_version', '1');
                 storedDocs,
                 snapshot.createdAt,
                 snapshot.sourceInstanceId,
+                'imported',
                 snapshot.warningsKnown ? 1 : 0,
             );
             const snapshotId = Number(result.lastInsertRowid);
@@ -7446,12 +7460,20 @@ stmt.run('gitops_schema_version', '1');
     // get a cheap `has_documentation` flag; read the blob with
     // getSnapshotDocumentation().
     private static readonly SNAPSHOT_COLUMNS =
-        "id, description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at, (documentation != '') AS has_documentation, source_instance_id, warnings_known";
+        "id, description, created_by, node_count, stack_count, skipped_nodes, skipped_stacks, created_at, (documentation != '') AS has_documentation, source_instance_id, origin, warnings_known";
 
     public getSnapshots(limit = 50, offset = 0): FleetSnapshot[] {
         return this.db.prepare(
             `SELECT ${DatabaseService.SNAPSHOT_COLUMNS} FROM fleet_snapshots ORDER BY created_at DESC LIMIT ? OFFSET ?`
         ).all(limit, offset) as FleetSnapshot[];
+    }
+
+    /** Newest snapshot this instance captured; imported archives never count. */
+    public getLatestLocalSnapshot(): FleetSnapshot | null {
+        const row = this.db.prepare(
+            `SELECT ${DatabaseService.SNAPSHOT_COLUMNS} FROM fleet_snapshots WHERE origin = 'local' ORDER BY created_at DESC LIMIT 1`
+        ).get() as FleetSnapshot | undefined;
+        return row ?? null;
     }
 
     public getSnapshot(id: number): FleetSnapshot | undefined {
@@ -7512,7 +7534,7 @@ stmt.run('gitops_schema_version', '1');
             `SELECT MAX(s.created_at) AS latest
              FROM fleet_snapshots s
              JOIN fleet_snapshot_files f ON f.snapshot_id = s.id
-             WHERE f.node_id = ? AND f.stack_name = ? AND s.source_instance_id IS NULL`
+             WHERE f.node_id = ? AND f.stack_name = ? AND s.origin = 'local'`
         ).get(nodeId, stackName) as { latest: number | null } | undefined;
         return row?.latest ?? null;
     }

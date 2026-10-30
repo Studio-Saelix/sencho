@@ -212,20 +212,25 @@ export default function FleetSnapshots() {
     }, [fetchCloudConfig]);
 
     // Destination choices for mapping an imported snapshot's archived nodes.
+    // Loaded only when a snapshot actually needs a mapping, so an ordinary
+    // visit does not depend on this read.
     const fetchCurrentNodes = useCallback(async () => {
         try {
             const res = await apiFetch('/nodes', { localOnly: true });
-            if (!res.ok) return;
+            if (!res.ok) throw new Error(`Failed to load nodes (${res.status})`);
             const data = await res.json() as Array<{ id: number; name: string }>;
             setCurrentNodes(data.map(node => ({ id: node.id, name: node.name })));
-        } catch {
-            // best-effort; an unmapped restore stays blocked without options
+        } catch (error: unknown) {
+            const err = error as Record<string, unknown> | null;
+            toast.error(err?.message as string || 'Failed to load nodes for the snapshot mapping.');
         }
     }, []);
 
     useEffect(() => {
-        fetchCurrentNodes();
-    }, [fetchCurrentNodes]);
+        if (selectedSnapshot?.requiresNodeMapping !== true) return;
+        if (currentNodes.length > 0) return;
+        void fetchCurrentNodes();
+    }, [selectedSnapshot, currentNodes.length, fetchCurrentNodes]);
 
     useEffect(() => {
         fetchCloudSnapshots();

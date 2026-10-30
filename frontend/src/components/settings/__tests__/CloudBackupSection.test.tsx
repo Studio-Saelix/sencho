@@ -187,6 +187,54 @@ describe('CloudBackupSection archive action locking', () => {
         expect(screen.getByRole('button', { name: 'Import snapshot' })).not.toBeDisabled();
     });
 
+    it('locks delete while an archive action is pending', async () => {
+        let resolveImport: () => void = () => {};
+        const pending = new Promise<void>(resolve => { resolveImport = resolve; });
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') return json(configPayload);
+            if (path === '/cloud-backup/snapshots') {
+                return json([{ objectKey: snapshotKey, sizeBytes: 20, lastModified: null, snapshotId: 1, encrypted: true }]);
+            }
+            if (path.includes('/import')) {
+                await pending;
+                return json({ snapshot_id: 4 }, 201);
+            }
+            return json({}, 200);
+        });
+        render(<CloudBackupSection />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Import snapshot' }));
+        expect(screen.getByRole('button', { name: 'Delete snapshot' })).toBeDisabled();
+        resolveImport();
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Imported as a new local snapshot.'));
+        expect(screen.getByRole('button', { name: 'Delete snapshot' })).not.toBeDisabled();
+    });
+
+    it('issues one delete for a double-confirm while the request is pending', async () => {
+        let resolveDelete: () => void = () => {};
+        const pending = new Promise<void>(resolve => { resolveDelete = resolve; });
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => {
+            if (path === '/cloud-backup/config') return json(configPayload);
+            if (path === '/cloud-backup/snapshots') {
+                return json([{ objectKey: snapshotKey, sizeBytes: 20, lastModified: null, snapshotId: 1, encrypted: true }]);
+            }
+            if (options?.method === 'DELETE') {
+                await pending;
+                return json({}, 204);
+            }
+            return json({}, 200);
+        });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Delete snapshot' }));
+        const confirm = await screen.findByRole('button', { name: 'Delete' });
+        fireEvent.click(confirm);
+        fireEvent.click(confirm);
+        const deletes = apiFetch.mock.calls.filter(call => call[1]?.method === 'DELETE');
+        expect(deletes).toHaveLength(1);
+        resolveDelete();
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Cloud snapshot deleted.'));
+    });
+
     it('unlocks the row action after a failed import', async () => {
         apiFetch.mockImplementation(async (path: string) => {
             if (path === '/cloud-backup/config') return json(configPayload);

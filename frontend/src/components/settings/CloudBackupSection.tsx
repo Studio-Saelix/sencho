@@ -104,6 +104,7 @@ export function CloudBackupSection() {
     const [testing, setTesting] = useState(false);
     const [provisioning, setProvisioning] = useState(false);
     const [deleteKey, setDeleteKey] = useState<string | null>(null);
+    const [deleteBusy, setDeleteBusy] = useState(false);
     const [page, setPage] = useState(0);
     const [encryptArchives, setEncryptArchives] = useState(false);
     const [passphraseSaved, setPassphraseSaved] = useState(false);
@@ -125,6 +126,7 @@ export function CloudBackupSection() {
     // pre-render value of state, and a double-click must issue one request.
     const archiveBusyRef = useRef(false);
     const recoveryBusyRef = useRef(false);
+    const deleteBusyRef = useRef(false);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
@@ -440,7 +442,9 @@ export function CloudBackupSection() {
     };
 
     const confirmDelete = async () => {
-        if (!deleteKey) return;
+        if (!deleteKey || deleteBusyRef.current) return;
+        deleteBusyRef.current = true;
+        setDeleteBusy(true);
         try {
             const res = await cloudFetch(`/cloud-backup/object/${encodeObjectKey(deleteKey)}`, { method: 'DELETE' });
             if (!res.ok) {
@@ -453,6 +457,8 @@ export function CloudBackupSection() {
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to delete cloud snapshot.');
         } finally {
+            deleteBusyRef.current = false;
+            setDeleteBusy(false);
             setDeleteKey(null);
         }
     };
@@ -794,6 +800,8 @@ export function CloudBackupSection() {
                                                         size="icon"
                                                         variant="ghost"
                                                         className="h-7 w-7"
+                                                        aria-label="Delete snapshot"
+                                                        disabled={archiveBusy || deleteBusy}
                                                         onClick={() => setDeleteKey(s.objectKey)}
                                                     >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -817,6 +825,7 @@ export function CloudBackupSection() {
                 kicker="CLOUD · DELETE · IRREVERSIBLE"
                 title="Delete cloud snapshot"
                 confirmLabel="Delete"
+                confirming={deleteBusy}
                 onConfirm={confirmDelete}
             >
                 <p className="text-sm text-stat-subtitle">

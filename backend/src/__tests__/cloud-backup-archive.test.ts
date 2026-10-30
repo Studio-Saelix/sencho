@@ -3,6 +3,7 @@ import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import type { Header } from 'tar-stream';
 import {
+    ARCHIVE_ENVELOPE_OVERHEAD_BYTES,
     ARCHIVE_LIMITS,
     ArchiveFormatError,
     assertArchiveFitsLimits,
@@ -313,6 +314,16 @@ describe('producer archive limits', () => {
     it('refuses an upload object past the reader size limit', () => {
         expect(() => assertArchiveObjectSize(1024)).not.toThrow();
         expect(() => assertArchiveObjectSize(1025, { ...ARCHIVE_LIMITS, maxObjectBytes: 1024 }))
+            .toThrow(/upload limit/);
+    });
+
+    it('counts the seal envelope against the object limit', async () => {
+        const plain = Buffer.alloc(100, 7);
+        const sealed = await sealArchive(plain, PASSPHRASE, SALT, IV);
+        expect(sealed.byteLength).toBe(plain.byteLength + ARCHIVE_ENVELOPE_OVERHEAD_BYTES);
+        const limit = sealed.byteLength - 1;
+        expect(() => assertArchiveObjectSize(plain.byteLength, { ...ARCHIVE_LIMITS, maxObjectBytes: limit })).not.toThrow();
+        expect(() => assertArchiveObjectSize(sealed.byteLength, { ...ARCHIVE_LIMITS, maxObjectBytes: limit }))
             .toThrow(/upload limit/);
     });
 });

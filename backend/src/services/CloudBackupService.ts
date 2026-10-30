@@ -367,14 +367,24 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) return [];
         const { client, sdk } = await this.buildS3Client(cfg);
-        const result = await client.send(new sdk.ListObjectsV2Command({
-            Bucket: cfg.bucket,
-            Prefix: `${cfg.pathPrefix}instances/`,
-            MaxKeys: 1000,
-        }));
+        // Follow continuation tokens so a bucket with more than one page of
+        // archives still lists every candidate the operator can recover.
+        const objects: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
+        let continuationToken: string | undefined;
+        for (let page = 0; page < 10; page += 1) {
+            const result = await client.send(new sdk.ListObjectsV2Command({
+                Bucket: cfg.bucket,
+                Prefix: `${cfg.pathPrefix}instances/`,
+                MaxKeys: 1000,
+                ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+            }));
+            objects.push(...(result.Contents || []));
+            if (!result.IsTruncated || !result.NextContinuationToken) break;
+            continuationToken = result.NextContinuationToken;
+        }
         const current = this.getInstanceId();
         const entries: CloudSnapshotEntry[] = [];
-        for (const object of result.Contents || []) {
+        for (const object of objects) {
             const key = object.Key;
             if (!key) continue;
             const parsed = this.parseRecoveryKey(key, cfg.pathPrefix);
@@ -516,7 +526,11 @@ export class CloudBackupService {
         if (!this.archivesAreEncrypted()) return { body: gzip, encrypted: false };
         const passphrase = this.storedArchivePassphrase();
         if (!passphrase) throw new Error('Archive encryption is on, but no passphrase is saved');
-        return { body: await encryptArchive(gzip, passphrase), encrypted: true };
+        const body = await encryptArchive(gzip, passphrase);
+        // The provider stores the envelope, not the plaintext gzip, so the
+        // object limit is measured on the sealed bytes.
+        assertArchiveObjectSize(body.byteLength);
+        return { body, encrypted: true };
     }
 
     private async fetchObject(objectKey: string): Promise<Buffer> {
@@ -535,10 +549,28 @@ export class CloudBackupService {
     }
 
     private async buildArchive(
-        snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; skipped_stacks: string; created_at: number },
+        snapshot: {
+            id: number;
+            description: string;
+            created_by: string;
+            node_count: number;
+            stack_count: number;
+            skipped_nodes: string;
+            skipped_stacks: string;
+            created_at: number;
+            source_instance_id: string | null;
+            origin: 'local' | 'imported';
+            warnings_known: number;
+        },
         files: AvailableSnapshotFile[],
         documentation = '',
     ): Promise<Buffer> {
+        // A re-uploaded imported snapshot keeps the identity of the instance
+        // that captured it; claiming this instance would let the next import
+        // treat the source installation's node ids as local ones.
+        const sourceInstanceId = snapshot.origin === 'imported'
+            ? snapshot.source_instance_id
+            : this.getInstanceId();
         const metadata = {
             id: snapshot.id,
             description: snapshot.description,
@@ -549,9 +581,13 @@ export class CloudBackupService {
             skipped_nodes: safeParseJson(snapshot.skipped_nodes, []),
             // Partial-capture warnings travel with the archive so an import
             // never turns a known-partial snapshot into a complete-looking one.
-            skipped_stacks: safeParseJson(snapshot.skipped_stacks, []),
+            // A snapshot whose archive could not record them stays silent, so
+            // the next import keeps the same uncertainty.
+            ...(snapshot.warnings_known === 0
+                ? {}
+                : { skipped_stacks: safeParseJson(snapshot.skipped_stacks, []) }),
             has_documentation: documentation !== '',
-            instance_id: this.getInstanceId(),
+            instance_id: sourceInstanceId,
             // Version 2 adds the optional documentation.json entry; readers of
             // version 1 archives simply will not find that file.
             archive_version: 2,

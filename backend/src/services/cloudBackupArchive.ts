@@ -30,6 +30,8 @@ const IV_LEN = 12;
 const TAG_LEN = 16;
 const HEADER_LEN = MAGIC.length + 1 + SALT_LEN + IV_LEN;
 const KEY_LEN = 32;
+/** Bytes the seal adds to the plaintext object: header plus auth tag. */
+export const ARCHIVE_ENVELOPE_OVERHEAD_BYTES = HEADER_LEN + TAG_LEN;
 const SCRYPT_N = 2 ** 15;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;

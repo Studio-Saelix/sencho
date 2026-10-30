@@ -1898,6 +1898,44 @@ describe('Imported snapshot node mapping', () => {
     expect(localRes.status).toBe(400);
   });
 
+  it('treats an imported archive with no source instance as foreign', async () => {
+    const id = importSnapshot({ sourceInstanceId: null, stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'unknown-source' }] });
+    seedStackDir('unknown-source');
+    fs.writeFileSync(composePath('unknown-source'), 'services:\n  live: {}\n');
+
+    const restore = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'unknown-source' });
+    expect(restore.status).toBe(409);
+    expect(restore.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('unknown-source'), 'utf-8')).toContain('live');
+
+    const mapped = await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: LOCAL_NODE_ID }]);
+    expect(mapped.status).toBe(200);
+  });
+
+  it('refuses a mapping whose destination node was deleted', async () => {
+    const db = DatabaseService.getInstance();
+    const doomed = db.addNode({ name: 'doomed-target', type: 'remote', api_url: '', api_token: '', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'deleted-target' }] });
+    seedStackDir('deleted-target');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: doomed }]);
+    db.deleteNode(doomed);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'deleted-target' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.existsSync(composePath('deleted-target'))).toBe(false);
+
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(detail.body.nodes[0].targetNodeId).toBeNull();
+  });
+
   it('drops the mapping when the snapshot is deleted', async () => {
     const db = DatabaseService.getInstance();
     const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'delete-map' }] });
@@ -1911,8 +1949,13 @@ describe('Imported snapshot node mapping', () => {
 
   it('keeps imported snapshots out of local coverage claims', () => {
     const db = DatabaseService.getInstance();
-    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'coverage-web' }] });
-    expect(db.getLatestSnapshotTimestampFor(LOCAL_NODE_ID, 'coverage-web')).toBeNull();
-    void id;
+    const localId = db.createSnapshot('local coverage', 'admin', 1, 1, '[]', '[]');
+    db.insertSnapshotFiles(localId, [
+      { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'coverage-web', filename: 'compose.yaml', content: 'services: {}\n' },
+    ]);
+    const importedId = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'coverage-web' }] });
+    expect(importedId).toBeGreaterThan(localId);
+    expect(db.getLatestSnapshotTimestampFor(LOCAL_NODE_ID, 'coverage-web')).toBe(db.getSnapshot(localId)?.created_at);
+    expect(db.getLatestLocalSnapshot()?.id).toBe(localId);
   });
 });

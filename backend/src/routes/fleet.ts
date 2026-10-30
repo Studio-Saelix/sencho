@@ -2814,9 +2814,11 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
     // Archived nodes keep the source installation's ids and names. Resolve each
     // one to a destination node here: identity for a locally captured snapshot,
     // the recorded mapping for an imported one, and null when nothing is mapped.
-    const sameInstance = !snapshot.source_instance_id
-      || snapshot.source_instance_id === db.getInstanceId();
-    const requiresNodeMapping = !sameInstance;
+    const imported = snapshot.origin === 'imported';
+    const sameInstance = imported
+      && !!snapshot.source_instance_id
+      && snapshot.source_instance_id === db.getInstanceId();
+    const requiresNodeMapping = imported && !sameInstance;
     const mappingBySource = new Map(
       db.getSnapshotNodeMap(id).map(m => [m.source_node_id, m.target_node_id] as const),
     );
@@ -2880,9 +2882,11 @@ fleetRouter.put('/snapshots/:id/node-mapping', authMiddleware, async (req: Reque
       res.status(404).json({ error: 'Snapshot not found' });
       return;
     }
-    const sameInstance = !snapshot.source_instance_id
-      || snapshot.source_instance_id === db.getInstanceId();
-    if (sameInstance) {
+    const imported = snapshot.origin === 'imported';
+    const sameInstance = imported
+      && !!snapshot.source_instance_id
+      && snapshot.source_instance_id === db.getInstanceId();
+    if (!imported || sameInstance) {
       res.status(400).json({ error: 'This snapshot was captured by this instance, so its nodes need no mapping' });
       return;
     }
@@ -3116,9 +3120,11 @@ function resolveSnapshotNodeTarget(
   sourceNodeId: number,
 ): { node: Node } | SnapshotNodeTargetFailure {
   const db = DatabaseService.getInstance();
-  const sameInstance = !!snapshot.source_instance_id
+  const imported = snapshot.origin === 'imported';
+  const sameInstance = imported
+    && !!snapshot.source_instance_id
     && snapshot.source_instance_id === db.getInstanceId();
-  const capturedHere = !snapshot.source_instance_id || sameInstance;
+  const capturedHere = !imported || sameInstance;
   const targetNodeId = capturedHere
     ? sourceNodeId
     : db.getSnapshotNodeMap(snapshot.id).find(m => m.source_node_id === sourceNodeId)?.target_node_id;

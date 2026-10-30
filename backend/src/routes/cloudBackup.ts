@@ -373,7 +373,7 @@ cloudBackupRouter.post('/recover', async (req: Request, res: Response): Promise<
     }
     const passphrase = passphraseFromBody(req);
     if (!passphrase) {
-        res.status(400).json({ error: 'A passphrase is required to recover an archive', code: 'PASSPHRASE_REQUIRED' });
+        res.status(409).json({ error: 'A passphrase is required to recover an archive', code: 'PASSPHRASE_REQUIRED' });
         return;
     }
     try {

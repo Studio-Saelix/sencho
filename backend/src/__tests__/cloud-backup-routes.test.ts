@@ -543,7 +543,7 @@ describe('Cloud backup recovery', () => {
         DatabaseService.getInstance().setSystemState('instance_id', 'new-instance');
 
         const missing = await request(app).post('/api/cloud-backup/recover').set('Cookie', authCookie).send({ object_key: recoveryKey });
-        expect(missing.status).toBe(400);
+        expect(missing.status).toBe(409);
         expect(missing.body.code).toBe('PASSPHRASE_REQUIRED');
 
         sentSpy.mockResolvedValue({ Body: Readable.from(zlib.gzipSync(Buffer.from('plain'))) });

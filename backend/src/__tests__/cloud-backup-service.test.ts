@@ -389,8 +389,8 @@ function snapshotCounts(): { headers: number; files: number } {
 }
 
 function putObjectInput(): { Key: string; Body: Buffer; ContentType: string } {
-    const putCall = sentSpy.mock.calls.find(c => c[0].name === 'PutObjectCommand');
-    return putCall![0].input as { Key: string; Body: Buffer; ContentType: string };
+    const putCalls = sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand');
+    return putCalls[putCalls.length - 1]![0].input as { Key: string; Body: Buffer; ContentType: string };
 }
 
 describe('CloudBackupService archive encryption', () => {
@@ -676,6 +676,69 @@ describe('CloudBackupService archive fidelity', () => {
     });
 });
 
+describe('CloudBackupService archive provenance', () => {
+    it('keeps the source instance when an imported snapshot is uploaded again', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const snapshotId = db.createSnapshot('From A', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName: 'a-node', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const original = putObjectInput();
+
+        // Instance B recovers A's archive, then uploads that snapshot again.
+        db.setSystemState('instance_id', 'instance-b');
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(original.Body) };
+            return {};
+        });
+        const importedId = await CloudBackupService.getInstance().importRecoveryArchive(original.Key, ARCHIVE_PASSPHRASE);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(importedId);
+        const reuploaded = putObjectInput();
+        const opened = await openSnapshotArchive(reuploaded.Body, ARCHIVE_PASSPHRASE);
+        expect(opened.sourceInstanceId).toBe('test-instance-id');
+        expect(opened.sourceInstanceId).not.toBe('instance-b');
+
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(reuploaded.Body) };
+            return {};
+        });
+        const againId = await CloudBackupService.getInstance().importSnapshot(reuploaded.Key);
+        const again = db.getSnapshot(againId)!;
+        expect(again.source_instance_id).toBe('test-instance-id');
+        expect(again.origin).toBe('imported');
+    });
+
+    it('keeps warning uncertainty when a legacy imported snapshot is uploaded again', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const importedId = db.importSnapshotArchive({
+            description: 'legacy import',
+            createdBy: 'ada',
+            createdAt: 1,
+            nodeCount: 1,
+            stackCount: 1,
+            skippedNodes: '[]',
+            skippedStacks: '[]',
+            warningsKnown: false,
+            sourceInstanceId: 'instance-a',
+            documentation: '',
+            files: [{ nodeId: 1, nodeName: 'a-node', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' }],
+        });
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(importedId);
+        const uploaded = putObjectInput();
+        const opened = await openSnapshotArchive(uploaded.Body, null);
+        expect(opened.warningsKnown).toBe(false);
+        expect(opened.sourceInstanceId).toBe('instance-a');
+    });
+});
+
 describe('CloudBackupService disaster recovery', () => {
     it('recovers a sealed archive after the instance identity changes, without widening delete or download', async () => {
         seedCustomBucket();
@@ -731,6 +794,29 @@ describe('CloudBackupService disaster recovery', () => {
         await expect(CloudBackupService.getInstance().importRecoveryArchive(uploaded.Key, ARCHIVE_PASSPHRASE))
             .rejects.toThrow(/Only an encrypted archive/);
         expect(snapshotCounts()).toEqual(before);
+    });
+
+    it('follows continuation tokens when listing recovery archives', async () => {
+        seedCustomBucket();
+        sentSpy.mockImplementation(async (cmd: { name: string; input: Record<string, unknown> }) => {
+            if (cmd.name !== 'ListObjectsV2Command') return {};
+            if (!cmd.input.ContinuationToken) {
+                return {
+                    Contents: [{ Key: 'sencho/instances/old-instance/snapshots/1_a.tar.gz.senc', Size: 1, LastModified: new Date('2026-01-01T00:00:00Z') }],
+                    IsTruncated: true,
+                    NextContinuationToken: 'page-2',
+                };
+            }
+            return {
+                Contents: [{ Key: 'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc', Size: 2, LastModified: new Date('2026-02-01T00:00:00Z') }],
+                IsTruncated: false,
+            };
+        });
+        const list = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(list.map(entry => entry.objectKey)).toEqual([
+            'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc',
+            'sencho/instances/old-instance/snapshots/1_a.tar.gz.senc',
+        ]);
     });
 
     it('lists only other instances snapshot archives for recovery', async () => {

@@ -4,6 +4,7 @@ import FleetSnapshots from '../FleetSnapshots';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ user: { role: 'admin' }, isAdmin: true }),
@@ -193,6 +194,28 @@ describe('FleetSnapshots imported snapshot mapping', () => {
       const after = screen.getByRole('button', { name: /^Restore$/i }) as HTMLButtonElement;
       expect(after.disabled).toBe(false);
     });
+  });
+
+  it('surfaces a failure to load destination nodes for the mapping', async () => {
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [{ ...detail(false), nodes: undefined }], total: 1 }) } as unknown as Response;
+      }
+      if (path === '/fleet/snapshots/7') {
+        return { ok: true, json: async () => detail(false) } as unknown as Response;
+      }
+      if (path === '/nodes') {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      }
+      if (path === '/cloud-backup/config') {
+        return { ok: true, json: async () => ({ provider: 'disabled' }) } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({}) } as unknown as Response;
+    });
+    render(<FleetSnapshots />);
+    await waitFor(() => expect(screen.getByText('from-the-old-instance')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /View/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to load nodes (500)'));
   });
 
   it('warns that a legacy archive did not record partial-capture warnings', async () => {
