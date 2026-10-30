@@ -120,15 +120,28 @@ describe('StorageIdentityStore', () => {
     expect(store().getCurrent(g1.storageKey)?.id).toBe(g2.id);
     expect(store().listGenerations(g1.storageKey).map((g) => g.generation)).toEqual([1, 2]);
 
-    // Seeing the old token again is a third generation, not a revival of the first.
-    const g3 = store().observe({
-      ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'cache_data', generationToken: 'created-1', dependents: [],
-    });
-    expect(g3.generation).toBe(3);
-    expect(g3.id).not.toBe(g1.id);
   });
 
-  it('models shared storage once, with every stack that uses it', () => {
+  it('refuses a stale observation instead of rolling the generation back', () => {
+    const g1 = store().observe({
+      ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'raced_data', generationToken: 't1',
+      dependents: [{ stackName: 'old-view', serviceName: null }],
+    });
+    const g2 = store().observe({
+      ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'raced_data', generationToken: 't2',
+      dependents: [{ stackName: 'new-view', serviceName: null }],
+    });
+    // An inspect taken before the recreate lands after it.
+    expect(errorClassOf(() => store().observe({
+      ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'raced_data', generationToken: 't1',
+      dependents: [{ stackName: 'old-view', serviceName: null }],
+    }))).toBe('identity_unknown');
+    expect(store().getCurrent(g1.storageKey)?.id).toBe(g2.id);
+    expect(store().listGenerations(g1.storageKey)).toHaveLength(2);
+    expect(store().listDependents(g1.storageKey)).toEqual([{ stackName: 'new-view', serviceName: null }]);
+  });
+
+  it('models shared storage once, with every stack that uses it, whatever each stack calls it', () => {
     const shared = store().observe({
       ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'shared_media', generationToken: 't',
       dependents: [
@@ -137,6 +150,8 @@ describe('StorageIdentityStore', () => {
         { stackName: 'photos', serviceName: 'app' },
       ],
     });
+    // Each stack declares its own Compose key for the volume (external: true,
+    // name: shared_media); the identity follows the Docker name, not the key.
     const viaOtherAlias = store().observe({
       ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'shared_media', generationToken: 't',
       dependents: [

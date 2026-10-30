@@ -11,14 +11,15 @@ import type {
 
 /**
  * The coverage evaluator. Pure: every surface that shows a protection state
- * (Storage, Anatomy, the Recovery overview) calls this with the evidence it
- * has, and nothing else decides "Protected".
+ * (Storage, Anatomy, the Recovery overview) must call this with the evidence it
+ * has, and nothing else may decide "Protected".
  *
  * A root is covered only by a root point of its current generation that
- * completed with nothing skipped, whose most recent verification says
- * verified, and that finished within the freshness window. Path points never
- * count. Anything the evaluator cannot establish is reported as such, never
- * defaulted to green.
+ * completed with nothing skipped and nothing excluded except by policy, whose
+ * most recent verification says verified, and that finished within the
+ * freshness window. The evaluator checks all of that itself rather than trusting
+ * the store's `partial` demotion. Path points never count. Anything it cannot
+ * establish is reported as such, never defaulted to green.
  */
 
 /** How far ahead of the evaluator's clock a completion time may be before it reads as inconsistent. */
@@ -56,6 +57,7 @@ export interface CoverageVerdict {
   roots: RootCoverage[];
 }
 
+/** The most recent verification; on a tie, the one that did not verify wins. */
 function latestVerification(
   pointId: string,
   verifications: ReadonlyMap<string, readonly IntegrityVerification[]>,
@@ -64,10 +66,17 @@ function latestVerification(
   let latest: IntegrityVerification | null = null;
   for (const v of list) {
     if (v.pointId !== pointId) continue;
-    if (!latest || v.verifiedAt > latest.verifiedAt) latest = v;
+    if (!latest || v.verifiedAt > latest.verifiedAt
+      || (v.verifiedAt === latest.verifiedAt && latest.result === 'verified' && v.result !== 'verified')) {
+      latest = v;
+    }
   }
   return latest;
 }
+
+const isComplete = (p: RecoveryPoint): boolean =>
+  p.status === 'succeeded' && p.capture.skippedCount === 0
+  && p.exclusions.every((e) => e.reason === 'policy_excluded');
 
 export function evaluateRootCoverage(root: RootCoverageInput, now: number, freshnessMs: number): RootCoverage {
   const storageKey = root.storage?.storageKey ?? null;
@@ -78,6 +87,8 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
   if (root.access === 'inaccessible') return result('inaccessible');
   if (root.access !== 'supported' || !root.storage) return result('identity_unknown');
   const storage = root.storage;
+  // Points matched to a superseded identity describe bytes that were replaced.
+  if (storage.state !== 'current') return result('older_generation');
 
   const roots = root.points.filter((p) => p.kind === 'root');
   const currentGen = roots.filter((p) => p.storageId === storage.id && p.storageGeneration === storage.generation);
@@ -90,11 +101,13 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
   }
 
   const complete = currentGen
-    .filter((p) => p.status === 'succeeded' && p.snapshotId !== null && p.completedAt !== null
-      && p.capture !== null && p.capture.skippedCount === 0)
+    .filter(isComplete)
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0));
   if (complete.length === 0) {
-    return result(currentGen.some((p) => p.status === 'partial') ? 'partial_point' : 'failed_only');
+    if (currentGen.some((p) => p.status === 'pending')) return result('in_progress');
+    if (currentGen.some((p) => p.status === 'partial' || p.status === 'succeeded')) return result('partial_point');
+    if (currentGen.some((p) => p.status === 'completion_unknown')) return result('completion_unknown');
+    return result('failed_only');
   }
 
   const verified = complete.filter((p) => latestVerification(p.id, root.verifications)?.result === 'verified');
@@ -109,25 +122,36 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
 }
 
 const UNKNOWN_ROOT_REASONS: ReadonlySet<RootCoverageReason> = new Set([
-  'identity_unknown', 'inaccessible', 'evidence_inconsistent',
+  'identity_unknown', 'inaccessible', 'evidence_inconsistent', 'completion_unknown',
 ]);
 
 export function evaluateCoverage(input: CoverageInput): CoverageVerdict {
   const freshnessMs = input.freshnessMs ?? ROOT_COVERAGE_FRESHNESS_MS;
 
-  // Shared storage is one root however many aliases reach it.
-  const seen = new Set<string>();
+  // Shared storage is one root however many aliases reach it. When aliases
+  // disagree (different access, a stale identity), the uncovered answer wins,
+  // so the verdict does not depend on input order.
+  const byKey = new Map<string, RootCoverage>();
   const roots: RootCoverage[] = [];
   for (const root of input.roots) {
+    const evaluated = evaluateRootCoverage(root, input.now, freshnessMs);
     const key = root.storage?.storageKey;
-    if (key) {
-      if (seen.has(key)) continue;
-      seen.add(key);
+    if (!key) {
+      roots.push(evaluated);
+      continue;
     }
-    roots.push(evaluateRootCoverage(root, input.now, freshnessMs));
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, evaluated);
+      roots.push(evaluated);
+    } else if (existing.reason === 'covered' && evaluated.reason !== 'covered') {
+      byKey.set(key, evaluated);
+      roots[roots.indexOf(existing)] = evaluated;
+    }
   }
 
   if (input.volumeProtection === 'unknown') return { state: 'unknown', reason: 'capability_unknown', roots };
+  if (input.volumeProtection === 'update_required') return { state: 'unknown', reason: 'capability_update_required', roots };
   if (input.volumeProtection !== 'available') return { state: 'unknown', reason: 'capability_unavailable', roots };
   if (roots.length === 0) return { state: 'unknown', reason: 'no_qualifying_storage', roots };
 

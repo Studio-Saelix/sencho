@@ -168,8 +168,9 @@ export type RecoverySchemaOutcome =
 export function applyRecoverySchema(db: Database.Database): RecoverySchemaOutcome {
   const row = db.prepare('SELECT value FROM system_state WHERE key = ?')
     .get(RECOVERY_SCHEMA_STATE_KEY) as { value: string } | undefined;
-  const stored = row ? Number.parseInt(row.value, 10) : 0;
-  if (!Number.isInteger(stored) || stored < 0) {
+  if (row && !/^\d+$/.test(row.value)) throw new Error(`Unreadable ${RECOVERY_SCHEMA_STATE_KEY}`);
+  const stored = row ? Number(row.value) : 0;
+  if (!Number.isSafeInteger(stored)) {
     throw new Error(`Unreadable ${RECOVERY_SCHEMA_STATE_KEY}`);
   }
   if (stored > RECOVERY_SCHEMA_VERSION) return { kind: 'newer', storedVersion: stored };

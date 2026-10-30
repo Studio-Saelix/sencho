@@ -22,11 +22,11 @@ import type { StorageDependent, StorageIdentity, StorageKind } from './types';
 const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]+$/;
 
 /**
- * Canonical form of a locator, or `invalid_request`. A bind root must be the
- * resolved absolute host path (the node-local adapter resolves symlinks before
- * calling); `..` segments and the filesystem root are refused rather than
- * normalized away, so two spellings of one directory cannot become two
- * identities and a traversal cannot become one.
+ * Canonical form of a locator, or `invalid_request`. Normalizing doubled and
+ * trailing slashes makes two spellings of one directory one identity; `..`
+ * segments and the filesystem root are refused rather than normalized away, so
+ * a traversal cannot become an identity. Symlinks are not resolved here: the
+ * node-local adapter must pass the real path.
  */
 export function canonicalizeLocator(kind: StorageKind, raw: string): string {
   if (typeof raw !== 'string' || raw.length === 0 || raw.includes('\0')) {
@@ -104,7 +104,7 @@ export interface StorageObservation {
   ownerNodeKey: string;
   kind: StorageKind;
   locator: string;
-  /** Adapter token that changes when the storage is recreated (a volume's CreatedAt). */
+  /** Adapter token that changes on every recreate (see `StorageIdentity.generationToken`). */
   generationToken: string;
   /** The complete set of stacks that reference this storage right now. */
   dependents: readonly StorageDependent[];
@@ -124,6 +124,11 @@ export class StorageIdentityStore {
    * new token: the old generation is superseded and a new one is linked to it.
    * The dependent set is replaced as a whole, so a stack that stopped using the
    * storage stops being a dependent.
+   *
+   * A token that belongs to a superseded generation is a stale observation (an
+   * inspect taken before the recreate, written after it). It is refused as
+   * `identity_unknown` and changes nothing, so it can neither roll the current
+   * generation back nor replace the dependents with an old view.
    */
   observe(observation: StorageObservation, now = Date.now()): StorageIdentity {
     const token = typeof observation.generationToken === 'string' ? observation.generationToken.trim() : '';
@@ -137,6 +142,13 @@ export class StorageIdentityStore {
       const current = db.prepare(
         "SELECT * FROM recovery_storage_identities WHERE storage_key = ? AND state = 'current'",
       ).get(storageKey) as IdentityRow | undefined;
+
+      if (!current || current.generation_token !== token) {
+        const seenBefore = db.prepare(
+          'SELECT 1 FROM recovery_storage_identities WHERE storage_key = ? AND generation_token = ?',
+        ).get(storageKey, token);
+        if (seenBefore) throw new RecoveryError('identity_unknown');
+      }
 
       let id: string;
       if (current && current.generation_token === token) {
@@ -196,8 +208,9 @@ export class StorageIdentityStore {
     const db = recoveryDb();
     db.prepare('DELETE FROM recovery_storage_dependents WHERE storage_key = ?').run(storageKey);
     const insert = db.prepare(`
-      INSERT OR IGNORE INTO recovery_storage_dependents (storage_key, stack_name, service_name, observed_at)
+      INSERT INTO recovery_storage_dependents (storage_key, stack_name, service_name, observed_at)
       VALUES (?, ?, ?, ?)
+      ON CONFLICT (storage_key, stack_name, service_name) DO NOTHING
     `);
     for (const dependent of dependents) {
       if (typeof dependent.stackName !== 'string' || dependent.stackName === '') {

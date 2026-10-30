@@ -1,20 +1,25 @@
 import { randomUUID } from 'crypto';
 import path from 'path';
+import { errorMessageForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
 import { assertMetadataOnly, RecoveryError } from './redaction';
 import { RECOVERY_POINT_SCHEMA_VERSION, VOLUME_PROTECTION_CAPABILITY_VERSION } from './types';
 import type {
   CaptureSummary,
   ConsistencyClass,
+  ExclusionReason,
   IntegrityMethod,
   IntegrityResult,
   IntegrityVerification,
   PointCaptureEvidence,
   PointExclusion,
+  PointHolderKind,
   RecoveryErrorClass,
   RecoveryPoint,
   RecoveryPointHold,
   RecoveryPointKind,
+  RecoveryPointOutcome,
+  RecoveryPointScope,
   RecoveryPointStatus,
   RecoveryPointTrigger,
 } from './types';
@@ -26,6 +31,12 @@ import type {
  * that the database refuses any update (trigger `recovery_points_immutable`).
  * Later facts about a point are separate rows: verifications are appended,
  * holds are added and removed, and neither rewrites the evidence.
+ *
+ * A point's own status is the authority on the data it captured. The operation
+ * that produced it is the authority on the request: an operation interrupted
+ * after its point was finalized ends `completion_unknown` while the point keeps
+ * its evidence, and an operation cannot finish `succeeded` or `partial` while
+ * one of its points is still pending.
  */
 
 interface PointRow {
@@ -52,20 +63,45 @@ interface PointRow {
   failure_class: RecoveryErrorClass | null;
 }
 
+/** The database CHECKs guarantee each status carries the evidence its branch names. */
+function outcomeOf(row: PointRow): RecoveryPointOutcome {
+  switch (row.status) {
+    case 'pending':
+      return { status: 'pending', snapshotId: null, consistency: 'unknown', capture: null, exclusions: [], completedAt: null, failureClass: null };
+    case 'succeeded':
+    case 'partial':
+      return {
+        status: row.status,
+        snapshotId: row.snapshot_id ?? '',
+        consistency: row.consistency,
+        capture: JSON.parse(row.capture_json ?? 'null') as CaptureSummary,
+        exclusions: JSON.parse(row.exclusions_json) as PointExclusion[],
+        completedAt: row.completed_at ?? 0,
+        failureClass: null,
+      };
+    case 'failed':
+      return {
+        status: 'failed', snapshotId: null, consistency: 'unknown', capture: null, exclusions: [],
+        completedAt: row.completed_at ?? 0, failureClass: row.failure_class ?? 'internal',
+      };
+    case 'completion_unknown':
+      return {
+        status: 'completion_unknown', snapshotId: null, consistency: 'unknown', capture: null, exclusions: [],
+        completedAt: row.completed_at ?? 0, failureClass: 'interrupted',
+      };
+  }
+}
+
 function toPoint(row: PointRow): RecoveryPoint {
+  const scope: RecoveryPointScope = row.kind === 'path'
+    ? { kind: 'path', pathScope: row.path_scope ?? '' }
+    : { kind: 'root', pathScope: null };
   return {
     id: row.id,
     schemaVersion: row.schema_version,
     storageId: row.storage_id,
     storageGeneration: row.storage_generation,
-    kind: row.kind,
-    pathScope: row.path_scope,
     repositoryId: row.repository_id,
-    snapshotId: row.snapshot_id,
-    status: row.status,
-    consistency: row.consistency,
-    capture: row.capture_json ? JSON.parse(row.capture_json) as CaptureSummary : null,
-    exclusions: JSON.parse(row.exclusions_json) as PointExclusion[],
     trigger: row.trigger_kind,
     actor: row.actor,
     sourceOperationId: row.source_operation_id,
@@ -73,9 +109,8 @@ function toPoint(row: PointRow): RecoveryPoint {
     engineId: row.engine_id,
     capabilityVersion: row.capability_version,
     startedAt: row.started_at,
-    completedAt: row.completed_at,
-    failureClass: row.failure_class,
-    immutable: true,
+    ...scope,
+    ...outcomeOf(row),
   };
 }
 
@@ -88,22 +123,50 @@ export function canonicalizePathScope(raw: string): string {
   return normalized;
 }
 
-export interface BeginPointInput {
+export type BeginPointInput = {
   storageId: string;
+  /**
+   * The generation token the caller observed just before starting. A storage
+   * recreated since then has a different token, and the point is refused
+   * rather than labelled with a generation whose bytes are gone.
+   */
+  expectedGenerationToken: string;
   repositoryId: string;
-  kind: RecoveryPointKind;
-  pathScope?: string;
   trigger: RecoveryPointTrigger;
   actor: string;
   sourceOperationId: string;
   sourceNodeKey: string;
   engineId: string;
-}
+} & (
+  | { kind: 'root'; pathScope?: undefined }
+  | { kind: 'path'; pathScope: string }
+);
 
 export type PointFinalization =
   | { status: 'succeeded' | 'partial'; evidence: PointCaptureEvidence }
   | { status: 'failed'; errorClass: RecoveryErrorClass }
   | { status: 'completion_unknown' };
+
+const EXCLUSION_REASONS: ReadonlySet<ExclusionReason> = new Set<ExclusionReason>([
+  'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type',
+]);
+
+const isCount = (n: unknown): boolean => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+
+/** Shape and redaction check of engine evidence; throws a plain Error describing the defect. */
+function validateEvidence(evidence: PointCaptureEvidence): void {
+  if (typeof evidence?.snapshotId !== 'string' || evidence.snapshotId.trim() === '') throw new Error('snapshot id missing');
+  const c = evidence.capture;
+  if (!c || !isCount(c.fileCount) || !isCount(c.byteCount) || !isCount(c.skippedCount)) throw new Error('capture counts invalid');
+  if (!Array.isArray(evidence.exclusions)) throw new Error('exclusions invalid');
+  for (const e of evidence.exclusions) {
+    if (!e || !EXCLUSION_REASONS.has(e.reason)) throw new Error('exclusion reason invalid');
+    canonicalizePathScope(e.path);
+  }
+  // Exclusion paths are the operator's own file names and may look like
+  // anything; every other field is checked for credential-shaped text.
+  assertMetadataOnly(evidence, 'recovery point evidence', ['path']);
+}
 
 /**
  * Only data the operator chose to leave out keeps a point complete. Anything
@@ -124,21 +187,23 @@ export class RecoveryPointStore {
     return RecoveryPointStore.instance;
   }
 
-  /** Record a point as `pending` against the storage's current generation. */
+  /** Record a point as `pending` against the generation the caller observed. */
   begin(input: BeginPointInput, now = Date.now()): RecoveryPoint {
     const db = recoveryDb();
     const storage = db.prepare(
-      'SELECT generation, state FROM recovery_storage_identities WHERE id = ?',
-    ).get(input.storageId) as { generation: number; state: string } | undefined;
+      'SELECT generation, generation_token, state FROM recovery_storage_identities WHERE id = ?',
+    ).get(input.storageId) as { generation: number; generation_token: string; state: string } | undefined;
     if (!storage) throw new RecoveryError('identity_unknown');
-    // A point of a superseded generation would describe bytes that no longer exist.
-    if (storage.state !== 'current') throw new RecoveryError('identity_unknown');
+    // A point of a superseded or since-recreated generation would describe bytes that no longer exist.
+    if (storage.state !== 'current' || storage.generation_token !== input.expectedGenerationToken) {
+      throw new RecoveryError('identity_unknown');
+    }
     // Checked here as well as by the foreign key, so the caller gets a recovery error class.
     if (!db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(input.repositoryId)) {
       throw new RecoveryError('repository_unavailable');
     }
     if (input.kind === 'root' && input.pathScope !== undefined) throw new RecoveryError('invalid_request');
-    const pathScope = input.kind === 'path' ? canonicalizePathScope(input.pathScope ?? '') : null;
+    const pathScope = input.kind === 'path' ? canonicalizePathScope(input.pathScope) : null;
 
     const id = randomUUID();
     db.prepare(`
@@ -155,12 +220,33 @@ export class RecoveryPointStore {
     return this.require(id);
   }
 
-  /** Write the point's only terminal state. A second call fails at the database. */
+  /**
+   * Write the point's only terminal state. A late or duplicated completion
+   * (after a restart settled the point, say) is refused as `invalid_request`
+   * and logged, never applied. Evidence that fails validation ends the point
+   * `failed` rather than leaving it pending until the next boot.
+   */
   finalize(pointId: string, outcome: PointFinalization, now = Date.now()): RecoveryPoint {
     const db = recoveryDb();
+    const current = this.require(pointId);
+    if (current.status !== 'pending') {
+      console.warn(
+        '[Recovery] Ignored a late %s completion for point %s, already %s',
+        outcome.status, pointId, current.status,
+      );
+      throw new RecoveryError('invalid_request');
+    }
     if (outcome.status === 'succeeded' || outcome.status === 'partial') {
       const { evidence } = outcome;
-      assertMetadataOnly(evidence, 'recovery point evidence');
+      try {
+        validateEvidence(evidence);
+      } catch (err) {
+        console.error('[Recovery] Point %s evidence refused:', pointId, errorMessageForLog(err));
+        db.prepare(`
+          UPDATE recovery_points SET status = 'failed', failure_class = 'internal', completed_at = ? WHERE id = ?
+        `).run(now, pointId);
+        throw new RecoveryError('internal');
+      }
       const status = demotedStatus(evidence, outcome.status);
       db.prepare(`
         UPDATE recovery_points
@@ -168,7 +254,8 @@ export class RecoveryPointStore {
         WHERE id = ?
       `).run(
         status, evidence.snapshotId, evidence.consistency, JSON.stringify(evidence.capture),
-        JSON.stringify(evidence.exclusions), now, pointId,
+        JSON.stringify(evidence.exclusions.map((e) => ({ path: canonicalizePathScope(e.path), reason: e.reason }))),
+        now, pointId,
       );
     } else {
       db.prepare(`
@@ -229,8 +316,9 @@ export class RecoveryPointStore {
   addHold(hold: Omit<RecoveryPointHold, 'createdAt'>, now = Date.now()): void {
     this.require(hold.pointId);
     recoveryDb().prepare(`
-      INSERT OR IGNORE INTO recovery_point_holds (point_id, holder_kind, holder_ref, created_at)
+      INSERT INTO recovery_point_holds (point_id, holder_kind, holder_ref, created_at)
       VALUES (?, ?, ?, ?)
+      ON CONFLICT (point_id, holder_kind, holder_ref) DO NOTHING
     `).run(hold.pointId, hold.holderKind, hold.holderRef, now);
   }
 
@@ -243,7 +331,7 @@ export class RecoveryPointStore {
   listHolds(pointId: string): RecoveryPointHold[] {
     const rows = recoveryDb().prepare(
       'SELECT point_id, holder_kind, holder_ref, created_at FROM recovery_point_holds WHERE point_id = ?',
-    ).all(pointId) as Array<{ point_id: string; holder_kind: RecoveryPointHold['holderKind']; holder_ref: string; created_at: number }>;
+    ).all(pointId) as Array<{ point_id: string; holder_kind: PointHolderKind; holder_ref: string; created_at: number }>;
     return rows.map((r) => ({ pointId: r.point_id, holderKind: r.holder_kind, holderRef: r.holder_ref, createdAt: r.created_at }));
   }
 

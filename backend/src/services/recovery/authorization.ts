@@ -17,6 +17,10 @@ import type { StorageDependent } from './types';
  * using it now, so a dependency added or dropped since cannot narrow the check.
  * Storage with no dependent stack needs the action globally.
  *
+ * The live set must come from the node's own current Compose model, resolved
+ * just before the check, and the operation that follows must run under the
+ * storage lock, so a dependency added after the check waits for the next one.
+ *
  * The check runs on the node that owns the storage, with the request as it
  * arrived there, so a request relayed by the hub (direct proxy or Pilot) is
  * held to the same rule: machine-auth stack evidence names one stack and can

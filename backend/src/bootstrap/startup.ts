@@ -142,6 +142,30 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
  * already-constructed server so tests can import the module without binding a
  * port.
  */
+/**
+ * Settle recovery work a previous process left behind: operations it left
+ * running end as completion_unknown and their locks turn stale, before anything
+ * can start new recovery work. Nothing recovery-related runs at boot, so a
+ * failure is logged and Sencho still starts; the store then refuses to resume
+ * any of that work, because a dead process's operation and locks can only be
+ * picked up by the epoch that owned them. On a build that cannot use the
+ * recovery schema there is nothing to settle.
+ */
+export function runRecoveryReconcile(): void {
+  if (DatabaseService.getInstance().getRecoverySchemaOutcome().kind !== 'current') return;
+  try {
+    const settled = RecoveryOperationStore.getInstance().reconcileAtStartup();
+    if (settled.interruptedOperations + settled.unknownPoints + settled.staleLocks > 0) {
+      console.warn(
+        '[Startup] Recovery reconcile: %d interrupted operations, %d unknown points, %d stale locks',
+        settled.interruptedOperations, settled.unknownPoints, settled.staleLocks,
+      );
+    }
+  } catch (err) {
+    console.error('[Startup] Recovery reconcile failed:', err);
+  }
+}
+
 export async function startServer(server: Server): Promise<void> {
   const freeBytes = os.freemem();
   const freeMiB = Math.round(freeBytes / (1024 * 1024));
@@ -217,21 +241,7 @@ export async function startServer(server: Server): Promise<void> {
   }
   StackUpdateRecoveryService.getInstance().start();
 
-  // Recovery operations a previous process left running end completion_unknown
-  // and their locks turn stale, before anything can start new recovery work.
-  // Nothing recovery-related runs at boot, so a failure here is logged and the
-  // locks stay as they are (closed) rather than stopping Sencho.
-  try {
-    const settled = RecoveryOperationStore.getInstance().reconcileAtStartup();
-    if (settled.interruptedOperations + settled.unknownPoints + settled.staleLocks > 0) {
-      console.warn(
-        '[Startup] Recovery reconcile: %d interrupted operations, %d unknown points, %d stale locks',
-        settled.interruptedOperations, settled.unknownPoints, settled.staleLocks,
-      );
-    }
-  } catch (err) {
-    console.error('[Startup] Recovery reconcile skipped:', (err as Error).message);
-  }
+  runRecoveryReconcile();
 
   // Interrupted creates are settled here, ahead of the background mutators and
   // the HTTP bind below, because a scheduler or webhook that fired first could

@@ -6,7 +6,35 @@ import {
   buildLocalRecoveryNodeDescriptor,
   resolveRemoteVolumeProtection,
 } from './capability';
+import { sanitizeForLog } from '../../utils/safeLog';
+import { VOLUME_PROTECTION_CAPABILITY, VOLUME_PROTECTION_CAPABILITY_VERSION } from './types';
 import type { RecoveryErrorClass, RecoveryTransport, VolumeProtectionStatus } from './types';
+
+const descriptorMismatch: VolumeProtectionStatus = {
+  capability: VOLUME_PROTECTION_CAPABILITY,
+  version: VOLUME_PROTECTION_CAPABILITY_VERSION,
+  state: 'unknown',
+  reason: 'descriptor_mismatch',
+};
+
+/** Why a status is not the node's own answer, read from the state first. */
+function errorClassFor(status: VolumeProtectionStatus): RecoveryErrorClass | null {
+  switch (status.state) {
+    case 'available':
+    case 'unavailable':
+      return null;
+    case 'update_required':
+      return 'update_required';
+    case 'unknown':
+      switch (status.reason) {
+        case 'node_unreachable': return 'transport_unreachable';
+        case 'node_refused': return 'node_refused';
+        case 'node_error': return 'node_error';
+        case 'descriptor_invalid':
+        case 'descriptor_mismatch': return 'internal';
+      }
+  }
+}
 
 /**
  * Where recovery work for a node runs, and how the hub learns about it.
@@ -79,18 +107,22 @@ export async function readRecoveryNodeStatus(nodeId: number, now: () => number =
     logLabel: 'recovery node descriptor',
     headers: { [RECOVERY_OPERATION_HEADER]: operationId },
   });
-  // An answer to some other dispatch (a replayed or crossed response) is not
-  // evidence about this one.
+  let volumeProtection: VolumeProtectionStatus;
   const echoed = read.kind === 'ok' && read.data && typeof read.data === 'object'
     ? (read.data as Record<string, unknown>).operationId
     : undefined;
-  const checked = read.kind === 'ok' && echoed !== operationId
-    ? { kind: 'ok' as const, data: null }
-    : read;
-  const volumeProtection = resolveRemoteVolumeProtection(checked);
-  let errorClass: RecoveryErrorClass | null = null;
-  if (volumeProtection.reason === 'node_unreachable') errorClass = 'transport_unreachable';
-  else if (volumeProtection.state === 'update_required') errorClass = 'update_required';
-  else if (volumeProtection.reason === 'descriptor_invalid') errorClass = 'internal';
+  if (read.kind === 'ok' && echoed !== operationId) {
+    // An answer to some other dispatch (crossed or replayed), or from a hop that
+    // drops the header, is not evidence about this one. Logged, because a hop
+    // that always strips the header would otherwise fail without a trace.
+    console.warn(
+      '[Recovery] Node %d answered the descriptor read without this dispatch\'s operation id (sent %s, got %s)',
+      nodeId, operationId, typeof echoed === 'string' ? sanitizeForLog(echoed).slice(0, 64) : String(echoed),
+    );
+    volumeProtection = { ...descriptorMismatch };
+  } else {
+    volumeProtection = resolveRemoteVolumeProtection(read);
+  }
+  const errorClass = errorClassFor(volumeProtection);
   return { operationId, nodeId, transport, volumeProtection, errorClass, observedAt: now() };
 }

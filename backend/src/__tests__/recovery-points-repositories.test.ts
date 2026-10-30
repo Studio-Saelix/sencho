@@ -4,7 +4,7 @@
  * repository secret is encrypted at rest and never leaves through a
  * descriptor, an error, or point evidence.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { StorageIdentity, RepositoryDescriptor, PointCaptureEvidence } from '../services/recovery/types';
 
@@ -46,8 +46,8 @@ const evidence = (overrides: Partial<PointCaptureEvidence> = {}): PointCaptureEv
   ...overrides,
 });
 
-const beginRoot = (storageId = storage.id) => points.RecoveryPointStore.getInstance().begin({
-  storageId, repositoryId: repository.id, kind: 'root', trigger: 'manual', actor: 'admin',
+const beginRoot = (storageId = storage.id, expectedGenerationToken = 'g1') => points.RecoveryPointStore.getInstance().begin({
+  storageId, expectedGenerationToken, repositoryId: repository.id, kind: 'root', trigger: 'manual', actor: 'admin',
   sourceOperationId: `op-${++counter}`, sourceNodeKey: ENGINE, engineId: 'test-engine',
 });
 
@@ -56,13 +56,17 @@ describe('RecoveryPointStore', () => {
 
   it('records a pending point against the current generation, then finalizes it once', () => {
     const p = beginRoot();
-    expect(p).toMatchObject({ status: 'pending', kind: 'root', pathScope: null, storageGeneration: 1, schemaVersion: 1, immutable: true });
+    expect(p).toMatchObject({ status: 'pending', kind: 'root', pathScope: null, storageGeneration: 1, schemaVersion: 1, snapshotId: null, completedAt: null });
     const done = store().finalize(p.id, { status: 'succeeded', evidence: evidence() });
     expect(done.status).toBe('succeeded');
     expect(done.capture).toEqual({ fileCount: 10, byteCount: 1024, skippedCount: 0 });
-    // A duplicated or late completion cannot rewrite the record.
-    expect(() => store().finalize(p.id, { status: 'failed', errorClass: 'internal' })).toThrow(/immutable/);
+    // A duplicated or late completion cannot rewrite the record, and says so as a recovery error.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => store().finalize(p.id, { status: 'failed', errorClass: 'internal' })).toThrow(expect.objectContaining({ errorClass: 'invalid_request' }));
+    warn.mockRestore();
     expect(store().get(p.id)?.status).toBe('succeeded');
+    // The database still refuses a direct rewrite.
+    expect(() => recoveryDb().prepare("UPDATE recovery_points SET status = 'failed' WHERE id = ?").run(p.id)).toThrow(/immutable/);
   });
 
   it('demotes a point that skipped data to partial, whatever the engine claimed', () => {
@@ -87,18 +91,19 @@ describe('RecoveryPointStore', () => {
 
   it('keeps path points scoped inside the root', () => {
     const p = store().begin({
-      storageId: storage.id, repositoryId: repository.id, kind: 'path', pathScope: 'uploads/2026/', trigger: 'pre_change',
+      storageId: storage.id, expectedGenerationToken: 'g1', repositoryId: repository.id, kind: 'path', pathScope: 'uploads/2026/', trigger: 'pre_change',
       actor: 'admin', sourceOperationId: 'op-path', sourceNodeKey: ENGINE, engineId: 'test-engine',
     });
     expect(p.pathScope).toBe('uploads/2026');
     for (const bad of ['', '/etc', '../up', 'a/../../b', '.']) {
       expect(() => store().begin({
-        storageId: storage.id, repositoryId: repository.id, kind: 'path', pathScope: bad, trigger: 'pre_change',
+        storageId: storage.id, expectedGenerationToken: 'g1', repositoryId: repository.id, kind: 'path', pathScope: bad, trigger: 'pre_change',
         actor: 'admin', sourceOperationId: 'op-bad', sourceNodeKey: ENGINE, engineId: 'test-engine',
       })).toThrow(redaction.RecoveryError);
     }
     expect(() => store().begin({
-      storageId: storage.id, repositoryId: repository.id, kind: 'root', pathScope: 'a', trigger: 'manual',
+      storageId: storage.id, expectedGenerationToken: 'g1', repositoryId: repository.id, kind: 'root',
+      pathScope: 'a' as never, trigger: 'manual',
       actor: 'admin', sourceOperationId: 'op-bad', sourceNodeKey: ENGINE, engineId: 'test-engine',
     })).toThrow(redaction.RecoveryError);
   });
@@ -110,10 +115,12 @@ describe('RecoveryPointStore', () => {
     identities.StorageIdentityStore.getInstance().observe({
       ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'recreated_data', generationToken: 'g2', dependents: [],
     });
-    expect(() => beginRoot(old.id)).toThrow(expect.objectContaining({ errorClass: 'identity_unknown' }));
+    expect(() => beginRoot(old.id, 'g1')).toThrow(expect.objectContaining({ errorClass: 'identity_unknown' }));
+    // Recreated since the caller observed it: the token no longer matches.
+    expect(() => beginRoot(storage.id, 'g0-stale')).toThrow(expect.objectContaining({ errorClass: 'identity_unknown' }));
     expect(() => beginRoot('no-such-storage')).toThrow(expect.objectContaining({ errorClass: 'identity_unknown' }));
     expect(() => store().begin({
-      storageId: storage.id, repositoryId: 'no-such-repo', kind: 'root', trigger: 'manual', actor: 'admin',
+      storageId: storage.id, expectedGenerationToken: 'g1', repositoryId: 'no-such-repo', kind: 'root', trigger: 'manual', actor: 'admin',
       sourceOperationId: 'op', sourceNodeKey: ENGINE, engineId: 'test-engine',
     })).toThrow(expect.objectContaining({ errorClass: 'repository_unavailable' }));
   });
@@ -138,17 +145,49 @@ describe('RecoveryPointStore', () => {
     expect(recoveryDb().prepare('DELETE FROM recovery_points WHERE id = ?').run(p.id).changes).toBe(1);
   });
 
-  it('refuses evidence that carries a secret', () => {
-    const p = beginRoot();
-    expect(() => store().finalize(p.id, {
+  it('ends a point failed when its evidence carries a secret, instead of leaving it pending', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const keyed = beginRoot();
+    expect(() => store().finalize(keyed.id, {
       status: 'succeeded',
       evidence: { ...evidence(), password: 'hunter2' } as unknown as PointCaptureEvidence,
-    })).toThrow(/secret-shaped key/);
-    expect(() => store().finalize(p.id, {
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    expect(store().get(keyed.id)).toMatchObject({ status: 'failed', failureClass: 'internal' });
+    const texted = beginRoot();
+    expect(() => store().finalize(texted.id, {
       status: 'succeeded',
       evidence: evidence({ snapshotId: 'RESTIC_PASSWORD=hunter2' }),
-    })).toThrow(/credential-shaped/);
-    expect(store().get(p.id)?.status).toBe('pending');
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    expect(store().get(texted.id)?.status).toBe('failed');
+    const malformed = beginRoot();
+    expect(() => store().finalize(malformed.id, {
+      status: 'succeeded',
+      evidence: evidence({ capture: { fileCount: -1, byteCount: 0, skippedCount: 0 } }),
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    const escaping = beginRoot();
+    expect(() => store().finalize(escaping.id, {
+      status: 'succeeded',
+      evidence: evidence({ exclusions: [{ path: '../etc/shadow', reason: 'unreadable' }] }),
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    err.mockRestore();
+  });
+
+  it('keeps an exclusion whose file name merely looks like a credential', () => {
+    const p = store().finalize(beginRoot().id, {
+      status: 'succeeded',
+      evidence: evidence({ exclusions: [
+        { path: 'exports/database_dump.20240101.compressed', reason: 'policy_excluded' },
+        { path: 'conf/password=hunter2.txt', reason: 'policy_excluded' },
+      ] }),
+    });
+    expect(p.status).toBe('succeeded');
+    expect(p.exclusions.map((e) => e.path)).toEqual(['exports/database_dump.20240101.compressed', 'conf/password=hunter2.txt']);
+  });
+
+  it('refuses a hold of an unknown kind instead of dropping it', () => {
+    const p = store().finalize(beginRoot().id, { status: 'succeeded', evidence: evidence() });
+    expect(() => store().addHold({ pointId: p.id, holderKind: 'whim' as never, holderRef: 'x' })).toThrow(/CHECK/);
+    expect(store().listHolds(p.id)).toEqual([]);
   });
 });
 
@@ -172,6 +211,21 @@ describe('RecoveryRepositoryStore', () => {
     expect(JSON.stringify(descriptor)).not.toContain(SECRET);
     expect(JSON.stringify(descriptor)).not.toContain('enc:');
     expect(store().readSecret(repository.id)).toBe(SECRET);
+  });
+
+  it('refuses a second registration with a different failure domain, or an unknown kind', () => {
+    expect(() => store().register({ ownerNodeKey: ENGINE, kind: 'local_volume', locator: 'sencho_recovery_repo', failureDomain: 'separate' }))
+      .toThrow(expect.objectContaining({ errorClass: 'invalid_request' }));
+    expect(() => store().register({ ownerNodeKey: ENGINE, kind: 's3' as never, locator: 'other_repo', failureDomain: 'unknown' })).toThrow(/CHECK/);
+  });
+
+  it('sets the repository fingerprint once and refuses a replacement', () => {
+    const r = store().register({ ownerNodeKey: ENGINE, kind: 'local_volume', locator: 'fingerprint_repo', failureDomain: 'same_failure_domain' });
+    store().setFingerprint(r.id, 'restic-aaaa');
+    store().setFingerprint(r.id, 'restic-aaaa');
+    expect(() => store().setFingerprint(r.id, 'restic-bbbb')).toThrow(expect.objectContaining({ errorClass: 'repository_unavailable' }));
+    expect(store().get(r.id)?.repositoryFingerprint).toBe('restic-aaaa');
+    expect(() => store().setFingerprint(r.id, ' ')).toThrow(expect.objectContaining({ errorClass: 'invalid_request' }));
   });
 
   it('reports a missing or unreadable secret as unavailable, never as the ciphertext', () => {
@@ -200,6 +254,11 @@ describe('redaction boundary', () => {
     expect(line).not.toContain('s3cr3t-pass');
     expect(line).not.toContain('user:pw');
     expect(line).not.toContain('password=other');
+  });
+
+  it('names the two node answers that are not network faults', () => {
+    expect(redaction.errorDetailFor('node_refused')).toBe('The node refused the request.');
+    expect(redaction.errorDetailFor('node_error')).toBe('The node could not answer the request.');
   });
 
   it('accepts plain metadata and paths under a home directory', () => {

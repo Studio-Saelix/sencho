@@ -4,6 +4,7 @@ import { recoveryDb } from './recoveryDb';
 import { errorDetailFor, RecoveryError } from './redaction';
 import { TERMINAL_OPERATION_STATES } from './types';
 import type {
+  OperationFinish,
   RecoveryErrorClass,
   RecoveryLock,
   RecoveryLockScope,
@@ -26,6 +27,14 @@ import type {
  *
  * Replays are safe: a request carries an idempotency key, and the same key
  * returns the operation it already created instead of starting a second one.
+ * The key is honored only for the same request from the same actor over the
+ * same transport; anything else is refused rather than handed someone else's
+ * operation.
+ *
+ * Work left by a dead process can never be resumed in place: `markRunning`
+ * and a lock owner's re-acquire both require the current epoch, so even if
+ * boot reconciliation failed, an interrupted operation and its locks stay
+ * closed until reviewed.
  */
 
 interface OperationRow {
@@ -74,8 +83,9 @@ function toOperation(row: OperationRow): RecoveryOperation {
 
 function toLock(row: LockRow): RecoveryLock {
   return {
-    scope: row.scope,
-    resourceKey: row.resource_key,
+    ...(row.scope === 'storage'
+      ? { scope: 'storage' as const, resourceKey: row.resource_key }
+      : { scope: 'repository' as const, resourceKey: row.resource_key }),
     ownerOperationId: row.owner_operation_id,
     processEpoch: row.process_epoch,
     acquiredAt: row.acquired_at,
@@ -83,7 +93,7 @@ function toLock(row: LockRow): RecoveryLock {
   };
 }
 
-const isTerminal = (state: RecoveryOperationState): boolean => TERMINAL_OPERATION_STATES.includes(state);
+const isTerminal = (state: RecoveryOperationState): boolean => TERMINAL_OPERATION_STATES.some((t) => t === state);
 
 export interface StartOperationInput {
   idempotencyKey: string;
@@ -106,11 +116,11 @@ export interface StartupReconciliation {
   staleLocks: number;
 }
 
-export type FinishState = Exclude<RecoveryOperationState, 'queued' | 'running'>;
 
 export class RecoveryOperationStore {
   private static instance: RecoveryOperationStore;
   readonly processEpoch: string;
+  private reconciled = false;
 
   constructor(processEpoch: string = randomUUID()) {
     this.processEpoch = processEpoch;
@@ -130,8 +140,9 @@ export class RecoveryOperationStore {
     return db.transaction((): StartedOperation => {
       const existing = db.prepare('SELECT * FROM recovery_operations WHERE idempotency_key = ?').get(key) as OperationRow | undefined;
       if (existing) {
-        // The same key for a different request is a client bug, not a replay.
-        if (existing.kind !== input.kind || existing.storage_id !== storageId || existing.point_id !== pointId) {
+        // The same key for a different request, actor or transport is not a replay.
+        if (existing.kind !== input.kind || existing.storage_id !== storageId || existing.point_id !== pointId
+          || existing.actor !== input.actor || existing.transport !== input.transport) {
           throw new RecoveryError('invalid_request');
         }
         return { operation: toOperation(existing), replayed: true };
@@ -151,32 +162,53 @@ export class RecoveryOperationStore {
     return row ? toOperation(row) : null;
   }
 
+  /** Start a queued operation. Running one this process already started is a no-op replay. */
   markRunning(id: string, now = Date.now()): RecoveryOperation {
     const result = recoveryDb().prepare(`
       UPDATE recovery_operations SET state = 'running', process_epoch = ?, updated_at = ?
       WHERE id = ? AND state = 'queued'
     `).run(this.processEpoch, now, id);
     const op = this.require(id);
-    if (result.changes === 0 && op.state !== 'running') throw new RecoveryError('invalid_request');
+    if (result.changes === 0 && !(op.state === 'running' && op.processEpoch === this.processEpoch)) {
+      throw new RecoveryError('invalid_request');
+    }
     return op;
   }
 
   /**
    * Record the one terminal state. A finished operation is never rewritten, so
-   * a late or duplicated completion cannot turn a failure into a success.
-   * Locks are released on a known outcome and turned stale on
-   * `completion_unknown`, which needs review before the storage is reused.
+   * a late or duplicated completion cannot turn a failure into a success; one
+   * that disagrees with the stored outcome is logged. An operation cannot end
+   * `succeeded` or `partial` while one of its points is still pending: the point
+   * is finalized first. Locks are released on a known outcome and turned stale
+   * on `completion_unknown`, which needs review before the storage is reused.
    */
-  finish(id: string, state: FinishState, errorClass: RecoveryErrorClass | null = null, now = Date.now()): RecoveryOperation {
-    if (state === 'failed' && !errorClass) throw new RecoveryError('invalid_request');
+  finish(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
+    const errorClass: RecoveryErrorClass | null = 'errorClass' in outcome
+      ? outcome.errorClass
+      : outcome.state === 'completion_unknown' ? 'interrupted' : null;
     const db = recoveryDb();
     return db.transaction((): RecoveryOperation => {
       const current = this.require(id);
-      if (isTerminal(current.state)) return current;
+      if (isTerminal(current.state)) {
+        if (current.state !== outcome.state) {
+          console.warn(
+            '[Recovery] Ignored a late %s completion for operation %s, already %s',
+            outcome.state, id, current.state,
+          );
+        }
+        return current;
+      }
+      if (outcome.state === 'succeeded' || outcome.state === 'partial') {
+        const pending = db.prepare(
+          "SELECT 1 FROM recovery_points WHERE source_operation_id = ? AND status = 'pending'",
+        ).get(id);
+        if (pending) throw new RecoveryError('invalid_request');
+      }
       db.prepare(`
         UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ? WHERE id = ?
-      `).run(state, errorClass, now, now, id);
-      if (state === 'completion_unknown') {
+      `).run(outcome.state, errorClass, now, now, id);
+      if (outcome.state === 'completion_unknown') {
         db.prepare('UPDATE recovery_locks SET stale_since = ? WHERE owner_operation_id = ? AND stale_since IS NULL').run(now, id);
       } else {
         db.prepare('DELETE FROM recovery_locks WHERE owner_operation_id = ?').run(id);
@@ -186,20 +218,29 @@ export class RecoveryOperationStore {
   }
 
   /**
-   * Take the lock for one storage or repository. The owner taking it again is
-   * a replay and succeeds; anyone else gets `lock_held`, or `lock_stale` when
-   * an interrupted operation still holds it.
+   * Take the lock for one storage (keyed by its storage key, which is the same
+   * for every generation) or one repository (keyed by its id); a key that names
+   * neither is refused, so a lock taken on the wrong id cannot sit beside the
+   * real one. The owner taking it again in this process is a replay and
+   * succeeds; anyone else gets `lock_held`, and a lock that is stale or left by
+   * a dead process gets `lock_stale`.
    */
   acquireLock(scope: RecoveryLockScope, resourceKey: string, operationId: string, now = Date.now()): RecoveryLock {
     const db = recoveryDb();
     return db.transaction((): RecoveryLock => {
       const op = this.require(operationId);
       if (isTerminal(op.state)) throw new RecoveryError('invalid_request');
+      const target = scope === 'storage'
+        ? db.prepare('SELECT 1 FROM recovery_storage_identities WHERE storage_key = ? LIMIT 1').get(resourceKey)
+        : db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(resourceKey);
+      if (!target) throw new RecoveryError('invalid_request');
       const existing = db.prepare(
         'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
       ).get(scope, resourceKey) as LockRow | undefined;
       if (existing) {
-        if (existing.stale_since !== null) throw new RecoveryError('lock_stale');
+        if (existing.stale_since !== null || existing.process_epoch !== this.processEpoch) {
+          throw new RecoveryError('lock_stale');
+        }
         if (existing.owner_operation_id !== operationId) throw new RecoveryError('lock_held');
         return toLock(existing);
       }
@@ -238,10 +279,15 @@ export class RecoveryOperationStore {
     })();
   }
 
-  /** Settle what a previous process left behind. Run once at boot, before any new recovery work. */
+  /**
+   * Settle what a previous process left behind. Run at boot, before any new
+   * recovery work; a second call in the same process does nothing, so it can
+   * never mistake this process's own pending work for a dead process's.
+   */
   reconcileAtStartup(now = Date.now()): StartupReconciliation {
+    if (this.reconciled) return { interruptedOperations: 0, unknownPoints: 0, staleLocks: 0 };
     const db = recoveryDb();
-    return db.transaction((): StartupReconciliation => {
+    const settled = db.transaction((): StartupReconciliation => {
       const interrupted = db.prepare(`
         SELECT id FROM recovery_operations
         WHERE state IN ('queued','running') AND process_epoch <> ?
@@ -265,6 +311,8 @@ export class RecoveryOperationStore {
       `).run(now, this.processEpoch).changes;
       return { interruptedOperations: interrupted.length, unknownPoints, staleLocks };
     })();
+    this.reconciled = true;
+    return settled;
   }
 
   private require(id: string): RecoveryOperation {

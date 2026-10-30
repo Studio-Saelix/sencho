@@ -1,7 +1,9 @@
 /**
  * Durable operations and locks: replays return the same operation, a finished
  * operation is never rewritten, and a restart turns whatever was running into
- * completion_unknown with stale locks that need a reviewed release.
+ * completion_unknown with stale locks that need a reviewed release. Work left
+ * by a dead process can never be resumed in place, even when boot
+ * reconciliation did not run.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
@@ -11,6 +13,7 @@ let ops: typeof import('../services/recovery/operations');
 let points: typeof import('../services/recovery/recoveryPoints');
 let identities: typeof import('../services/recovery/storageIdentity');
 let repos: typeof import('../services/recovery/repositories');
+let recoveryDb: typeof import('../services/recovery/recoveryDb').recoveryDb;
 
 const ENGINE = 'docker-engine:ops-test';
 let n = 0;
@@ -22,6 +25,7 @@ beforeAll(async () => {
   points = await import('../services/recovery/recoveryPoints');
   identities = await import('../services/recovery/storageIdentity');
   repos = await import('../services/recovery/repositories');
+  ({ recoveryDb } = await import('../services/recovery/recoveryDb'));
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -35,6 +39,33 @@ function classOf(fn: () => unknown): string | null {
   }
 }
 
+/** A storage that exists, so its key is a valid lock target. */
+function storage(locator: string) {
+  return identities.StorageIdentityStore.getInstance().observe({
+    ownerNodeKey: ENGINE, kind: 'named_volume', locator, generationToken: 'g', dependents: [],
+  });
+}
+
+function repository(locator: string) {
+  return repos.RecoveryRepositoryStore.getInstance().register({
+    ownerNodeKey: ENGINE, kind: 'local_volume', locator, failureDomain: 'same_failure_domain',
+  });
+}
+
+function beginPoint(storageId: string, token: string, repositoryId: string, sourceOperationId: string) {
+  return points.RecoveryPointStore.getInstance().begin({
+    storageId, expectedGenerationToken: token, repositoryId, kind: 'root', trigger: 'manual', actor: 'admin',
+    sourceOperationId, sourceNodeKey: ENGINE, engineId: 'e',
+  });
+}
+
+const evidence = () => ({
+  snapshotId: `snap-${++n}`,
+  capture: { fileCount: 1, byteCount: 1, skippedCount: 0 },
+  exclusions: [],
+  consistency: 'crash_consistent_live' as const,
+});
+
 describe('operations', () => {
   it('creates once and returns the same operation on replay', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
@@ -46,12 +77,18 @@ describe('operations', () => {
     expect(replay).toEqual({ operation: first.operation, replayed: true });
   });
 
-  it('refuses a key reused for a different request', () => {
+  it('refuses a key reused for a different request, actor or transport', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
     const k = key();
-    s.start({ idempotencyKey: k, kind: 'create_point', storageId: 's1', actor: 'admin', transport: 'local' });
-    expect(classOf(() => s.start({ idempotencyKey: k, kind: 'restore', storageId: 's1', actor: 'admin', transport: 'local' }))).toBe('invalid_request');
-    expect(classOf(() => s.start({ idempotencyKey: k, kind: 'create_point', storageId: 's2', actor: 'admin', transport: 'local' }))).toBe('invalid_request');
+    s.start({ idempotencyKey: k, kind: 'restore', storageId: 's1', actor: 'alice', transport: 'local' });
+    for (const other of [
+      { kind: 'create_point' as const, storageId: 's1', actor: 'alice', transport: 'local' as const },
+      { kind: 'restore' as const, storageId: 's2', actor: 'alice', transport: 'local' as const },
+      { kind: 'restore' as const, storageId: 's1', actor: 'mallory', transport: 'local' as const },
+      { kind: 'restore' as const, storageId: 's1', actor: 'alice', transport: 'pilot_tunnel' as const },
+    ]) {
+      expect(classOf(() => s.start({ idempotencyKey: k, ...other }))).toBe('invalid_request');
+    }
     expect(classOf(() => s.start({ idempotencyKey: '  ', kind: 'create_point', actor: 'admin', transport: 'local' }))).toBe('invalid_request');
   });
 
@@ -59,122 +96,189 @@ describe('operations', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
     const { operation } = s.start({ idempotencyKey: key(), kind: 'verify_point', pointId: 'p', actor: 'admin', transport: 'node_proxy' });
     s.markRunning(operation.id);
-    const failed = s.finish(operation.id, 'failed', 'integrity_mismatch', 100);
+    expect(s.markRunning(operation.id).state).toBe('running');
+    const failed = s.finish(operation.id, { state: 'failed', errorClass: 'integrity_mismatch' }, 100);
     expect(failed).toMatchObject({ state: 'failed', errorClass: 'integrity_mismatch', completedAt: 100 });
     expect(failed.errorDetail).toBe('The recovery point failed its integrity check.');
-    expect(s.finish(operation.id, 'succeeded', null, 200)).toMatchObject({ state: 'failed', completedAt: 100 });
-    expect(s.finish(operation.id, 'failed', 'integrity_mismatch', 300)).toMatchObject({ completedAt: 100 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(s.finish(operation.id, { state: 'succeeded' }, 200)).toMatchObject({ state: 'failed', completedAt: 100 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'succeeded', operation.id, 'failed');
+    warn.mockRestore();
+    expect(s.finish(operation.id, { state: 'failed', errorClass: 'integrity_mismatch' }, 300)).toMatchObject({ completedAt: 100 });
     expect(classOf(() => s.markRunning(operation.id))).toBe('invalid_request');
   });
 
-  it('requires an error class on failure', () => {
+  it('ties each ending to its error class', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
-    const { operation } = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' });
-    expect(classOf(() => s.finish(operation.id, 'failed'))).toBe('invalid_request');
+    const ok = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
+    expect(s.finish(ok.id, { state: 'succeeded' })).toMatchObject({ errorClass: null, errorDetail: null });
+    const lost = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
+    expect(s.finish(lost.id, { state: 'completion_unknown' })).toMatchObject({ errorClass: 'interrupted' });
+  });
+
+  it('refuses to finish succeeded or partial while a point of the operation is pending', () => {
+    const s = new ops.RecoveryOperationStore('epoch-a');
+    const st = storage('finish_guard');
+    const repo = repository('finish_guard_repo');
+    const op = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    const p = beginPoint(st.id, 'g', repo.id, op.id);
+    expect(classOf(() => s.finish(op.id, { state: 'succeeded' }))).toBe('invalid_request');
+    expect(classOf(() => s.finish(op.id, { state: 'partial', errorClass: 'source_unreadable' }))).toBe('invalid_request');
+    expect(s.get(op.id)?.state).toBe('queued');
+    points.RecoveryPointStore.getInstance().finalize(p.id, { status: 'succeeded', evidence: evidence() });
+    expect(s.finish(op.id, { state: 'succeeded' }).state).toBe('succeeded');
   });
 });
 
 describe('locks', () => {
   it('admits one owner per storage, lets the owner re-acquire, and releases on a known outcome', () => {
     const s = new ops.RecoveryOperationStore('epoch-b');
+    const st = storage('lock_one');
+    const repo = repository('lock_one_repo');
     const a = s.start({ idempotencyKey: key(), kind: 'create_point', actor: 'admin', transport: 'local' }).operation;
     const b = s.start({ idempotencyKey: key(), kind: 'restore', actor: 'admin', transport: 'local' }).operation;
-    const lock = s.acquireLock('storage', 'k-1', a.id);
-    expect(lock).toMatchObject({ ownerOperationId: a.id, staleSince: null, processEpoch: 'epoch-b' });
-    expect(s.acquireLock('storage', 'k-1', a.id)).toEqual(lock);
-    expect(classOf(() => s.acquireLock('storage', 'k-1', b.id))).toBe('lock_held');
-    // A repository lock is a separate scope.
-    expect(s.acquireLock('repository', 'k-1', b.id).ownerOperationId).toBe(b.id);
-    s.finish(a.id, 'succeeded');
-    expect(s.getLock('storage', 'k-1')).toBeNull();
-    expect(s.acquireLock('storage', 'k-1', b.id).ownerOperationId).toBe(b.id);
+    const lock = s.acquireLock('storage', st.storageKey, a.id);
+    expect(lock).toMatchObject({ scope: 'storage', ownerOperationId: a.id, staleSince: null, processEpoch: 'epoch-b' });
+    expect(s.acquireLock('storage', st.storageKey, a.id)).toEqual(lock);
+    expect(classOf(() => s.acquireLock('storage', st.storageKey, b.id))).toBe('lock_held');
+    expect(s.acquireLock('repository', repo.id, b.id).ownerOperationId).toBe(b.id);
+    s.finish(a.id, { state: 'succeeded' });
+    expect(s.getLock('storage', st.storageKey)).toBeNull();
+    expect(s.acquireLock('storage', st.storageKey, b.id).ownerOperationId).toBe(b.id);
+  });
+
+  it('refuses a lock on a key that names no storage or repository', () => {
+    const s = new ops.RecoveryOperationStore('epoch-b');
+    const st = storage('lock_target');
+    const a = s.start({ idempotencyKey: key(), kind: 'create_point', actor: 'admin', transport: 'local' }).operation;
+    // A generation id is not the storage key: locking it would not exclude the real lock.
+    expect(classOf(() => s.acquireLock('storage', st.id, a.id))).toBe('invalid_request');
+    expect(classOf(() => s.acquireLock('repository', st.storageKey, a.id))).toBe('invalid_request');
   });
 
   it('refuses a lock for an operation that already finished', () => {
     const s = new ops.RecoveryOperationStore('epoch-b');
+    const st = storage('lock_done');
     const a = s.start({ idempotencyKey: key(), kind: 'create_point', actor: 'admin', transport: 'local' }).operation;
-    s.finish(a.id, 'cancelled');
-    expect(classOf(() => s.acquireLock('storage', 'k-done', a.id))).toBe('invalid_request');
+    s.finish(a.id, { state: 'cancelled' });
+    expect(classOf(() => s.acquireLock('storage', st.storageKey, a.id))).toBe('invalid_request');
   });
 
   it('turns locks stale when the outcome is unknown, and only a reviewed release clears them', () => {
     const s = new ops.RecoveryOperationStore('epoch-b');
+    const st = storage('lock_unknown');
     const a = s.start({ idempotencyKey: key(), kind: 'restore', actor: 'admin', transport: 'local' }).operation;
     const next = s.start({ idempotencyKey: key(), kind: 'restore', actor: 'admin', transport: 'local' }).operation;
-    s.acquireLock('storage', 'k-unknown', a.id);
-    s.finish(a.id, 'completion_unknown', 'interrupted', 50);
-    expect(s.getLock('storage', 'k-unknown')?.staleSince).toBe(50);
-    expect(classOf(() => s.acquireLock('storage', 'k-unknown', next.id))).toBe('lock_stale');
+    s.acquireLock('storage', st.storageKey, a.id);
+    s.finish(a.id, { state: 'completion_unknown' }, 50);
+    expect(s.getLock('storage', st.storageKey)?.staleSince).toBe(50);
+    expect(classOf(() => s.acquireLock('storage', st.storageKey, next.id))).toBe('lock_stale');
     expect(classOf(() => s.releaseStaleLock('storage', 'no-such-lock', 'admin'))).toBe('invalid_request');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(s.releaseStaleLock('storage', 'k-unknown', 'admin').ownerOperationId).toBe(a.id);
+    expect(s.releaseStaleLock('storage', st.storageKey, 'admin').ownerOperationId).toBe(a.id);
     warn.mockRestore();
-    expect(s.acquireLock('storage', 'k-unknown', next.id).ownerOperationId).toBe(next.id);
+    expect(s.acquireLock('storage', st.storageKey, next.id).ownerOperationId).toBe(next.id);
     // A live lock is never released by the review path.
-    expect(classOf(() => s.releaseStaleLock('storage', 'k-unknown', 'admin'))).toBe('invalid_request');
+    expect(classOf(() => s.releaseStaleLock('storage', st.storageKey, 'admin'))).toBe('invalid_request');
   });
 });
 
 describe('restart reconciliation', () => {
   it('ends what the previous process left running as completion_unknown, with stale locks and unknown points', () => {
     const before = new ops.RecoveryOperationStore('epoch-old');
-    const storage = identities.StorageIdentityStore.getInstance().observe({
-      ownerNodeKey: ENGINE, kind: 'named_volume', locator: 'restart_data', generationToken: 'g', dependents: [],
-    });
-    const repo = repos.RecoveryRepositoryStore.getInstance().register({
-      ownerNodeKey: ENGINE, kind: 'local_volume', locator: 'restart_repo', failureDomain: 'same_failure_domain',
-    });
-    const running = before.start({ idempotencyKey: key(), kind: 'create_point', storageId: storage.id, actor: 'admin', transport: 'local' }).operation;
+    const st = storage('restart_data');
+    const repo = repository('restart_repo');
+    const running = before.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     before.markRunning(running.id);
-    before.acquireLock('storage', storage.storageKey, running.id);
+    before.acquireLock('storage', st.storageKey, running.id);
     const queued = before.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
     const done = before.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
-    before.finish(done.id, 'succeeded');
-    const pending = points.RecoveryPointStore.getInstance().begin({
-      storageId: storage.id, repositoryId: repo.id, kind: 'root', trigger: 'manual', actor: 'admin',
-      sourceOperationId: running.id, sourceNodeKey: ENGINE, engineId: 'e',
-    });
-    const orphan = points.RecoveryPointStore.getInstance().begin({
-      storageId: storage.id, repositoryId: repo.id, kind: 'root', trigger: 'manual', actor: 'admin',
-      sourceOperationId: 'never-recorded', sourceNodeKey: ENGINE, engineId: 'e',
-    });
+    before.finish(done.id, { state: 'succeeded' });
+    const pending = beginPoint(st.id, 'g', repo.id, running.id);
+    const orphan = beginPoint(st.id, 'g', repo.id, 'never-recorded');
+
+    const db = recoveryDb();
+    const expectedOps = (db.prepare(
+      "SELECT COUNT(*) AS n FROM recovery_operations WHERE state IN ('queued','running') AND process_epoch <> 'epoch-new'",
+    ).get() as { n: number }).n;
+    const expectedPoints = (db.prepare("SELECT COUNT(*) AS n FROM recovery_points WHERE status = 'pending'").get() as { n: number }).n;
+    const expectedLocks = (db.prepare(
+      "SELECT COUNT(*) AS n FROM recovery_locks WHERE process_epoch <> 'epoch-new' AND stale_since IS NULL",
+    ).get() as { n: number }).n;
 
     // The process dies here. The next one boots with a new epoch.
     const after = new ops.RecoveryOperationStore('epoch-new');
-    const settled = after.reconcileAtStartup(9_000);
-    expect(settled.interruptedOperations).toBeGreaterThanOrEqual(2);
-    expect(settled.unknownPoints).toBeGreaterThanOrEqual(2);
-    expect(settled.staleLocks).toBeGreaterThanOrEqual(1);
+    expect(after.reconcileAtStartup(9_000)).toEqual({
+      interruptedOperations: expectedOps, unknownPoints: expectedPoints, staleLocks: expectedLocks,
+    });
 
     expect(after.get(running.id)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted', completedAt: 9_000 });
     expect(after.get(queued.id)?.state).toBe('completion_unknown');
     expect(after.get(done.id)?.state).toBe('succeeded');
     expect(points.RecoveryPointStore.getInstance().get(pending.id)).toMatchObject({ status: 'completion_unknown', failureClass: 'interrupted' });
     expect(points.RecoveryPointStore.getInstance().get(orphan.id)?.status).toBe('completion_unknown');
-    expect(after.getLock('storage', storage.storageKey)?.staleSince).toBe(9_000);
+    expect(after.getLock('storage', st.storageKey)?.staleSince).toBe(9_000);
 
-    // A completion from the dead process arriving late cannot turn it into a success.
-    expect(after.finish(running.id, 'succeeded').state).toBe('completion_unknown');
+    // Completions from the dead process arriving late change nothing.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(after.finish(running.id, { state: 'succeeded' }).state).toBe('completion_unknown');
+    expect(classOf(() => points.RecoveryPointStore.getInstance().finalize(pending.id, { status: 'succeeded', evidence: evidence() }))).toBe('invalid_request');
+    warn.mockRestore();
+    expect(points.RecoveryPointStore.getInstance().get(pending.id)?.status).toBe('completion_unknown');
 
     // Replaying the original request returns the interrupted operation, not a fresh run.
-    const replay = after.start({ idempotencyKey: running.idempotencyKey, kind: 'create_point', storageId: storage.id, actor: 'admin', transport: 'local' });
+    const replay = after.start({ idempotencyKey: running.idempotencyKey, kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' });
     expect(replay).toMatchObject({ replayed: true, operation: { id: running.id, state: 'completion_unknown' } });
 
     // New work on that storage waits for a reviewed release.
-    const fresh = after.start({ idempotencyKey: key(), kind: 'create_point', storageId: storage.id, actor: 'admin', transport: 'local' }).operation;
-    expect(classOf(() => after.acquireLock('storage', storage.storageKey, fresh.id))).toBe('lock_stale');
+    const fresh = after.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    expect(classOf(() => after.acquireLock('storage', st.storageKey, fresh.id))).toBe('lock_stale');
 
-    // Running it again changes nothing.
+    // Running it again in the same process changes nothing.
     expect(after.reconcileAtStartup(10_000)).toEqual({ interruptedOperations: 0, unknownPoints: 0, staleLocks: 0 });
   });
 
-  it('leaves the current process\'s own operations alone', () => {
+  it('keeps a dead process\'s work closed even when reconciliation never ran', () => {
+    const before = new ops.RecoveryOperationStore('epoch-crashed');
+    const st = storage('unreconciled_data');
+    const running = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    before.markRunning(running.id);
+    before.acquireLock('storage', st.storageKey, running.id);
+
+    const after = new ops.RecoveryOperationStore('epoch-without-reconcile');
+    // A replayed request gets the old operation back, but cannot pick it up.
+    expect(after.start({ idempotencyKey: running.idempotencyKey, kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).replayed).toBe(true);
+    expect(classOf(() => after.markRunning(running.id))).toBe('invalid_request');
+    expect(classOf(() => after.acquireLock('storage', st.storageKey, running.id))).toBe('lock_stale');
+    const other = after.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    expect(classOf(() => after.acquireLock('storage', st.storageKey, other.id))).toBe('lock_stale');
+  });
+
+  it('keeps a point finalized before the crash, while its operation ends completion_unknown', () => {
+    const before = new ops.RecoveryOperationStore('epoch-crash-a');
+    const st = storage('crash_after_point');
+    const repo = repository('crash_after_point_repo');
+    const op = before.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    before.markRunning(op.id);
+    const p = beginPoint(st.id, 'g', repo.id, op.id);
+    points.RecoveryPointStore.getInstance().finalize(p.id, { status: 'succeeded', evidence: evidence() });
+    // Dies before the operation finishes.
+    new ops.RecoveryOperationStore('epoch-crash-a-next').reconcileAtStartup();
+    expect(points.RecoveryPointStore.getInstance().get(p.id)?.status).toBe('succeeded');
+    expect(before.get(op.id)?.state).toBe('completion_unknown');
+  });
+
+  it('leaves the current process\'s own operations and their pending points alone', () => {
     const s = new ops.RecoveryOperationStore('epoch-live');
-    const live = s.start({ idempotencyKey: key(), kind: 'create_point', actor: 'admin', transport: 'local' }).operation;
+    const st = storage('live_data');
+    const repo = repository('live_repo');
+    const live = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     s.markRunning(live.id);
-    s.acquireLock('storage', 'k-live', live.id);
+    s.acquireLock('storage', st.storageKey, live.id);
+    const p = beginPoint(st.id, 'g', repo.id, live.id);
     s.reconcileAtStartup();
     expect(s.get(live.id)?.state).toBe('running');
-    expect(s.getLock('storage', 'k-live')?.staleSince).toBeNull();
+    expect(s.getLock('storage', st.storageKey)?.staleSince).toBeNull();
+    expect(points.RecoveryPointStore.getInstance().get(p.id)?.status).toBe('pending');
   });
 });

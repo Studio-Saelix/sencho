@@ -1351,7 +1351,7 @@ export class DatabaseService {
             }
         } catch (e) {
             this.recoverySchemaOutcome = { kind: 'failed' };
-            console.error('[DatabaseService] Recovery schema migration failed; recovery is unavailable:', (e as Error).message);
+            console.error('[DatabaseService] Recovery schema migration failed; recovery is unavailable:', e);
         }
     }
 

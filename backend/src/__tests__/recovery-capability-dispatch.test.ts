@@ -120,10 +120,27 @@ describe('resolveRemoteVolumeProtection', () => {
   });
 
   it('reads an unreachable node as unknown, never as available or unavailable', () => {
-    for (const read of [
-      { kind: 'no_target' }, { kind: 'transport', detail: 'ECONNRESET' }, { kind: 'http', status: 502 }, { kind: 'http', status: 403 },
-    ] as NodeProxyJsonRead[]) {
+    for (const read of [{ kind: 'no_target' }, { kind: 'transport', detail: 'ECONNRESET' }] as NodeProxyJsonRead[]) {
       expect(resolve(read)).toMatchObject({ state: 'unknown', reason: 'node_unreachable' });
+    }
+  });
+
+  it('tells a node that refused or failed the read apart from one that could not be reached', () => {
+    expect(resolve({ kind: 'http', status: 401 })).toMatchObject({ state: 'unknown', reason: 'node_refused' });
+    expect(resolve({ kind: 'http', status: 403 })).toMatchObject({ state: 'unknown', reason: 'node_refused' });
+    expect(resolve({ kind: 'http', status: 500 })).toMatchObject({ state: 'unknown', reason: 'node_error' });
+    expect(resolve({ kind: 'http', status: 502 })).toMatchObject({ state: 'unknown', reason: 'node_error' });
+  });
+
+  it('refuses a state and reason that contradict each other, or that only the hub may conclude', () => {
+    for (const [state, reason] of [
+      ['available', 'engine_not_installed'],
+      ['unavailable', 'engine_registered'],
+      ['available', 'node_unreachable'],
+      ['update_required', 'node_contract_older'],
+      ['unknown', 'descriptor_invalid'],
+    ]) {
+      expect(resolve({ kind: 'ok', data: descriptor(state, reason) })).toMatchObject({ state: 'unknown', reason: 'descriptor_invalid' });
     }
   });
 
@@ -170,13 +187,22 @@ describe('readRecoveryNodeStatus', () => {
         expect(JSON.stringify(result)).not.toContain('/srv/data');
       });
 
-      it('rejects an answer that belongs to another dispatch', async () => {
+      it('rejects and logs an answer that belongs to another dispatch, or that lost the operation id', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         mockRead.mockResolvedValue({ kind: 'ok', data: { ...descriptor('available', 'engine_registered'), operationId: '00000000-0000-4000-8000-000000000000' } });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({
-          transport, errorClass: 'internal', volumeProtection: { state: 'unknown', reason: 'descriptor_invalid' },
+          transport, errorClass: 'internal', volumeProtection: { state: 'unknown', reason: 'descriptor_mismatch' },
         });
         mockRead.mockResolvedValue({ kind: 'ok', data: descriptor('available', 'engine_registered') });
-        expect((await dispatcher.readRecoveryNodeStatus(getId())).volumeProtection.state).toBe('unknown');
+        expect((await dispatcher.readRecoveryNodeStatus(getId())).volumeProtection).toMatchObject({ state: 'unknown', reason: 'descriptor_mismatch' });
+        expect(warn).toHaveBeenCalledTimes(2);
+      });
+
+      it('reports a node that refused or failed the read with its own class', async () => {
+        mockRead.mockResolvedValue({ kind: 'http', status: 401 });
+        expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_refused' });
+        mockRead.mockResolvedValue({ kind: 'http', status: 500 });
+        expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_error' });
       });
 
       it('reports an old node as update required', async () => {
@@ -208,6 +234,23 @@ describe('readRecoveryNodeStatus', () => {
 describe('GET /api/recovery/node', () => {
   it('requires a signed-in caller', async () => {
     expect((await request(app).get('/api/recovery/node')).status).toBe(401);
+  });
+
+  it('requires stack:read', async () => {
+    const { ROLE_PERMISSIONS } = await import('../middleware/permissions');
+    const bcrypt = (await import('bcrypt')).default;
+    const db = DatabaseService.getInstance();
+    db.addUser({ username: 'recovery-viewer', password_hash: await bcrypt.hash('x', 1), role: 'viewer' });
+    const token = `Bearer ${jwt.sign({ username: 'recovery-viewer' }, TEST_JWT_SECRET, { expiresIn: '5m' })}`;
+    expect((await request(app).get('/api/recovery/node').set('Authorization', token)).status).toBe(200);
+    const original = [...ROLE_PERMISSIONS.viewer];
+    ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original.filter((a) => a !== 'stack:read'));
+    try {
+      const denied = await request(app).get('/api/recovery/node').set('Authorization', token);
+      expect(denied.status).toBe(403);
+    } finally {
+      ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original);
+    }
   });
 
   it('returns this node\'s descriptor and nothing else', async () => {

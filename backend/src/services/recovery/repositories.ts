@@ -58,21 +58,30 @@ export class RecoveryRepositoryStore {
     return RecoveryRepositoryStore.instance;
   }
 
-  /** Register a repository, or return the one already registered at that locator. */
+  /**
+   * Register a repository, or return the one already registered at that
+   * locator. Registering the same locator with a different failure domain is
+   * refused rather than silently keeping the first answer.
+   */
   register(registration: RepositoryRegistration, now = Date.now()): RepositoryDescriptor {
     if (registration.ownerNodeKey.trim() === '') throw new RecoveryError('identity_unknown');
     const locator = canonicalizeLocator('named_volume', registration.locator);
     const authorityId = getRecoveryAuthorityId();
     const db = recoveryDb();
+    // ON CONFLICT covers only the uniqueness clash; a CHECK violation (an
+    // unknown kind or failure domain) still throws instead of vanishing.
     db.prepare(`
-      INSERT OR IGNORE INTO recovery_repositories
+      INSERT INTO recovery_repositories
         (id, authority_id, owner_node_key, kind, locator, failure_domain, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (authority_id, owner_node_key, kind, locator) DO NOTHING
     `).run(randomUUID(), authorityId, registration.ownerNodeKey, registration.kind, locator, registration.failureDomain, now);
     const row = db.prepare(`
       SELECT * FROM recovery_repositories
       WHERE authority_id = ? AND owner_node_key = ? AND kind = ? AND locator = ?
-    `).get(authorityId, registration.ownerNodeKey, registration.kind, locator) as RepositoryRow;
+    `).get(authorityId, registration.ownerNodeKey, registration.kind, locator) as RepositoryRow | undefined;
+    if (!row) throw new RecoveryError('repository_unavailable');
+    if (row.failure_domain !== registration.failureDomain) throw new RecoveryError('invalid_request');
     return toDescriptor(row);
   }
 
@@ -81,11 +90,18 @@ export class RecoveryRepositoryStore {
     return row ? toDescriptor(row) : null;
   }
 
-  /** Record the engine's repository id once the repository is initialized. */
+  /**
+   * Record the engine's repository id once the repository is initialized. It
+   * is set once: a different id at the same locator means the repository was
+   * replaced, and every point recorded against the old one names snapshots the
+   * new one does not have, so the change is refused as `repository_unavailable`.
+   */
   setFingerprint(id: string, fingerprint: string): void {
-    const result = recoveryDb().prepare(
-      'UPDATE recovery_repositories SET repository_fingerprint = ? WHERE id = ?',
-    ).run(fingerprint, id);
+    if (typeof fingerprint !== 'string' || fingerprint.trim() === '') throw new RecoveryError('invalid_request');
+    const result = recoveryDb().prepare(`
+      UPDATE recovery_repositories SET repository_fingerprint = ?
+      WHERE id = ? AND (repository_fingerprint IS NULL OR repository_fingerprint = ?)
+    `).run(fingerprint, id, fingerprint);
     if (result.changes === 0) throw new RecoveryError('repository_unavailable');
   }
 

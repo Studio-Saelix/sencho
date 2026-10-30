@@ -20,17 +20,18 @@ function storage(key: string, generation = 1): StorageIdentity {
 }
 
 let seq = 0;
-function point(s: StorageIdentity, overrides: Partial<RecoveryPoint> = {}): RecoveryPoint {
-  const completedAt = overrides.completedAt === undefined ? NOW - DAY : overrides.completedAt;
+/** Fixture builder; overrides may describe any status, so the result is asserted to the union. */
+function point(s: StorageIdentity, overrides: Record<string, unknown> = {}): RecoveryPoint {
+  const completedAt = overrides.completedAt === undefined ? NOW - DAY : overrides.completedAt as number | null;
   return {
     id: `p${++seq}`, schemaVersion: 1, storageId: s.id, storageGeneration: s.generation, kind: 'root', pathScope: null,
     repositoryId: 'r', snapshotId: 'snap', status: 'succeeded', consistency: 'crash_consistent_live',
     capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], trigger: 'manual', actor: 'admin',
     sourceOperationId: 'op', sourceNodeKey: 'docker-engine:x', engineId: 'e', capabilityVersion: 1,
-    startedAt: (completedAt ?? NOW) - 1000, failureClass: null, immutable: true,
+    startedAt: (completedAt ?? NOW) - 1000, failureClass: null,
     ...overrides,
     completedAt,
-  };
+  } as RecoveryPoint;
 }
 
 function verified(p: RecoveryPoint, result: IntegrityVerification['result'] = 'verified', at = NOW - DAY + 1): [string, IntegrityVerification[]] {
@@ -80,16 +81,47 @@ describe('evaluateRootCoverage', () => {
     expect(reasonOf(root(s, [partial], [verified(partial)]))).toBe('partial_point');
     const failed = point(s, { status: 'failed', snapshotId: null, capture: null, failureClass: 'internal' });
     expect(reasonOf(root(s, [failed]))).toBe('failed_only');
-    const unknown = point(s, { status: 'completion_unknown', snapshotId: null, capture: null });
-    expect(reasonOf(root(s, [unknown]))).toBe('failed_only');
+    const unknown = point(s, { status: 'completion_unknown', snapshotId: null, capture: null, failureClass: 'interrupted' });
+    expect(reasonOf(root(s, [unknown]))).toBe('completion_unknown');
     const pending = point(s, { status: 'pending', snapshotId: null, capture: null, completedAt: null });
-    expect(reasonOf(root(s, [pending]))).toBe('failed_only');
+    expect(reasonOf(root(s, [pending]))).toBe('in_progress');
+    expect(reasonOf(root(s, [pending, unknown, failed]))).toBe('in_progress');
   });
 
-  it('does not trust a succeeded row whose capture reports skipped files', () => {
+  it('does not trust a succeeded row whose capture reports skipped files or unreadable exclusions', () => {
     const s = storage('a');
-    const p = point(s, { capture: { fileCount: 1, byteCount: 1, skippedCount: 1 } });
-    expect(reasonOf(root(s, [p], [verified(p)]))).toBe('failed_only');
+    const skipped = point(s, { capture: { fileCount: 1, byteCount: 1, skippedCount: 1 } });
+    expect(reasonOf(root(s, [skipped], [verified(skipped)]))).toBe('partial_point');
+    const excluded = point(s, { exclusions: [{ path: 'db', reason: 'unreadable' }] });
+    expect(reasonOf(root(s, [excluded], [verified(excluded)]))).toBe('partial_point');
+    const policy = point(s, { exclusions: [{ path: 'cache', reason: 'policy_excluded' }] });
+    expect(reasonOf(root(s, [policy], [verified(policy)]))).toBe('covered');
+  });
+
+  it('does not count a point that belongs to another storage with the same generation number', () => {
+    const s = storage('a');
+    const other = point(storage('b'));
+    expect(reasonOf(root(s, [other], [verified(other)]))).toBe('older_generation');
+  });
+
+  it('does not count coverage for an identity that has been superseded', () => {
+    const s = { ...storage('a'), state: 'superseded' as const };
+    const p = point(s);
+    expect(reasonOf(root(s, [p], [verified(p)]))).toBe('older_generation');
+    expect(evaluateCoverage({ volumeProtection: 'available', roots: [root(s, [p], [verified(p)])], now: NOW }).state).not.toBe('protected');
+  });
+
+  it('lets a check that did not verify win a tie with one that did', () => {
+    const s = storage('a');
+    const p = point(s);
+    const at = NOW - 10;
+    const tie: Array<[string, IntegrityVerification[]]> = [[p.id, [
+      { id: 'z-verified', pointId: p.id, method: 'engine_check_metadata', result: 'verified', verifiedAt: at, operationId: null },
+      { id: 'a-mismatch', pointId: p.id, method: 'engine_check_read_data', result: 'mismatch', verifiedAt: at, operationId: null },
+    ]]];
+    expect(reasonOf(root(s, [p], tie))).toBe('integrity_mismatch');
+    const reversed: Array<[string, IntegrityVerification[]]> = [[p.id, [...tie[0][1]].reverse()]];
+    expect(reasonOf(root(s, [p], reversed))).toBe('integrity_mismatch');
   });
 
   it('expires coverage after the freshness window, without deleting anything', () => {
@@ -171,10 +203,10 @@ describe('evaluateCoverage', () => {
   });
 
   it('is never Protected while the capability is missing, skewed or unknown', () => {
-    for (const vp of ['unavailable', 'update_required'] as const) {
-      expect(evaluateCoverage({ volumeProtection: vp, roots: [covered('a')], now: NOW }))
-        .toMatchObject({ state: 'unknown', reason: 'capability_unavailable' });
-    }
+    expect(evaluateCoverage({ volumeProtection: 'unavailable', roots: [covered('a')], now: NOW }))
+      .toMatchObject({ state: 'unknown', reason: 'capability_unavailable' });
+    expect(evaluateCoverage({ volumeProtection: 'update_required', roots: [covered('a')], now: NOW }))
+      .toMatchObject({ state: 'unknown', reason: 'capability_update_required' });
     expect(evaluateCoverage({ volumeProtection: 'unknown', roots: [covered('a')], now: NOW }))
       .toMatchObject({ state: 'unknown', reason: 'capability_unknown' });
   });
@@ -182,6 +214,24 @@ describe('evaluateCoverage', () => {
   it('is Unknown, not Protected, with no qualifying storage', () => {
     expect(evaluateCoverage({ volumeProtection: 'available', roots: [], now: NOW }))
       .toMatchObject({ state: 'unknown', reason: 'no_qualifying_storage' });
+  });
+
+  it('is Unknown when the only evidence is an interrupted point', () => {
+    const s = storage('a');
+    const unknown = point(s, { status: 'completion_unknown', snapshotId: null, capture: null, failureClass: 'interrupted' });
+    expect(evaluateCoverage({ volumeProtection: 'available', roots: [root(s, [unknown])], now: NOW }))
+      .toMatchObject({ state: 'unknown', reason: 'root_evidence_unknown' });
+  });
+
+  it('takes the uncovered answer when aliases of one storage disagree, whatever the order', () => {
+    const shared = covered('shared');
+    const blocked = { ...shared, access: 'inaccessible' as const };
+    for (const roots of [[shared, blocked], [blocked, shared]]) {
+      const verdict = evaluateCoverage({ volumeProtection: 'available', roots, now: NOW });
+      expect(verdict.roots).toHaveLength(1);
+      expect(verdict.roots[0].reason).toBe('inaccessible');
+      expect(verdict.state).toBe('unknown');
+    }
   });
 
   it('counts shared storage once however many aliases reach it', () => {

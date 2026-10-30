@@ -2,9 +2,9 @@
  * Canonical contracts for application-data recovery.
  *
  * Every data-protection surface (Files & Volumes, Storage, Anatomy, the
- * Recovery workplace, deploy checkpoints, mobility, drain) imports these types
- * rather than defining its own storage identity, point record, coverage model,
- * engine, lock, or restore intent. This module carries no behavior.
+ * Recovery workplace, deploy checkpoints, mobility, drain) must import these
+ * types rather than define its own storage identity, point record, coverage
+ * model, engine, lock, or restore intent. This module carries no behavior.
  *
  * Configuration recovery (Fleet Snapshots, rollback generations) is a separate
  * domain and never appears here: a data point can reference a configuration
@@ -15,9 +15,10 @@
 export const RECOVERY_CONTRACT_VERSION = 1;
 
 /**
- * Capability key a node advertises in `/api/meta` once it can actually create
- * and restore volume points. Deliberately absent from `CAPABILITIES` until an
- * engine is registered, so no build advertises protection it cannot perform.
+ * Capability key for a node that can actually create and restore volume
+ * points. Not in `CAPABILITIES`: the change that registers the first engine
+ * adds it there too, so no build advertises protection it cannot perform. The
+ * hub reads a node's status from its recovery descriptor, not from this key.
  */
 export const VOLUME_PROTECTION_CAPABILITY = 'volume-protection-v1';
 export const VOLUME_PROTECTION_CAPABILITY_VERSION = 1;
@@ -51,11 +52,17 @@ export interface StorageIdentity {
   kind: StorageKind;
   /** Canonical locator: the volume name, or the normalized absolute host path. */
   locator: string;
-  /** Hash of authority, owner, kind and locator; equal across generations. */
+  /** Hash of authority, owner, kind and locator; equal across generations. Lock key for storage. */
   storageKey: string;
   /** 1-based generation within `storageKey`. */
   generation: number;
-  /** Opaque adapter token that changes when the underlying storage is recreated. */
+  /**
+   * Adapter token that must change every time the storage is recreated. A
+   * volume's `CreatedAt` alone does not qualify: it has one-second resolution,
+   * so a `down -v` and `up` inside one second keeps it. The adapter combines it
+   * with something the recreate always changes (a marker the adapter writes, or
+   * the root's device and inode).
+   */
   generationToken: string;
   /** Previous generation's id, or null for the first. */
   lineageParentId: string | null;
@@ -67,7 +74,7 @@ export interface StorageIdentity {
 /** One stack (and optionally service) that references a storage identity. */
 export interface StorageDependent {
   stackName: string;
-  /** Null when the reference is stack-wide or the service is not known. */
+  /** Null (or an empty string, read back as null) when the service is not known. */
   serviceName: string | null;
 }
 
@@ -77,8 +84,9 @@ export type RepositoryKind = 'local_volume';
 
 /**
  * Whether a repository can fail together with the data it protects. A separate
- * Docker volume on the same engine is not a separate disk, so the local default
- * is `same_failure_domain`; `unknown` when it cannot be told.
+ * Docker volume on the same engine is not a separate disk, so a local volume
+ * repository should be registered as `same_failure_domain`; `unknown` when it
+ * cannot be told.
  */
 export type FailureDomainRelation = 'same_failure_domain' | 'separate' | 'unknown';
 
@@ -89,7 +97,7 @@ export interface RepositoryDescriptor {
   ownerNodeKey: string;
   kind: RepositoryKind;
   locator: string;
-  /** Engine-reported repository id (restic `repository id`), once initialized. */
+  /** Engine-reported repository id (restic `repository id`), set once when initialized. */
   repositoryFingerprint: string | null;
   failureDomain: FailureDomainRelation;
   /** Whether a secret is stored, never the secret itself. */
@@ -109,21 +117,23 @@ export type RecoveryPointKind = 'root' | 'path';
 
 export type RecoveryPointTrigger = 'manual' | 'policy' | 'pre_change' | 'pre_restore';
 
-/** Terminal point statuses are immutable; `pending` is the only mutable one. */
+/** `pending` is the only status a point can leave; every other one is final. */
 export type RecoveryPointStatus = 'pending' | 'succeeded' | 'partial' | 'failed' | 'completion_unknown';
 export type TerminalRecoveryPointStatus = Exclude<RecoveryPointStatus, 'pending'>;
 
 /**
- * Phase A consistency labels. Nothing stronger (application, database,
- * transaction) exists until an adapter proves it.
+ * Consistency labels this contract version supports. Nothing stronger
+ * (application, database, transaction) exists until an adapter proves it.
  */
 export type ConsistencyClass = 'crash_consistent_live' | 'crash_consistent_stopped' | 'unknown';
 
-/** A path left out of a point, with the reason. Skipped data disqualifies coverage. */
+/** Why a path was left out of a point. Only `policy_excluded` keeps a point complete. */
+export type ExclusionReason = 'policy_excluded' | 'permission_denied' | 'unreadable' | 'vanished' | 'unsupported_type';
+
 export interface PointExclusion {
   /** Path relative to the storage root. */
   path: string;
-  reason: 'policy_excluded' | 'permission_denied' | 'unreadable' | 'vanished' | 'unsupported_type';
+  reason: ExclusionReason;
 }
 
 /** What the engine counted while capturing a point. */
@@ -135,6 +145,7 @@ export interface CaptureSummary {
 }
 
 export type IntegrityMethod = 'engine_check_metadata' | 'engine_check_read_data';
+/** `error` is a check that could not run; it never counts as verified. */
 export type IntegrityResult = 'verified' | 'mismatch' | 'error';
 
 /** One verification of a point. Appended, never rewritten. */
@@ -164,24 +175,16 @@ export type RecoveryErrorClass =
   | 'integrity_mismatch'
   | 'interrupted'
   | 'transport_unreachable'
+  | 'node_refused'
+  | 'node_error'
   | 'internal';
 
-/** A versioned recovery-point record. */
-export interface RecoveryPoint {
+interface RecoveryPointBase {
   id: string;
   schemaVersion: number;
   storageId: string;
   storageGeneration: number;
-  kind: RecoveryPointKind;
-  /** Relative path a `path` point covers; null for a `root` point. */
-  pathScope: string | null;
   repositoryId: string;
-  /** Engine snapshot id; null until the engine reports one. */
-  snapshotId: string | null;
-  status: RecoveryPointStatus;
-  consistency: ConsistencyClass;
-  capture: CaptureSummary | null;
-  exclusions: PointExclusion[];
   trigger: RecoveryPointTrigger;
   /** Username or policy id that asked for the point. */
   actor: string;
@@ -190,16 +193,33 @@ export interface RecoveryPoint {
   engineId: string;
   capabilityVersion: number;
   startedAt: number;
-  completedAt: number | null;
-  failureClass: RecoveryErrorClass | null;
-  /** Always true: a terminal point is never rewritten. Holds and verifications live elsewhere. */
-  immutable: true;
 }
+
+/** A root point covers the whole root; a path point names the path it covers. */
+export type RecoveryPointScope =
+  | { kind: 'root'; pathScope: null }
+  | { kind: 'path'; pathScope: string };
+
+/** What the point's status guarantees about its evidence. */
+export type RecoveryPointOutcome =
+  | { status: 'pending'; snapshotId: null; consistency: 'unknown'; capture: null; exclusions: []; completedAt: null; failureClass: null }
+  | { status: 'succeeded' | 'partial'; snapshotId: string; consistency: ConsistencyClass; capture: CaptureSummary; exclusions: PointExclusion[]; completedAt: number; failureClass: null }
+  | { status: 'failed'; snapshotId: null; consistency: 'unknown'; capture: null; exclusions: []; completedAt: number; failureClass: RecoveryErrorClass }
+  | { status: 'completion_unknown'; snapshotId: null; consistency: 'unknown'; capture: null; exclusions: []; completedAt: number; failureClass: 'interrupted' };
+
+/**
+ * A versioned recovery-point record. Once its status leaves `pending` the row
+ * is frozen by the database; later facts (verifications, holds) are separate
+ * records.
+ */
+export type RecoveryPoint = RecoveryPointBase & RecoveryPointScope & RecoveryPointOutcome;
+
+export type PointHolderKind = 'deploy_checkpoint' | 'recovery_policy' | 'mobility' | 'drain' | 'last_known_good' | 'operator';
 
 /** Something that must keep a point from retention (checkpoint, policy, mobility, drain, LKG). */
 export interface RecoveryPointHold {
   pointId: string;
-  holderKind: 'deploy_checkpoint' | 'recovery_policy' | 'mobility' | 'drain' | 'last_known_good' | 'operator';
+  holderKind: PointHolderKind;
   holderRef: string;
   createdAt: number;
 }
@@ -218,6 +238,8 @@ export type CoverageState = 'protected' | 'partially_protected' | 'unprotected' 
 export type RootCoverageReason =
   | 'covered'
   | 'no_point'
+  | 'in_progress'
+  | 'completion_unknown'
   | 'stale'
   | 'partial_point'
   | 'failed_only'
@@ -234,6 +256,7 @@ export type CoverageReason =
   | 'some_roots_covered'
   | 'no_root_covered'
   | 'capability_unavailable'
+  | 'capability_update_required'
   | 'capability_unknown'
   | 'no_qualifying_storage'
   | 'root_evidence_unknown';
@@ -241,28 +264,28 @@ export type CoverageReason =
 // --- Capability -------------------------------------------------------------
 
 /**
- * Whether volume protection can run on a node, as the hub sees it.
- * `update_required` is reserved for a real version skew; a node on the same
- * contract that simply has no engine is `unavailable`.
+ * Whether volume protection can run on a node, as the hub sees it, keyed so a
+ * state can only carry the reasons that explain it. `update_required` is a real
+ * contract skew; a node on the same contract with no engine is `unavailable`.
+ * Only `available` and `unavailable` are states a node reports about itself;
+ * the other two are the hub's conclusions.
  */
 export type VolumeProtectionState = 'available' | 'unavailable' | 'update_required' | 'unknown';
 
-export type VolumeProtectionReason =
-  | 'engine_registered'
-  | 'engine_not_installed'
-  | 'schema_newer_than_build'
-  | 'recovery_store_unavailable'
-  | 'node_contract_older'
-  | 'hub_contract_older'
-  | 'node_unreachable'
-  | 'descriptor_invalid';
-
-export interface VolumeProtectionStatus {
+export type VolumeProtectionStatus = {
   capability: typeof VOLUME_PROTECTION_CAPABILITY;
   version: number;
-  state: VolumeProtectionState;
-  reason: VolumeProtectionReason;
-}
+} & (
+  | { state: 'available'; reason: 'engine_registered' }
+  | { state: 'unavailable'; reason: 'engine_not_installed' | 'schema_newer_than_build' | 'recovery_store_unavailable' }
+  | { state: 'update_required'; reason: 'node_contract_older' | 'hub_contract_older' }
+  | {
+    state: 'unknown';
+    reason: 'node_unreachable' | 'node_refused' | 'node_error' | 'descriptor_invalid' | 'descriptor_mismatch';
+  }
+);
+
+export type VolumeProtectionReason = VolumeProtectionStatus['reason'];
 
 /** What a node reports about its own recovery support. Metadata only. */
 export interface RecoveryNodeDescriptor {
@@ -274,25 +297,19 @@ export interface RecoveryNodeDescriptor {
 
 export type RecoveryOperationKind = 'create_point' | 'verify_point' | 'restore' | 'repository_init';
 
-/**
- * `completion_unknown` is what an interrupted operation becomes after a
- * restart: never success, never silently retried.
- */
-export type RecoveryOperationState =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'partial'
-  | 'failed'
-  | 'cancelled'
-  | 'completion_unknown';
-
-export const TERMINAL_OPERATION_STATES: readonly RecoveryOperationState[] = [
-  'succeeded', 'partial', 'failed', 'cancelled', 'completion_unknown',
-];
+/** The states an operation can end in. `completion_unknown` is never success and never retried silently. */
+export const TERMINAL_OPERATION_STATES = ['succeeded', 'partial', 'failed', 'cancelled', 'completion_unknown'] as const;
+export type TerminalOperationState = (typeof TERMINAL_OPERATION_STATES)[number];
+export type RecoveryOperationState = 'queued' | 'running' | TerminalOperationState;
 
 /** How the request reached the node that executes it. */
 export type RecoveryTransport = 'local' | 'node_proxy' | 'pilot_tunnel';
+
+/** How an operation ends, with the error class each ending requires. */
+export type OperationFinish =
+  | { state: 'succeeded' | 'cancelled' }
+  | { state: 'partial' | 'failed'; errorClass: RecoveryErrorClass }
+  | { state: 'completion_unknown' };
 
 export interface RecoveryOperation {
   id: string;
@@ -314,23 +331,29 @@ export interface RecoveryOperation {
   completedAt: number | null;
 }
 
-export type RecoveryLockScope = 'storage' | 'repository';
+/** A storage lock is keyed by `StorageIdentity.storageKey`, a repository lock by its id. */
+export type RecoveryLockTarget =
+  | { scope: 'storage'; resourceKey: string }
+  | { scope: 'repository'; resourceKey: string };
+export type RecoveryLockScope = RecoveryLockTarget['scope'];
 
-export interface RecoveryLock {
-  scope: RecoveryLockScope;
-  /** Storage key or repository id. */
-  resourceKey: string;
+export type RecoveryLock = RecoveryLockTarget & {
   ownerOperationId: string;
   processEpoch: string;
   acquiredAt: number;
-  /** Set at boot when the owning process is gone; cleared only by a reviewed release. */
+  /**
+   * Set when the owner ended `completion_unknown`, at runtime or by boot
+   * reconciliation. The row is removed only by a reviewed release.
+   */
   staleSince: number | null;
-}
+};
+
+export type ProgressPhase = 'preparing' | 'scanning' | 'transferring' | 'verifying' | 'finalizing';
 
 /** Bounded progress an engine reports while running. */
 export interface RecoveryProgress {
   operationId: string;
-  phase: 'preparing' | 'scanning' | 'transferring' | 'verifying' | 'finalizing';
+  phase: ProgressPhase;
   filesDone: number;
   bytesDone: number;
   /** Null when the engine cannot estimate a total. */
@@ -348,25 +371,33 @@ export interface EngineExecutionContext {
   onProgress: (progress: RecoveryProgress) => void;
 }
 
-export interface CreatePointRequest {
+export type CreatePointRequest = {
   storage: StorageIdentity;
   repository: RepositoryDescriptor;
-  kind: RecoveryPointKind;
-  /** Required for a `path` point, absent for a `root` point. */
-  pathScope?: string;
   trigger: RecoveryPointTrigger;
   actor: string;
-}
+} & (
+  | { kind: 'root'; pathScope?: undefined }
+  | { kind: 'path'; pathScope: string }
+);
 
-/** Restore targets. Overwrite of a live destination is a separate, staged mode. */
+/**
+ * Restore targets. Overwrite of a live destination is a separate, staged mode,
+ * pinned to the generation the operator saw so a recreated volume is refused.
+ */
 export type RestoreTarget =
   | { mode: 'new_volume'; volumeName: string }
   | { mode: 'new_path'; hostPath: string }
-  | { mode: 'staged_overwrite'; storage: StorageIdentity; preRestorePointId: string };
+  | { mode: 'staged_overwrite'; storageId: string; expectedGeneration: number; preRestorePointId: string };
+
+export type RestoreIntentPhase =
+  | 'recorded' | 'staging' | 'staged_verified' | 'swapping' | 'committed' | 'rolled_back' | 'completion_unknown';
 
 /**
- * The durable record of a restore, written before any byte moves so a restart
- * can reconcile it instead of starting workloads against half-written data.
+ * The shape of a restore's durable record. The slice that implements restore
+ * must persist it before any byte moves and reconcile it at boot, so a restart
+ * never starts workloads against half-written data. This build defines the
+ * shape only.
  */
 export interface RestoreIntent {
   id: string;
@@ -375,15 +406,19 @@ export interface RestoreIntent {
   target: RestoreTarget;
   /** Path inside the point to restore; null restores the whole point. */
   pathScope: string | null;
-  phase: 'recorded' | 'staging' | 'staged_verified' | 'swapping' | 'committed' | 'rolled_back' | 'completion_unknown';
+  phase: RestoreIntentPhase;
   actor: string;
   createdAt: number;
 }
 
-/** Outcome of one engine call: either the evidence, or a sanitized failure. */
+/**
+ * Outcome of one engine call: the evidence, or a sanitized failure. A capture
+ * that skipped data is still `ok: true` with its skipped count; the point store
+ * records it as `partial`.
+ */
 export type EngineResult<T> =
   | { ok: true; evidence: T }
-  | { ok: false; errorClass: RecoveryErrorClass; partialEvidence?: T };
+  | { ok: false; errorClass: RecoveryErrorClass };
 
 export interface PointCaptureEvidence {
   snapshotId: string;
@@ -408,7 +443,8 @@ export interface EngineProbe {
 
 /**
  * The single engine contract every adapter implements. Engines execute on the
- * node that owns the data; bytes never transit the hub.
+ * node that owns the data; bytes never transit the hub. A check that could not
+ * run is `ok: false`; a check that ran answers `verified` or `mismatch`.
  */
 export interface BackupEngine {
   readonly engineId: string;
@@ -416,6 +452,6 @@ export interface BackupEngine {
   readonly storageKinds: readonly StorageKind[];
   probe(): Promise<EngineProbe>;
   createPoint(request: CreatePointRequest, ctx: EngineExecutionContext): Promise<EngineResult<PointCaptureEvidence>>;
-  verifyPoint(point: RecoveryPoint, method: IntegrityMethod, ctx: EngineExecutionContext): Promise<EngineResult<{ result: IntegrityResult }>>;
+  verifyPoint(point: RecoveryPoint, method: IntegrityMethod, ctx: EngineExecutionContext): Promise<EngineResult<{ result: 'verified' | 'mismatch' }>>;
   restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>>;
 }
