@@ -187,8 +187,9 @@ export class RecoveryOperationStore {
    * operation is refused and keeps its state and its locks until boot
    * reconciliation settles it. The write is conditional on the operation still
    * being live and owned by this process, so a completion that loses a race
-   * with reconciliation changes nothing. An operation cannot end `succeeded` or `partial` while one of its
-   * points is still pending: the point is finalized first. Any other ending
+   * with reconciliation changes nothing. An operation cannot end `succeeded`
+   * or `partial` while one of its points is still pending: the point is
+   * finalized first. Any other ending
    * settles the operation's own pending points in the same transaction
    * (`failed` with the operation's class, otherwise `completion_unknown`). A
    * point begun after its operation finished stays pending until the next boot
@@ -374,8 +375,8 @@ export class RecoveryOperationStore {
 
   /**
    * An operation a dead process left queued or running is never moved to
-   * running, finished or locked here; it waits for boot reconciliation. Reported as
-   * `interrupted`, which is what happened to it.
+   * running, finished or locked here; it waits for boot reconciliation.
+   * Reported as `interrupted`, which is what happened to it.
    */
   private refuseOtherProcess(action: string, op: RecoveryOperation): never {
     console.warn('[Recovery] Refused to %s operation %s: it is %s under another process', action, op.id, op.state);

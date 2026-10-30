@@ -9,6 +9,7 @@ import type { Request, Response } from 'express';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { PermissionAction } from '../middleware/permissions';
 import type { UserRole } from '../services/DatabaseService';
+import type { RecoveryAccess } from '../services/recovery/authorization';
 
 let tmpDir: string;
 let auth: typeof import('../services/recovery/authorization');
@@ -159,7 +160,7 @@ describe('authorizeStorageAccess', () => {
 describe('requireStorageAccess', () => {
   const denial = { error: 'You do not have permission for this recovery action.', code: 'PERMISSION_DENIED' };
 
-  function answer(request: Request, access: 'read' | 'protect' | 'restore' | 'configure', storage: ReturnType<typeof target> | null) {
+  function answer(request: Request, access: RecoveryAccess, storage: ReturnType<typeof target> | null) {
     let status = 0;
     let body: unknown;
     const res = {
