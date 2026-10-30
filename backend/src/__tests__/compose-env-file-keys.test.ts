@@ -75,6 +75,12 @@ describe('service env_file assigned names', () => {
       expect(files.assigned('B')).toBe('$2');
     });
 
+    it('refuses a byte order mark past the start of the file, which Compose keeps in the name', () => {
+      for (const bad of ['A=1\n\ufeffA=2\n', ' \ufeffA=1\n', '\ufeff\ufeffA=1\n']) {
+        expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
+      }
+    });
+
     it('refuses what Compose refuses or reads differently from a dotenv file', () => {
       for (const bad of ['B = 2\n', 'export D=4\n', '=x\n']) {
         expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);

@@ -474,10 +474,13 @@ export class ComposeEnvFiles {
   private readRaw(content: string): void {
     // Compose's raw reader skips blank lines and lines whose first non-space
     // character is `#`, rejects a name that is empty or holds whitespace, and
-    // lets a line with no `=` inherit the name's value. It drops a leading BOM
-    // as it does for a dotenv file (a rendered `\ufeffBOM=1` names `BOM`); the
-    // `trimStart` below, which treats U+FEFF as whitespace, does the same here.
-    for (const line of content.split('\n')) {
+    // lets a line with no `=` inherit the name's value. It drops a BOM at the
+    // start of the file, as it does for a dotenv file; anywhere else the BOM
+    // stays in the name (a rendered ` \ufeffSP=1` names `\ufeffSP`), which
+    // `trimStart` below would hide, so that file is refused.
+    const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
+    if (text.includes(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file has a byte order mark past its start');
+    for (const line of text.split('\n')) {
       const entry = (line.endsWith('\r') ? line.slice(0, -1) : line).trimStart();
       if (entry === '' || entry.startsWith(COMMENT)) continue;
       const eq = entry.indexOf('=');
