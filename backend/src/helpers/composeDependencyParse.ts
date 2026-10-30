@@ -220,8 +220,10 @@ function envFileEntries(value: unknown): DeclaredEnvFile[] {
       if (filePath !== undefined) {
         // Compose reads `raw` and refuses any other format; a templated format
         // is not resolved here, so it is no more readable than an unknown one.
-        const format = obj.format === undefined ? {} : obj.format === 'raw' ? { raw: true } : { unsupportedFormat: true };
-        return { path: filePath, required: obj.required !== false, ...format };
+        const declared: DeclaredEnvFile = { path: filePath, required: obj.required !== false };
+        if (obj.format === 'raw') declared.raw = true;
+        else if (obj.format !== undefined) declared.unsupportedFormat = true;
+        return declared;
       }
     }
     return null;
