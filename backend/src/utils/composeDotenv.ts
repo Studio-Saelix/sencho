@@ -494,7 +494,7 @@ export class ComposeEnvFiles {
       if (entry === '' || entry.startsWith(COMMENT)) continue;
       const eq = entry.indexOf('=');
       const name = eq === -1 ? entry : entry.slice(0, eq);
-      if (name === '' || /[ \t]/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains whitespace');
+      if (name === '' || /[ \t]/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains a space or tab');
       if (eq !== -1) {
         this.values.set(name, entry.slice(eq + 1));
         continue;

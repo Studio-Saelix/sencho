@@ -41,7 +41,7 @@ export interface StackExposure {
   computedAt: number;
 }
 
-/** Build a port-range label: "8080" for a single port, "8080-8090" for a range. */
+/** Build a port label: "8080" for a single port, "8080-8090" for a range, "auto" for a port Docker assigns. */
 function portLabel(port: EffPortSpec): string {
   if (port.dynamic) return 'auto';
   return port.startPort === port.endPort ? `${port.startPort}` : `${port.startPort}-${port.endPort}`;
@@ -67,9 +67,10 @@ export function deriveStackExposure(
 
     const publiclyExposed = nonLoopbackPorts.length > 0 || hostNetwork || tunnel !== undefined;
 
-    const bindings = nonLoopbackPorts.map(
+    // Several auto-assigned ports of one protocol read the same, so list each binding once.
+    const bindings = [...new Set(nonLoopbackPorts.map(
       (p) => `${p.hostIp || '0.0.0.0'}:${portLabel(p)}/${p.protocol}`,
-    );
+    ))];
 
     return {
       service: svc.name,

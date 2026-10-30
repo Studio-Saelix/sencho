@@ -58,6 +58,8 @@ interface ParityCase {
   reached: string[];
   /** The stack is unknown-exposure without a tunnel path: it publishes a port, even on loopback. */
   publishes?: boolean;
+  /** The stack is exposed without a tunnel path: it publishes a port beyond loopback. */
+  exposes?: boolean;
 }
 
 const WIREGUARD = (ports: string, extra = '') => [
@@ -220,10 +222,11 @@ const PARITY: ParityCase[] = [
 ];
 
 /**
- * Host ports Docker assigns at start are still published. Each form below
+ * Host ports Docker assigns at start are still published. Each DYNAMIC_PORTS form
  * renders with no `published` value, or `"0"`, and the authored reader must keep
- * it as the rendered adapter does. Fixed-port and `expose` controls sit beside
- * them so a dynamic form is not read as every port, or as none.
+ * it as the rendered adapter does. IPV6_FIXED_PORTS are the fixed-port forms the
+ * authored reader once mis-parsed, and the `expose` and TCP cases are controls,
+ * so a dynamic form is not read as every port, or as none.
  */
 const DYNAMIC_PORTS: Array<[string, string]> = [
   ['a container-only short entry', '"51820/udp"'],
@@ -232,18 +235,36 @@ const DYNAMIC_PORTS: Array<[string, string]> = [
   ['a long entry with no published port', '{ target: 51820, protocol: udp }'],
   ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp }'],
   ['an empty host port with no interface', '":51820/udp"'],
-  ['a bracketed IPv6 interface with a fixed host port', '"[::1]:51820:51820/udp"'],
   ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"'],
+  ['an unbracketed IPv6 interface with an empty host port', '"::1::51820/udp"'],
+  ['an upper-case protocol', '"51820/UDP"'],
+];
+
+const IPV6_FIXED_PORTS: Array<[string, string]> = [
+  ['a bracketed IPv6 interface with a fixed host port', '"[::1]:51820:51820/udp"'],
   ['an unbracketed IPv6 interface with a fixed host port', '"::1:51820:51820/udp"'],
   ['a long entry on an IPv6 interface', '{ target: 51820, published: 51820, host_ip: "::1", protocol: udp }'],
 ];
 
 const DYNAMIC_PORT_CASES: ParityCase[] = [
-  ...DYNAMIC_PORTS.map(([name, port]): ParityCase => ({
+  ...[...DYNAMIC_PORTS, ...IPV6_FIXED_PORTS].map(([name, port]): ParityCase => ({
     name: `WireGuard published through ${name}`,
     files: { 'compose.yaml': WIREGUARD(`      - ${port}`) },
     reached: ['app'],
   })),
+  {
+    name: 'a plain app with an auto-assigned port is exposed and unclassified without any tunnel',
+    files: { 'compose.yaml': 'services:\n  app:\n    image: busybox:1.36.1\n    ports:\n      - "8080"\n' },
+    reached: [],
+    publishes: true,
+    exposes: true,
+  },
+  {
+    name: 'a plain app with a loopback auto-assigned port is unclassified but not exposed',
+    files: { 'compose.yaml': 'services:\n  app:\n    image: busybox:1.36.1\n    ports:\n      - "127.0.0.1::8080"\n' },
+    reached: [],
+    publishes: true,
+  },
   { name: 'WireGuard with a dynamic TCP port is not a server', files: { 'compose.yaml': WIREGUARD('      - "127.0.0.1::51820"') }, reached: [], publishes: true },
   {
     name: 'WireGuard with `expose` only is not published',
@@ -313,8 +334,8 @@ const RAW_WHITESPACE_CASES: ParityCase[] = [
     files: { 'compose.yaml': rawEdge(image, namespace), 'edge.env': `${lead}${line}\n` },
     reached: ['app'],
   }))),
-  // Controls: the spaces Compose and JavaScript both trim, and the ones neither trims.
-  ...[['ASCII indentation', '  '], ['a no-break space', ' '], ['a line separator', ' '], ['an ideographic space', '　']].map(([what, lead]): ParityCase => ({
+  // Controls: spaces both Compose and JavaScript trim. The zero-width space below is one neither trims.
+  ...[['ASCII indentation', '  '], ['a no-break space', '\u00a0'], ['a line separator', '\u2028'], ['an ideographic space', '\u3000']].map(([what, lead]): ParityCase => ({
     name: `a key after ${what} in a raw env file`,
     files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': `${lead}TUNNEL_TOKEN=tunnel-secret\n` },
     reached: ['app'],
@@ -324,9 +345,14 @@ const RAW_WHITESPACE_CASES: ParityCase[] = [
     files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': `${NEL}# note\nTUNNEL_TOKEN=tunnel-secret\n` },
     reached: ['app'],
   },
+  ...[NEL, ` ${NEL}`].map((lead): ParityCase => ({
+    name: `a key after ${lead === NEL ? 'a leading NEL' : 'a space then NEL'} in a dotenv env file`,
+    files: { 'compose.yaml': 'services:\n  edge:\n    image: example/edge:1\n    env_file: ./edge.env\n  app:\n    image: busybox:1.36.1\n    network_mode: service:edge\n', 'edge.env': `${lead}TUNNEL_TOKEN=tunnel-secret\n` },
+    reached: ['app'],
+  })),
   {
     name: 'a zero-width space is part of the key, not leading space',
-    files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': '​TUNNEL_TOKEN=tunnel-secret\n' },
+    files: { 'compose.yaml': rawEdge('example/edge:1', true), 'edge.env': '\u200bTUNNEL_TOKEN=tunnel-secret\n' },
     reached: [],
   },
 ];
@@ -452,7 +478,7 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     expect(summary.exposed.stacks).not.toContain(STACK);
   });
 
-  it.each([...PARITY, ...DYNAMIC_PORT_CASES, ...HOST_NETWORK_PORT_CASES, ...RAW_WHITESPACE_CASES])('$name', async ({ files, layers = ['compose.yaml'], reached, publishes = false }) => {
+  it.each([...PARITY, ...DYNAMIC_PORT_CASES, ...HOST_NETWORK_PORT_CASES, ...RAW_WHITESPACE_CASES])('$name', async ({ files, layers = ['compose.yaml'], reached, publishes = false, exposes = false }) => {
     fs.rmSync(stackDir, { recursive: true, force: true });
     fs.mkdirSync(stackDir, { recursive: true });
     for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);
@@ -461,7 +487,7 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     expect(reachedServices(stackDir, layers)).toEqual(reached);
     const summary = await computeNodeNetworkingSummary(1);
     expect(summary.unreadable?.stacks).not.toContain(STACK);
-    if (reached.length > 0) expect(summary.exposed.stacks).toContain(STACK);
+    if (reached.length > 0 || exposes) expect(summary.exposed.stacks).toContain(STACK);
     else expect(summary.exposed.stacks).not.toContain(STACK);
     if (reached.length > 0 || publishes) expect(summary.unknownExposure.stacks).toContain(STACK);
     else expect(summary.unknownExposure.stacks).not.toContain(STACK);

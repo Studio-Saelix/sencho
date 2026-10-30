@@ -303,9 +303,15 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     // range (e.g. "8000-8002:80") to its first port, while the runtime reports
     // every port in the range, so a range can read as a mismatch. That errs
     // toward reporting drift rather than hiding it, consistent with the engine's
-    // philosophy.
+    // philosophy. A service that declares a port Docker assigns at start has
+    // runtime ports no declaration names, so for it only a declared fixed port
+    // that is not running counts as drift.
     const declaredPorts = new Set(fixedPorts(svc.ports).map((p) => portKey(p.publishedPort, p.protocol)));
-    if (!setsEqual(declaredPorts, runtime.ports)) {
+    const hasAutoAssigned = svc.ports.some((p) => p.dynamic);
+    const portsDiffer = hasAutoAssigned
+      ? [...declaredPorts].some((key) => !runtime.ports.has(key))
+      : !setsEqual(declaredPorts, runtime.ports);
+    if (portsDiffer) {
       findings.push({
         kind: 'ports-mismatch',
         service: name,

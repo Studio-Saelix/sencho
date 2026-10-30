@@ -1,7 +1,7 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
 import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
-import { isContainerPort, isDynamicHostPort, splitShortPortSpec } from './composePortSpec';
+import { isContainerPort, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from './composePortSpec';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -17,7 +17,8 @@ export interface DeclaredPort {
   protocol: string;
   /** Docker assigns the host port at start, so no number is known. The entry
    *  still publishes the container; port-conflict and drift consumers skip it
-   *  (see `fixedPorts` in composePortSpec). */
+   *  (see `fixedPorts` in composePortSpec). Drift compares
+   *  only the fixed ports, and the ledger hash records it as `auto`.. */
   dynamic?: true;
 }
 
@@ -379,9 +380,8 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
         ? { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true }
         : null;
     }
-    const published = parseInt(spec.hostPart.split('-')[0], 10);
-    if (!Number.isFinite(published) || published < 0) return null;
-    return { hostIp: spec.hostIp, publishedPort: published, protocol: spec.protocol };
+    if (!isFixedHostPort(spec.hostPart)) return null;
+    return { hostIp: spec.hostIp, publishedPort: parseInt(spec.hostPart.split('-')[0], 10), protocol: spec.protocol };
   }
   if (entry && typeof entry === 'object') {
     const obj = entry as Record<string, unknown>;
@@ -393,9 +393,8 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
         ? { hostIp, publishedPort: 0, protocol, dynamic: true }
         : null;
     }
-    const published = parseInt((publishedRaw as string).split('-')[0], 10);
-    if (!Number.isFinite(published) || published < 0) return null;
-    return { hostIp, publishedPort: published, protocol };
+    if (!isFixedHostPort(publishedRaw as string)) return null;
+    return { hostIp, publishedPort: parseInt((publishedRaw as string).split('-')[0], 10), protocol };
   }
   return null;
 }

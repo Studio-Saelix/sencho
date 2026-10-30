@@ -337,7 +337,7 @@ const portExposedAllInterfaces: PreflightRule = {
           message: `Service "${svc.name}" publishes ${spec.dynamic ? `${specLabel(spec)} (${spec.protocol})` : `${specLabel(spec)}/${spec.protocol}`} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
           sourcePath: svc.name,
           service: svc.name,
-          remediation: `Bind to a specific interface, e.g. 127.0.0.1${spec.dynamic ? '' : `:${spec.startPort}`}, if this should not be public.`,
+          remediation: `Bind to a specific interface, e.g. ${spec.dynamic ? '127.0.0.1::<container port>' : `127.0.0.1:${spec.startPort}`}, if this should not be public.`,
         });
       }
     }

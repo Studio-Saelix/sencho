@@ -79,10 +79,21 @@ describe('computeStackHashes', () => {
     expect(v2.renderedHash).not.toBe(v1.renderedHash);
   });
 
-  it('leaves the rendered hash alone for a port Docker assigns, which has no number to compare', () => {
-    const plain = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n');
-    const withDynamic = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n      - "51820/udp"\n');
-    expect(withDynamic.renderedHash).toBe(plain.renderedHash);
+  it('changes the rendered hash when a port Docker assigns is added, removed, or moved to a wider interface', () => {
+    const hash = (ports: string[]) => computeStackHashes(
+      `services:\n  web:\n    image: nginx:1.27\n    ports:\n${ports.map(p => `      - "${p}"`).join('\n')}\n`,
+    ).renderedHash;
+    const fixed = hash(['8080:80']);
+    const withDynamic = hash(['8080:80', '51820/udp']);
+    expect(withDynamic).not.toBe(fixed);
+    expect(hash(['8080:80', '127.0.0.1::51820/udp'])).not.toBe(withDynamic);
+    expect(hash(['8080:80', '51820/udp'])).toBe(withDynamic);
+  });
+
+  it('keeps the rendered hash of a stack with only fixed ports as it was', () => {
+    // A recorded baseline must not read as changed after an upgrade.
+    expect(computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n').renderedHash)
+      .toBe(computeStackHashes('# note\nservices:\n  web:\n    ports: ["8080:80"]\n    image: nginx:1.27\n').renderedHash);
   });
 
   it('returns a null rendered hash when the model cannot be parsed', () => {

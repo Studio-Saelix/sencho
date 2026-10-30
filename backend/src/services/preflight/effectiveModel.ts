@@ -12,7 +12,7 @@
  * by the caller, not here.
  */
 
-import { isContainerPort, isDynamicHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { isContainerPort, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
@@ -28,7 +28,8 @@ export interface EffPortSpec {
   protocol: string;
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published;
-   *  conflict, drift, and documented-port checks skip it (see `fixedPorts` in composePortSpec). */
+   *  conflict, drift, and documented-port checks skip it (see `fixedPorts` in composePortSpec). Drift compares
+   *  only the fixed ports, and exposure checks count it as published.. */
   dynamic?: true;
 }
 
@@ -176,6 +177,7 @@ function str(v: unknown): string | undefined {
 
 /** Parse a `start[-end]` published-port string into a clamped range, or null if invalid. */
 function parsePortRange(raw: string): { startPort: number; endPort: number } | null {
+  if (!isFixedHostPort(raw)) return null;
   const [a, b] = raw.split('-');
   const start = parseInt(a, 10);
   if (!Number.isFinite(start) || start <= 0) return null;

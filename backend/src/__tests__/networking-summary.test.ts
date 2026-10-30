@@ -803,6 +803,18 @@ describe('networking summary', () => {
       expect(res.body.unknownExposure.stacks).toContain(STACK);
     });
 
+    it('counts a plain app with an auto-assigned port as exposed and unclassified, and a loopback one as unclassified only', async () => {
+      const compose = (port: string) => `services:\n  app:\n    image: example/app:1\n    ports:\n      - ${port}\n`;
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('"8080"'));
+      const wide = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(wide.body.exposed.stacks).toContain(STACK);
+      expect(wide.body.unknownExposure.stacks).toContain(STACK);
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('"127.0.0.1::8080"'));
+      const loopback = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(loopback.body.exposed.stacks).not.toContain(STACK);
+      expect(loopback.body.unknownExposure.stacks).toContain(STACK);
+    });
+
     it('does not take a dynamic TCP port, or `expose`, for a WireGuard server', async () => {
       fs.writeFileSync(path.join(stackDir, 'compose.yaml'), WG('"127.0.0.1::51820"'));
       const tcp = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
@@ -849,7 +861,7 @@ describe('networking summary', () => {
       ['TS_EXTRA_ARGS', 'tailscale/tailscale', 'TS_EXTRA_ARGS=--advertise-exit-node', false],
     ])('reads %s after leading NEL space in a raw env_file', async (_name, image, line, namespace) => {
       fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge(image, namespace));
-      for (const lead of [NEL, ` ${NEL}`, '  ', ' ', '　']) {
+      for (const lead of [NEL, ` ${NEL}`, '  ', '\u00a0', '\u3000']) {
         fs.writeFileSync(path.join(stackDir, 'edge.env'), `${lead}${line}\n`);
         const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
         expect(res.body.unreadable.stacks, JSON.stringify(lead)).not.toContain(STACK);
@@ -859,7 +871,7 @@ describe('networking summary', () => {
 
     it('does not trim a zero-width space off a raw env_file name, as Compose does not', async () => {
       fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge('example/edge:1', true));
-      fs.writeFileSync(path.join(stackDir, 'edge.env'), '​TUNNEL_TOKEN=t\n');
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), '\u200bTUNNEL_TOKEN=t\n');
       const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
       expect(res.body.exposed.stacks).not.toContain(STACK);
       expect(res.body.unreadable.stacks).not.toContain(STACK);

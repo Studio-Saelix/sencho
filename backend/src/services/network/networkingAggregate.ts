@@ -102,7 +102,7 @@ async function computeNodeNetworkingAggregate(
   return aggregate;
 }
 
-function buildOverview(
+export function buildOverview(
   nodeId: number,
   stacks: string[],
   snapshot: DependencySnapshot | null,
