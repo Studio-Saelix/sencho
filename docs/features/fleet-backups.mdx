@@ -48,9 +48,9 @@ This is off by default. Turn it on in **Settings → Infrastructure → Fleet** 
 The snapshot list shows each snapshot in a table with the following columns:
 
 - **Date** - when the snapshot was taken
-- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Recovery Vault (or a custom off-site target) is configured, an upload icon in this column marks snapshots that have been mirrored off-site. An **Imported** badge marks a snapshot that came from an off-site archive (imported or recovered) rather than a capture on this instance; open it to map its archived nodes before restoring.
+- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Recovery Vault (or a custom off-site target) is configured, an upload icon in this column marks snapshots that have been mirrored off-site. An **Imported** badge marks a snapshot that came from an off-site archive (imported or recovered) rather than a fresh capture on this instance; an archive from another instance also needs its archived nodes mapped before restoring.
 - **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
-- **Warnings** - a warning icon with a count if any nodes or stacks were skipped, "Unknown" when the archive was made before Sencho recorded those warnings, or "None"
+- **Warnings** - a warning icon with a count if any nodes or stacks were skipped, "Unknown" when no warnings were recorded and the archive does not record whether anything was skipped, or "None"
 - **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Recovery Vault or custom off-site target, and a delete button for admins
 
 The list paginates at 10 snapshots per page; use the arrows next to **Create Snapshot** to page through history.

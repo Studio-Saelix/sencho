@@ -37,6 +37,7 @@ interface FleetSnapshot {
     source_instance_id?: string | null;
     /** 'imported' when the row came from an off-site archive rather than a capture here. */
     origin?: 'local' | 'imported';
+    /** 0 means the archive never recorded partial-capture warnings, so an empty list is not proof of completeness. */
     warnings_known?: number;
 }
 

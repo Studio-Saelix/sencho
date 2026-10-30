@@ -94,6 +94,9 @@ describe('Fleet snapshot read authorization', () => {
         const res = await request(app).get('/api/fleet/snapshots').set('Cookie', adminCookie);
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body.snapshots)).toBe(true);
+        const seeded = (res.body.snapshots as Array<Record<string, unknown>>)
+            .find(snapshot => snapshot.id === snapshotId);
+        expect(seeded).toMatchObject({ origin: 'local', warnings_known: 1 });
     });
 
     it('GET /api/fleet/snapshots/:id returns 403 for a non-admin', async () => {
@@ -1495,6 +1498,25 @@ describe('Snapshot restore: recovery generation contract', () => {
         expect(fs.readFileSync(composePath('apply-existing'), 'utf-8')).toContain('snap: {}');
         expect(fs.readFileSync(envPath('apply-existing'), 'utf-8')).toBe('SNAP=1\n');
         expectCurrentGenerationMatches('apply-existing', preCompose, preEnv);
+    });
+
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply creates a stack directory that does not exist yet', async () => {
+        expect(fs.existsSync(path.join(process.env.COMPOSE_DIR as string, 'apply-fresh'))).toBe(false);
+
+        const res = await request(app)
+            .post('/api/stacks/apply-fresh/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({
+                files: [
+                    { filename: 'compose.yaml', content: 'services:\n  fresh: {}\n' },
+                    { filename: '.env', content: 'SNAP=1\n' },
+                ],
+            });
+
+        expect(res.status).toBe(200);
+        expect(res.body.capturedGenerationId).toBeNull();
+        expect(fs.readFileSync(composePath('apply-fresh'), 'utf-8')).toContain('fresh: {}');
+        expect(fs.readFileSync(envPath('apply-fresh'), 'utf-8')).toBe('SNAP=1\n');
     });
 
     it('POST /api/stacks/:stackName/fleet-snapshot-apply returns 400 when no restoreable files remain', async () => {

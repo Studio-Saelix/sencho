@@ -138,9 +138,10 @@ export function CloudBackupSection() {
     // Discovery can be restarted (reopen, retry) while an earlier listing is
     // still in flight; only the newest request may write its result.
     const recoveryListSeqRef = useRef(0);
-    // The recovery error sits above the archive list, so a failed passphrase is
-    // visible even when the operator scrolled to the passphrase field at the
-    // bottom of a long list.
+    // The recovery error is rendered above the archive list and the effect
+    // below scrolls it into view, so a failed passphrase is visible even when
+    // the operator scrolled to the passphrase field at the bottom of a long
+    // list.
     const recoveryErrorRef = useRef<HTMLParagraphElement | null>(null);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));

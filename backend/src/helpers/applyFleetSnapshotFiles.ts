@@ -43,11 +43,11 @@ export function getCodedError(error: unknown): CodedError | undefined {
   return error as CodedError;
 }
 
-export type FleetSnapshotApplyConflictCode = 'stack_op_in_progress' | 'HEALTH_GATE_OBSERVING';
+export type FleetSnapshotApplyConflictCode = 'stack_op_in_progress' | 'HEALTH_GATE_OBSERVING' | 'stack_deletion_in_progress';
 
 export function fleetSnapshotApplyConflictCode(error: unknown): FleetSnapshotApplyConflictCode | undefined {
   const code = getCodedError(error)?.code;
-  if (code === 'stack_op_in_progress' || code === 'HEALTH_GATE_OBSERVING') return code;
+  if (code === 'stack_op_in_progress' || code === 'HEALTH_GATE_OBSERVING' || code === 'stack_deletion_in_progress') return code;
   return undefined;
 }
 
@@ -106,8 +106,8 @@ export async function applyFleetSnapshotFiles(
         })).id;
       } else {
         // A restore may target a stack this node does not have yet (every stack
-        // on a fresh instance after recovering an archive). Create its directory
-        // so the captured files can be written there.
+        // in a recovered archive is absent on a fresh instance). Create its
+        // directory so the captured files can be written there.
         await fsSvc.ensureStackDir(stackName);
       }
       for (const file of files) {

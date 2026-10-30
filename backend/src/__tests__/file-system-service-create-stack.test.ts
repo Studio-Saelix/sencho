@@ -25,6 +25,7 @@ vi.mock('../services/NodeRegistry', () => ({
 }));
 
 import { FileSystemService } from '../services/FileSystemService';
+import { DatabaseService } from '../services/DatabaseService';
 
 describe('FileSystemService.createStack', () => {
   let tmpBase: string;
@@ -106,6 +107,7 @@ describe('FileSystemService.ensureStackDir', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(tmpBase, { recursive: true, force: true });
   });
 
@@ -127,6 +129,14 @@ describe('FileSystemService.ensureStackDir', () => {
 
     expect(created).toBe(false);
     expect(await fs.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('services: {}\n');
+  });
+
+  it('refuses to restore a stack while a deletion is in progress', async () => {
+    vi.spyOn(DatabaseService.getInstance(), 'hasBlockingDeletionIntent').mockReturnValue(true);
+
+    await expect(FileSystemService.getInstance().ensureStackDir('deleting'))
+      .rejects.toMatchObject({ code: 'stack_deletion_in_progress' });
+    await expect(fs.access(path.join(tmpBase, 'deleting'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects a stack name that escapes the compose root', async () => {

@@ -445,9 +445,16 @@ describe('FleetSnapshots list provenance and warning completeness', () => {
           json: async () => ({
             snapshots: [
               row({ id: 7, description: 'legacy archive without warnings', warnings_known: 0, origin: 'imported' }),
+              row({
+                id: 9,
+                description: 'legacy archive with a skipped node',
+                warnings_known: 0,
+                origin: 'imported',
+                skipped_nodes: JSON.stringify([{ nodeId: 2, nodeName: 'edge', reason: 'offline' }]),
+              }),
               row({ id: 8, description: 'modern local snapshot', warnings_known: 1, origin: 'local' }),
             ],
-            total: 2,
+            total: 3,
           }),
         } as unknown as Response;
       }
@@ -479,6 +486,13 @@ describe('FleetSnapshots list provenance and warning completeness', () => {
     expect(legacyRow).not.toBeNull();
     expect(within(legacyRow as HTMLElement).getByText('Unknown')).toBeInTheDocument();
     expect(within(legacyRow as HTMLElement).queryByText('None')).toBeNull();
+
+    // A recorded skipped node is still a known warning even when the archive
+    // never recorded the skipped-stack side.
+    const partialRow = screen.getByText('legacy archive with a skipped node').closest('tr');
+    expect(partialRow).not.toBeNull();
+    expect(within(partialRow as HTMLElement).getByText('1')).toBeInTheDocument();
+    expect(within(partialRow as HTMLElement).queryByText('Unknown')).toBeNull();
 
     const localRow = screen.getByText('modern local snapshot').closest('tr');
     expect(localRow).not.toBeNull();

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { applyFleetSnapshotFiles, selectFleetSnapshotApplyFiles, type FleetSnapshotApplyFile } from '../helpers/applyFleetSnapshotFiles';
+import { applyFleetSnapshotFiles, fleetSnapshotApplyConflictCode, selectFleetSnapshotApplyFiles, type FleetSnapshotApplyFile } from '../helpers/applyFleetSnapshotFiles';
 import { StackOpLockService } from '../services/StackOpLockService';
 
 const mocks = vi.hoisted(() => ({
@@ -180,5 +180,11 @@ describe('applyFleetSnapshotFiles', () => {
       { filename: 'compose.yaml', content: 'a' },
       { filename: '.env', content: 'b' },
     ]);
+  });
+
+  it('reports a deletion in progress as a restore conflict', () => {
+    expect(fleetSnapshotApplyConflictCode(
+      Object.assign(new Error('deletion in progress'), { code: 'stack_deletion_in_progress' }),
+    )).toBe('stack_deletion_in_progress');
   });
 });
