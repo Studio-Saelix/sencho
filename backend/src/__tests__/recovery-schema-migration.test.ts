@@ -145,6 +145,15 @@ describe('database-enforced point invariants', () => {
     expect(() => insertPoint(db, { status: 'succeeded' })).toThrow(/CHECK/);
   });
 
+  it('refuses a finished capture without evidence, a failure without a class, or a final status without a time', () => {
+    const db = seeded();
+    expect(() => insertPoint(db, { status: 'partial', completed_at: 2 })).toThrow(/CHECK/);
+    expect(() => insertPoint(db, { id: 'p2', status: 'failed', completed_at: 2 })).toThrow(/CHECK/);
+    expect(() => insertPoint(db, { id: 'p3', status: 'completion_unknown', completed_at: 2 })).toThrow(/CHECK/);
+    expect(() => insertPoint(db, { id: 'p4', status: 'succeeded', snapshot_id: 's', capture_json: '{}' })).toThrow(/CHECK/);
+    expect(() => insertPoint(db, { id: 'p5', status: 'pending', completed_at: 2 })).toThrow(/CHECK/);
+  });
+
   it('keeps root and path scopes apart', () => {
     const db = seeded();
     expect(() => insertPoint(db, { kind: 'root', path_scope: 'a/b' })).toThrow(/CHECK/);

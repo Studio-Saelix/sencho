@@ -116,6 +116,34 @@ describe('operations', () => {
     expect(s.finish(lost.id, { state: 'completion_unknown' })).toMatchObject({ errorClass: 'interrupted' });
   });
 
+  it('refuses a failed or partial ending without a known error class, even from untyped data', () => {
+    const s = new ops.RecoveryOperationStore('epoch-a');
+    const op = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
+    expect(classOf(() => s.finish(op.id, { state: 'failed' } as never))).toBe('invalid_request');
+    expect(classOf(() => s.finish(op.id, { state: 'partial', errorClass: 'whatever' } as never))).toBe('invalid_request');
+    expect(s.get(op.id)?.state).toBe('queued');
+  });
+
+  it('settles its pending points when an operation ends any other way', () => {
+    const s = new ops.RecoveryOperationStore('epoch-a');
+    const st = storage('settle_points');
+    const repo = repository('settle_points_repo');
+    const failing = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    const failedPoint = beginPoint(st.id, 'g', repo.id, failing.id);
+    s.finish(failing.id, { state: 'failed', errorClass: 'source_unreadable' });
+    expect(points.RecoveryPointStore.getInstance().get(failedPoint.id)).toMatchObject({ status: 'failed', failureClass: 'source_unreadable' });
+    for (const ending of [{ state: 'cancelled' as const }, { state: 'completion_unknown' as const }]) {
+      const op = s.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+      const p = beginPoint(st.id, 'g', repo.id, op.id);
+      s.finish(op.id, ending);
+      expect(points.RecoveryPointStore.getInstance().get(p.id)).toMatchObject({ status: 'completion_unknown', failureClass: 'interrupted' });
+    }
+    // A late success for the settled point is refused.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(classOf(() => points.RecoveryPointStore.getInstance().finalize(failedPoint.id, { status: 'succeeded', evidence: evidence() }))).toBe('invalid_request');
+    warn.mockRestore();
+  });
+
   it('refuses to finish succeeded or partial while a point of the operation is pending', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
     const st = storage('finish_guard');
@@ -234,8 +262,11 @@ describe('restart reconciliation', () => {
     const fresh = after.start({ idempotencyKey: key(), kind: 'create_point', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     expect(classOf(() => after.acquireLock('storage', st.storageKey, fresh.id))).toBe('lock_stale');
 
-    // Running it again in the same process changes nothing.
+    // Running it again in the same process changes nothing, even for a point
+    // this process has begun under an operation it has not recorded yet.
+    const early = beginPoint(st.id, 'g', repo.id, 'not-recorded-yet');
     expect(after.reconcileAtStartup(10_000)).toEqual({ interruptedOperations: 0, unknownPoints: 0, staleLocks: 0 });
+    expect(points.RecoveryPointStore.getInstance().get(early.id)?.status).toBe('pending');
   });
 
   it('keeps a dead process\'s work closed even when reconciliation never ran', () => {
@@ -245,7 +276,12 @@ describe('restart reconciliation', () => {
     before.markRunning(running.id);
     before.acquireLock('storage', st.storageKey, running.id);
 
+    const queued = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+
     const after = new ops.RecoveryOperationStore('epoch-without-reconcile');
+    // Neither a queued nor a running operation of the dead process can be started here.
+    expect(classOf(() => after.markRunning(queued.id))).toBe('invalid_request');
+    expect(after.get(queued.id)).toMatchObject({ state: 'queued', processEpoch: 'epoch-crashed' });
     // A replayed request gets the old operation back, but cannot pick it up.
     expect(after.start({ idempotencyKey: running.idempotencyKey, kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).replayed).toBe(true);
     expect(classOf(() => after.markRunning(running.id))).toBe('invalid_request');

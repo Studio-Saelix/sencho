@@ -84,7 +84,9 @@ CREATE TABLE IF NOT EXISTS recovery_points (
   completed_at INTEGER NULL,
   failure_class TEXT NULL,
   CHECK ((kind = 'root' AND path_scope IS NULL) OR (kind = 'path' AND path_scope IS NOT NULL AND path_scope <> '')),
-  CHECK (status <> 'succeeded' OR (snapshot_id IS NOT NULL AND capture_json IS NOT NULL AND completed_at IS NOT NULL))
+  CHECK (status NOT IN ('succeeded','partial') OR (snapshot_id IS NOT NULL AND capture_json IS NOT NULL)),
+  CHECK ((status = 'pending') = (completed_at IS NULL)),
+  CHECK (status NOT IN ('failed','completion_unknown') OR failure_class IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_recovery_points_storage
   ON recovery_points(storage_id, kind, status);

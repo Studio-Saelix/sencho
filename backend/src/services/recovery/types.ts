@@ -264,14 +264,14 @@ export type CoverageReason =
 // --- Capability -------------------------------------------------------------
 
 /**
- * Whether volume protection can run on a node, as the hub sees it, keyed so a
- * state can only carry the reasons that explain it. `update_required` is a real
- * contract skew; a node on the same contract with no engine is `unavailable`.
- * Only `available` and `unavailable` are states a node reports about itself;
- * the other two are the hub's conclusions.
+ * Whether volume protection can run on a node, as the hub sees it.
+ * `update_required` is a real contract skew; a node on the same contract with
+ * no engine is `unavailable`. Only `available` and `unavailable` are states a
+ * node reports about itself; the other two are the hub's conclusions.
  */
 export type VolumeProtectionState = 'available' | 'unavailable' | 'update_required' | 'unknown';
 
+/** A volume-protection status, keyed so a state can only carry the reasons that explain it. */
 export type VolumeProtectionStatus = {
   capability: typeof VOLUME_PROTECTION_CAPABILITY;
   version: number;
@@ -383,12 +383,14 @@ export type CreatePointRequest = {
 
 /**
  * Restore targets. Overwrite of a live destination is a separate, staged mode,
- * pinned to the generation the operator saw so a recreated volume is refused.
+ * pinned to the generation token the operator saw (as a point's `begin` is), so
+ * a volume recreated since then is refused even before the identity store has
+ * observed the recreate.
  */
 export type RestoreTarget =
   | { mode: 'new_volume'; volumeName: string }
   | { mode: 'new_path'; hostPath: string }
-  | { mode: 'staged_overwrite'; storageId: string; expectedGeneration: number; preRestorePointId: string };
+  | { mode: 'staged_overwrite'; storageId: string; expectedGenerationToken: string; preRestorePointId: string };
 
 export type RestoreIntentPhase =
   | 'recorded' | 'staging' | 'staged_verified' | 'swapping' | 'committed' | 'rolled_back' | 'completion_unknown';
@@ -452,6 +454,10 @@ export interface BackupEngine {
   readonly storageKinds: readonly StorageKind[];
   probe(): Promise<EngineProbe>;
   createPoint(request: CreatePointRequest, ctx: EngineExecutionContext): Promise<EngineResult<PointCaptureEvidence>>;
-  verifyPoint(point: RecoveryPoint, method: IntegrityMethod, ctx: EngineExecutionContext): Promise<EngineResult<{ result: 'verified' | 'mismatch' }>>;
+  verifyPoint(
+    point: Extract<RecoveryPoint, { status: 'succeeded' | 'partial' }>,
+    method: IntegrityMethod,
+    ctx: EngineExecutionContext,
+  ): Promise<EngineResult<{ result: 'verified' | 'mismatch' }>>;
   restore(intent: RestoreIntent, ctx: EngineExecutionContext): Promise<EngineResult<RestoreEvidence>>;
 }

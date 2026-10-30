@@ -147,12 +147,14 @@ describe('RecoveryPointStore', () => {
 
   it('ends a point failed when its evidence carries a secret, instead of leaving it pending', () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const keyed = beginRoot();
-    expect(() => store().finalize(keyed.id, {
+    // A field the contract does not know is dropped, never stored.
+    const keyed = store().finalize(beginRoot().id, {
       status: 'succeeded',
       evidence: { ...evidence(), password: 'hunter2' } as unknown as PointCaptureEvidence,
-    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
-    expect(store().get(keyed.id)).toMatchObject({ status: 'failed', failureClass: 'internal' });
+    });
+    expect(keyed.status).toBe('succeeded');
+    const row = recoveryDb().prepare('SELECT * FROM recovery_points WHERE id = ?').get(keyed.id);
+    expect(JSON.stringify(row)).not.toContain('hunter2');
     const texted = beginRoot();
     expect(() => store().finalize(texted.id, {
       status: 'succeeded',
@@ -164,12 +166,32 @@ describe('RecoveryPointStore', () => {
       status: 'succeeded',
       evidence: evidence({ capture: { fileCount: -1, byteCount: 0, skippedCount: 0 } }),
     })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    const inconsistent = beginRoot();
+    expect(() => store().finalize(inconsistent.id, {
+      status: 'succeeded',
+      evidence: evidence({ consistency: 'application_consistent' as never }),
+    })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    expect(store().get(inconsistent.id)).toMatchObject({ status: 'failed', failureClass: 'internal' });
     const escaping = beginRoot();
     expect(() => store().finalize(escaping.id, {
       status: 'succeeded',
       evidence: evidence({ exclusions: [{ path: '../etc/shadow', reason: 'unreadable' }] }),
     })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
     err.mockRestore();
+  });
+
+  it('stores only the known evidence fields, with exclusion paths canonicalized', () => {
+    const p = store().finalize(beginRoot().id, {
+      status: 'succeeded',
+      evidence: {
+        ...evidence({ exclusions: [{ path: 'uploads//a/', reason: 'policy_excluded' }] }),
+        capture: { fileCount: 3, byteCount: 30, skippedCount: 0, path: 'RESTIC_PASSWORD=hunter2' },
+      } as unknown as PointCaptureEvidence,
+    });
+    expect(p.status).toBe('succeeded');
+    expect(p.exclusions).toEqual([{ path: 'uploads/a', reason: 'policy_excluded' }]);
+    const raw = recoveryDb().prepare('SELECT capture_json FROM recovery_points WHERE id = ?').get(p.id) as { capture_json: string };
+    expect(JSON.parse(raw.capture_json)).toEqual({ fileCount: 3, byteCount: 30, skippedCount: 0 });
   });
 
   it('keeps an exclusion whose file name merely looks like a credential', () => {

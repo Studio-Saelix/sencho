@@ -223,6 +223,18 @@ describe('evaluateCoverage', () => {
       .toMatchObject({ state: 'unknown', reason: 'root_evidence_unknown' });
   });
 
+  it('takes the unknown answer over a plain uncovered one, whatever the order', () => {
+    const s = storage('mixed');
+    const old = point(s, { completedAt: NOW - 30 * DAY });
+    const stale = root(s, [old], [verified(old)]);
+    const blocked = { ...stale, access: 'inaccessible' as const };
+    for (const roots of [[stale, blocked], [blocked, stale]]) {
+      const verdict = evaluateCoverage({ volumeProtection: 'available', roots, now: NOW });
+      expect(verdict.roots.map((r) => r.reason)).toEqual(['inaccessible']);
+      expect(verdict).toMatchObject({ state: 'unknown', reason: 'root_evidence_unknown' });
+    }
+  });
+
   it('takes the uncovered answer when aliases of one storage disagree, whatever the order', () => {
     const shared = covered('shared');
     const blocked = { ...shared, access: 'inaccessible' as const };

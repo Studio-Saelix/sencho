@@ -125,12 +125,19 @@ const UNKNOWN_ROOT_REASONS: ReadonlySet<RootCoverageReason> = new Set([
   'identity_unknown', 'inaccessible', 'evidence_inconsistent', 'completion_unknown',
 ]);
 
+/** How bad a root reason is for the aggregate: covered, plain uncovered, unknown evidence. */
+function rank(reason: RootCoverageReason): number {
+  if (reason === 'covered') return 0;
+  return UNKNOWN_ROOT_REASONS.has(reason) ? 2 : 1;
+}
+
 export function evaluateCoverage(input: CoverageInput): CoverageVerdict {
   const freshnessMs = input.freshnessMs ?? ROOT_COVERAGE_FRESHNESS_MS;
 
   // Shared storage is one root however many aliases reach it. When aliases
-  // disagree (different access, a stale identity), the uncovered answer wins,
-  // so the verdict does not depend on input order.
+  // disagree, the worst answer wins (unknown evidence over a plain uncovered
+  // reason over covered); between two of equal rank the first is kept, and both
+  // lead to the same verdict, so the verdict does not depend on input order.
   const byKey = new Map<string, RootCoverage>();
   const roots: RootCoverage[] = [];
   for (const root of input.roots) {
@@ -144,7 +151,7 @@ export function evaluateCoverage(input: CoverageInput): CoverageVerdict {
     if (!existing) {
       byKey.set(key, evaluated);
       roots.push(evaluated);
-    } else if (existing.reason === 'covered' && evaluated.reason !== 'covered') {
+    } else if (rank(evaluated.reason) > rank(existing.reason)) {
       byKey.set(key, evaluated);
       roots[roots.indexOf(existing)] = evaluated;
     }

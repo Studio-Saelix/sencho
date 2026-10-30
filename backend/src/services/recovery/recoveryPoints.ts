@@ -1,8 +1,8 @@
 import { randomUUID } from 'crypto';
 import path from 'path';
-import { errorMessageForLog } from '../../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
-import { assertMetadataOnly, RecoveryError } from './redaction';
+import { assertMetadataOnly, RecoveryError, redactRecoveryLogText } from './redaction';
 import { RECOVERY_POINT_SCHEMA_VERSION, VOLUME_PROTECTION_CAPABILITY_VERSION } from './types';
 import type {
   CaptureSummary,
@@ -63,7 +63,12 @@ interface PointRow {
   failure_class: RecoveryErrorClass | null;
 }
 
-/** The database CHECKs guarantee each status carries the evidence its branch names. */
+/**
+ * The schema's CHECKs guarantee each status carries the evidence its branch
+ * names (snapshot, capture and completion for a finished capture, a failure
+ * class for `failed`, a completion time for every final status), so the
+ * fallbacks below only satisfy the compiler.
+ */
 function outcomeOf(row: PointRow): RecoveryPointOutcome {
   switch (row.status) {
     case 'pending':
@@ -151,21 +156,44 @@ const EXCLUSION_REASONS: ReadonlySet<ExclusionReason> = new Set<ExclusionReason>
   'policy_excluded', 'permission_denied', 'unreadable', 'vanished', 'unsupported_type',
 ]);
 
-const isCount = (n: unknown): boolean => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+const CONSISTENCY_CLASSES: ReadonlySet<ConsistencyClass> = new Set<ConsistencyClass>([
+  'crash_consistent_live', 'crash_consistent_stopped', 'unknown',
+]);
 
-/** Shape and redaction check of engine evidence; throws a plain Error describing the defect. */
-function validateEvidence(evidence: PointCaptureEvidence): void {
+const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+
+/**
+ * Validate engine evidence and rebuild it from the known fields only, so
+ * nothing an engine adds reaches the database. The snapshot id and consistency
+ * are checked for credential-shaped text; exclusion paths are the operator's
+ * own file names, which may look like anything, so they are shape-checked
+ * (relative, inside the root) instead. Throws on any defect.
+ */
+function sanitizeEvidence(evidence: PointCaptureEvidence): PointCaptureEvidence {
   if (typeof evidence?.snapshotId !== 'string' || evidence.snapshotId.trim() === '') throw new Error('snapshot id missing');
+  if (!CONSISTENCY_CLASSES.has(evidence.consistency)) throw new Error('consistency class invalid');
   const c = evidence.capture;
   if (!c || !isCount(c.fileCount) || !isCount(c.byteCount) || !isCount(c.skippedCount)) throw new Error('capture counts invalid');
   if (!Array.isArray(evidence.exclusions)) throw new Error('exclusions invalid');
-  for (const e of evidence.exclusions) {
+  const exclusions = evidence.exclusions.map((e): PointExclusion => {
     if (!e || !EXCLUSION_REASONS.has(e.reason)) throw new Error('exclusion reason invalid');
-    canonicalizePathScope(e.path);
-  }
-  // Exclusion paths are the operator's own file names and may look like
-  // anything; every other field is checked for credential-shaped text.
-  assertMetadataOnly(evidence, 'recovery point evidence', ['path']);
+    return { path: canonicalizePathScope(e.path), reason: e.reason };
+  });
+  assertMetadataOnly({ snapshotId: evidence.snapshotId, consistency: evidence.consistency }, 'recovery point evidence');
+  return {
+    snapshotId: evidence.snapshotId,
+    consistency: evidence.consistency,
+    capture: { fileCount: c.fileCount, byteCount: c.byteCount, skippedCount: c.skippedCount },
+    exclusions,
+  };
+}
+
+/** The reported snapshot id for a log line, when it is safe to print. */
+function loggableSnapshot(outcome: PointFinalization): string {
+  if (outcome.status !== 'succeeded' && outcome.status !== 'partial') return '';
+  const id: unknown = outcome.evidence?.snapshotId;
+  if (typeof id !== 'string' || id.length > 128 || redactRecoveryLogText(id) !== id) return '';
+  return ` (snapshot ${sanitizeForLog(id)})`;
 }
 
 /**
@@ -230,18 +258,20 @@ export class RecoveryPointStore {
     const db = recoveryDb();
     const current = this.require(pointId);
     if (current.status !== 'pending') {
+      // The snapshot an engine reports late may exist in the repository with no
+      // record pointing at it; its id goes in the log so it can be found.
       console.warn(
-        '[Recovery] Ignored a late %s completion for point %s, already %s',
-        outcome.status, pointId, current.status,
+        '[Recovery] Ignored a late %s completion for point %s, already %s%s',
+        outcome.status, pointId, current.status, loggableSnapshot(outcome),
       );
       throw new RecoveryError('invalid_request');
     }
     if (outcome.status === 'succeeded' || outcome.status === 'partial') {
-      const { evidence } = outcome;
+      let evidence: PointCaptureEvidence;
       try {
-        validateEvidence(evidence);
+        evidence = sanitizeEvidence(outcome.evidence);
       } catch (err) {
-        console.error('[Recovery] Point %s evidence refused:', pointId, errorMessageForLog(err));
+        console.error('[Recovery] Point %s evidence refused%s:', pointId, loggableSnapshot(outcome), errorMessageForLog(err));
         db.prepare(`
           UPDATE recovery_points SET status = 'failed', failure_class = 'internal', completed_at = ? WHERE id = ?
         `).run(now, pointId);
@@ -254,8 +284,7 @@ export class RecoveryPointStore {
         WHERE id = ?
       `).run(
         status, evidence.snapshotId, evidence.consistency, JSON.stringify(evidence.capture),
-        JSON.stringify(evidence.exclusions.map((e) => ({ path: canonicalizePathScope(e.path), reason: e.reason }))),
-        now, pointId,
+        JSON.stringify(evidence.exclusions), now, pointId,
       );
     } else {
       db.prepare(`

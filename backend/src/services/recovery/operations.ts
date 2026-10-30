@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
-import { errorDetailFor, RecoveryError } from './redaction';
+import { errorDetailFor, isRecoveryErrorClass, RecoveryError } from './redaction';
 import { TERMINAL_OPERATION_STATES } from './types';
 import type {
   OperationFinish,
@@ -32,9 +32,10 @@ import type {
  * operation.
  *
  * Work left by a dead process can never be resumed in place: `markRunning`
- * and a lock owner's re-acquire both require the current epoch, so even if
- * boot reconciliation failed, an interrupted operation and its locks stay
- * closed until reviewed.
+ * (for a queued or a running operation) and a lock owner's re-acquire both
+ * require the current epoch, so even if boot reconciliation failed, an
+ * interrupted operation and its locks stay closed until a later boot settles
+ * them or someone reviews the lock.
  */
 
 interface OperationRow {
@@ -162,12 +163,16 @@ export class RecoveryOperationStore {
     return row ? toOperation(row) : null;
   }
 
-  /** Start a queued operation. Running one this process already started is a no-op replay. */
+  /**
+   * Start an operation this process queued. Running one this process already
+   * started is a no-op replay. An operation queued or started by another
+   * process is refused: it waits for boot reconciliation, never runs here.
+   */
   markRunning(id: string, now = Date.now()): RecoveryOperation {
     const result = recoveryDb().prepare(`
-      UPDATE recovery_operations SET state = 'running', process_epoch = ?, updated_at = ?
-      WHERE id = ? AND state = 'queued'
-    `).run(this.processEpoch, now, id);
+      UPDATE recovery_operations SET state = 'running', updated_at = ?
+      WHERE id = ? AND state = 'queued' AND process_epoch = ?
+    `).run(now, id, this.processEpoch);
     const op = this.require(id);
     if (result.changes === 0 && !(op.state === 'running' && op.processEpoch === this.processEpoch)) {
       throw new RecoveryError('invalid_request');
@@ -180,18 +185,26 @@ export class RecoveryOperationStore {
    * a late or duplicated completion cannot turn a failure into a success; one
    * that disagrees with the stored outcome is logged. An operation cannot end
    * `succeeded` or `partial` while one of its points is still pending: the point
-   * is finalized first. Locks are released on a known outcome and turned stale
-   * on `completion_unknown`, which needs review before the storage is reused.
+   * is finalized first. Any other ending settles the operation's pending points
+   * in the same transaction (`failed` with the operation's class, otherwise
+   * `completion_unknown`), so a point never outlives its operation as pending.
+   * Locks are released on a known outcome and turned stale on
+   * `completion_unknown`, which needs review before the storage is reused.
    */
   finish(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
     const errorClass: RecoveryErrorClass | null = 'errorClass' in outcome
       ? outcome.errorClass
       : outcome.state === 'completion_unknown' ? 'interrupted' : null;
+    // The union already requires a class for these endings; this holds the
+    // rule for a caller that built the outcome from untyped data.
+    if ((outcome.state === 'failed' || outcome.state === 'partial') && !isRecoveryErrorClass(errorClass)) {
+      throw new RecoveryError('invalid_request');
+    }
     const db = recoveryDb();
     return db.transaction((): RecoveryOperation => {
       const current = this.require(id);
       if (isTerminal(current.state)) {
-        if (current.state !== outcome.state) {
+        if (current.state !== outcome.state || current.errorClass !== errorClass) {
           console.warn(
             '[Recovery] Ignored a late %s completion for operation %s, already %s',
             outcome.state, id, current.state,
@@ -204,6 +217,16 @@ export class RecoveryOperationStore {
           "SELECT 1 FROM recovery_points WHERE source_operation_id = ? AND status = 'pending'",
         ).get(id);
         if (pending) throw new RecoveryError('invalid_request');
+      } else if (outcome.state === 'failed') {
+        db.prepare(`
+          UPDATE recovery_points SET status = 'failed', failure_class = ?, completed_at = ?
+          WHERE source_operation_id = ? AND status = 'pending'
+        `).run(errorClass, now, id);
+      } else {
+        db.prepare(`
+          UPDATE recovery_points SET status = 'completion_unknown', failure_class = 'interrupted', completed_at = ?
+          WHERE source_operation_id = ? AND status = 'pending'
+        `).run(now, id);
       }
       db.prepare(`
         UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ? WHERE id = ?

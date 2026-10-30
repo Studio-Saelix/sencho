@@ -76,6 +76,9 @@ describe('booting on a recovery schema this build cannot use', () => {
     expect(() => booted.recoveryDb()).toThrow(expect.objectContaining({ errorClass: 'schema_unsupported' }));
     expect(booted.capability.getLocalVolumeProtectionStatus())
       .toMatchObject({ state: 'unavailable', reason: 'recovery_store_unavailable' });
+    const reconcile = vi.spyOn(booted.RecoveryOperationStore.prototype, 'reconcileAtStartup');
+    booted.startup.runRecoveryReconcile();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 });
 
@@ -83,9 +86,16 @@ describe('runRecoveryReconcile', () => {
   it('settles the previous process\'s work on a usable schema', async () => {
     const booted = await bootWithRecoveryVersion(String(RECOVERY_SCHEMA_VERSION));
     expect(booted.db.getRecoverySchemaOutcome().kind).toBe('current');
-    const reconcile = vi.spyOn(booted.RecoveryOperationStore.prototype, 'reconcileAtStartup');
+    booted.db.getDb().prepare(`
+      INSERT INTO recovery_operations
+        (id, idempotency_key, kind, actor, transport, state, process_epoch, created_at, updated_at)
+      VALUES ('dead-op', 'dead-key', 'restore', 'admin', 'local', 'running', 'dead-epoch', 1, 1)
+    `).run();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     booted.startup.runRecoveryReconcile();
-    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(booted.RecoveryOperationStore.getInstance().get('dead-op'))
+      .toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Recovery reconcile'), 1, 0, 0);
   });
 
   it('logs a failed reconcile and lets startup continue', async () => {

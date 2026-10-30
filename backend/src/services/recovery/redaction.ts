@@ -7,9 +7,10 @@ import type { RecoveryErrorClass } from './types';
  * Plaintext repository passwords, keys, file bodies and raw engine output never
  * leave node memory: the database holds only `enc:` ciphertext of a password.
  * API responses, audit rows and notifications carry a fixed error class and
- * its fixed sentence (`errorDetailFor`), never an engine message. Node-local
- * log lines go through `redactRecoveryLogText` or `errorMessageForLog`. Point
- * evidence is checked by `assertMetadataOnly` before it is stored.
+ * its fixed sentence (`errorDetailFor`), never an engine message. A node-local
+ * log line that carries engine output goes through `redactRecoveryLogText` or
+ * `errorMessageForLog`. Point evidence is checked by `assertMetadataOnly`
+ * before it is stored.
  */
 
 const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
@@ -82,21 +83,17 @@ function hasCredentialShape(text: string): boolean {
  * Throw when a metadata object about to cross a boundary (database JSON column,
  * API response, hub dispatch) carries a secret-shaped key or a string that
  * looks like a credential. Evidence is counts, ids, classes and timestamps.
- *
- * Keys named in `freeTextKeys` hold names the operator's data chose (file
- * paths), which may look like anything: their keys are still checked, their
- * values are not.
  */
-export function assertMetadataOnly(value: unknown, where: string, freeTextKeys: readonly string[] = []): void {
-  const visit = (node: unknown, trail: string, freeText: boolean): void => {
+export function assertMetadataOnly(value: unknown, where: string): void {
+  const visit = (node: unknown, trail: string): void => {
     if (typeof node === 'string') {
-      if (!freeText && hasCredentialShape(node)) {
+      if (hasCredentialShape(node)) {
         throw new Error(`Recovery metadata at ${where}${trail} carries credential-shaped text`);
       }
       return;
     }
     if (Array.isArray(node)) {
-      node.forEach((child, i) => visit(child, `${trail}[${i}]`, false));
+      node.forEach((child, i) => visit(child, `${trail}[${i}]`));
       return;
     }
     if (node && typeof node === 'object') {
@@ -104,9 +101,9 @@ export function assertMetadataOnly(value: unknown, where: string, freeTextKeys: 
         if (SECRET_KEY_PATTERN.test(key)) {
           throw new Error(`Recovery metadata at ${where}${trail} carries a secret-shaped key`);
         }
-        visit(child, `${trail}.${key}`, freeTextKeys.includes(key));
+        visit(child, `${trail}.${key}`);
       }
     }
   };
-  visit(value, '', false);
+  visit(value, '');
 }

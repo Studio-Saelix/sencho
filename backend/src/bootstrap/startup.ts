@@ -137,19 +137,13 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
 }
 
 /**
- * Run the startup sequence: stack-directory migration, service initialization,
- * background watchdogs, then bind the HTTP server. The caller passes the
- * already-constructed server so tests can import the module without binding a
- * port.
- */
-/**
  * Settle recovery work a previous process left behind: operations it left
  * running end as completion_unknown and their locks turn stale, before anything
  * can start new recovery work. Nothing recovery-related runs at boot, so a
  * failure is logged and Sencho still starts; the store then refuses to resume
- * any of that work, because a dead process's operation and locks can only be
- * picked up by the epoch that owned them. On a build that cannot use the
- * recovery schema there is nothing to settle.
+ * any of that work, because a dead process's operations and locks can only be
+ * picked up by the epoch that owned them. A build that cannot use the recovery
+ * schema leaves those rows alone.
  */
 export function runRecoveryReconcile(): void {
   if (DatabaseService.getInstance().getRecoverySchemaOutcome().kind !== 'current') return;
@@ -166,6 +160,12 @@ export function runRecoveryReconcile(): void {
   }
 }
 
+/**
+ * Run the startup sequence: stack-directory migration, service initialization,
+ * background watchdogs, then bind the HTTP server. The caller passes the
+ * already-constructed server so tests can import the module without binding a
+ * port.
+ */
 export async function startServer(server: Server): Promise<void> {
   const freeBytes = os.freemem();
   const freeMiB = Math.round(freeBytes / (1024 * 1024));
