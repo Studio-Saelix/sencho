@@ -114,7 +114,7 @@ function buildExposureSummary(
       // A tunnel reaches the service over the connector's own networks, so it
       // counts on this network only when the connector is attached to it too.
       const connector = svc.tunnel ? byName.get(svc.tunnel.connector) : undefined;
-      const tunneledHere = svc.tunnel !== undefined && connector !== undefined && attachedToNetwork(connector, networkName, facts, byName);
+      const tunneledHere = connector !== undefined && attachedToNetwork(connector, networkName, facts, byName);
       const publishes = svc.publishedPorts.length > 0 || isHostNetwork(owner?.networkMode) || tunneledHere;
       // A public-edge tunnel can reach the internet, so the network carries
       // exposure beyond loopback even when no host port is published.

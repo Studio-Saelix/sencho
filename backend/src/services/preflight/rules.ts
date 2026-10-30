@@ -1039,6 +1039,14 @@ const exposureInternalTunneled: PreflightRule = {
       const intent = effectiveIntent(ctx, service);
       if (intent !== 'internal' && intent !== 'same-node') continue;
       const certain = isCertainTunnelPath(tunnel);
+      let remediation: string;
+      if (certain) {
+        remediation = 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.';
+      } else if (tunnel.path === 'shared-namespace') {
+        remediation = 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service out of the connector\'s network namespace, or reclassify the exposure intent.';
+      } else {
+        remediation = 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.';
+      }
       findings.push({
         ruleId: 'exposure-internal-tunneled',
         // A shared network, the host network, or a cloudflared namespace only
@@ -1048,11 +1056,7 @@ const exposureInternalTunneled: PreflightRule = {
         message: `Service "${service}" is classified as ${intent} exposure. ${describeServiceTunnel(tunnel)}`,
         sourcePath: service,
         service,
-        remediation: certain
-          ? 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.'
-          : tunnel.path === 'shared-namespace'
-            ? 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service out of the connector\'s network namespace, or reclassify the exposure intent.'
-            : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.',
+        remediation,
       });
     }
     return findings;

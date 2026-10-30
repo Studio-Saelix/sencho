@@ -482,7 +482,9 @@ export function detectTunnels(model: TunnelDetectionModel, options: TunnelDetect
  *  cloudflared namespace is reachable locally but its ingress is unverified, so
  *  it ranks above another unverified path but below a certain one. */
 function strength(e: ServiceTunnelExposure): number {
-  const certainty = isCertainTunnelPath(e) ? 2 : e.path === 'shared-namespace' ? 1 : 0;
+  let certainty = 0;
+  if (isCertainTunnelPath(e)) certainty = 2;
+  else if (e.path === 'shared-namespace') certainty = 1;
   return certainty * 2 + (e.scope === 'public-edge' ? 1 : 0);
 }
 
@@ -569,7 +571,10 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const namespaced = byPath('shared-namespace');
   const networked = byPath('shared-network');
   const hosted = byPath('host-network');
-  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${c.provider === 'cloudflared' ? 'can publish whatever its ingress routes to, to anyone on the internet through Cloudflare\'s edge' : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`}.${audienceCaveat(c.provider)}`];
+  const opens = c.provider === 'cloudflared'
+    ? 'can publish whatever its ingress routes to, to anyone on the internet through Cloudflare\'s edge'
+    : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`;
+  const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${opens}.${audienceCaveat(c.provider)}`];
   if (namespaced.length > 0) {
     const { verb, they } = shareVerb(namespaced);
     sentences.push(c.provider === 'cloudflared'

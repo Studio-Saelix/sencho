@@ -152,7 +152,7 @@ function interpolateCommand(value: unknown, lookup?: ComposeEnvLookup): unknown 
 }
 
 /** Whether a raw value still holds a template Compose would interpolate. */
-function holdsTemplate(value: string | undefined): boolean {
+export function holdsTemplate(value: string | undefined): boolean {
   return value !== undefined && /\$(?:\{|\$|[A-Za-z_])/.test(value.replace(/\$\$/g, ''));
 }
 
@@ -404,7 +404,7 @@ export function parseComposeDependencies(
   // Compose resolves YAML merge keys, so a caller that must read a service as it
   // renders (the tunnel summary) opts in.
   let parsed: unknown;
-  let hasLayerTags = false;
+  let hasLayerTags: boolean;
   try {
     const document = YAML.parseDocument(content, { merge: options.mergeKeys === true });
     if (document.errors.length > 0) throw document.errors[0];
@@ -416,7 +416,7 @@ export function parseComposeDependencies(
 
   const root = (parsed ?? {}) as Record<string, unknown>;
   const rawServices = root.services;
-  if (root.services === undefined) {
+  if (rawServices === undefined) {
     // With `allowEmptyServices`, a layer that declares only top-level sections
     // (`name`, `networks`, `volumes`, `configs`, `secrets`, `include`,
     // `version`, or `x-` anchors) is valid Compose; the summary merges it with
@@ -457,7 +457,8 @@ export function parseComposeDependencies(
     const rawEnvKeys = envKeyNames(svc.environment);
     const commandDeclared = svc.command !== undefined;
     const entrypointDeclared = svc.entrypoint !== undefined;
-    const envFiles = envFileEntries(svc.env_file).map(entry => ({
+    const rawEnvFiles = envFileEntries(svc.env_file);
+    const envFiles = rawEnvFiles.map(entry => ({
       ...entry,
       path: interpolateString(entry.path, lookup) ?? entry.path,
     }));
@@ -473,7 +474,7 @@ export function parseComposeDependencies(
       ...collectKeys(svc.networks),
       ...rawEnvKeys,
       ...rawCommandParts,
-      ...envFileEntries(svc.env_file).map(entry => entry.path),
+      ...rawEnvFiles.map(entry => entry.path),
       ...stringList(svc.cap_add),
       ...deviceHostPaths(svc.devices),
       ...volumeStrings(svc.volumes),

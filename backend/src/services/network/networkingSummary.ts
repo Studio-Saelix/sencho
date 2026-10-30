@@ -23,6 +23,7 @@ import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
 import { NodeRegistry } from '../NodeRegistry';
 import {
+  holdsTemplate,
   mergeDeclaredCompose,
   parseComposeDependencies,
   type DeclaredCompose,
@@ -31,7 +32,6 @@ import {
   detectTunnels,
   tailscaleForwardFlags,
   tunnelExposureByService,
-  type TailscaleForwardFlag,
   type TunnelDetectionModel,
 } from './tunnelDetection';
 import { assembleStackDrift } from '../DriftDetectionService';
@@ -93,9 +93,14 @@ interface TunnelInputs {
 /** Why a stack is reported unreadable: a fixed reason and the error's code or
  *  class name. Never the message, which can hold a path. */
 function noteUnreadable(stack: string, reason: string, error?: unknown): void {
-  const cause = error === undefined
-    ? ''
-    : ` (${sanitizeForLog(typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : error instanceof Error ? error.name : 'unknown')})`;
+  let cause = '';
+  if (error !== undefined) {
+    const code = (error as { code?: unknown })?.code;
+    let kind = 'unknown';
+    if (typeof code === 'string') kind = code;
+    else if (error instanceof Error) kind = error.name;
+    cause = ` (${sanitizeForLog(kind)})`;
+  }
   console.warn('[NetworkingSummary] Stack %s reported unreadable: %s%s.', sanitizeForLog(stack), reason, cause);
 }
 
@@ -106,10 +111,6 @@ const ENV_FILE_ARGS_NEEDS_LOOKUP = /^\s*(?:export\s+)?TS_EXTRA_ARGS(?:\s*[:=][^\
 
 function isMissingFile(error: unknown): boolean {
   return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
-}
-
-function holdsTemplate(value: string | undefined): boolean {
-  return value !== undefined && /\$(?:\{|\$|[A-Za-z_])/.test(value.replace(/\$\$/g, ''));
 }
 
 /** A post-parse field that can still hide a connector behind an unexpanded template. */
@@ -233,10 +234,9 @@ async function readComposeContents(nodeId: number, stack: string): Promise<Compo
       return readMainLayers(nodeId, stack, stackDir, true);
     }
   }
-  if (selection.kind === 'unknown' || selection.kind === 'invalid') {
-    noteUnreadable(stack, `the COMPOSE_FILE selection is ${selection.kind}`);
-  }
-  return readMainLayers(nodeId, stack, stackDir, selection.kind === 'unknown' || selection.kind === 'invalid');
+  const selectionUnreadable = selection.kind === 'unknown' || selection.kind === 'invalid';
+  if (selectionUnreadable) noteUnreadable(stack, `the COMPOSE_FILE selection is ${selection.kind}`);
+  return readMainLayers(nodeId, stack, stackDir, selectionUnreadable);
 }
 
 /**
@@ -287,13 +287,9 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
   if (parsed.some(layer => layer.parseError)) return null;
 
   const declared = mergeDeclaredCompose(parsed);
-  let unreadable = contents.opaque
-    || declared.hasInclude === true
-    || declared.hasExtends === true
-    || declared.hasLayerTags === true;
-  if (declared.hasInclude || declared.hasExtends || declared.hasLayerTags) {
-    noteUnreadable(stack, 'the compose files use include, extends, or a !reset/!override tag');
-  }
+  const unfollowed = declared.hasInclude === true || declared.hasExtends === true || declared.hasLayerTags === true;
+  if (unfollowed) noteUnreadable(stack, 'the compose files use include, extends, or a !reset/!override tag');
+  let unreadable = contents.opaque || unfollowed;
   if (!lookup && initial.some(layer => layer.services.some(service => service.needsInterpolation === true))) {
     unreadable = true;
   }
@@ -308,7 +304,6 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     // may reference the stack's interpolation environment, so the reader starts
     // from the lookup the rest of the detection fields use.
     const reader = new ComposeEnvFiles(lookup ?? (() => undefined));
-    let envFileFlags: TailscaleForwardFlag[] | undefined;
     let envFileTemplate = false;
     for (const envFile of service.envFiles ?? []) {
       if (holdsTemplate(envFile.path)) {
@@ -328,11 +323,12 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
         unreadable = true;
       }
     }
-    const extraArgs = reader.assigned('TS_EXTRA_ARGS');
-    if (extraArgs !== undefined) envFileFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
     if (lookup === undefined && envFileTemplate) unreadable = true;
     service.envKeys = [...keys];
-    if (!service.tailscaleArgsDeclared && envFileFlags !== undefined) service.tailscaleFlags = envFileFlags;
+    const extraArgs = reader.assigned('TS_EXTRA_ARGS');
+    if (!service.tailscaleArgsDeclared && extraArgs !== undefined) {
+      service.tailscaleFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
+    }
   }
 
   const model: TunnelDetectionModel = {
