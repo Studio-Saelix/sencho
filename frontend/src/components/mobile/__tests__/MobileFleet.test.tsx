@@ -267,3 +267,85 @@ describe('MobileFleet node identity', () => {
     expect(screen.queryByRole('img', { name: 'Online' })).not.toBeInTheDocument();
   });
 });
+
+describe('MobileFleet crowded node row', () => {
+  const hot = { cpu: { usage: '97.0', cores: 4 } };
+
+  // The row wraps its metadata instead of shrinking the name, whatever adds
+  // width: the pin, an exception word, the active or integration chip, or a
+  // name that already fills the card. jsdom has no layout, so the contract is
+  // asserted on the classes that decide it: the name keeps its content width
+  // (shrink-0) and only ellipsizes when it alone is wider than the row
+  // (max-w-full), while the row is a wrapping flex line.
+  const cases: Array<{
+    label: string;
+    name: string;
+    pin: string;
+    node: Partial<FleetNode>;
+    active?: boolean;
+    devImage?: boolean;
+  }> = [
+    {
+      label: 'the Local pin',
+      name: 'sencho-test-01',
+      pin: '★ Local',
+      node: { type: 'local' },
+    },
+    {
+      label: 'the Proxy pin',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy' },
+    },
+    {
+      label: 'the Pilot pin and two exception words',
+      name: 'sencho-test-01',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
+    {
+      label: 'a critical cordoned node',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy', cordoned: true, systemStats: { ...makeNode().systemStats!, ...hot } },
+    },
+    {
+      label: 'the active and integration chips',
+      name: 'sencho-test-01',
+      pin: 'Proxy',
+      node: { type: 'remote', mode: 'proxy' },
+      active: true,
+      devImage: true,
+    },
+    {
+      label: 'a name that fills the card',
+      name: 'sencho-test-01-primary-eu-west',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
+  ];
+
+  it.each(cases)('keeps the name legible with $label', async ({ name, pin, node, active, devImage }) => {
+    const fleetNode = makeNode({ id: 2, name, type: 'remote', ...node });
+    if (active) {
+      useNodesMock.mockReturnValue({
+        nodes: [{ id: 2, name, type: 'remote', mode: 'proxy' }],
+        activeNode: { id: 2, name },
+        hasCapability: vi.fn(() => false),
+      });
+    }
+    setupFetch([fleetNode], devImage ? [makeUpdateStatus({ nodeId: 2, isDevImage: true })] : []);
+
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    const nodeName = await screen.findByText(name);
+    expect(nodeName).toHaveClass('shrink-0', 'max-w-full', 'truncate');
+    expect(nodeName).not.toHaveClass('min-w-24', 'flex-1');
+    expect(nodeName.parentElement).toHaveClass('flex-wrap');
+    // The pin and every qualifier wrap as one block below the name, so a
+    // crowded row never strands the pin on a line of its own.
+    const meta = nodeName.nextElementSibling;
+    expect(meta).toHaveClass('flex-wrap', 'min-w-0');
+    expect(meta).toContainElement(screen.getByText(pin));
+  });
+});

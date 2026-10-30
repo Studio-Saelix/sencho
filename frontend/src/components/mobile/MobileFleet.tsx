@@ -133,23 +133,28 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
         ) : (
           <StateDot tone={tone} size={7} glow />
         )}
-        <span className="min-w-24 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
-        {isActive && !local ? (
-          <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
-            active
-          </span>
-        ) : null}
-        {isDevImage ? (
-          <span className="flex shrink-0 items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
-            <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
-          </span>
-        ) : null}
-        {exceptions.length > 0 ? (
-          <Kicker className={cn('shrink-0 whitespace-nowrap', tone === 'destructive' ? 'text-destructive' : 'text-warning')}>
-            {exceptions.join(' · ')}
-          </Kicker>
-        ) : null}
-        <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
+        <span className="max-w-full shrink-0 grow truncate font-mono text-[14px] text-stat-value">{node.name}</span>
+        {/* Everything that qualifies the name is one block: when the row is crowded
+            the block wraps below the name as a unit, so the name never gives up
+            width and the pin never strands itself on a line of its own. */}
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
+          {isActive && !local ? (
+            <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
+              active
+            </span>
+          ) : null}
+          {isDevImage ? (
+            <span className="flex shrink-0 items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
+              <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
+            </span>
+          ) : null}
+          {exceptions.length > 0 ? (
+            <Kicker className={cn('shrink-0 whitespace-nowrap', tone === 'destructive' ? 'text-destructive' : 'text-warning')}>
+              {exceptions.join(' · ')}
+            </Kicker>
+          ) : null}
+          <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
+        </span>
       </div>
       <div className="flex items-stretch divide-x divide-hairline border-t border-hairline">
         <StatCell label="stacks" value={`${node.stacks?.length ?? 0}`} />
