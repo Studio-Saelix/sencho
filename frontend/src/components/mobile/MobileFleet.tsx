@@ -124,16 +124,22 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 px-[13px] pb-2.5 pt-3">
-        {tone === 'success' ? (
-          // An online node that is not critical has no offline or critical word, so the dot
-          // carries "Online" for assistive tech (a cordoned word, if any, is announced beside it).
-          <span role="img" aria-label="Online" className="inline-flex">
+        {/* The dot and the name are one non-wrapping unit, so a name that fills
+            the row ellipsizes beside its dot instead of pushing the dot onto a
+            line of its own above the name. The name keeps its content width
+            until the unit alone is wider than the row, then it shrinks. */}
+        <span className="flex min-w-0 items-center gap-x-2.5">
+          {tone === 'success' ? (
+            // An online node that is not critical has no offline or critical word, so the dot
+            // carries "Online" for assistive tech (a cordoned word, if any, is announced beside it).
+            <span role="img" aria-label="Online" className="inline-flex shrink-0">
+              <StateDot tone={tone} size={7} glow />
+            </span>
+          ) : (
             <StateDot tone={tone} size={7} glow />
-          </span>
-        ) : (
-          <StateDot tone={tone} size={7} glow />
-        )}
-        <span className="max-w-full shrink-0 grow truncate font-mono text-[14px] text-stat-value">{node.name}</span>
+          )}
+          <span className="min-w-0 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
+        </span>
         {/* Everything that qualifies the name is one block: when the row is crowded
             the block wraps below the name as a unit, so the name never gives up
             width and the pin never strands itself on a line of its own. */}

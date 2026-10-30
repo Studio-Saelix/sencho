@@ -274,9 +274,10 @@ describe('MobileFleet crowded node row', () => {
   // The row wraps its metadata instead of shrinking the name, whatever adds
   // width: the pin, an exception word, the active or integration chip, or a
   // name that already fills the card. jsdom has no layout, so the contract is
-  // asserted on the classes that decide it: the name keeps its content width
-  // (shrink-0) and only ellipsizes when it alone is wider than the row
-  // (max-w-full), while the row is a wrapping flex line.
+  // asserted on the classes that decide it: the dot and the name share one
+  // non-wrapping unit, and the name shrinks (min-w-0, truncate) only when that
+  // unit alone is wider than the row, so it can never push the dot off the
+  // line. The qualifier block is the only part that wraps.
   const cases: Array<{
     label: string;
     name: string;
@@ -347,12 +348,23 @@ describe('MobileFleet crowded node row', () => {
     render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
 
     const nodeName = await screen.findByText(name);
-    expect(nodeName).toHaveClass('shrink-0', 'max-w-full', 'truncate');
-    expect(nodeName).not.toHaveClass('min-w-24', 'flex-1');
-    expect(nodeName.parentElement).toHaveClass('flex-wrap');
+    expect(nodeName).toHaveClass('min-w-0', 'truncate');
+    expect(nodeName).not.toHaveClass('shrink-0', 'max-w-full', 'grow', 'flex-1', 'min-w-24');
+    // The dot and the name are one non-wrapping unit: a name as wide as the
+    // row shrinks and ellipsizes inside that unit instead of pushing the dot
+    // onto a line above it.
+    const identity = nodeName.parentElement!;
+    expect(identity).toHaveClass('flex', 'min-w-0', 'items-center');
+    expect(identity).not.toHaveClass('flex-wrap');
+    expect(identity).toContainElement(nodeName);
+    // The status dot precedes the name inside the unit that cannot wrap.
+    const dot = identity.firstElementChild!;
+    expect(dot).not.toBe(nodeName);
+    expect(dot.compareDocumentPosition(nodeName) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(identity.parentElement).toHaveClass('flex-wrap');
     // The pin and every qualifier wrap as one block below the name, so a
     // crowded row never strands the pin on a line of its own.
-    const meta = nodeName.nextElementSibling;
+    const meta = identity.nextElementSibling;
     expect(meta).toHaveClass('flex-wrap', 'min-w-0');
     expect(meta).toContainElement(screen.getByText(pin));
   });
