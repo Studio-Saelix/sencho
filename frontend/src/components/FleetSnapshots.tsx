@@ -645,7 +645,7 @@ export default function FleetSnapshots() {
                                                                     <span className="text-xs font-mono font-medium flex-1 truncate">
                                                                         {stack.stackName}
                                                                     </span>
-                                                                    <Badge variant="outline" className="text-[10px] font-mono tabular-nums px-1.5 py-0 h-4 shrink-0">
+                                                                    <Badge variant="outline" size="compact" className="font-mono tabular-nums">
                                                                         {stack.files.length} file{stack.files.length !== 1 ? 's' : ''}
                                                                     </Badge>
                                                                 </button>

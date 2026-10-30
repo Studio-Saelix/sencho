@@ -292,7 +292,7 @@ export function NodeDetailsSheet({
                             {!updateStatus || !updateStatus.online ? (
                                 <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 text-muted-foreground">Unknown</Badge>
                             ) : updateStatus.updateBlocked ? (
-                                <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="text-[10px] px-1.5 py-0 h-5" />
+                                <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} className="h-5" />
                             ) : updateStatus.updateAvailable ? (
                                 <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">Update available</Badge>
                             ) : (

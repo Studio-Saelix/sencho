@@ -190,12 +190,12 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                             <h3 className="text-sm font-medium truncate">{node.name}</h3>
                             <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                 {!isOnline && (
-                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                    <Badge variant="secondary" size="compact">
                                         <WifiOff className="w-2.5 h-2.5 mr-0.5" /> Offline
                                     </Badge>
                                 )}
                                 {formattedVersion && (
-                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono tabular-nums shrink-0">
+                                    <Badge variant="outline" size="compact" className="font-mono tabular-nums">
                                         {formattedVersion}
                                     </Badge>
                                 )}
@@ -208,7 +208,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     />
                                 )}
                                 {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+                                    <Badge size="compact" className="bg-warning/15 text-warning border-warning/30">
                                         Update available
                                     </Badge>
                                 )}
@@ -216,24 +216,25 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
                                 )}
                                 {updateStatus?.skipActive && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-muted text-muted-foreground border-card-border/40 shrink-0">
+                                    <Badge size="compact" className="bg-muted text-muted-foreground border-card-border/40">
                                         Skipped
                                     </Badge>
                                 )}
                                 {updateStatus?.isDevImage && (
-                                    <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
+                                    <Badge size="compact" className="bg-warning/15 text-warning border-warning/30">
                                         <FlaskConical className="w-2.5 h-2.5 mr-0.5" strokeWidth={1.5} /> Integration image
                                     </Badge>
                                 )}
                                 {isOnline && isCritical(node) && (
-                                    <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
+                                    <Badge variant="destructive" size="compact">
                                         <AlertTriangle className="w-2.5 h-2.5 mr-0.5" /> Critical
                                     </Badge>
                                 )}
                                 {node.cordoned && (
                                     <Badge
                                         variant="outline"
-                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 bg-warning/15 text-warning border-warning/30"
+                                        size="compact"
+                                        className="bg-warning/15 text-warning border-warning/30"
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
@@ -243,8 +244,8 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                     <button
                                         type="button"
                                         className={cn(
-                                            badgeVariants({ variant: 'outline' }),
-                                            'text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
+                                            badgeVariants({ variant: 'outline', size: 'compact' }),
+                                            'cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20',
                                         )}
                                         onClick={(event) => { event.stopPropagation(); openGitOpsWorkplace({ nodeId: node.id, attention: true }); }}
                                         title="Open the GitOps applications needing attention on this node"
