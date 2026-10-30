@@ -536,7 +536,7 @@ describe('CloudBackupSection recovery from another instance', () => {
             const alert = await screen.findByRole('alert');
             expect(alert).toHaveTextContent('Passphrase is incorrect');
             expect(scrollIntoView).toHaveBeenCalled();
-            expect(scrollIntoView.mock.instances[0]).toBe(alert);
+            expect(scrollIntoView.mock.contexts[0]).toBe(alert);
             const list = within(screen.getByRole('dialog')).getByRole('list');
             expect(alert.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         } finally {
