@@ -26,6 +26,7 @@ import { useNodes, type Node } from '@/context/NodeContext';
 import { NodeCordonModal } from './NodeCordonModal';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import { PinnedUpdateBadge } from './PinnedUpdateBadge';
+import { NodeConnectionPin } from './NodeConnectionPin';
 import { StackSection } from './NodeCardStackList';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { Label as StackLabel } from '../label-types';
@@ -96,7 +97,6 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
-    const isPilot = (registryNode?.mode ?? node.mode) === 'pilot_agent';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
@@ -136,18 +136,7 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
         <div className={`rounded-xl border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel transition-colors hover:border-t-card-border-hover ${localRailClasses} ${isOnline ? '' : 'opacity-60'}`}>
             {/* Card Header */}
             <div className="relative p-4 pb-3">
-                {isLocal ? (
-                    <span className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
-                        ★ Local
-                    </span>
-                ) : (
-                    <span
-                        className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground"
-                        title={isPilot ? 'Pilot agent: this node connects out to the control instance over a tunnel' : 'Proxy: the control instance reaches this node over its API'}
-                    >
-                        {isPilot ? 'Pilot' : 'Proxy'}
-                    </span>
-                )}
+                <NodeConnectionPin type={node.type} mode={registryNode?.mode ?? node.mode} className="absolute top-3 right-9" />
                 <div className="absolute top-2 right-2">
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
