@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { format } from 'util';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -101,10 +102,24 @@ describe('networking summary', () => {
     expect(router.body.exposed.stacks).toContain(STACK);
     expect(JSON.stringify(router.body)).not.toContain('10.0.0.0');
 
-    // An env file Compose would refuse leaves the value unresolved, counted as forwarding.
-    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=maybe\n');
+    // An env file Compose would refuse leaves the value unresolved, counted as
+    // forwarding, and says so in the log without any value from the file.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=maybe\nTS_ARGS=--advertise-routes=10.9.0.0/24\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const unreadable = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(unreadable.body.exposed.stacks).toContain(STACK);
+    const logged = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(logged).toContain(`Stack ${STACK} env files cannot be read the way Compose reads them`);
+    expect(logged).not.toContain('10.9.0.0');
+  });
+
+  it('ignores the values of a stack .env that disables itself, as Compose does', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:---advertise-exit-node}\n  app:\n    image: example/app:1\n');
+    // Compose leaves TS_ARGS unset, so the default applies and the node forwards.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\nTS_ARGS=--accept-dns=false\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
   });
 
   it('does not count a cloudflared DNS proxy as exposure', async () => {

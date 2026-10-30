@@ -13,6 +13,7 @@ import {
   cloudflaredCommandHints,
   describeServiceTunnel,
   describeTunnelConnector,
+  DEFAULT_BRIDGE_KEY,
   detectTunnels,
   imageBaseName,
   tailscaleForwardFlags,
@@ -571,7 +572,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
       app,
     });
     const c = connector(model, 'cloudflared');
-    expect(c.reaches).toEqual([{ service: 'legacy', path: 'shared-network', networks: ['bridge'] }]);
+    expect(c.reaches).toEqual([{ service: 'legacy', path: 'shared-network', networks: [DEFAULT_BRIDGE_KEY] }]);
     expect(c.externalNetworks).toEqual([]);
     expect(c.meshAttached).toBe(false);
     expect(describeTunnelConnector(c).message).toContain('"legacy" shares a network with the connector');
@@ -581,6 +582,18 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
       { bridge: { name: 'proj_bridge' } },
     );
     expect(connector(keyed, 'cloudflared').reaches).toEqual([]);
+  });
+
+  it('treats network_mode: default as Docker\'s default bridge, reached through a service that runs in its namespace', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'default' },
+      legacy: { image: 'example/legacy', network_mode: 'bridge' },
+      sidecar: { image: 'example/sidecar', network_mode: 'service:legacy' },
+      app,
+    });
+    const c = connector(model, 'cloudflared');
+    expect(c.attachment).toBe('networks');
+    expect(reachOf(c)).toEqual({ legacy: 'shared-network', sidecar: 'shared-network' });
   });
 
   it('does not loop or invent a reach on a network_mode cycle', () => {
@@ -691,6 +704,10 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     for (const off of ['0', 'f', 'F', 'FALSE', 'False']) {
       expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node=${off}` })).toEqual([]);
     }
+    // ParseBool is case-sensitive and has no `no` or `off`, so these are not false.
+    for (const notOff of ['fAlSe', 'no', 'off']) {
+      expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node=${notOff}` })).toEqual(['--advertise-exit-node']);
+    }
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node=1' })).toEqual(['--advertise-exit-node']);
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--accept-dns=false', 'TS_EXTRA_ARGS=--advertise-exit-node'])).toEqual(['--advertise-exit-node']);
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=--advertise-exit-node', 'TS_EXTRA_ARGS=--accept-dns=false'])).toEqual([]);
@@ -707,6 +724,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=${MISSING:-}'], lookup)).toEqual([]);
     // A key with no value takes the variable of the same name.
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'], name => (name === 'TS_EXTRA_ARGS' ? '--advertise-exit-node' : undefined))).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: null }, name => (name === 'TS_EXTRA_ARGS' ? '--accept-dns=false' : undefined))).toEqual([]);
     // A value that needs no interpolation is read as written.
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node' }, () => undefined)).toEqual(['--advertise-exit-node']);
   });

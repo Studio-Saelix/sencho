@@ -491,8 +491,7 @@ type ComposeEnvRead =
     stackEnvRead: boolean;
     projectEnvDisabled: boolean;
   }
-  | { kind: 'unknown'; reason: string; loadedEnvFiles: string[] }
-  | { kind: 'invalid'; reason: string; loadedEnvFiles: string[] };
+  | Extract<ComposeFileEnvSelection, { kind: 'unknown' | 'invalid' }>;
 
 async function readComposeEnv(stackName: string, nodeId?: number): Promise<ComposeEnvRead> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
@@ -647,16 +646,43 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
 }
 
 /**
- * The variables Compose interpolates a stack's compose file with: the process
- * environment above the env files the run loads. Null when those files cannot
- * be read the way Compose reads them, or when the stack `.env` disables itself
- * with COMPOSE_DISABLE_ENV_FILE (it was still read for that setting, so its
- * values would wrongly appear here).
+ * The variables Compose interpolates a stack's compose file with, or why they
+ * cannot be known here:
+ * - `unreadable`: the env files cannot be read the way Compose reads them.
+ * - `env-file-disabled`: the stack `.env` disables itself with
+ *   COMPOSE_DISABLE_ENV_FILE. It was still read for that setting, so its values
+ *   would wrongly appear in a lookup.
+ * - `project-directory-env`: the project directory may not be the stack root
+ *   (a `--project-directory` from the deploy spec, or COMPOSE_FILE, which can
+ *   point into a subfolder), and Compose then also loads that directory's own
+ *   `.env`, which this reader does not.
  */
-export async function composeInterpolationLookup(stackName: string, nodeId?: number): Promise<ComposeEnvLookup | null> {
+export type ComposeInterpolation =
+  | { kind: 'lookup'; lookup: ComposeEnvLookup }
+  | { kind: 'unavailable'; reason: 'unreadable' | 'env-file-disabled' | 'project-directory-env' };
+
+/**
+ * See `ComposeInterpolation`. The lookup puts the process environment above the
+ * env files the run loads, in the order Compose reads them.
+ */
+export async function composeInterpolation(stackName: string, nodeId?: number): Promise<ComposeInterpolation> {
   const env = await readComposeEnv(stackName, nodeId);
-  if (env.kind !== 'read' || (env.projectEnvDisabled && env.stackEnvRead)) return null;
-  return (name) => env.reader.lookup(name);
+  if (env.kind !== 'read') return { kind: 'unavailable', reason: 'unreadable' };
+  if (env.projectEnvDisabled && env.stackEnvRead) return { kind: 'unavailable', reason: 'env-file-disabled' };
+  if (!env.projectEnvDisabled) {
+    let movesProjectDirectory = env.reader.lookup('COMPOSE_FILE') !== undefined;
+    if (!movesProjectDirectory) {
+      try {
+        movesProjectDirectory = authoredComposeFileArgs(stackName, nodeId).includes('--project-directory');
+      } catch {
+        // An invalid deploy spec stops the deploy before Compose reads anything,
+        // so no lookup describes the run.
+        return { kind: 'unavailable', reason: 'unreadable' };
+      }
+    }
+    if (movesProjectDirectory) return { kind: 'unavailable', reason: 'project-directory-env' };
+  }
+  return { kind: 'lookup', lookup: (name) => env.reader.lookup(name) };
 }
 
 /**
