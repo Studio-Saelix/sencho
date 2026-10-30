@@ -257,7 +257,7 @@ export class RecoveryPointStore {
    * (after a restart settled the point, say) is refused as `invalid_request`
    * and logged, never applied. Evidence that fails validation ends the point
    * `failed` rather than leaving it pending until the next boot. A `failed`
-   * outcome without a known error class is refused as `invalid_request` and the
+   * outcome without a known error class is refused as `invalid_request` and logged; the
    * point stays pending until its operation, or the next boot, settles it.
    */
   finalize(pointId: string, outcome: PointFinalization, now = Date.now()): RecoveryPoint {
@@ -295,6 +295,7 @@ export class RecoveryPointStore {
       );
     } else {
       if (outcome.status === 'failed' && !isRecoveryErrorClass(outcome.errorClass)) {
+        console.warn('[Recovery] Refused a failed completion for point %s with an unknown error class', pointId);
         throw new RecoveryError('invalid_request');
       }
       db.prepare(`
