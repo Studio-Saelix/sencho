@@ -61,16 +61,14 @@ function tunneledServices(declared: DeclaredCompose): Set<string> {
  * value), so these counters read the flags Compose Doctor and the stack views
  * read from the rendered model. The value stays unresolved, and counts as
  * forwarding, when no lookup describes the run (see `ComposeInterpolation`),
- * Compose would refuse the template, or the deploy spec cannot be read.
+ * Compose would refuse the template, or the deploy spec or project env-file
+ * selection cannot be read.
  */
 async function withTailscaleArgsInterpolated(nodeId: number, stack: string, content: string, declared: DeclaredCompose): Promise<DeclaredCompose> {
   if (!declared.services.some(s => s.tailscaleFlags?.includes('unresolved'))) return declared;
   try {
     const interpolation = await composeInterpolation(stack, nodeId);
-    if (interpolation.kind === 'lookup') {
-      const interpolated = parseComposeDependencies(content, { lookup: interpolation.lookup });
-      return interpolated.parseError ? declared : interpolated;
-    }
+    if (interpolation.kind === 'lookup') return parseComposeDependencies(content, { lookup: interpolation.lookup });
     if (interpolation.reason === 'unreadable') {
       console.warn('[NetworkingSummary] Stack %s env files cannot be read the way Compose reads them; TS_EXTRA_ARGS left unresolved.',
         sanitizeForLog(stack));
@@ -80,9 +78,9 @@ async function withTailscaleArgsInterpolated(nodeId: number, stack: string, cont
     }
     return declared;
   } catch (error) {
-    // An invalid or unreadable deploy spec, or a defect. Unreadable env files
-    // and a template Compose refuses come back as values instead. An env-file
-    // error message can hold an interpolated value, so it is never logged.
+    // A deploy spec or project env-file selection this run cannot read, or a
+    // defect. Those messages carry stack names and paths, never an env value. A
+    // ComposeEnvFileError message can hold one, so only its class name is kept.
     const detail = error instanceof ComposeEnvFileError
       ? 'ComposeEnvFileError'
       : error instanceof Error ? `${error.name}: ${error.message}` : 'unknown';

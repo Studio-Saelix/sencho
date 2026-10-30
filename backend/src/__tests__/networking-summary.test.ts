@@ -127,11 +127,13 @@ describe('networking summary', () => {
     expect(warn.mock.calls.map(args => format(...args)).filter(line => line.includes('[NetworkingSummary]'))).toEqual([]);
   });
 
-  it('names a refused deploy spec in the log and never logs an env-file error message', async () => {
+  it('names a refused deploy spec or env-file selection in the log and never logs an env-file value', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS}\n  app:\n    image: example/app:1\n');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const gitSource = vi.spyOn(DatabaseService.getInstance(), 'getGitSource');
+    const db = DatabaseService.getInstance();
+    const gitSource = vi.spyOn(db, 'getGitSource');
+    const selection = vi.spyOn(db, 'getStackProjectEnvFiles');
 
     // A context directory a deploy refuses: the env files read fine, so the cause is the spec.
     gitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } } as ReturnType<DatabaseService['getGitSource']>);
@@ -141,19 +143,25 @@ describe('networking summary', () => {
     expect(specLog).toContain(`Stack ${STACK} interpolation failed; TS_EXTRA_ARGS left unresolved: Error: Invalid context directory in deploy spec`);
     expect(specLog).not.toContain('env files cannot be read');
 
-    // The env files read first and fine; the project-directory check then throws.
+    // A selection read that fails keeps its own cause instead of blaming env files.
     warn.mockClear();
-    let calls = 0;
-    gitSource.mockImplementation(() => {
-      calls += 1;
-      if (calls === 1) return undefined;
-      throw new ComposeEnvFileError('required variable A is missing a value: hunter2-value');
-    });
-    const refused = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
-    expect(refused.body.exposed.stacks).toContain(STACK);
-    const logged = warn.mock.calls.map(args => format(...args)).join('\n');
-    expect(logged).toContain('TS_EXTRA_ARGS left unresolved: ComposeEnvFileError');
-    expect(logged).not.toContain('hunter2-value');
+    gitSource.mockReturnValue(undefined);
+    selection.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+    const refusedSelection = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(refusedSelection.body.exposed.stacks).toContain(STACK);
+    const selectionLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(selectionLog).toContain(`Stack ${STACK} interpolation failed; TS_EXTRA_ARGS left unresolved: Error: SQLITE_BUSY: database is locked`);
+    expect(selectionLog).not.toContain('env files cannot be read');
+
+    // An env-file error message can hold an interpolated value, so only its class name is logged.
+    warn.mockClear();
+    selection.mockReturnValue([]);
+    gitSource.mockImplementation(() => { throw new ComposeEnvFileError('required variable A is missing a value: hunter2-value'); });
+    const failedRead = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(failedRead.body.exposed.stacks).toContain(STACK);
+    const readLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(readLog).toContain('TS_EXTRA_ARGS left unresolved: ComposeEnvFileError');
+    expect(readLog).not.toContain('hunter2-value');
   });
 
   it('does not count a cloudflared DNS proxy as exposure', async () => {

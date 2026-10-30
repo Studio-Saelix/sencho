@@ -1285,6 +1285,22 @@ describe('composeFileEnvVarSelection', () => {
       await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/context directory/i);
     });
 
+    it('throws on a refused deploy spec even when an explicit env file would answer', async () => {
+      writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/context directory/i);
+    });
+
+    it('throws when the deploy spec or the env-file selection cannot be read', async () => {
+      mockGetGitSource.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/SQLITE_BUSY/);
+
+      mockGetGitSource.mockReturnValue(undefined);
+      mockGetStackProjectEnvFiles.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/SQLITE_BUSY/);
+    });
+
     it('keeps the lookup with a project directory when an explicit env file replaces every project .env', async () => {
       writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
       mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);

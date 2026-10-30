@@ -1,6 +1,6 @@
 import path from 'path';
 import { promises as fsPromises } from 'fs';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type GitSourceAppliedSpec } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { gitSecretsAreaBase, managedAreaBase } from '../services/gitops/managedPaths';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -27,8 +27,22 @@ import { getErrorMessage } from './errors';
  * changes the directory basename Compose would otherwise derive the name from.
  */
 export function authoredComposeFileArgs(stackName: string, nodeId?: number, stackDirOverride?: string): string[] {
+  return composeFileArgsFromSpec(
+    DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec ?? null,
+    stackName,
+    nodeId,
+    stackDirOverride,
+  );
+}
+
+/** The argument list for an already-read deploy spec (see `authoredComposeFileArgs`). */
+function composeFileArgsFromSpec(
+  spec: GitSourceAppliedSpec | null,
+  stackName: string,
+  nodeId?: number,
+  stackDirOverride?: string,
+): string[] {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
-  const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (!spec || spec.files.length === 0) return [];
 
   const baseDir = NodeRegistry.getInstance().getComposeDir(resolvedNodeId);
@@ -133,6 +147,15 @@ function envResolvesOutsideError(stackName: string, file: string): Error {
 }
 
 /**
+ * The deploy spec and project env-file list a run's env files come from, read
+ * once by a caller that needs a failed read reported as itself.
+ */
+export interface ComposeRunSelection {
+  spec: GitSourceAppliedSpec | null;
+  configuredEnvFiles: string[];
+}
+
+/**
  * Build `--env-file` arguments for the stack's configured project env files.
  *
  * When the stack has one or more project env files configured (via the
@@ -163,18 +186,24 @@ function envResolvesOutsideError(stackName: string, file: string): Error {
  * deployment select the same file. Validation uses the same check. An override
  * outside the live stack and those areas is rejected. A live stack with no
  * override stays on the compose-root path.
+ *
+ * `options.selection` supplies the deploy spec and project env-file list when
+ * the caller has already read them, so a database failure is reported once and
+ * as itself rather than as an env-file problem.
  */
 export async function authoredComposeEnvFileArgs(
   stackName: string,
   nodeId?: number,
   stackDirOverride?: string,
   preferredEnvDir?: string,
-  options?: { missingMode?: 'throw' | 'skip' },
+  options?: { missingMode?: 'throw' | 'skip'; selection?: ComposeRunSelection },
 ): Promise<string[]> {
   const missingMode = options?.missingMode ?? 'throw';
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const db = DatabaseService.getInstance();
-  const configuredFiles = db.getStackProjectEnvFiles(resolvedNodeId, stackName);
+  const configuredFiles = options?.selection
+    ? options.selection.configuredEnvFiles
+    : db.getStackProjectEnvFiles(resolvedNodeId, stackName);
 
   if (configuredFiles.length > 0) {
     const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
@@ -265,7 +294,9 @@ export async function authoredComposeEnvFileArgs(
   }
 
   // Legacy fallback: --env-file .env only for multi-file Git stacks with contextDir.
-  const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+  const spec = options?.selection
+    ? options.selection.spec
+    : db.getGitSource(stackName)?.applied_deploy_spec ?? null;
   if (!spec || spec.files.length === 0 || !spec.contextDir) return [];
 
   // Inline barrier at the fs sink. Area files are checked against the
@@ -493,12 +524,13 @@ type ComposeEnvRead =
   }
   | Extract<ComposeFileEnvSelection, { kind: 'unknown' | 'invalid' }>;
 
-async function readComposeEnv(stackName: string, nodeId?: number): Promise<ComposeEnvRead> {
+async function readComposeEnv(stackName: string, nodeId?: number, selection?: ComposeRunSelection): Promise<ComposeEnvRead> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
   const fsSvc = FileSystemService.getInstance(resolvedNodeId);
   let envArgs: string[];
   try {
-    envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId);
+    envArgs = await authoredComposeEnvFileArgs(stackName, resolvedNodeId, undefined, undefined,
+      selection ? { selection } : undefined);
   } catch (e) {
     // A configured env file that exists but is not a regular file is a refusal
     // the run cannot proceed past, not a selection this reader could not
@@ -653,14 +685,14 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
  *   COMPOSE_DISABLE_ENV_FILE. It was still read for that setting, so its values
  *   would wrongly appear in a lookup.
  * - `project-directory-env`: the project directory is not the stack root, so
- *   Compose loads that directory's `.env`, which this reader does not. It moves
- *   with a deploy spec's `--project-directory` (Compose then reads only the
- *   nested `.env`), a first `-f` file in a subfolder, or a COMPOSE_FILE whose
- *   first entry is in a subfolder (Compose reads the nested `.env` on top of
- *   the stack `.env`).
+ *   Compose reads a `.env` this reader does not. With a deploy spec's
+ *   `--project-directory`, or a first `-f` file outside the stack root, Compose
+ *   reads only that directory's `.env`. With a COMPOSE_FILE whose first entry
+ *   is outside the stack root, the stack `.env` is read first and the nested
+ *   `.env` adds only the names it leaves unset.
  *
- * Throws when the deploy spec is invalid or cannot be read; a deploy refuses
- * the same spec.
+ * Throws when the deploy spec is invalid or cannot be read, and when the
+ * project env-file selection cannot be read: a deploy refuses the same spec.
  */
 export type ComposeInterpolation =
   | { kind: 'lookup'; lookup: ComposeEnvLookup }
@@ -671,22 +703,37 @@ export type ComposeInterpolation =
  * env files the run loads, in the order Compose reads them.
  */
 export async function composeInterpolation(stackName: string, nodeId?: number): Promise<ComposeInterpolation> {
-  const env = await readComposeEnv(stackName, nodeId);
+  const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+  // Resolve the run's database state first: an invalid spec is refused before
+  // Compose reads any env file, and a failed read keeps its own cause instead
+  // of being reported as unreadable env files. An explicit env file must not
+  // skip the spec check, because that would fail open.
+  const selection = readComposeRunSelection(stackName, resolvedNodeId);
+  const deployArgs = composeFileArgsFromSpec(selection.spec, stackName, resolvedNodeId);
+  const env = await readComposeEnv(stackName, resolvedNodeId, selection);
   if (env.kind !== 'read') return { kind: 'unavailable', reason: 'unreadable' };
   if (env.projectEnvDisabled && env.stackEnvRead) return { kind: 'unavailable', reason: 'env-file-disabled' };
   // A disabled default env input also skips the project directory's `.env`.
-  if (!env.projectEnvDisabled && projectDirectoryMoves(env.reader, stackName, nodeId)) {
+  if (!env.projectEnvDisabled && projectDirectoryMoves(deployArgs, env.reader, stackName, resolvedNodeId)) {
     return { kind: 'unavailable', reason: 'project-directory-env' };
   }
   return { kind: 'lookup', lookup: (name) => env.reader.lookup(name) };
 }
 
+/** The deploy spec and project env-file list a run reads; a database failure throws. */
+function readComposeRunSelection(stackName: string, nodeId: number): ComposeRunSelection {
+  const db = DatabaseService.getInstance();
+  return {
+    spec: db.getGitSource(stackName)?.applied_deploy_spec ?? null,
+    configuredEnvFiles: db.getStackProjectEnvFiles(nodeId, stackName),
+  };
+}
+
 /** Whether a run's project directory is somewhere other than the stack root. */
-function projectDirectoryMoves(reader: ComposeEnvFiles, stackName: string, nodeId?: number): boolean {
-  const args = authoredComposeFileArgs(stackName, nodeId);
-  if (args.some((arg) => arg === '--project-directory' || arg.startsWith('--project-directory='))) return true;
-  const fileFlag = args.indexOf('-f');
-  const firstFile = fileFlag === -1 ? undefined : args[fileFlag + 1];
+function projectDirectoryMoves(deployArgs: string[], reader: ComposeEnvFiles, stackName: string, nodeId?: number): boolean {
+  if (deployArgs.includes('--project-directory')) return true;
+  const fileFlag = deployArgs.indexOf('-f');
+  const firstFile = fileFlag === -1 ? undefined : deployArgs[fileFlag + 1];
   if (firstFile !== undefined) return path.dirname(firstFile) !== '.';
   const composeFile = reader.lookup('COMPOSE_FILE');
   if (composeFile === undefined) return false;

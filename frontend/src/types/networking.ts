@@ -14,7 +14,8 @@ export interface TunnelReach {
   service: string;
   path: TunnelPath;
   /** Network keys shared with the connector. Docker's default bridge appears as
-   *  `docker default bridge`, which no stack network key can equal. */
+   *  `docker default bridge`, which no stack network key can equal. Empty unless
+   *  the path is `shared-network`. */
   networks: string[];
 }
 
