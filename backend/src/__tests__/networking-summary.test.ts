@@ -14,6 +14,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { ComposeEnvFileError } from '../utils/composeDotenv';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -113,13 +114,46 @@ describe('networking summary', () => {
     expect(logged).not.toContain('10.9.0.0');
   });
 
-  it('ignores the values of a stack .env that disables itself, as Compose does', async () => {
+  it('does not read the values of a stack .env that disables itself', async () => {
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:---advertise-exit-node}\n  app:\n    image: example/app:1\n');
-    // Compose leaves TS_ARGS unset, so the default applies and the node forwards.
+    // Compose leaves TS_ARGS unset, so its default forwards. Sencho has no lookup
+    // here and counts the value as unresolved, which gives the same answer.
     fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\nTS_ARGS=--accept-dns=false\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(res.body.exposed.stacks).toContain(STACK);
+    // An ordinary configuration, not a warning.
+    expect(warn.mock.calls.map(args => format(...args)).filter(line => line.includes('[NetworkingSummary]'))).toEqual([]);
+  });
+
+  it('names a refused deploy spec in the log and never logs an env-file error message', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS}\n  app:\n    image: example/app:1\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const gitSource = vi.spyOn(DatabaseService.getInstance(), 'getGitSource');
+
+    // A context directory a deploy refuses: the env files read fine, so the cause is the spec.
+    gitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } } as ReturnType<DatabaseService['getGitSource']>);
+    const refusedSpec = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(refusedSpec.body.exposed.stacks).toContain(STACK);
+    const specLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(specLog).toContain(`Stack ${STACK} interpolation failed; TS_EXTRA_ARGS left unresolved: Error: Invalid context directory in deploy spec`);
+    expect(specLog).not.toContain('env files cannot be read');
+
+    // The env files read first and fine; the project-directory check then throws.
+    warn.mockClear();
+    let calls = 0;
+    gitSource.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) return undefined;
+      throw new ComposeEnvFileError('required variable A is missing a value: hunter2-value');
+    });
+    const refused = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(refused.body.exposed.stacks).toContain(STACK);
+    const logged = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(logged).toContain('TS_EXTRA_ARGS left unresolved: ComposeEnvFileError');
+    expect(logged).not.toContain('hunter2-value');
   });
 
   it('does not count a cloudflared DNS proxy as exposure', async () => {

@@ -36,7 +36,7 @@ export type TunnelScope = 'public-edge' | 'private-overlay';
  *  the connector's own address: overlay peers reach it directly, and a
  *  cloudflared sidecar reaches it on localhost, which Sencho counts as certain.
  *  `shared-network`: they share a Compose network, or both use Docker's
- *  default bridge (`network_mode: bridge`). `host-network`: the
+ *  default bridge (`network_mode: bridge` or `default`). `host-network`: the
  *  connector uses the host network and the service (or the service whose
  *  namespace it runs in) publishes a host port or is itself on the host network. For the last two the connector can reach the
  *  service, but whether it routes to it is configured elsewhere. */
@@ -52,7 +52,7 @@ export interface TunnelReach {
 }
 
 /** How the connector is attached: to the stack's networks (`network_mode:
- *  bridge` counts here but joins only Docker's default bridge, shared with
+ *  bridge` or `default` counts here but joins only Docker's default bridge, shared with
  *  other bridge-mode services and none of the stack's networks), to the host
  *  network, or to another container's namespace
  *  (`container:<x>`), whose reach Sencho cannot see. A connector with
@@ -348,8 +348,8 @@ export const DEFAULT_BRIDGE_KEY = 'docker default bridge';
 
 /** Network keys a namespace owner joins: its stack networks (Compose's implicit
  *  `default` when it lists none), or Docker's default bridge alone under
- *  `network_mode: bridge`, which it shares only with other bridge-mode services.
- *  Any other network mode (`host`, `none`, `container:`, `service:`) joins no
+ *  `network_mode: bridge` or `default`, which it shares only with other
+ *  bridge-mode services. Any other network mode (`host`, `none`, `container:`, `service:`) joins no
  *  stack network, so the list is empty. */
 function networksOf(owner: TunnelDetectionService | undefined): string[] {
   if (usesDefaultBridge(owner)) return [DEFAULT_BRIDGE_KEY];

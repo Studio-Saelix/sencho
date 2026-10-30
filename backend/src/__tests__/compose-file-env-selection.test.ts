@@ -1268,6 +1268,23 @@ describe('composeFileEnvVarSelection', () => {
       expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'project-directory-env' });
     });
 
+    it('has no lookup when the deploy spec\'s first compose file is in a subfolder', async () => {
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['sub/compose.yaml'], contextDir: null } });
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'project-directory-env' });
+    });
+
+    it('keeps the lookup when COMPOSE_FILE only layers files at the stack root', async () => {
+      writeStackFile('.env', 'COMPOSE_FILE=compose.yaml:compose.prod.yaml\nTS_ARGS=--from-file\n');
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-file');
+      writeStackFile('.env', 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=./compose.yaml;sub/extra.yaml\nTS_ARGS=--from-file\n');
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-file');
+    });
+
+    it('throws on a deploy spec a deploy would refuse instead of calling the env files unreadable', async () => {
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/context directory/i);
+    });
+
     it('keeps the lookup with a project directory when an explicit env file replaces every project .env', async () => {
       writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
       mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);

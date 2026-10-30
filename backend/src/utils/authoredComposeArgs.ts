@@ -652,10 +652,15 @@ export async function composeFileEnvVarSelection(stackName: string, nodeId?: num
  * - `env-file-disabled`: the stack `.env` disables itself with
  *   COMPOSE_DISABLE_ENV_FILE. It was still read for that setting, so its values
  *   would wrongly appear in a lookup.
- * - `project-directory-env`: the project directory may not be the stack root
- *   (a `--project-directory` from the deploy spec, or COMPOSE_FILE, which can
- *   point into a subfolder), and Compose then also loads that directory's own
- *   `.env`, which this reader does not.
+ * - `project-directory-env`: the project directory is not the stack root, so
+ *   Compose loads that directory's `.env`, which this reader does not. It moves
+ *   with a deploy spec's `--project-directory` (Compose then reads only the
+ *   nested `.env`), a first `-f` file in a subfolder, or a COMPOSE_FILE whose
+ *   first entry is in a subfolder (Compose reads the nested `.env` on top of
+ *   the stack `.env`).
+ *
+ * Throws when the deploy spec is invalid or cannot be read; a deploy refuses
+ * the same spec.
  */
 export type ComposeInterpolation =
   | { kind: 'lookup'; lookup: ComposeEnvLookup }
@@ -669,20 +674,26 @@ export async function composeInterpolation(stackName: string, nodeId?: number): 
   const env = await readComposeEnv(stackName, nodeId);
   if (env.kind !== 'read') return { kind: 'unavailable', reason: 'unreadable' };
   if (env.projectEnvDisabled && env.stackEnvRead) return { kind: 'unavailable', reason: 'env-file-disabled' };
-  if (!env.projectEnvDisabled) {
-    let movesProjectDirectory = env.reader.lookup('COMPOSE_FILE') !== undefined;
-    if (!movesProjectDirectory) {
-      try {
-        movesProjectDirectory = authoredComposeFileArgs(stackName, nodeId).includes('--project-directory');
-      } catch {
-        // An invalid deploy spec stops the deploy before Compose reads anything,
-        // so no lookup describes the run.
-        return { kind: 'unavailable', reason: 'unreadable' };
-      }
-    }
-    if (movesProjectDirectory) return { kind: 'unavailable', reason: 'project-directory-env' };
+  // A disabled default env input also skips the project directory's `.env`.
+  if (!env.projectEnvDisabled && projectDirectoryMoves(env.reader, stackName, nodeId)) {
+    return { kind: 'unavailable', reason: 'project-directory-env' };
   }
   return { kind: 'lookup', lookup: (name) => env.reader.lookup(name) };
+}
+
+/** Whether a run's project directory is somewhere other than the stack root. */
+function projectDirectoryMoves(reader: ComposeEnvFiles, stackName: string, nodeId?: number): boolean {
+  const args = authoredComposeFileArgs(stackName, nodeId);
+  if (args.some((arg) => arg === '--project-directory' || arg.startsWith('--project-directory='))) return true;
+  const fileFlag = args.indexOf('-f');
+  const firstFile = fileFlag === -1 ? undefined : args[fileFlag + 1];
+  if (firstFile !== undefined) return path.dirname(firstFile) !== '.';
+  const composeFile = reader.lookup('COMPOSE_FILE');
+  if (composeFile === undefined) return false;
+  const separator = reader.lookup('COMPOSE_PATH_SEPARATOR') || DEFAULT_PATH_SEPARATOR;
+  const first = composeFile.split(separator)[0];
+  const stackDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId ?? NodeRegistry.getInstance().getDefaultNodeId()), stackName);
+  return path.resolve(stackDir, path.dirname(first)) !== stackDir;
 }
 
 /**

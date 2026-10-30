@@ -18,6 +18,7 @@ import { getErrorMessage } from '../../utils/errors';
 import { composeInterpolation } from '../../utils/authoredComposeArgs';
 import { ComposeEnvFileError } from '../../utils/composeDotenv';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { isDebugEnabled } from '../../utils/debug';
 
 /** One signal bucket: how many stacks match, and which. */
 export interface NetworkingSummaryBucket {
@@ -59,28 +60,33 @@ function tunneledServices(declared: DeclaredCompose): Set<string> {
  * `TS_EXTRA_ARGS` is `unresolved` in the raw YAML (a `${VAR}`, or a key with no
  * value), so these counters read the flags Compose Doctor and the stack views
  * read from the rendered model. The value stays unresolved, and counts as
- * forwarding, when no lookup describes the run (see `ComposeInterpolation`) or
- * Compose would refuse the template.
+ * forwarding, when no lookup describes the run (see `ComposeInterpolation`),
+ * Compose would refuse the template, or the deploy spec cannot be read.
  */
 async function withTailscaleArgsInterpolated(nodeId: number, stack: string, content: string, declared: DeclaredCompose): Promise<DeclaredCompose> {
   if (!declared.services.some(s => s.tailscaleFlags?.includes('unresolved'))) return declared;
   try {
     const interpolation = await composeInterpolation(stack, nodeId);
-    if (interpolation.kind === 'lookup') return parseComposeDependencies(content, { lookup: interpolation.lookup });
-    // The other reasons are ordinary configurations this reader does not model.
+    if (interpolation.kind === 'lookup') {
+      const interpolated = parseComposeDependencies(content, { lookup: interpolation.lookup });
+      return interpolated.parseError ? declared : interpolated;
+    }
     if (interpolation.reason === 'unreadable') {
       console.warn('[NetworkingSummary] Stack %s env files cannot be read the way Compose reads them; TS_EXTRA_ARGS left unresolved.',
         sanitizeForLog(stack));
+    } else if (isDebugEnabled()) {
+      // Ordinary configurations this reader does not model, so not a warning.
+      console.log('[NetworkingSummary:diag] Stack %s TS_EXTRA_ARGS left unresolved: %s.', sanitizeForLog(stack), interpolation.reason);
     }
     return declared;
   } catch (error) {
-    // Not expected: unreadable env files and a template Compose refuses both
-    // come back as values. An env-file error message can hold an interpolated
-    // value, so it is never logged.
+    // An invalid or unreadable deploy spec, or a defect. Unreadable env files
+    // and a template Compose refuses come back as values instead. An env-file
+    // error message can hold an interpolated value, so it is never logged.
     const detail = error instanceof ComposeEnvFileError
       ? 'ComposeEnvFileError'
       : error instanceof Error ? `${error.name}: ${error.message}` : 'unknown';
-    console.warn('[NetworkingSummary] Stack %s interpolation failed unexpectedly; TS_EXTRA_ARGS left unresolved:',
+    console.warn('[NetworkingSummary] Stack %s interpolation failed; TS_EXTRA_ARGS left unresolved:',
       sanitizeForLog(stack), sanitizeForLog(detail));
     return declared;
   }

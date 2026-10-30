@@ -704,7 +704,8 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     for (const off of ['0', 'f', 'F', 'FALSE', 'False']) {
       expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node=${off}` })).toEqual([]);
     }
-    // ParseBool is case-sensitive and has no `no` or `off`, so these are not false.
+    // ParseBool is case-sensitive and has no `no` or `off`. Tailscale rejects these
+    // values, and Sencho fails closed by counting the flag as forwarding.
     for (const notOff of ['fAlSe', 'no', 'off']) {
       expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: `--advertise-exit-node=${notOff}` })).toEqual(['--advertise-exit-node']);
     }
