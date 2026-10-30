@@ -84,6 +84,8 @@ interface FleetSnapshotDetail extends FleetSnapshot {
     fileDecryptWarnings?: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string }>;
     /** True when the snapshot came from another instance, so its node ids need mapping. */
     requiresNodeMapping?: boolean;
+    /** Fingerprint of the mapping this detail represents; Restore all echoes it back. */
+    mappingVersion?: string;
 }
 
 interface CurrentNodeOption {
@@ -329,15 +331,28 @@ export default function FleetSnapshots() {
         }
     };
 
-    const handleRestore = async (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => {
+    const handleRestore = async (
+        nodeId: number,
+        stackName: string,
+        redeploy: boolean,
+        restoreNotes: boolean,
+        expectedTargetNodeId: number | null,
+    ) => {
         if (!selectedSnapshot) return;
+        const snapshot = selectedSnapshot;
         const key = `${nodeId}:${stackName}`;
         setRestoringStack(key);
         try {
-            const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/restore`, {
+            const res = await apiFetch(`/fleet/snapshots/${snapshot.id}/restore`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ nodeId, stackName, redeploy, restoreNotes }),
+                body: JSON.stringify({
+                    nodeId,
+                    stackName,
+                    redeploy,
+                    restoreNotes,
+                    ...(expectedTargetNodeId != null ? { expectedTargetNodeId } : {}),
+                }),
             });
             if (res.ok) {
                 const data: { message: string; redeployed: boolean; notesRestored: boolean; notesError?: string } = await res.json();
@@ -350,7 +365,12 @@ export default function FleetSnapshots() {
                 }
             } else {
                 const err = await res.json().catch(() => null);
-                if (res.status === 409 && err?.code === 'SNAPSHOT_FILE_UNAVAILABLE') {
+                if (res.status === 409 && err?.code === 'SNAPSHOT_MAPPING_CHANGED') {
+                    toast.error(err?.error || 'The destination mapping changed. Reload the snapshot and confirm again.');
+                    // The confirmation is stale: reload so the operator sees the
+                    // destination that is current before restoring anything.
+                    await handleViewDetail(snapshot);
+                } else if (res.status === 409 && err?.code === 'SNAPSHOT_FILE_UNAVAILABLE') {
                     toast.error(err?.error || 'One or more snapshot files could not be decrypted.');
                 } else {
                     toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore stack.');
@@ -387,12 +407,17 @@ export default function FleetSnapshots() {
 
     const handleRestoreAll = async (redeploy: boolean, restoreNotes: boolean) => {
         if (!selectedSnapshot) return;
+        const snapshot = selectedSnapshot;
         setRestoringAll(true);
         try {
-            const res = await apiFetch(`/fleet/snapshots/${selectedSnapshot.id}/restore-all`, {
+            const res = await apiFetch(`/fleet/snapshots/${snapshot.id}/restore-all`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ redeploy, restoreNotes }),
+                body: JSON.stringify({
+                    redeploy,
+                    restoreNotes,
+                    ...(snapshot.mappingVersion ? { expectedMappingVersion: snapshot.mappingVersion } : {}),
+                }),
             });
             if (res.ok) {
                 const data: {
@@ -422,7 +447,12 @@ export default function FleetSnapshots() {
                 }
             } else {
                 const err = await res.json().catch(() => null);
-                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore snapshot.');
+                if (res.status === 409 && err?.code === 'SNAPSHOT_MAPPING_CHANGED') {
+                    toast.error(err?.error || 'The destination mapping changed. Reload the snapshot and confirm again.');
+                    await handleViewDetail(snapshot);
+                } else {
+                    toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore snapshot.');
+                }
             }
         } catch (error: unknown) {
             const err = error as Record<string, unknown> | null;
@@ -591,7 +621,7 @@ export default function FleetSnapshots() {
                                         </div>
                                     ))}
                                 </div>
-                                <Button size="sm" onClick={handleSaveMapping} disabled={savingMapping}>
+                                <Button size="sm" onClick={handleSaveMapping} disabled={savingMapping || restoringAll || restoringStack !== null}>
                                     {savingMapping ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
                                     Save mapping
                                 </Button>
@@ -777,6 +807,7 @@ export default function FleetSnapshots() {
                                                                     <RestoreButton
                                                                         nodeId={node.nodeId}
                                                                         nodeName={node.targetNodeName ?? node.nodeName}
+                                                                        expectedTargetNodeId={node.targetNodeId ?? null}
                                                                         stackName={stack.stackName}
                                                                         hasDossier={!!dossier}
                                                                         restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
@@ -1093,15 +1124,17 @@ export default function FleetSnapshots() {
 
 // --- Restore Button Sub-Component ---
 
-function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, disabled, disabledReason, onRestore }: {
+function RestoreButton({ nodeId, nodeName, expectedTargetNodeId, stackName, hasDossier, restoring, disabled, disabledReason, onRestore }: {
     nodeId: number;
     nodeName: string;
+    /** Destination the confirmation names; the server refuses a stale one. */
+    expectedTargetNodeId: number | null;
     stackName: string;
     hasDossier: boolean;
     restoring: boolean;
     disabled?: boolean;
     disabledReason?: string;
-    onRestore: (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => Promise<void>;
+    onRestore: (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean, expectedTargetNodeId: number | null) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
     const [restoreNotes, setRestoreNotes] = useState(false);
@@ -1133,7 +1166,7 @@ function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, dis
                 confirming={restoring}
                 onConfirm={async () => {
                     try {
-                        await onRestore(nodeId, stackName, redeploy, restoreNotes);
+                        await onRestore(nodeId, stackName, redeploy, restoreNotes, expectedTargetNodeId);
                     } finally {
                         setOpen(false);
                     }

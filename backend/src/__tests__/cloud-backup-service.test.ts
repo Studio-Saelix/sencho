@@ -9,7 +9,7 @@ import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import { Readable } from 'stream';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { isEncryptedArchive, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OBJECT_BYTES, openSnapshotArchive } from '../services/cloudBackupArchive';
+import { encryptArchive, isEncryptedArchive, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OBJECT_BYTES, openSnapshotArchive } from '../services/cloudBackupArchive';
 
 const sentSpy = vi.fn();
 const s3ClientCtorSpy = vi.fn();
@@ -880,3 +880,117 @@ function archiveObject(entries: Array<{ name: string; content: string }>): Promi
         pack.pipe(gzip);
     });
 }
+
+describe('CloudBackupService imported record validation', () => {
+    const validMetadata = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+        description: 'malformed',
+        created_by: 'ada',
+        created_at: 1_700_000_000_000,
+        skipped_nodes: [],
+        skipped_stacks: [],
+        archive_version: 2,
+        ...overrides,
+    });
+
+    function stubObjectFetch(bytes: Buffer): void {
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(bytes) };
+            return {};
+        });
+    }
+
+    it('refuses an ordinary import carrying a malformed warning record and inserts nothing', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const instanceId = db.getSystemState('instance_id') || 'unknown';
+        const objectKey = `sencho/instances/${instanceId}/snapshots/9_malformed.tar.gz`;
+        const before = snapshotCounts();
+        const archive = await archiveObject([
+            { name: 'metadata.json', content: validMetadata({ skipped_nodes: [null] }) },
+            { name: 'nodes/1_gw/web/compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubObjectFetch(archive);
+
+        await expect(CloudBackupService.getInstance().importSnapshot(objectKey))
+            .rejects.toMatchObject({ code: 'BAD_ARCHIVE' });
+        expect(snapshotCounts()).toEqual(before);
+    });
+
+    it('refuses a recovery archive carrying malformed documentation and inserts nothing', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        const before = snapshotCounts();
+        const sealed = await encryptArchive(await archiveObject([
+            { name: 'metadata.json', content: validMetadata() },
+            {
+                name: 'documentation.json',
+                content: JSON.stringify({ generated_at: 'x', stacks: [], warnings: [null] }),
+            },
+            { name: 'nodes/1_gw/web/compose.yaml', content: 'services: {}\n' },
+        ]), ARCHIVE_PASSPHRASE);
+        stubObjectFetch(sealed);
+
+        await expect(CloudBackupService.getInstance().importRecoveryArchive(
+            'sencho/instances/old-instance/snapshots/9_sealed.tar.gz.senc',
+            ARCHIVE_PASSPHRASE,
+        )).rejects.toMatchObject({ code: 'BAD_ARCHIVE' });
+        expect(snapshotCounts()).toEqual(before);
+    });
+
+    it('imports a valid archive with warning and documentation records', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const instanceId = db.getSystemState('instance_id') || 'unknown';
+        const objectKey = `sencho/instances/${instanceId}/snapshots/10_valid.tar.gz`;
+        const before = snapshotCounts();
+        const documentation = JSON.stringify({
+            generated_at: 'x',
+            stacks: [{ nodeId: 1, nodeName: 'gw', stackName: 'web', dossier: { purpose: 'payments' } }],
+            warnings: [{ nodeId: 2, nodeName: 'edge', stackName: 'api', reason: 'notes unavailable' }],
+        });
+        const archive = await archiveObject([
+            {
+                name: 'metadata.json',
+                content: validMetadata({
+                    skipped_nodes: [{ nodeId: 2, nodeName: 'edge', reason: 'unreachable' }],
+                    skipped_stacks: [{ nodeId: 1, nodeName: 'gw', stackName: 'api', reason: 'compose unreadable' }],
+                }),
+            },
+            { name: 'documentation.json', content: documentation },
+            { name: 'nodes/1_gw/web/compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubObjectFetch(archive);
+
+        const importedId = await CloudBackupService.getInstance().importSnapshot(objectKey);
+        expect(snapshotCounts().headers).toBe(before.headers + 1);
+        const stored = db.getSnapshot(importedId);
+        expect(JSON.parse(stored!.skipped_nodes)).toEqual([
+            { nodeId: 2, nodeName: 'edge', reason: 'unreachable' },
+        ]);
+        expect(JSON.parse(stored!.skipped_stacks)).toEqual([
+            { nodeId: 1, nodeName: 'gw', stackName: 'api', reason: 'compose unreadable' },
+        ]);
+        expect(db.getSnapshotDocumentation(importedId)).toBe(documentation);
+    });
+
+    it('keeps a legacy archive without warning fields importable', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const instanceId = db.getSystemState('instance_id') || 'unknown';
+        const objectKey = `sencho/instances/${instanceId}/snapshots/11_legacy.tar.gz`;
+        const legacyMetadata = JSON.parse(validMetadata()) as Record<string, unknown>;
+        delete legacyMetadata.skipped_stacks;
+        const archive = await archiveObject([
+            { name: 'metadata.json', content: JSON.stringify(legacyMetadata) },
+            { name: 'nodes/1_gw/web/compose.yaml', content: 'services: {}\n' },
+        ]);
+        stubObjectFetch(archive);
+
+        const importedId = await CloudBackupService.getInstance().importSnapshot(objectKey);
+        const stored = db.getSnapshot(importedId);
+        expect(stored?.warnings_known).toBe(0);
+        expect(stored?.skipped_stacks).toBe('[]');
+    });
+});

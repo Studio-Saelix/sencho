@@ -12,8 +12,6 @@
  */
 
 import { Readable } from 'stream';
-import * as zlib from 'zlib';
-import * as tar from 'tar-stream';
 import axios from 'axios';
 import { DatabaseService } from './DatabaseService';
 import { CryptoService } from './CryptoService';
@@ -33,6 +31,8 @@ import {
     isEncryptedArchive,
     MAX_ARCHIVE_OBJECT_BYTES,
     openSnapshotArchive,
+    packSnapshotArchive,
+    type ArchiveEntryPlan,
 } from './cloudBackupArchive';
 
 // Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
@@ -614,34 +614,24 @@ export class CloudBackupService {
             fileBytes: files.map(file => Buffer.byteLength(file.content)),
         });
 
-        const pack = tar.pack();
-        pack.entry({ name: 'metadata.json' }, metadataJson);
-
+        // Entry order is part of the format the importer walks. Packing and the
+        // post-pack size checks live with the limits in cloudBackupArchive so
+        // the producer and the reader cannot drift apart.
+        const entries: ArchiveEntryPlan[] = [{ name: 'metadata.json', content: metadataJson }];
         // Captured Stack Dossier metadata travels with the archive when present.
         if (documentation !== '') {
-            pack.entry({ name: 'documentation.json' }, documentation);
+            entries.push({ name: 'documentation.json', content: documentation });
         }
-
         for (const file of files) {
             const safeNodeName = sanitizePathSegment(file.node_name);
             const safeStackName = sanitizePathSegment(file.stack_name);
             const safeFilename = sanitizePathSegment(file.filename);
-            const entryPath = `nodes/${file.node_id}_${safeNodeName}/${safeStackName}/${safeFilename}`;
-            pack.entry({ name: entryPath }, file.content);
+            entries.push({
+                name: `nodes/${file.node_id}_${safeNodeName}/${safeStackName}/${safeFilename}`,
+                content: file.content,
+            });
         }
-        pack.finalize();
-
-        const gzip = zlib.createGzip();
-        const chunks: Buffer[] = [];
-        const archive = await new Promise<Buffer>((resolve, reject) => {
-            gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
-            gzip.on('end', () => resolve(Buffer.concat(chunks)));
-            gzip.on('error', reject);
-            pack.on('error', reject);
-            pack.pipe(gzip);
-        });
-        assertArchiveObjectSize(archive.byteLength);
-        return archive;
+        return packSnapshotArchive(entries);
     }
 }
 

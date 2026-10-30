@@ -12,6 +12,7 @@ import {
     encryptArchive,
     isEncryptedArchive,
     openSnapshotArchive,
+    packSnapshotArchive,
     sealArchive,
     type ArchiveLimits,
 } from '../services/cloudBackupArchive';
@@ -46,9 +47,18 @@ function metadata(overrides: Record<string, unknown> = {}): string {
         description: 'nightly',
         created_by: 'ada',
         created_at: 1_700_000_000_000,
-        skipped_nodes: [{ name: 'edge' }],
+        skipped_nodes: [{ nodeId: 9, nodeName: 'edge', reason: 'unreachable during capture' }],
         skipped_stacks: [],
         archive_version: 2,
+        ...overrides,
+    });
+}
+
+function documentation(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+        generated_at: '2026-01-01T00:00:00Z',
+        stacks: [{ nodeId: 3, nodeName: 'edge_gw', stackName: 'api', dossier: { purpose: 'payments' } }],
+        warnings: [{ nodeId: 9, nodeName: 'edge', stackName: 'api', reason: 'dossier fetch failed' }],
         ...overrides,
     });
 }
@@ -91,15 +101,17 @@ describe('openSnapshotArchive', () => {
     it('reads an encrypted archive, including a node name that contains an underscore', async () => {
         const gzip = await gzipTar([
             ...SAMPLE_FILES,
-            { name: 'documentation.json', content: '{"notes":true}' },
+            { name: 'documentation.json', content: documentation() },
         ]);
         const sealed = await encryptArchive(gzip, PASSPHRASE);
         const opened = await openSnapshotArchive(sealed, PASSPHRASE);
         expect(opened.description).toBe('nightly');
         expect(opened.createdBy).toBe('ada');
         expect(opened.createdAt).toBe(1_700_000_000_000);
-        expect(JSON.parse(opened.skippedNodes)).toEqual([{ name: 'edge' }]);
-        expect(opened.documentation).toBe('{"notes":true}');
+        expect(JSON.parse(opened.skippedNodes)).toEqual([
+            { nodeId: 9, nodeName: 'edge', reason: 'unreachable during capture' },
+        ]);
+        expect(opened.documentation).toBe(documentation());
         expect(opened.nodeCount).toBe(1);
         expect(opened.stackCount).toBe(1);
         expect(opened.files).toEqual([
@@ -199,6 +211,7 @@ describe('openSnapshotArchive', () => {
             maxDocumentationBytes: 8 * 1024 * 1024,
             maxMetadataBytes: 1024 * 1024,
             maxUncompressedBytes: 64 * 1024 * 1024,
+            maxTarBytes: 72 * 1024 * 1024,
         });
     });
 });
@@ -254,7 +267,7 @@ describe('archive metadata fidelity', () => {
     });
 
     it('gives aggregate documentation its own bound', async () => {
-        const doc = 'n'.repeat(50);
+        const doc = JSON.stringify({ generated_at: 'x', stacks: [], warnings: [] });
         const gzip = await gzipTar([
             { name: 'metadata.json', content: metadata() },
             { name: 'documentation.json', content: doc },
@@ -264,7 +277,7 @@ describe('archive metadata fidelity', () => {
         const opened = await openSnapshotArchive(gzip, null, {
             ...ARCHIVE_LIMITS,
             maxEntryBytes: 40,
-            maxDocumentationBytes: 60,
+            maxDocumentationBytes: doc.length,
             maxObjectBytes: gzip.length,
         });
         expect(opened.documentation).toBe(doc);
@@ -272,9 +285,68 @@ describe('archive metadata fidelity', () => {
         await expect(openSnapshotArchive(gzip, null, {
             ...ARCHIVE_LIMITS,
             maxEntryBytes: 40,
-            maxDocumentationBytes: 20,
+            maxDocumentationBytes: doc.length - 1,
             maxObjectBytes: gzip.length,
         })).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    });
+});
+
+describe('archive warning and documentation records', () => {
+    const fileEntry = { name: 'nodes/1_a/web/compose.yaml', content: 'services: {}\n' };
+
+    it.each([
+        ['a null node warning', { skipped_nodes: [null] }],
+        ['a primitive node warning', { skipped_nodes: ['edge'] }],
+        ['a node warning with a string id', { skipped_nodes: [{ nodeId: '9', nodeName: 'edge', reason: 'down' }] }],
+        ['a node warning without a name', { skipped_nodes: [{ nodeId: 9, reason: 'down' }] }],
+        ['a node warning without a reason', { skipped_nodes: [{ nodeId: 9, nodeName: 'edge' }] }],
+        ['a null stack warning', { skipped_stacks: [null] }],
+        ['a stack warning without a stack name', { skipped_stacks: [{ nodeId: 9, nodeName: 'edge', reason: 'down' }] }],
+        ['a stack warning with a numeric reason', { skipped_stacks: [{ nodeId: 9, nodeName: 'edge', stackName: 'web', reason: 7 }] }],
+        ['a skipped_nodes value that is not an array', { skipped_nodes: null }],
+    ])('rejects %s', async (_label, overrides) => {
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: metadata(overrides) },
+            fileEntry,
+        ]);
+        await expect(openSnapshotArchive(gzip, null)).rejects.toMatchObject({ code: 'BAD_ARCHIVE' });
+    });
+
+    it.each([
+        ['documentation that is not JSON', 'not json'],
+        ['documentation without a stacks array', JSON.stringify({ generated_at: 'x', warnings: [] })],
+        ['documentation without a warnings array', JSON.stringify({ generated_at: 'x', stacks: [] })],
+        ['a null documentation stack', JSON.stringify({ generated_at: 'x', stacks: [null], warnings: [] })],
+        ['a null documentation warning', JSON.stringify({ generated_at: 'x', stacks: [], warnings: [null] })],
+        ['a stack whose dossier is not an object', JSON.stringify({ generated_at: 'x', stacks: [{ nodeId: 1, nodeName: 'a', stackName: 'b', dossier: 'notes' }], warnings: [] })],
+        ['a warning whose reason is numeric', JSON.stringify({ generated_at: 'x', stacks: [], warnings: [{ nodeId: 1, nodeName: 'a', stackName: 'b', reason: 7 }] })],
+    ])('rejects %s', async (_label, documentationJson) => {
+        const gzip = await gzipTar([
+            { name: 'metadata.json', content: metadata() },
+            { name: 'documentation.json', content: documentationJson },
+            fileEntry,
+        ]);
+        await expect(openSnapshotArchive(gzip, null)).rejects.toMatchObject({ code: 'BAD_ARCHIVE' });
+    });
+
+    it('keeps valid warning and documentation records', async () => {
+        const gzip = await gzipTar([
+            {
+                name: 'metadata.json',
+                content: metadata({
+                    skipped_nodes: [{ nodeId: 9, nodeName: 'edge', reason: 'unreachable' }],
+                    skipped_stacks: [{ nodeId: 3, nodeName: 'edge_gw', stackName: 'api', reason: 'compose unreadable' }],
+                }),
+            },
+            { name: 'documentation.json', content: documentation() },
+            fileEntry,
+        ]);
+        const opened = await openSnapshotArchive(gzip, null);
+        expect(JSON.parse(opened.skippedNodes)).toEqual([{ nodeId: 9, nodeName: 'edge', reason: 'unreachable' }]);
+        expect(JSON.parse(opened.skippedStacks)).toEqual([
+            { nodeId: 3, nodeName: 'edge_gw', stackName: 'api', reason: 'compose unreadable' },
+        ]);
+        expect(opened.documentation).toBe(documentation());
     });
 });
 
@@ -326,4 +398,57 @@ describe('producer archive limits', () => {
         expect(() => assertArchiveObjectSize(sealed.byteLength, { ...ARCHIVE_LIMITS, maxObjectBytes: limit }))
             .toThrow(/upload limit/);
     });
+
+    it('refuses a packed tar whose PAX framing pushes it past the reader bound', async () => {
+        // Long entry paths make tar-stream emit a PAX extended header per file.
+        // The payloads alone fit the payload bound; the framed tar does not.
+        const entries = Array.from({ length: 40 }, (_, index) => ({
+            name: `nodes/1_${'n'.repeat(180)}/stack-${index}/compose.yaml`,
+            content: Buffer.alloc(400, 120),
+        }));
+        const limits: ArchiveLimits = {
+            ...ARCHIVE_LIMITS,
+            maxUncompressedBytes: 20 * 1024,
+            maxTarBytes: 24 * 1024,
+        };
+        expect(() => assertArchiveFitsLimits(
+            { metadataBytes: 0, documentationBytes: 0, fileBytes: entries.map(entry => entry.content.byteLength) },
+            limits,
+        )).not.toThrow();
+        await expect(packSnapshotArchive(entries, limits)).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    });
+
+    it('packs to exactly the tar bound the reader accepts and refuses one byte more', async () => {
+        const entries = [
+            { name: 'metadata.json', content: metadata() },
+            ...Array.from({ length: 20 }, (_, index) => ({
+                name: `nodes/1_${'n'.repeat(150)}/stack-${index}/compose.yaml`,
+                content: Buffer.alloc(200, 7),
+            })),
+        ];
+        const packed = await packSnapshotArchive(entries);
+        const tarBytes = zlib.gunzipSync(packed).byteLength;
+
+        const exact: ArchiveLimits = { ...ARCHIVE_LIMITS, maxTarBytes: tarBytes };
+        await expect(packSnapshotArchive(entries, exact)).resolves.toBeInstanceOf(Buffer);
+        await expect(packSnapshotArchive(entries, { ...exact, maxTarBytes: tarBytes - 1 }))
+            .rejects.toMatchObject({ code: 'TOO_LARGE' });
+
+        // The reader accepts exactly what the producer published at that bound.
+        await expect(openSnapshotArchive(packed, null, exact)).resolves.toMatchObject({ description: 'nightly' });
+        await expect(openSnapshotArchive(packed, null, { ...exact, maxTarBytes: tarBytes - 1 }))
+            .rejects.toMatchObject({ code: 'TOO_LARGE' });
+    });
+
+    it('refuses a production-boundary archive of long-named files the importer would reject', async () => {
+        // The shape an audit probe used: the payloads sit under the 64 MiB
+        // content bound, but PAX records for 200-character node names push the
+        // framed tar past the reader's decompression bound.
+        const nodeName = 'n'.repeat(200);
+        const entries = Array.from({ length: 4999 }, (_, index) => ({
+            name: `nodes/1_${nodeName}/stack-${index}/compose.yaml`,
+            content: Buffer.alloc(13_400, 120),
+        }));
+        await expect(packSnapshotArchive(entries)).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    }, 60_000);
 });

@@ -252,6 +252,88 @@ describe('CloudBackupSection archive action locking', () => {
     });
 });
 
+describe('CloudBackupSection object-key encoding', () => {
+    const unicodeKey = 'sencho/instances/inst/snapshots/2_été/復旧-2026.tar.gz.senc';
+
+    function decodeObjectKey(segment: string): string {
+        const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        const binary = atob(padded);
+        return new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+    }
+
+    function objectPath(path: string, suffix = ''): string {
+        const prefix = '/cloud-backup/object/';
+        expect(path.startsWith(prefix)).toBe(true);
+        if (suffix) expect(path.endsWith(suffix)).toBe(true);
+        return path.slice(prefix.length, suffix ? path.length - suffix.length : undefined);
+    }
+
+    beforeEach(() => {
+        apiFetch.mockReset();
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string; body?: string }) => {
+            if (path === '/cloud-backup/config') {
+                return json({ ...customConfig, encrypt_archives: true, archive_passphrase: '***' });
+            }
+            if (path === '/cloud-backup/snapshots') {
+                return json([{ objectKey: unicodeKey, sizeBytes: 20, lastModified: null, snapshotId: 2, encrypted: true }]);
+            }
+            if (path.includes('/import')) {
+                const passphrase = options?.body ? JSON.parse(options.body).passphrase : '';
+                if (passphrase === 'correct-horse') return json({ snapshot_id: 4 }, 201);
+                return json({ error: 'A passphrase is required to read this archive', code: 'PASSPHRASE_REQUIRED' }, 409);
+            }
+            if (path.includes('/download')) {
+                if (options?.method === 'POST') return json({});
+                return json({ error: 'A passphrase is required to read this archive', code: 'PASSPHRASE_REQUIRED' }, 409);
+            }
+            if (options?.method === 'DELETE') return json({}, 204);
+            return json({}, 200);
+        });
+    });
+
+    it('keeps a UTF-8 object key intact for import, download, and delete', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+
+        await user.click(await screen.findByRole('button', { name: 'Import snapshot' }));
+        const importCall = apiFetch.mock.calls.find(call => String(call[0]).includes('/import'));
+        expect(decodeObjectKey(objectPath(String(importCall?.[0]), '/import'))).toBe(unicodeKey);
+        // Dismiss the passphrase overlay so the next action is not blocked.
+        await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+        await user.click(await screen.findByRole('button', { name: 'Download snapshot' }));
+        const downloadCall = apiFetch.mock.calls.find(call => String(call[0]).includes('/download'));
+        expect(decodeObjectKey(objectPath(String(downloadCall?.[0]), '/download'))).toBe(unicodeKey);
+        // The GET download answered PASSPHRASE_REQUIRED; dismiss its overlay.
+        await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+        await user.click(await screen.findByRole('button', { name: 'Delete snapshot' }));
+        await user.click(await screen.findByRole('button', { name: 'Delete' }));
+        const deleteCall = apiFetch.mock.calls.find(call => call[1]?.method === 'DELETE');
+        expect(decodeObjectKey(objectPath(String(deleteCall?.[0])))).toBe(unicodeKey);
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Cloud snapshot deleted.'));
+    });
+
+    it('keeps a UTF-8 object key intact when a download needs its passphrase', async () => {
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+
+        await user.click(await screen.findByRole('button', { name: 'Download snapshot' }));
+        // The GET attempt answered PASSPHRASE_REQUIRED; retry through the overlay.
+        await user.type(await screen.findByLabelText('Passphrase for this archive'), 'correct-horse');
+        await user.click(screen.getByRole('button', { name: 'Download' }));
+
+        await waitFor(() => expect(apiFetch.mock.calls.some(
+            call => call[1]?.method === 'POST' && String(call[0]).includes('/download'),
+        )).toBe(true));
+        const postCall = apiFetch.mock.calls.find(
+            call => call[1]?.method === 'POST' && String(call[0]).includes('/download'),
+        );
+        expect(decodeObjectKey(objectPath(String(postCall?.[0]), '/download'))).toBe(unicodeKey);
+    });
+});
+
 describe('CloudBackupSection recovery from another instance', () => {
     it('recovers a sealed archive with its passphrase', async () => {
         apiFetch.mockImplementation(async (path: string) => {

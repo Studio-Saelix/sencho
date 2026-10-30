@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import FleetSnapshots from '../FleetSnapshots';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -114,6 +114,121 @@ describe('FleetSnapshots unavailable files', () => {
     );
     fireEvent.click(badStackButtons[0]);
     await waitFor(() => expect(screen.getByText('Unavailable')).toBeInTheDocument());
+  });
+});
+
+describe('FleetSnapshots restore destination binding', () => {
+  const mappedDetail = () => ({
+    id: 7,
+    description: 'from-the-old-instance',
+    created_by: 'ada',
+    node_count: 1,
+    stack_count: 1,
+    skipped_nodes: '[]',
+    skipped_stacks: '[]',
+    created_at: Date.now(),
+    source_instance_id: 'old-instance',
+    warnings_known: 1,
+    requiresNodeMapping: true,
+    mappingVersion: '42:1',
+    nodes: [{
+      nodeId: 42,
+      nodeName: 'original-production',
+      targetNodeId: 1,
+      targetNodeName: 'Local',
+      stacks: [{ stackName: 'web', files: [{ filename: 'compose.yaml', content: 'services: {}' }] }],
+    }],
+  });
+
+  function mockApi(handler?: (path: string, options?: Parameters<typeof apiFetch>[1]) => Promise<Response | null>) {
+    return async (path: string, options?: Parameters<typeof apiFetch>[1]) => {
+      const handled = handler ? await handler(path, options) : null;
+      if (handled) return handled;
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [{ ...mappedDetail(), nodes: undefined }], total: 1 }) } as unknown as Response;
+      }
+      if (path === '/fleet/snapshots/7') {
+        return { ok: true, json: async () => mappedDetail() } as unknown as Response;
+      }
+      if (path === '/cloud-backup/config') {
+        return { ok: true, json: async () => ({ provider: 'disabled' }) } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({}) } as unknown as Response;
+    };
+  }
+
+  beforeEach(() => {
+    mockedFetch.mockReset();
+  });
+
+  it('binds an individual restore to the confirmed destination and reloads on a stale mapping', async () => {
+    let restoreBody: Record<string, unknown> | null = null;
+    let detailLoads = 0;
+    mockedFetch.mockImplementation(mockApi(async (path, options) => {
+      if (path === '/fleet/snapshots/7' && options?.method !== 'POST') detailLoads += 1;
+      if (path === '/fleet/snapshots/7/restore' && options?.method === 'POST') {
+        restoreBody = JSON.parse(String(options.body)) as Record<string, unknown>;
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: 'The destination mapping changed after the snapshot details loaded. Reload the snapshot and confirm the destinations again.',
+            code: 'SNAPSHOT_MAPPING_CHANGED',
+          }),
+        } as unknown as Response;
+      }
+      return null;
+    }));
+
+    render(<FleetSnapshots />);
+    await waitFor(() => expect(screen.getByText('from-the-old-instance')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /View/i }));
+    await waitFor(() => expect(screen.getByText(/came from another instance/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /original-production/i }));
+    await waitFor(() => expect(screen.getByText('web')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /^Restore$/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Restore' }));
+
+    await waitFor(() => expect(restoreBody).not.toBeNull());
+    expect(restoreBody).toEqual(expect.objectContaining({
+      nodeId: 42,
+      stackName: 'web',
+      expectedTargetNodeId: 1,
+    }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      'The destination mapping changed after the snapshot details loaded. Reload the snapshot and confirm the destinations again.',
+    ));
+    // The stale confirmation sends the operator back to the current mapping.
+    await waitFor(() => expect(detailLoads).toBeGreaterThan(1));
+  });
+
+  it('sends the confirmed mapping fingerprint with Restore all', async () => {
+    let restoreAllBody: Record<string, unknown> | null = null;
+    mockedFetch.mockImplementation(mockApi(async (path, options) => {
+      if (path === '/fleet/snapshots/7/restore-all' && options?.method === 'POST') {
+        restoreAllBody = JSON.parse(String(options.body)) as Record<string, unknown>;
+        return { ok: true, json: async () => ({ restored: 1, failed: 0, redeploy: false, results: [{ stackName: 'web', success: true }] }) } as unknown as Response;
+      }
+      return null;
+    }));
+
+    render(<FleetSnapshots />);
+    await waitFor(() => expect(screen.getByText('from-the-old-instance')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /View/i }));
+    await waitFor(() => expect(screen.getByText(/came from another instance/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Restore all/i }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Restore all' }));
+
+    await waitFor(() => expect(restoreAllBody).not.toBeNull());
+    expect(restoreAllBody).toEqual({
+      redeploy: false,
+      restoreNotes: false,
+      expectedMappingVersion: '42:1',
+    });
   });
 });
 

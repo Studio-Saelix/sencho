@@ -14,7 +14,7 @@
  * Detection is the magic bytes. A gzip object without them stays plaintext.
  */
 import crypto from 'crypto';
-import { Readable } from 'stream';
+import { Readable, Transform } from 'stream';
 import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import type { ExtractEvents, Header } from 'tar-stream';
@@ -54,10 +54,14 @@ export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 64 * 1024 * 1024;
  */
 export const MAX_ARCHIVE_DOCUMENTATION_BYTES = 8 * 1024 * 1024;
 export const MAX_ARCHIVE_METADATA_BYTES = 1024 * 1024;
-/** Tar headers sit outside file payloads. Leave room so a full payload still
- *  parses: at the 5,000-entry cap each header plus block padding adds about
- *  1 KB, so 8 MB covers the framing around a 64 MB payload. */
-const GUNZIP_SLACK_BYTES = 8 * 1024 * 1024;
+/**
+ * Decompressed-tar ceiling. Tar headers and PAX records sit outside the file
+ * payloads: at the 5,000-entry cap with long node names they add roughly
+ * 10 MB, so the reader accepts the 64 MB payload bound plus this framing
+ * allowance. The producer measures the tar it actually packed against the same
+ * value, so a published archive is always one the importer accepts.
+ */
+const ARCHIVE_FRAMING_ALLOWANCE_BYTES = 8 * 1024 * 1024;
 
 const FILE_NAMES = new Set<string>(FLEET_SNAPSHOT_APPLY_FILENAMES);
 
@@ -84,6 +88,8 @@ export interface ArchiveLimits {
     maxDocumentationBytes: number;
     maxMetadataBytes: number;
     maxUncompressedBytes: number;
+    /** Decompressed tar size the reader accepts: payloads plus framing. */
+    maxTarBytes: number;
 }
 
 export const ARCHIVE_LIMITS: ArchiveLimits = {
@@ -93,6 +99,7 @@ export const ARCHIVE_LIMITS: ArchiveLimits = {
     maxDocumentationBytes: MAX_ARCHIVE_DOCUMENTATION_BYTES,
     maxMetadataBytes: MAX_ARCHIVE_METADATA_BYTES,
     maxUncompressedBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    maxTarBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES + ARCHIVE_FRAMING_ALLOWANCE_BYTES,
 };
 
 export interface ImportedSnapshotFile {
@@ -185,7 +192,7 @@ export async function openSnapshotArchive(
         throw new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit');
     }
     const gzipBytes = await plaintextGzip(objectBytes, passphrase);
-    const tarBytes = await gunzipLimited(gzipBytes, limits.maxUncompressedBytes + GUNZIP_SLACK_BYTES);
+    const tarBytes = await gunzipLimited(gzipBytes, limits.maxTarBytes);
     const entries = await readTarEntries(tarBytes, limits);
     return snapshotFromEntries(entries);
 }
@@ -238,6 +245,72 @@ export function assertArchiveObjectSize(bytes: number, limits: ArchiveLimits = A
             `Archive is ${formatMiB(bytes)}, above the ${formatMiB(limits.maxObjectBytes)} upload limit`,
         );
     }
+}
+
+export interface ArchiveEntryPlan {
+    name: string;
+    content: string | Buffer;
+}
+
+/**
+ * Pack and compress the archive an upload publishes, then refuse it when the
+ * reader's bounds would reject it. The tar is metered as it is produced rather
+ * than estimated from the payloads: PAX headers for long entry paths are real
+ * bytes the reader counts, and a payload-only estimate let a successful upload
+ * be an archive the importer refuses. Metering during the stream also stops an
+ * outsized entry path before it is buffered in memory.
+ */
+export async function packSnapshotArchive(
+    entries: ArchiveEntryPlan[],
+    limits: ArchiveLimits = ARCHIVE_LIMITS,
+): Promise<Buffer> {
+    const pack = tar.pack();
+    for (const entry of entries) pack.entry({ name: entry.name }, entry.content);
+    pack.finalize();
+
+    const gzip = zlib.createGzip();
+    const chunks: Buffer[] = [];
+    let tarBytes = 0;
+    const meter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+            tarBytes += chunk.byteLength;
+            if (tarBytes > limits.maxTarBytes) {
+                callback(new ArchiveFormatError(
+                    'TOO_LARGE',
+                    `Archive would expand past the ${formatMiB(limits.maxTarBytes)} recovery limit`,
+                ));
+                return;
+            }
+            callback(null, chunk);
+        },
+    });
+
+    return new Promise<Buffer>((resolve, reject) => {
+        let settled = false;
+        const fail = (error: Error): void => {
+            if (settled) return;
+            settled = true;
+            pack.destroy();
+            gzip.destroy();
+            reject(error);
+        };
+        gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
+        gzip.on('end', () => {
+            if (settled) return;
+            settled = true;
+            try {
+                const archive = Buffer.concat(chunks);
+                assertArchiveObjectSize(archive.byteLength, limits);
+                resolve(archive);
+            } catch (error) {
+                reject(error);
+            }
+        });
+        gzip.on('error', fail);
+        pack.on('error', fail);
+        meter.on('error', fail);
+        pack.pipe(meter).pipe(gzip);
+    });
 }
 
 function formatMiB(bytes: number): string {
@@ -432,6 +505,11 @@ function snapshotFromEntries(entries: Map<string, Buffer>): ImportedSnapshot {
     const rawMeta = entries.get('metadata.json');
     if (!rawMeta) throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive is missing metadata.json');
     const meta = parseMetadata(rawMeta.toString('utf-8'));
+    // Warning and documentation records are rendered verbatim by the snapshot
+    // detail view. An element of the wrong shape would crash that view after the
+    // import succeeded, so every record is checked here, before persistence.
+    const rawDocumentation = entries.get('documentation.json');
+    const documentation = rawDocumentation ? parseDocumentation(rawDocumentation.toString('utf-8')) : '';
     const files: ImportedSnapshotFile[] = [];
     for (const [name, body] of entries) {
         if (name === 'metadata.json' || name === 'documentation.json') continue;
@@ -459,7 +537,7 @@ function snapshotFromEntries(entries: Map<string, Buffer>): ImportedSnapshot {
         // plus warningsKnown=false and the snapshot says it does not know.
         skippedStacks: JSON.stringify(meta.skippedStacks ?? []),
         warningsKnown: meta.skippedStacks !== null,
-        documentation: entries.get('documentation.json')?.toString('utf-8') ?? '',
+        documentation,
         // Metadata counts cover captured nodes and stacks that produced no
         // files; never report fewer than the archive actually contains.
         nodeCount: Math.max(meta.nodeCount ?? 0, derivedNodeCount),
@@ -469,13 +547,25 @@ function snapshotFromEntries(entries: Map<string, Buffer>): ImportedSnapshot {
     };
 }
 
+/** A partial-capture warning for one node, as the snapshot detail renders it. */
+interface ArchiveSkippedNode {
+    nodeId: number;
+    nodeName: string;
+    reason: string;
+}
+
+/** A partial-capture warning for one stack, as the snapshot detail renders it. */
+interface ArchiveSkippedStack extends ArchiveSkippedNode {
+    stackName: string;
+}
+
 interface ParsedMetadata {
     description: string;
     createdBy: string;
     createdAt: number;
-    skippedNodes: unknown[];
+    skippedNodes: ArchiveSkippedNode[];
     /** null when the archive predates partial-capture warnings. */
-    skippedStacks: unknown[] | null;
+    skippedStacks: ArchiveSkippedStack[] | null;
     nodeCount: number | null;
     stackCount: number | null;
     instanceId: string | null;
@@ -488,10 +578,10 @@ function parseMetadata(text: string): ParsedMetadata {
     } catch {
         throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata is not valid JSON');
     }
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (!isRecord(value)) {
         throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata is not valid JSON');
     }
-    const record = value as Record<string, unknown>;
+    const record = value;
     const version = record.archive_version;
     if (typeof version !== 'number' || !SUPPORTED_ARCHIVE_VERSIONS.has(version)) {
         throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive version is not supported');
@@ -506,23 +596,94 @@ function parseMetadata(text: string): ParsedMetadata {
         description: record.description,
         createdBy: record.created_by,
         createdAt: record.created_at,
-        skippedNodes: asArray(record.skipped_nodes),
-        skippedStacks: record.skipped_stacks === undefined ? null : asArray(record.skipped_stacks),
+        skippedNodes: parseSkippedNodes(record.skipped_nodes),
+        skippedStacks: record.skipped_stacks === undefined ? null : parseSkippedStacks(record.skipped_stacks),
         nodeCount: asCount(record.node_count),
         stackCount: asCount(record.stack_count),
         instanceId: typeof record.instance_id === 'string' && record.instance_id !== '' ? record.instance_id : null,
     };
 }
 
-/** A missing or malformed count stays unknown; the caller derives a floor. */
-function asCount(value: unknown): number | null {
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function malformedWarning(): never {
+    throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata warning records are malformed');
+}
+
+function warningNodeId(value: unknown): number {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) malformedWarning();
     return value;
 }
 
-function asArray(value: unknown): unknown[] {
-    if (!Array.isArray(value)) {
-        throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata is incomplete');
+function warningText(value: unknown): string {
+    if (typeof value !== 'string' || value === '') malformedWarning();
+    return value;
+}
+
+function parseSkippedNodes(value: unknown): ArchiveSkippedNode[] {
+    if (!Array.isArray(value)) throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata is incomplete');
+    return value.map((entry) => {
+        if (!isRecord(entry)) malformedWarning();
+        return {
+            nodeId: warningNodeId(entry.nodeId),
+            nodeName: warningText(entry.nodeName),
+            reason: warningText(entry.reason),
+        };
+    });
+}
+
+function parseSkippedStacks(value: unknown): ArchiveSkippedStack[] {
+    if (!Array.isArray(value)) throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive metadata is incomplete');
+    return value.map((entry) => {
+        if (!isRecord(entry)) malformedWarning();
+        return {
+            nodeId: warningNodeId(entry.nodeId),
+            nodeName: warningText(entry.nodeName),
+            stackName: warningText(entry.stackName),
+            reason: warningText(entry.reason),
+        };
+    });
+}
+
+/**
+ * Validate the documentation blob an archive carries before it is persisted.
+ * The detail view renders these records directly, so an accepted malformed
+ * record would crash the view instead of showing the snapshot.
+ */
+function parseDocumentation(text: string): string {
+    let value: unknown;
+    try {
+        value = JSON.parse(text);
+    } catch {
+        throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive documentation is not valid JSON');
     }
+    if (!isRecord(value) || !Array.isArray(value.stacks) || !Array.isArray(value.warnings)) {
+        throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive documentation is incomplete');
+    }
+    const malformed = (): never => {
+        throw new ArchiveFormatError('BAD_ARCHIVE', 'Archive documentation is malformed');
+    };
+    for (const stack of value.stacks) {
+        if (!isRecord(stack)) malformed();
+        if (typeof stack.nodeId !== 'number' || !Number.isSafeInteger(stack.nodeId) || stack.nodeId <= 0) malformed();
+        if (typeof stack.nodeName !== 'string' || stack.nodeName === '') malformed();
+        if (typeof stack.stackName !== 'string' || stack.stackName === '') malformed();
+        if (stack.dossier !== undefined && !isRecord(stack.dossier)) malformed();
+    }
+    for (const warning of value.warnings) {
+        if (!isRecord(warning)) malformed();
+        if (typeof warning.nodeId !== 'number' || !Number.isSafeInteger(warning.nodeId) || warning.nodeId <= 0) malformed();
+        if (typeof warning.nodeName !== 'string' || warning.nodeName === '') malformed();
+        if (typeof warning.stackName !== 'string' || warning.stackName === '') malformed();
+        if (typeof warning.reason !== 'string' || warning.reason === '') malformed();
+    }
+    return text;
+}
+
+/** A missing or malformed count stays unknown; the caller derives a floor. */
+function asCount(value: unknown): number | null {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
     return value;
 }

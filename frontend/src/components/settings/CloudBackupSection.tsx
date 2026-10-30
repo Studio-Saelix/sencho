@@ -59,7 +59,12 @@ function cloudFetch(endpoint: string, options: ApiFetchOptions = {}) {
 }
 
 function encodeObjectKey(objectKey: string): string {
-    return btoa(objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    // The API decodes this path segment as UTF-8. btoa() alone only accepts
+    // Latin-1 and throws on any other character, so encode the string's UTF-8
+    // bytes first; a configured prefix must survive every archive action.
+    let binary = '';
+    for (const byte of new TextEncoder().encode(objectKey)) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function archiveFileName(objectKey: string): string {
