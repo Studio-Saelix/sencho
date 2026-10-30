@@ -20,6 +20,20 @@ function json(body: unknown, status = 200) {
     };
 }
 
+function deferredResponse() {
+    let resolve: (value: unknown) => void = () => {};
+    const promise = new Promise<unknown>(res => { resolve = res; });
+    return { promise, resolve };
+}
+
+const recoveryEntry = {
+    objectKey: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
+    sizeBytes: 40,
+    lastModified: null,
+    snapshotId: 2,
+    encrypted: true,
+};
+
 const snapshotKey = 'sencho/instances/inst/snapshots/1.tar.gz.senc';
 
 let configPayload: Record<string, unknown>;
@@ -335,26 +349,30 @@ describe('CloudBackupSection object-key encoding', () => {
 });
 
 describe('CloudBackupSection recovery from another instance', () => {
-    it('recovers a sealed archive with its passphrase', async () => {
+    function mockRecoveryApi(
+        provider: 'sencho' | 'custom',
+        overrides: {
+            recoveryArchives: (path: string) => unknown;
+            recover?: () => unknown;
+            recoveryConfig?: Record<string, unknown>;
+        },
+    ) {
+        const config = provider === 'sencho'
+            ? { ...configPayload, encrypt_archives: true, archive_passphrase: '***' }
+            : { ...customConfig, encrypt_archives: true, archive_passphrase: '***' };
         apiFetch.mockImplementation(async (path: string) => {
-            if (path === '/cloud-backup/config') return json({ ...customConfig, encrypt_archives: true, archive_passphrase: '***' });
+            if (path === '/cloud-backup/config') return json(overrides.recoveryConfig ?? config);
+            if (path === '/cloud-backup/usage') return json({ used_bytes: 10, quota_bytes: 100, object_count: 1 });
             if (path === '/cloud-backup/snapshots') return json([]);
-            if (path === '/cloud-backup/recovery-archives') {
-                return json({
-                    entries: [{
-                        objectKey: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
-                        sizeBytes: 40,
-                        lastModified: null,
-                        snapshotId: 2,
-                        encrypted: true,
-                    }],
-                    truncated: true,
-                });
-            }
-            if (path === '/cloud-backup/recover') {
-                return json({ snapshot_id: 9 }, 201);
-            }
+            if (path === '/cloud-backup/recovery-archives') return overrides.recoveryArchives(path);
+            if (path === '/cloud-backup/recover') return overrides.recover ? overrides.recover() : json({ snapshot_id: 9 }, 201);
             return json({}, 200);
+        });
+    }
+
+    it('recovers a sealed archive with its passphrase', async () => {
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => json({ entries: [recoveryEntry], truncated: true }),
         });
         render(<CloudBackupSection />);
         const user = userEvent.setup();
@@ -370,5 +388,203 @@ describe('CloudBackupSection recovery from another instance', () => {
             object_key: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
             passphrase: 'correct-horse-battery',
         });
+    });
+
+    it.each(['sencho', 'custom'] as const)(
+        'shows discovery progress and no absence claim while the %s listing is pending',
+        async (provider) => {
+            const listing = deferredResponse();
+            mockRecoveryApi(provider, { recoveryArchives: () => listing.promise });
+
+            render(<CloudBackupSection />);
+            const user = userEvent.setup();
+            await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+
+            expect(await screen.findByText(/Looking for sealed archives/)).toBeInTheDocument();
+            expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+            expect(screen.getByRole('button', { name: 'Recover' })).toBeDisabled();
+
+            listing.resolve(json({ entries: [recoveryEntry], truncated: false }));
+
+            expect(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ })).toBeInTheDocument();
+            expect(screen.queryByText(/Looking for sealed archives/)).toBeNull();
+            expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+        },
+    );
+
+    it('reports an empty result only once the listing has settled', async () => {
+        const listing = deferredResponse();
+        mockRecoveryApi('custom', { recoveryArchives: () => listing.promise });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        expect(await screen.findByText(/Looking for sealed archives/)).toBeInTheDocument();
+
+        listing.resolve(json({ entries: [], truncated: false }));
+
+        expect(await screen.findByText('No sealed archives from other instances were found.')).toBeInTheDocument();
+        expect(screen.queryByText(/Looking for sealed archives/)).toBeNull();
+    });
+
+    it('keeps a discovery failure visible and offers a retry', async () => {
+        const retry = deferredResponse();
+        let attempts = 0;
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => {
+                attempts += 1;
+                if (attempts === 1) return json({ error: 'Bucket listing failed' }, 502);
+                return retry.promise;
+            },
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+
+        expect(await screen.findByText('Bucket listing failed')).toBeInTheDocument();
+        expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+        expect(screen.queryByText(/Looking for sealed archives/)).toBeNull();
+
+        // A passphrase typed for a later action must not erase the discovery failure.
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
+        expect(screen.getByText('Bucket listing failed')).toBeInTheDocument();
+        expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
+        expect(await screen.findByText(/Looking for sealed archives/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+        expect(screen.queryByText('Bucket listing failed')).toBeNull();
+        expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+
+        retry.resolve(json({ entries: [recoveryEntry], truncated: false }));
+        expect(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ })).toBeInTheDocument();
+        expect(screen.queryByText('Bucket listing failed')).toBeNull();
+    });
+
+    it('issues one recovery for a double-click while the request is pending', async () => {
+        const pending = deferredResponse();
+        let recoverCalls = 0;
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => json({ entries: [recoveryEntry], truncated: false }),
+            recover: () => {
+                recoverCalls += 1;
+                return pending.promise;
+            },
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        await user.click(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ }));
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
+
+        const recover = screen.getByRole('button', { name: 'Recover' });
+        fireEvent.click(recover);
+        fireEvent.click(recover);
+        expect(recoverCalls).toBe(1);
+        expect(recover).toBeDisabled();
+
+        pending.resolve(json({ snapshot_id: 9 }, 201));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as a new local snapshot.'));
+    });
+
+    it('keeps a failed recovery in the dialog with the archive still selected', async () => {
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => json({ entries: [recoveryEntry], truncated: false }),
+            recover: () => json({ error: 'Archive could not be recovered' }, 502),
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        const archive = await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ });
+        await user.click(archive);
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Recover' }));
+
+        expect(await screen.findByText('Archive could not be recovered')).toBeInTheDocument();
+        expect(archive).toHaveAttribute('aria-pressed', 'true');
+        expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it('issues one recovery request when Recover is clicked twice before the dialog re-renders', async () => {
+        const recover = deferredResponse();
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') return json({ ...customConfig, encrypt_archives: true, archive_passphrase: '***' });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            if (path === '/cloud-backup/recovery-archives') return json({ entries: [recoveryEntry], truncated: false });
+            if (path === '/cloud-backup/recover') return recover.promise;
+            return json({}, 200);
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        await user.click(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ }));
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
+
+        const button = screen.getByRole('button', { name: 'Recover' });
+        fireEvent.click(button);
+        fireEvent.click(button);
+        expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/recover')).toHaveLength(1);
+        expect(button).toBeDisabled();
+
+        recover.resolve(json({ snapshot_id: 9 }, 201));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive recovered as a new local snapshot.'));
+    });
+
+    it('keeps a failed recovery in the dialog without reporting success or hiding the listing', async () => {
+        apiFetch.mockImplementation(async (path: string) => {
+            if (path === '/cloud-backup/config') return json({ ...customConfig, encrypt_archives: true, archive_passphrase: '***' });
+            if (path === '/cloud-backup/snapshots') return json([]);
+            if (path === '/cloud-backup/recovery-archives') return json({ entries: [recoveryEntry], truncated: false });
+            if (path === '/cloud-backup/recover') return json({ error: 'The archive could not be decrypted' }, 400);
+            return json({}, 200);
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        await user.click(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ }));
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'wrong-passphrase');
+        await user.click(screen.getByRole('button', { name: 'Recover' }));
+
+        expect(await screen.findByText('The archive could not be decrypted')).toBeInTheDocument();
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ })).toBeInTheDocument();
+        expect(screen.queryByText(/No sealed archives from other instances/)).toBeNull();
+    });
+
+    it('starts discovery again on reopen and discards an older pending listing', async () => {
+        const first = deferredResponse();
+        const second = deferredResponse();
+        let calls = 0;
+        mockRecoveryApi('custom', {
+            recoveryArchives: () => {
+                calls += 1;
+                return calls === 1 ? first.promise : second.promise;
+            },
+        });
+
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        expect(await screen.findByText(/Looking for sealed archives/)).toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => expect(screen.queryByText(/Looking for sealed archives/)).toBeNull());
+
+        await user.click(screen.getByRole('button', { name: 'Recover archive' }));
+        expect(await screen.findByText(/Looking for sealed archives/)).toBeInTheDocument();
+
+        second.resolve(json({ entries: [], truncated: false }));
+        expect(await screen.findByText('No sealed archives from other instances were found.')).toBeInTheDocument();
+
+        // The first, superseded request must not repopulate the list afterwards.
+        first.resolve(json({ entries: [recoveryEntry], truncated: false }));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(screen.getByText('No sealed archives from other instances were found.')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ })).toBeNull();
     });
 });

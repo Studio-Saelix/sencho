@@ -294,6 +294,7 @@ describe('FleetSnapshots imported snapshot mapping', () => {
     expect(restore.disabled).toBe(true);
     expect(screen.getByRole('button', { name: /Restore all/i })).toBeDisabled();
 
+    await waitFor(() => expect(screen.getByRole('combobox')).not.toBeDisabled());
     fireEvent.click(screen.getByRole('combobox'));
     fireEvent.click(screen.getByRole('button', { name: 'Local' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save mapping' }));
@@ -309,6 +310,74 @@ describe('FleetSnapshots imported snapshot mapping', () => {
       const after = screen.getByRole('button', { name: /^Restore$/i }) as HTMLButtonElement;
       expect(after.disabled).toBe(false);
     });
+  });
+
+  it('shows the destination list as loading instead of offering an empty choice', async () => {
+    let resolveNodes: (value: Response) => void = () => {};
+    const nodesPending = new Promise<Response>(resolve => { resolveNodes = resolve; });
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [{ ...detail(false), nodes: undefined }], total: 1 }) } as unknown as Response;
+      }
+      if (path === '/fleet/snapshots/7') {
+        return { ok: true, json: async () => detail(false) } as unknown as Response;
+      }
+      if (path === '/nodes') return nodesPending;
+      if (path === '/cloud-backup/config') {
+        return { ok: true, json: async () => ({ provider: 'disabled' }) } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({}) } as unknown as Response;
+    });
+    render(<FleetSnapshots />);
+    await waitFor(() => expect(screen.getByText('from-the-old-instance')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /View/i }));
+
+    await waitFor(() => expect(screen.getByText(/came from another instance/i)).toBeInTheDocument());
+    const combobox = screen.getByRole('combobox') as HTMLButtonElement;
+    expect(combobox.disabled).toBe(true);
+    expect(combobox).toHaveTextContent('Loading nodes...');
+    expect(combobox).not.toHaveTextContent('Not mapped');
+
+    resolveNodes({ ok: true, json: async () => [{ id: 1, name: 'Local' }] } as unknown as Response);
+    await waitFor(() => expect(screen.getByRole('combobox')).not.toBeDisabled());
+    expect(screen.getByRole('combobox')).toHaveTextContent('Not mapped');
+    expect(screen.getByRole('combobox')).not.toHaveTextContent('Loading nodes...');
+  });
+
+  it('keeps a failed destination list visible and retries it', async () => {
+    let attempts = 0;
+    mockedFetch.mockImplementation(async (path: string) => {
+      if (path === '/fleet/snapshots') {
+        return { ok: true, json: async () => ({ snapshots: [{ ...detail(false), nodes: undefined }], total: 1 }) } as unknown as Response;
+      }
+      if (path === '/fleet/snapshots/7') {
+        return { ok: true, json: async () => detail(false) } as unknown as Response;
+      }
+      if (path === '/nodes') {
+        attempts += 1;
+        if (attempts === 1) return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+        return { ok: true, json: async () => [{ id: 1, name: 'Local' }] } as unknown as Response;
+      }
+      if (path === '/cloud-backup/config') {
+        return { ok: true, json: async () => ({ provider: 'disabled' }) } as unknown as Response;
+      }
+      return { ok: true, json: async () => ({}) } as unknown as Response;
+    });
+    render(<FleetSnapshots />);
+    await waitFor(() => expect(screen.getByText('from-the-old-instance')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /View/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to load nodes (500)'));
+    expect(screen.getByText(/Destination nodes could not be loaded/)).toBeInTheDocument();
+    expect((screen.getByRole('combobox') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('combobox')).toHaveTextContent('Nodes unavailable');
+    expect(screen.getByRole('combobox')).not.toHaveTextContent('Not mapped');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.getByRole('combobox')).not.toBeDisabled());
+    expect(screen.queryByText(/Destination nodes could not be loaded/)).toBeNull();
+    fireEvent.click(screen.getByRole('combobox'));
+    expect(screen.getByRole('button', { name: 'Local' })).toBeInTheDocument();
   });
 
   it('surfaces a failure to load destination nodes for the mapping', async () => {

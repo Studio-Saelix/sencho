@@ -127,12 +127,17 @@ export function CloudBackupSection() {
     const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
     const [recoveryPassphrase, setRecoveryPassphrase] = useState('');
     const [recoveryError, setRecoveryError] = useState('');
+    const [recoveryLoading, setRecoveryLoading] = useState(false);
+    const [recoveryListError, setRecoveryListError] = useState('');
     const [recoveryBusy, setRecoveryBusy] = useState(false);
     // A ref, not the state flag: two clicks in the same tick both see the
     // pre-render value of state, and a double-click must issue one request.
     const archiveBusyRef = useRef(false);
     const recoveryBusyRef = useRef(false);
     const deleteBusyRef = useRef(false);
+    // Discovery can be restarted (reopen, retry) while an earlier listing is
+    // still in flight; only the newest request may write its result.
+    const recoveryListSeqRef = useRef(0);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
@@ -383,22 +388,38 @@ export function CloudBackupSection() {
         }
     };
 
-    const openRecovery = async () => {
-        setRecoveryOpen(true);
+    const loadRecoveryArchives = useCallback(async () => {
+        const seq = ++recoveryListSeqRef.current;
+        setRecoveryLoading(true);
+        setRecoveryListError('');
+        setRecoveryArchives([]);
+        setRecoveryTruncated(false);
+        // A retry starts a new listing, so a selection made against the
+        // previous one no longer describes an archive we can see.
         setRecoveryKey(null);
         setRecoveryPassphrase('');
         setRecoveryError('');
-        setRecoveryArchives([]);
-        setRecoveryTruncated(false);
         try {
             const res = await cloudFetch('/cloud-backup/recovery-archives');
-            if (!res.ok) throw new Error(`Failed to list recovery archives (${res.status})`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error || `Failed to list recovery archives (${res.status})`);
+            }
             const data = await res.json() as { entries: CloudSnapshotEntry[]; truncated: boolean };
+            if (seq !== recoveryListSeqRef.current) return;
             setRecoveryArchives(data.entries);
             setRecoveryTruncated(data.truncated === true);
         } catch (err) {
-            setRecoveryError((err as Error)?.message || 'Failed to list recovery archives.');
+            if (seq !== recoveryListSeqRef.current) return;
+            setRecoveryListError((err as Error)?.message || 'Failed to list recovery archives.');
+        } finally {
+            if (seq === recoveryListSeqRef.current) setRecoveryLoading(false);
         }
+    }, []);
+
+    const openRecovery = () => {
+        setRecoveryOpen(true);
+        void loadRecoveryArchives();
     };
 
     const handleRecover = async () => {
@@ -902,12 +923,22 @@ export function CloudBackupSection() {
                     <p className="text-sm text-stat-subtitle">
                         Archives from other instances in this bucket are listed here. Recovery needs the passphrase that sealed the archive, and the imported snapshot stays unmapped until you choose destination nodes in Fleet → Snapshots.
                     </p>
-                    {recoveryArchives.length === 0 ? (
-                        recoveryError ? null : (
-                            <p className="text-sm text-muted-foreground">
-                                No sealed archives from other instances were found.
-                            </p>
-                        )
+                    {recoveryLoading ? (
+                        <div role="status" aria-busy="true" className="flex items-center gap-2 text-sm text-stat-subtitle">
+                            <Loader2 className="w-4 h-4 animate-spin shrink-0" strokeWidth={1.5} />
+                            Looking for sealed archives from other instances...
+                        </div>
+                    ) : recoveryListError ? (
+                        <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+                            <p className="text-sm text-destructive">{recoveryListError}</p>
+                            <Button size="sm" variant="outline" onClick={() => void loadRecoveryArchives()}>
+                                Try again
+                            </Button>
+                        </div>
+                    ) : recoveryArchives.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                            No sealed archives from other instances were found.
+                        </p>
                     ) : (
                         <ul className="space-y-1.5">
                             {recoveryArchives.map(entry => (

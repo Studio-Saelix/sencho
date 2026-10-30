@@ -154,6 +154,7 @@ export default function FleetSnapshots() {
     const [cloudSnapshotIds, setCloudSnapshotIds] = useState<Set<number>>(new Set());
     const [uploadingId, setUploadingId] = useState<number | null>(null);
     const [currentNodes, setCurrentNodes] = useState<CurrentNodeOption[]>([]);
+    const [nodesLoadState, setNodesLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
     const [mappingDraft, setMappingDraft] = useState<Record<number, string>>({});
     const [savingMapping, setSavingMapping] = useState(false);
 
@@ -215,14 +216,18 @@ export default function FleetSnapshots() {
 
     // Destination choices for mapping an imported snapshot's archived nodes.
     // Loaded only when a snapshot actually needs a mapping, so an ordinary
-    // visit does not depend on this read.
+    // visit does not depend on this read. The load state keeps a pending or
+    // failed read from looking like an instance with no destinations.
     const fetchCurrentNodes = useCallback(async () => {
+        setNodesLoadState('loading');
         try {
             const res = await apiFetch('/nodes', { localOnly: true });
             if (!res.ok) throw new Error(`Failed to load nodes (${res.status})`);
             const data = await res.json() as Array<{ id: number; name: string }>;
             setCurrentNodes(data.map(node => ({ id: node.id, name: node.name })));
+            setNodesLoadState('ready');
         } catch (error: unknown) {
+            setNodesLoadState('error');
             const err = error as Record<string, unknown> | null;
             toast.error(err?.message as string || 'Failed to load nodes for the snapshot mapping.');
         }
@@ -230,9 +235,9 @@ export default function FleetSnapshots() {
 
     useEffect(() => {
         if (selectedSnapshot?.requiresNodeMapping !== true) return;
-        if (currentNodes.length > 0) return;
+        if (nodesLoadState !== 'idle') return;
         void fetchCurrentNodes();
-    }, [selectedSnapshot, currentNodes.length, fetchCurrentNodes]);
+    }, [selectedSnapshot, nodesLoadState, fetchCurrentNodes]);
 
     useEffect(() => {
         fetchCloudSnapshots();
@@ -616,11 +621,24 @@ export default function FleetSnapshots() {
                                                 options={currentNodes.map(option => ({ value: String(option.id), label: option.name }))}
                                                 value={mappingDraft[node.nodeId] ?? ''}
                                                 onValueChange={value => setMappingDraft(prev => ({ ...prev, [node.nodeId]: value }))}
-                                                placeholder="Not mapped"
+                                                disabled={nodesLoadState !== 'ready'}
+                                                placeholder={nodesLoadState === 'loading'
+                                                    ? 'Loading nodes...'
+                                                    : nodesLoadState === 'error' ? 'Nodes unavailable' : 'Not mapped'}
                                             />
                                         </div>
                                     ))}
                                 </div>
+                                {nodesLoadState === 'error' && (
+                                    <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+                                        <p className="text-sm text-destructive">
+                                            Destination nodes could not be loaded, so no destination can be chosen yet.
+                                        </p>
+                                        <Button size="sm" variant="outline" onClick={() => void fetchCurrentNodes()}>
+                                            Try again
+                                        </Button>
+                                    </div>
+                                )}
                                 <Button size="sm" onClick={handleSaveMapping} disabled={savingMapping || restoringAll || restoringStack !== null}>
                                     {savingMapping ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
                                     Save mapping
