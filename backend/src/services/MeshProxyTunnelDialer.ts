@@ -11,7 +11,9 @@ import { PilotMetrics } from './PilotMetrics';
 import type { MeshActivityType } from './MeshService';
 import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER } from './license-headers';
-import { assertSafeOutboundUrl, safeOutboundLookup } from '../utils/outboundTarget';
+import { assertSafeOutboundUrl, safeOutboundLookup, UnsafeOutboundTargetError } from '../utils/outboundTarget';
+import { loadMeshProxyDialConfig, MESH_PROXY_HEADERS_ENV, type MeshProxyDialConfig } from '../mesh/proxyDialConfig';
+import { MESH_REJECT_HEADER } from '../mesh/rejectReason';
 
 /**
  * Central-side dialer for proxy-mode mesh tunnels.
@@ -43,11 +45,50 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 const FAILURE_CACHE_TTL_MS = 60 * 1000;
 
+/**
+ * Why a proxy-mode dial failed. Each code maps to one operator-facing
+ * explanation (see `MeshService` REACHABLE_REASON), so the UI can say
+ * what to fix instead of a generic "unreachable".
+ */
 export type DialFailureCode =
     | 'no_target'
+    /** The remote has no /api/mesh/proxy-tunnel route (older Sencho, or a proxy route missing). */
     | 'endpoint_not_found'
+    /** The remote Sencho rejected the API token. */
     | 'auth_failed'
+    /** The remote Sencho refused: token not full-admin. */
+    | 'scope_denied'
+    /** The remote Sencho refused: license tier does not include mesh. */
+    | 'tier_denied'
+    /**
+     * Refused or redirected by something in front of the remote Sencho, with
+     * evidence that identifies it: a redirect to the Cloudflare Access login
+     * host, or a 407 proxy-authentication challenge.
+     */
+    | 'blocked_by_proxy'
+    /** The remote Sencho itself refused the upgrade for a reason it did not classify. */
+    | 'remote_refused'
+    /**
+     * Something refused or redirected the upgrade without identifying itself.
+     * Older Sencho receivers have no rejection marker, so in a mixed-version
+     * fleet a 401/403/429 can be their credential refusal or a gateway in
+     * front of them. An arbitrary redirect is equally unattributable, and
+     * ordinary Cloudflare edge headers only prove the response passed through
+     * Cloudflare, not which hop produced it. Do not claim either.
+     */
+    | 'refused_unverified'
+    /** A reverse proxy or tunnel in front of the remote answered but could not reach Sencho. */
+    | 'proxy_upstream_error'
+    /** The HTTP response was not a WebSocket upgrade (proxy not forwarding Upgrade headers, wrong port). */
+    | 'upgrade_rejected'
     | 'tls_failed'
+    | 'dns_failed'
+    | 'connection_refused'
+    | 'timeout'
+    /** The remote resolves to a loopback, link-local or reserved address Sencho refuses to dial. */
+    | 'blocked_address'
+    /** SENCHO_MESH_PROXY_HEADERS or SENCHO_MESH_PROXY_CA_FILE is invalid. */
+    | 'config_invalid'
     | 'network_error';
 
 /**
@@ -242,20 +283,46 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         // central's forwarded tier is paid, so keep sending it while fleets
         // can run mixed versions (it only helps a paid central there).
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        let dialConfig: MeshProxyDialConfig;
+        try {
+            dialConfig = this.getDialConfig();
+        } catch (err) {
+            this.recordFailure(nodeId, 'config_invalid', (err as Error).message);
+            return null;
+        }
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name;
+        const nodeHeaders = dialConfig.headersFor(nodeName);
+        // `SENCHO_MESH_PROXY_HEADERS` exists to carry a gateway credential
+        // (a Cloudflare Access service token, an SSO header). A node URL on
+        // http:// turns into ws://, which would put that credential on the
+        // wire in cleartext for anything on the path to read it. Refuse the
+        // combination instead of silently leaking it.
+        if (Object.keys(nodeHeaders).length > 0 && !/^wss:\/\//i.test(wsUrl)) {
+            this.recordFailure(
+                nodeId,
+                'config_invalid',
+                `${MESH_PROXY_HEADERS_ENV}: headers are only sent over a TLS node URL, and this node dials ${wsUrl}`,
+            );
+            return null;
+        }
         let ws: WebSocket;
         try {
             await assertSafeOutboundUrl(target.apiUrl);
             ws = new WebSocket(wsUrl, {
                 lookup: safeOutboundLookup,
                 headers: {
+                    // Operator headers first so Sencho's own always win.
+                    ...nodeHeaders,
                     Authorization: `Bearer ${target.apiToken}`,
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,
                 },
+                ...(dialConfig.ca ? { ca: dialConfig.ca } : {}),
                 handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
                 maxPayload: MAX_FRAME_SIZE_BYTES,
             });
         } catch (err) {
-            this.recordFailure(nodeId, 'network_error', (err as Error).message);
+            const failure = classifyDialError(err);
+            this.recordFailure(nodeId, failure.code, failure.message);
             return null;
         }
 
@@ -319,6 +386,14 @@ export class MeshProxyTunnelDialer extends EventEmitter {
         return bridge;
     }
 
+    /** Loaded lazily on the first dial and cached once it parses; a failed parse is retried on the next dial, and changing a loaded configuration needs a restart. */
+    private dialConfig: MeshProxyDialConfig | null = null;
+
+    private getDialConfig(): MeshProxyDialConfig {
+        if (!this.dialConfig) this.dialConfig = loadMeshProxyDialConfig();
+        return this.dialConfig;
+    }
+
     private awaitOpen(ws: WebSocket): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             const cleanup = () => {
@@ -330,8 +405,9 @@ export class MeshProxyTunnelDialer extends EventEmitter {
             ws.once('error', (err) => { cleanup(); reject(err); });
             ws.once('unexpected-response', (_req, res) => {
                 cleanup();
-                const err = new Error(`upgrade failed: HTTP ${res.statusCode}`) as Error & { httpStatus?: number };
+                const err = new Error(`upgrade failed: HTTP ${res.statusCode}`) as UpgradeFailure;
                 err.httpStatus = res.statusCode ?? 0;
+                err.httpHeaders = res.headers;
                 try { res.resume(); } catch { /* ignore */ }
                 reject(err);
             });
@@ -480,13 +556,140 @@ export class MeshProxyTunnelDialer extends EventEmitter {
     }
 }
 
-function classifyDialError(err: unknown): { code: DialFailureCode; message: string } {
+type UpgradeFailure = Error & {
+    httpStatus?: number;
+    httpHeaders?: Record<string, string | string[] | undefined>;
+};
+
+const TLS_ERROR_CODES = new Set([
+    'CERT_HAS_EXPIRED',
+    'CERT_NOT_YET_VALID',
+    'CERT_UNTRUSTED',
+    'CERT_SIGNATURE_FAILURE',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'ERR_SSL_WRONG_VERSION_NUMBER',
+    'EPROTO',
+]);
+
+function headerValue(headers: UpgradeFailure['httpHeaders'], name: string): string | undefined {
+    const v = headers?.[name.toLowerCase()];
+    return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * True when a redirect destination is Cloudflare Access's login host.
+ *
+ * The Location value is parsed and its host compared, rather than looking for
+ * the Access domain anywhere in the string. A redirect whose query or path
+ * merely mentions that domain is not an Access login, and treating it as one
+ * would send the operator after a gateway that is not in the path.
+ *
+ * Only the host establishes an Access login. Ordinary Cloudflare edge headers
+ * (`Server: cloudflare`, `CF-Ray`) appear on every response Cloudflare
+ * forwards, including the remote's own refusal, so they prove transit and
+ * nothing about which hop produced the status code. They must not upgrade an
+ * unmarked refusal or an arbitrary redirect into a gateway diagnosis.
+ *
+ * A scheme-relative Location (`//team.cloudflareaccess.com/...`) is a valid
+ * network-path reference to that host, and a trailing-dot FQDN is the same
+ * name in absolute form, so both are parsed against a placeholder base and a
+ * normalized host. A path-relative destination resolves to the placeholder; a
+ * network-path reference resolves to its own host. Only the Access host
+ * matches.
+ */
+const LOCATION_PARSE_BASE = 'https://sencho.invalid/';
+
+function isCloudflareAccessLogin(location: string | undefined): boolean {
+    if (!location) return false;
+    try {
+        const host = new URL(location, LOCATION_PARSE_BASE).hostname.toLowerCase().replace(/\.$/, '');
+        return host === 'cloudflareaccess.com' || host.endsWith('.cloudflareaccess.com');
+    } catch {
+        return false;
+    }
+}
+
+/** Statuses that carry a redirect destination. 304 is not a redirect. */
+const REDIRECT_STATUSES = new Set([300, 301, 302, 303, 305, 307, 308]);
+
+export function classifyDialError(err: unknown): { code: DialFailureCode; message: string } {
+    const outbound = err instanceof UnsafeOutboundTargetError
+        ? err
+        : ((err as { cause?: unknown })?.cause instanceof UnsafeOutboundTargetError
+            ? (err as { cause: UnsafeOutboundTargetError }).cause
+            : null);
+    if (outbound) {
+        return outbound.reason === 'unresolved'
+            ? { code: 'dns_failed', message: 'remote hostname could not be resolved' }
+            : { code: 'blocked_address', message: 'remote resolves to a loopback, link-local or reserved address Sencho does not dial' };
+    }
     const message = sanitizeForLog((err as Error).message || String(err));
-    const httpStatus = (err as Error & { httpStatus?: number }).httpStatus;
-    if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
-    if (httpStatus === 401 || httpStatus === 403) return { code: 'auth_failed', message: 'api token rejected by remote' };
-    const tlsCodes = new Set(['CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN']);
+    const failure = err as UpgradeFailure;
+    const httpStatus = failure.httpStatus;
+    if (httpStatus !== undefined) {
+        const headers = failure.httpHeaders;
+        const senchoReason = headerValue(headers, MESH_REJECT_HEADER);
+        if (senchoReason === 'unauthorized') return { code: 'auth_failed', message: 'api token rejected by remote' };
+        if (senchoReason === 'scope') return { code: 'scope_denied', message: 'remote refused: node token is not full-admin' };
+        if (senchoReason === 'tier') return { code: 'tier_denied', message: 'remote refused: license tier does not include mesh' };
+        // A Sencho rejection marker identifies the remote as the component
+        // that answered, so it outranks the status-based branches below. That
+        // includes `forbidden`, which would otherwise become
+        // `endpoint_not_found` on a 404 or be blamed on the gateway or left
+        // unidentified on a redirect.
+        if (senchoReason === 'forbidden') {
+            return { code: 'remote_refused', message: 'remote refused the mesh upgrade without a stated reason' };
+        }
+        if (httpStatus === 404) return { code: 'endpoint_not_found', message: 'remote does not expose /api/mesh/proxy-tunnel' };
+        if (REDIRECT_STATUSES.has(httpStatus)) {
+            const location = headerValue(headers, 'location');
+            if (isCloudflareAccessLogin(location)) {
+                return {
+                    code: 'blocked_by_proxy',
+                    message: `redirected to the Cloudflare Access login (HTTP ${httpStatus}); the gateway wants its own credential`,
+                };
+            }
+            // Any other destination is not evidence of a login gateway. A
+            // relative path, another host, or a malformed value can come from
+            // the remote itself or a proxy that does not identify itself.
+            return {
+                code: 'refused_unverified',
+                message: location
+                    ? `redirected with HTTP ${httpStatus} to a destination that is not a recognized access-gateway login, so neither the destination nor the response headers identify the hop that redirected`
+                    : `redirected with HTTP ${httpStatus} without a usable Location header, so neither the destination nor the response headers identify the hop that redirected`,
+            };
+        }
+        if (httpStatus === 407) {
+            // 407 is by definition a proxy authentication challenge, so this
+            // one does identify something in front of the remote.
+            return { code: 'blocked_by_proxy', message: 'proxy authentication required (HTTP 407) by a proxy in front of the remote' };
+        }
+        // Unmarked 401/403/429: an older Sencho receiver emits its credential
+        // refusals without a marker too, and ordinary Cloudflare edge headers
+        // are forwarded with the origin's response. Marker absence and edge
+        // headers both leave the refusing hop unknown, so keep the uncertainty
+        // instead of sending the operator to the gateway when the token is the
+        // actual problem.
+        if (httpStatus === 401 || httpStatus === 403 || httpStatus === 429) {
+            return {
+                code: 'refused_unverified',
+                message: `refused or rate-limited with HTTP ${httpStatus} without identifying whether the remote Sencho or a proxy in front of it answered`,
+            };
+        }
+        if (httpStatus === 502 || httpStatus === 503 || httpStatus === 504 || (httpStatus >= 520 && httpStatus <= 530)) {
+            return { code: 'proxy_upstream_error', message: `proxy in front of the remote could not reach Sencho (HTTP ${httpStatus})` };
+        }
+        return { code: 'upgrade_rejected', message: `WebSocket upgrade rejected (HTTP ${httpStatus})` };
+    }
     const errno = (err as NodeJS.ErrnoException).code;
-    if (errno && tlsCodes.has(errno)) return { code: 'tls_failed', message };
+    if (errno && TLS_ERROR_CODES.has(errno)) return { code: 'tls_failed', message };
+    if (errno === 'ENOTFOUND' || errno === 'EAI_AGAIN') return { code: 'dns_failed', message };
+    if (errno === 'ECONNREFUSED') return { code: 'connection_refused', message };
+    if (errno === 'ETIMEDOUT' || /handshake has timed out/i.test(message)) return { code: 'timeout', message };
     return { code: 'network_error', message };
 }

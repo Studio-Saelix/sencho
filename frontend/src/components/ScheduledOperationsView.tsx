@@ -1396,9 +1396,13 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                                       variant="ghost"
                                       size="icon"
                                       className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                                      onClick={() => {
-                                        copyToClipboard(run.output || run.error || '');
-                                        toast.info('Copied to clipboard');
+                                      onClick={async () => {
+                                        try {
+                                          await copyToClipboard(run.output || run.error || '');
+                                          toast.info('Copied to clipboard');
+                                        } catch {
+                                          toast.error('Could not copy to the clipboard');
+                                        }
                                       }}
                                     >
                                       <Copy className="w-3 h-3" strokeWidth={1.5} />

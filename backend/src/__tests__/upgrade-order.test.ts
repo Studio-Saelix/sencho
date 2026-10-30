@@ -17,6 +17,7 @@ import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { generateApiToken } from '../utils/apiTokenFormat';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
+import { classifyDialError } from '../services/MeshProxyTunnelDialer';
 
 describe('WebSocket upgrade dispatch order', () => {
   let tmpDir: string;
@@ -230,6 +231,83 @@ describe('WebSocket upgrade dispatch order', () => {
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+  });
+
+  describe('/api/mesh/proxy-tunnel rejection marker', () => {
+    // Central reads X-Sencho-Mesh-Reject to tell a refusal by this Sencho
+    // apart from one by an access proxy in front of it.
+    function rejectHeader(ws: WebSocket): Promise<{ status: number; reason: string | undefined }> {
+      return new Promise((resolve, reject) => {
+        ws.once('unexpected-response', (_req, res) => {
+          const raw = res.headers['x-sencho-mesh-reject'];
+          resolve({ status: res.statusCode ?? 0, reason: Array.isArray(raw) ? raw[0] : raw });
+          res.resume();
+        });
+        ws.once('open', () => reject(new Error('upgrade unexpectedly succeeded')));
+        ws.once('error', () => { /* surfaced through unexpected-response */ });
+      });
+    }
+
+    it('marks a missing credential as unauthorized', async () => {
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel'));
+      expect(out).toEqual({ status: 401, reason: 'unauthorized' });
+    });
+
+    it('marks a restricted api_token as a scope refusal', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
+        scope: 'read-only',
+        userId: DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id,
+        name: `mesh-reject-marker-${Date.now()}`,
+      });
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: rawToken }));
+      expect(out).toEqual({ status: 403, reason: 'scope' });
+    });
+
+    function classifyRejection(status: number, reason: string): string {
+      const err = new Error(`upgrade failed: HTTP ${status}`) as Error & {
+        httpStatus: number;
+        httpHeaders: Record<string, string>;
+      };
+      err.httpStatus = status;
+      err.httpHeaders = { 'x-sencho-mesh-reject': reason };
+      return classifyDialError(err).code;
+    }
+
+    it.each([
+      ['a malformed JWT', 'not-a-jwt'],
+      ['an expired node JWT', jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: -60 })],
+      ['a wrong-signature node JWT', jwt.sign({ scope: 'node_proxy' }, 'another-instances-secret', { expiresIn: '1m' })],
+      ['a malformed opaque key', 'sen_sk_short'],
+    ])('marks %s as a credential failure, not a generic refusal', async (_label, token) => {
+      // The verifier throws for every one of these; the dialing central has
+      // to hear `unauthorized` or it tells the operator to check the gateway.
+      const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { bearer: token }));
+      expect(out).toEqual({ status: 401, reason: 'unauthorized' });
+      expect(classifyRejection(out.status, out.reason!)).toBe('auth_failed');
+    });
+
+    it('keeps an unrelated handler exception a generic refusal', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const spy = vi.spyOn(DatabaseService.getInstance(), 'getUserByUsername').mockImplementation(() => {
+        throw new Error('database unavailable');
+      });
+      try {
+        // A valid session-shaped JWT passes verification and fails later in
+        // the user lookup. That says nothing about the credential.
+        const out = await rejectHeader(connect('/api/mesh/proxy-tunnel', { cookie: sessionCookie }));
+        expect(out).toEqual({ status: 401, reason: 'forbidden' });
+        expect(classifyRejection(out.status, out.reason!)).toBe('remote_refused');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not add the marker on other paths', async () => {
+      const out = await rejectHeader(connect('/ws'));
+      expect(out).toEqual({ status: 401, reason: undefined });
     });
   });
 

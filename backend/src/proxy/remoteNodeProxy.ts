@@ -340,10 +340,22 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     },
 };
 
+  // The outer gate caches the target on the request before any of these
+  // proxies run, and http-proxy-middleware requires the router to return a
+  // target. Fail loudly if that invariant ever breaks instead of letting the
+  // hop fall back to the placeholder target below.
+  const routerTarget = (req: Request): string => {
+    const target = req.proxyTarget;
+    if (!target) {
+      throw new Error('remote proxy router ran without a proxy target');
+    }
+    return target.apiUrl.replace(/\/$/, '');
+  };
+
   const baseOptions = {
     target: 'http://localhost:0', // placeholder - overridden per-request by router
     changeOrigin: true,
-    router: (req: Request) => req.proxyTarget?.apiUrl.replace(/\/$/, ''),
+    router: routerTarget,
     // When mounted at app.use('/api/', ...), Express strips the '/api/' prefix from
     // req.url before the middleware sees it. Re-add it so the remote Sencho instance
     // receives the full path (e.g. '/stats' becomes '/api/stats').

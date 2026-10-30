@@ -7,7 +7,7 @@
  * after enable, and must not fire after a disable or after unmount.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import type { MeshNodeStatus } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -18,6 +18,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 import { apiFetch } from '@/lib/api';
 import { RoutingNodeCard } from './RoutingNodeCard';
 import { deriveNodeState } from './routingNodeState';
+import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
 function node(over: Partial<MeshNodeStatus>): MeshNodeStatus {
     return {
@@ -56,11 +57,12 @@ describe('deriveNodeState', () => {
     });
 });
 
-function renderCard(status: MeshNodeStatus) {
+function renderCard(status: MeshNodeStatus, fleetStatus: MeshNodeStatus[] = [status]) {
     const onChanged = vi.fn();
     const view = render(
         <RoutingNodeCard
             status={status}
+            fleetStatus={fleetStatus}
             aliases={[]}
             onAddStack={vi.fn()}
             onShowDiagnostics={vi.fn()}
@@ -125,5 +127,147 @@ describe('RoutingNodeCard enable auto-converge', () => {
             vi.advanceTimersByTime(6000);
         });
         expect(onChanged).not.toHaveBeenCalled();
+    });
+});
+
+/**
+ * `ConfirmModal.description` renders into a screen-reader-only element, so a
+ * text match alone proves nothing about what a sighted operator sees.
+ * `expectVisibleInDialog` walks up from the matched text and fails if it only
+ * lives inside the hidden description, which is exactly the regression that
+ * made the impact copy invisible.
+ */
+describe('RoutingNodeCard disable confirmation', () => {
+    beforeEach(() => {
+        vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json: async () => ({}) } as unknown as Response);
+    });
+    afterEach(() => { vi.clearAllMocks(); });
+
+    it('asks before turning mesh off and states what restarts', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status, other]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/pg on this node leaves the mesh and restarts\. app on node-beta also restarts to refresh hostnames/);
+
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Turn off and restart/i })); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('turns mesh off without a prompt when nothing in the fleet is meshed', async () => {
+        const status = node({ enabled: true });
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={[status]}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    function renderDisable(status: MeshNodeStatus, fleet: MeshNodeStatus[]) {
+        render(
+            <RoutingNodeCard
+                status={status}
+                fleetStatus={fleet}
+                aliases={[]}
+                onAddStack={vi.fn()}
+                onShowDiagnostics={vi.fn()}
+                onShowAlias={vi.fn()}
+                onTestUpstream={async () => {}}
+                onChanged={vi.fn()}
+                canManage
+            />,
+        );
+    }
+
+    it('turns mesh off without a prompt when no stack of this node is meshed and no hostname changes', async () => {
+        // The redeploy of the rest of the fleet finds nothing to recreate, so a
+        // dialog promising restarts would be false and the prompt pointless.
+        const status = node({ enabled: true });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' }));
+    });
+
+    it('still asks when the redeploy would start a stopped stack, and says no hostname changes', async () => {
+        const status = node({ enabled: true });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: false }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/No hostnames change, so no other meshed stack needs a restart\. app on node-beta is not running right now/);
+        expect(screen.queryByText(/also restart/)).not.toBeInTheDocument();
+    });
+
+    it('asks before turning off the only meshed node, naming its own stack', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        renderDisable(status, [status]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expect(apiFetch).not.toHaveBeenCalled();
+        await screen.findByRole('button', { name: /Turn off and restart/i });
+        expectVisibleInDialog(/pg on this node leaves the mesh and restarts\. No other meshed stacks are affected\./);
+    });
+
+    it('does not offer Turn off and restart when its own node is unreachable', async () => {
+        const status = node({
+            enabled: true,
+            reachableMode: 'pilot',
+            pilotConnected: false,
+            optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }],
+        });
+        renderDisable(status, [status]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expectVisibleInDialog(/pg on this node cannot leave the mesh while that node is unreachable\./);
+        expect(screen.getByRole('button', { name: /Turn off and restart/i })).toBeDisabled();
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Close' })); });
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not block turning off an unreachable node that has no meshed stacks of its own', async () => {
+        const status = node({ enabled: true, reachableMode: 'pilot', pilotConnected: false, optedInStacks: [] });
+        const other = node({ nodeId: 2, nodeName: 'node-beta', optedInStacks: [{ stackName: 'app', currentlyResolvable: true }] });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        // Nothing to confirm: no stack leaves and no hostname changes.
+        await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/mesh/nodes/1/disable', expect.objectContaining({ method: 'POST' })));
+    });
+
+    it('names a stopped meshed stack once, as started', async () => {
+        const status = node({ enabled: true, optedInStacks: [{ stackName: 'pg', currentlyResolvable: true }] });
+        const other = node({
+            nodeId: 2,
+            nodeName: 'node-beta',
+            optedInStacks: [{ stackName: 'app', currentlyResolvable: true }, { stackName: 'legacy', currentlyResolvable: false }],
+        });
+        renderDisable(status, [status, other]);
+        await act(async () => { fireEvent.click(screen.getByRole('switch')); });
+        expectVisibleInDialog(/app on node-beta also restarts to refresh hostnames, so expect brief connection drops\. legacy on node-beta is not running right now, and the redeploy brings it up\./);
     });
 });
