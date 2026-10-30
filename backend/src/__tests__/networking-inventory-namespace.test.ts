@@ -117,4 +117,23 @@ describe('per-network exposure counters follow the namespace owner', () => {
     expect(row.exposureSummary?.unclassifiedStackCount).toBe(0);
     expect(row.exposureSummary?.broadExposureCount).toBe(1);
   });
+  it('counts a tunnel only on the networks the connector is attached to', () => {
+    const snap: DependencySnapshot = {
+      ...snapshot('app', 'proj_edge'),
+    };
+    snap.containers[0].networks = [
+      { name: 'proj_edge', id: 'id-proj_edge', ip: '172.18.0.2' },
+      { name: 'proj_backend', id: 'id-proj_backend', ip: '172.19.0.2' },
+    ];
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      getStackExposureIntents: vi.fn().mockReturnValue([{ service: 'app', intent: 'internal' }]),
+    } as unknown as DatabaseService);
+    const facts = assembleStackNetworkFacts(STACK, model({
+      cloudflared: { image: 'cloudflare/cloudflared', environment: { TUNNEL_TOKEN: 'secret' }, networks: { edge: null } },
+      app: { image: 'example/app:1', networks: { edge: null, backend: null } },
+    }, { edge: { name: 'proj_edge' }, backend: { name: 'proj_backend' } }), null, snap);
+    const [edge, backend] = enrichNetworkRows(1, [baseRow('proj_edge'), baseRow('proj_backend')], [facts], snap, []);
+    expect(edge.exposureSummary).toMatchObject({ broadExposureCount: 1, unclassifiedStackCount: 0 });
+    expect(backend.exposureSummary).toMatchObject({ broadExposureCount: 0, unclassifiedStackCount: 0 });
+  });
 });

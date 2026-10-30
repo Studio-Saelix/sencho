@@ -348,7 +348,7 @@ describe('networking summary', () => {
       expect(res.body.exposed.stacks).toContain(STACK);
       expect(res.body.exposed.stacks).toContain(linked);
       expect(res.body.unknownExposure.stacks).toContain(linked);
-      expect(warn.mock.calls.filter(call => String(call[0]).includes('Skipped stack'))).toEqual([]);
+      expect(warn.mock.calls.filter(call => String(call[0]).includes('reported unreadable'))).toEqual([]);
     } finally {
       fs.rmSync(linkedDir, { recursive: true, force: true });
     }
@@ -369,7 +369,7 @@ describe('networking summary', () => {
       expect(res.body.unknownExposure.stacks).not.toContain(linked);
       expect(res.body.unreadable.stacks).toContain(linked);
       const skipped = warn.mock.calls.find(call => call[1] === linked);
-      expect(skipped?.[0]).toContain('Skipped stack');
+      expect(skipped?.[0]).toContain('reported unreadable');
     } finally {
       fs.rmSync(linkedDir, { recursive: true, force: true });
     }
@@ -681,9 +681,58 @@ describe('networking summary', () => {
     }
   });
 
+  it('reports a stack as unreadable when the COMPOSE_FILE selection cannot be decided', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'NOT A VALID LINE\nCOMPOSE_FILE=extra.yaml\n');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable when a deploy spec layer cannot be read', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'missing.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports a service env_file path that stays a template as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./${ENV_DIR}/ts.env\n  app:\n    image: example/app:1\n');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('lets a service environment TS_EXTRA_ARGS override the value in its env_file', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_EXTRA_ARGS=--advertise-routes=10.0.0.0/24\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: --accept-dns=false\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
   it('reports a template in an env_file as unreadable when the interpolation lookup is unavailable', async () => {
     fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
     fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${ARGS}\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it.each([
+    ['an exported template', 'export TS_EXTRA_ARGS=--advertise-routes=$ROUTES\n'],
+    ['a bare inherited name', 'TS_EXTRA_ARGS\n'],
+    ['an exported bare inherited name', 'export TS_EXTRA_ARGS\n'],
+  ])('reports %s in an env_file as unreadable when the interpolation lookup is unavailable', async (_label, line) => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), `TS_AUTHKEY=tskey-secret\n${line}`);
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
       'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);

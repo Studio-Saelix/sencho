@@ -183,7 +183,8 @@ function envFileEntries(value: unknown): DeclaredEnvFile[] {
   if (Array.isArray(value)) return value.map(readEntry).filter((e): e is DeclaredEnvFile => e !== null);
   const single = readEntry(value);
   if (single) return [single];
-  // Map form: { "path": { required: true } }.
+  // Map form: { "path": { required: true } }. Compose's spec does not define
+  // it; it is read leniently so an unusual file is still scanned, not skipped.
   if (value && typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>).map(([filePath, cfg]) => ({
       path: filePath,
@@ -386,21 +387,26 @@ function collectResources(value: unknown): Record<string, DeclaredResource> {
  * expands the detection-relevant fields (`image`, `network_mode`, environment
  * KEY names, networks, ports, `command`/`entrypoint`, volumes, `cap_add`,
  * `devices`, `env_file` paths, and `TS_EXTRA_ARGS`) the way Compose would.
+ * `options.allowEmptyServices` accepts a layer with no `services:` key when it
+ * holds only top-level sections, for a caller that merges layers.
+ * `options.mergeKeys` resolves YAML merge keys (`<<: *anchor`) as Compose does.
+ * It is off by default so callers that hash or graph the declared view keep
+ * reading a file the way they always have; the networking summary turns it on.
  */
 export function parseComposeDependencies(
   content: string,
-  options: { lookup?: ComposeEnvLookup; allowEmptyServices?: boolean } = {},
+  options: { lookup?: ComposeEnvLookup; allowEmptyServices?: boolean; mergeKeys?: boolean } = {},
 ): DeclaredCompose {
   if (content.length > MAX_COMPOSE_PARSE_BYTES) {
     return { services: [], networks: {}, volumes: {}, parseError: 'Compose file is too large to parse.' };
   }
 
-  // Compose resolves YAML merge keys (`<<: *anchor`), so a service built from
-  // an anchor must read as it renders.
+  // Compose resolves YAML merge keys, so a caller that must read a service as it
+  // renders (the tunnel summary) opts in.
   let parsed: unknown;
   let hasLayerTags = false;
   try {
-    const document = YAML.parseDocument(content, { merge: true });
+    const document = YAML.parseDocument(content, { merge: options.mergeKeys === true });
     if (document.errors.length > 0) throw document.errors[0];
     hasLayerTags = document.warnings.some(warning => warning.code === 'TAG_RESOLVE_FAILED');
     parsed = document.toJS();
@@ -411,9 +417,10 @@ export function parseComposeDependencies(
   const root = (parsed ?? {}) as Record<string, unknown>;
   const rawServices = root.services;
   if (root.services === undefined) {
-    // A layer that only declares top-level networks, volumes, anchors, or a
-    // project name is valid Compose. The summary merges it with the layers that
-    // do declare services. An empty file, or one with a top-level key outside
+    // With `allowEmptyServices`, a layer that declares only top-level sections
+    // (`name`, `networks`, `volumes`, `configs`, `secrets`, `include`,
+    // `version`, or `x-` anchors) is valid Compose; the summary merges it with
+    // the layers that do declare services. An empty file, or one with a top-level key outside
     // that list (such as a newer Compose section), is a parse error so the
     // stack is reported unreadable instead of unexposed.
     const topLevel = Object.keys(root);
@@ -512,7 +519,7 @@ export function parseComposeDependencies(
 
 /** A later layer's top-level resource over an earlier one, field by field, as
  *  Compose merges mappings: an override that sets only `name:` keeps the base
- *  layer's `external: true`. */
+ *  layer's `external: true`. `external` stays set once any layer sets it. */
 function mergeResource(prior: DeclaredResource | undefined, next: DeclaredResource): DeclaredResource {
   if (!prior) return next;
   return { ...prior, ...(next.name !== undefined ? { name: next.name } : {}), external: prior.external || next.external };
@@ -525,10 +532,12 @@ function unionKeys(a: string[] | undefined, b: string[] | undefined): string[] {
 /**
  * Merge the parsed layers of a multi-file Compose run in load order, applying
  * the parts of Compose's merge rules that tunnel detection reads: maps merge by
- * key (top-level networks and volumes merge field by field), lists append, and
- * a later scalar replaces an earlier one. `environment`
- * is represented by its KEY names, so later layers add keys; `command` and
- * `TS_EXTRA_ARGS` replace when the later layer declares them.
+ * key (top-level networks and volumes merge field by field), a later scalar
+ * replaces an earlier one, `ports` and `env_file` entries append, and the other
+ * lists (`depends_on`, networks, volumes, `cap_add`, `devices`) union.
+ * `environment` is represented by its KEY names, so later layers add keys;
+ * `command`, `entrypoint`, and `TS_EXTRA_ARGS` replace when the later layer
+ * declares them.
  */
 export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose {
   const failed = layers.find(layer => layer.parseError);

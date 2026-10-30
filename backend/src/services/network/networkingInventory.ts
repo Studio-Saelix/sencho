@@ -111,10 +111,14 @@ function buildExposureSummary(
       // its own. Its traffic leaves through the namespace owner's network.
       if (!attachedToNetwork(svc, networkName, facts, byName)) continue;
       const owner = namespaceOwner(svc.name, byName);
-      const publishes = svc.publishedPorts.length > 0 || isHostNetwork(owner?.networkMode) || svc.tunnel !== undefined;
+      // A tunnel reaches the service over the connector's own networks, so it
+      // counts on this network only when the connector is attached to it too.
+      const connector = svc.tunnel ? byName.get(svc.tunnel.connector) : undefined;
+      const tunneledHere = svc.tunnel !== undefined && connector !== undefined && attachedToNetwork(connector, networkName, facts, byName);
+      const publishes = svc.publishedPorts.length > 0 || isHostNetwork(owner?.networkMode) || tunneledHere;
       // A public-edge tunnel can reach the internet, so the network carries
       // exposure beyond loopback even when no host port is published.
-      if (svc.publishedPorts.some(p => p.allInterfaces) || isHostNetwork(owner?.networkMode) || svc.tunnel?.scope === 'public-edge') stackBroad = true;
+      if (svc.publishedPorts.some(p => p.allInterfaces) || isHostNetwork(owner?.networkMode) || (tunneledHere && svc.tunnel?.scope === 'public-edge')) stackBroad = true;
       const intent = byService.get(svc.name) ?? stackIntent;
       if (publishes && (intent === null || intent === 'unknown')) stackUnclassified = true;
     }
@@ -133,7 +137,8 @@ type FactService = StackNetworkFacts['services'][number];
 
 const SERVICE_MODE = /^service:(.+)$/;
 
-/** The service whose network namespace `name` runs in (itself when it owns one). */
+/** The service whose network namespace `name` runs in (itself when it owns one).
+ *  A `network_mode` cycle has no owner and resolves to an arbitrary member. */
 function namespaceOwner(name: string, byName: Map<string, FactService>): FactService | undefined {
   let current = name;
   for (let hops = 0; hops < byName.size; hops += 1) {

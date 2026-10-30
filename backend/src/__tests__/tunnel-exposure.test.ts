@@ -878,7 +878,8 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     // Both dash forms, and a later occurrence in the other form still wins.
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-routes=10.0.0.0/24 --advertise-routes=' })).toEqual([]);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '-advertise-exit-node --advertise-exit-node=0' })).toEqual([]);
-    // The final value is what Compose interpolates, map or list form.
+    // The final value is what Compose interpolates, in map or list form, and a
+    // list entry whose own name is a template expands to the assignment.
     const lookup = (name: string) => name === 'ARGS' ? '--advertise-routes=10.0.0.0/24 --advertise-routes=' : undefined;
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${ARGS}' }, lookup)).toEqual([]);
     expect(tailscaleForwardFlags(['TS_EXTRA_ARGS=${ARGS}'], lookup)).toEqual([]);
@@ -888,6 +889,14 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
       db,
     });
     expect(tunnelExposureByService(detectTunnels(model)).has('db')).toBe(false);
+  });
+
+  it('does not let a disabling occurrence cancel a flag when a preceding value flag may have taken it as its value', () => {
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --hostname --advertise-routes=' })).toEqual(['--advertise-routes']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node --login-server --advertise-exit-node=false' })).toEqual(['--advertise-exit-node']);
+    // After the boolean exit-node flag, or a flag written with `=`, the next token is its own flag.
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --advertise-exit-node --advertise-routes=' })).toEqual(['--advertise-exit-node']);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --hostname=a --advertise-routes=' })).toEqual([]);
   });
 
   it('expands an uninterpolated TS_EXTRA_ARGS with the stack\'s variables the way Compose does', () => {

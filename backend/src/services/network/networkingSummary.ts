@@ -91,13 +91,18 @@ interface TunnelInputs {
 }
 
 /** Why a stack is reported unreadable: a fixed reason and the error's code or
- *  class name. Never the message, which can hold a path or an env value. */
+ *  class name. Never the message, which can hold a path. */
 function noteUnreadable(stack: string, reason: string, error?: unknown): void {
   const cause = error === undefined
     ? ''
     : ` (${sanitizeForLog(typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : error instanceof Error ? error.name : 'unknown')})`;
   console.warn('[NetworkingSummary] Stack %s reported unreadable: %s%s.', sanitizeForLog(stack), reason, cause);
 }
+
+/** An env_file line that sets `TS_EXTRA_ARGS` from a variable the stack's
+ *  interpolation environment must answer: a `${VAR}`/`$VAR` template in the
+ *  value, or the bare name that inherits it, each with or without `export`. */
+const ENV_FILE_ARGS_NEEDS_LOOKUP = /^\s*(?:export\s+)?TS_EXTRA_ARGS(?:\s*[:=][^\n]*\$(?:\{|[A-Za-z_])|\s*$)/m;
 
 function isMissingFile(error: unknown): boolean {
   return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
@@ -268,7 +273,7 @@ async function interpolationLookup(nodeId: number, stack: string): Promise<Compo
 /** The tunnel-reached services in the stack's effective inputs, and whether
  *  those inputs were complete enough to establish absence. */
 async function readTunnelInputs(nodeId: number, stack: string, contents: ComposeContents): Promise<TunnelInputs | null> {
-  const initial = contents.layers.map(layer => parseComposeDependencies(layer.content, { allowEmptyServices: true }));
+  const initial = contents.layers.map(layer => parseComposeDependencies(layer.content, { allowEmptyServices: true, mergeKeys: true }));
   if (initial.some(layer => layer.parseError)) return null;
 
   const needsLookup = initial.some(layer => layer.services.some(service =>
@@ -277,7 +282,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     || (service.envFiles?.length ?? 0) > 0));
   const lookup = needsLookup ? await interpolationLookup(nodeId, stack) : undefined;
   const parsed = lookup
-    ? contents.layers.map(layer => parseComposeDependencies(layer.content, { lookup, allowEmptyServices: true }))
+    ? contents.layers.map(layer => parseComposeDependencies(layer.content, { lookup, allowEmptyServices: true, mergeKeys: true }))
     : initial;
   if (parsed.some(layer => layer.parseError)) return null;
 
@@ -314,7 +319,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       try {
         const content = await fsSvc.readEnvFile(path.resolve(contents.projectDir, envFile.path));
         for (const key of composeEnvFileKeyNames(content)) keys.add(key);
-        if (/^\s*TS_EXTRA_ARGS\s*[:=][^\n]*\$(?:\{|[A-Za-z_])/m.test(content)) envFileTemplate = true;
+        if (ENV_FILE_ARGS_NEEDS_LOOKUP.test(content)) envFileTemplate = true;
         reader.read(content);
       } catch (error) {
         if (!envFile.required && isMissingFile(error)) continue;
@@ -381,7 +386,7 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
       contents = await readComposeContents(nodeId, stack);
     } catch (error) {
       // Unreadable compose (missing, a dangling link or one outside its stack dir, or an I/O error).
-      console.warn('[NetworkingSummary] Skipped stack %s, compose file unreadable:',
+      console.warn('[NetworkingSummary] Stack %s reported unreadable, compose file unreadable:',
         sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
       unreadable.push(stack);
       continue;
@@ -396,7 +401,7 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
       continue;
     }
     if (inputs === null) {
-      console.warn('[NetworkingSummary] Skipped stack %s, a compose layer does not parse.', sanitizeForLog(stack));
+      console.warn('[NetworkingSummary] Stack %s reported unreadable, a compose layer does not parse.', sanitizeForLog(stack));
       unreadable.push(stack);
       continue;
     }

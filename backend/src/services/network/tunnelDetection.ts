@@ -13,7 +13,8 @@
  * tokens and that one value are scanned for those fixed names and nothing else
  * is kept. The detector is handed environment KEY names and that one value; it
  * reads no other environment value, label value, or file content. (The node
- * summary parses a service's env files to supply them and discards the rest.)
+ * summary parses a service's env files and interpolates the other fields with
+ * the stack's interpolation environment to supply them, and keeps none of it.)
  * A tunnel token therefore never reaches a finding or a log.
  *
  * Which services a connector actually routes to is configured outside the
@@ -288,12 +289,20 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
   const text = readableExtraArgs(value, lookup);
   if (text === null) return ['unresolved'];
   const flags = new Map<Exclude<TailscaleForwardFlag, 'unresolved'>, boolean>();
+  // Go gives a flag written without `=` the next argument as its value unless it
+  // is a boolean. Sencho cannot tell which other flags are booleans, so a
+  // disabling occurrence right after such a flag may be that flag's value and
+  // does not switch the earlier occurrence off; an enabling one always counts.
+  let mayBeValue = false;
   for (const token of text.split(/\s+/)) {
     const eq = token.indexOf('=');
     const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
+    const consumable = mayBeValue;
+    mayBeValue = eq === -1 && token.startsWith('-') && name !== '--advertise-exit-node';
     if (!isTailscaleForwardFlag(name)) continue;
     const setting = eq === -1 ? undefined : token.slice(eq + 1);
     const enabled = setting !== '' && !(setting !== undefined && GO_FALSE.has(setting));
+    if (!enabled && consumable) continue;
     flags.set(name, enabled);
   }
   return [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
@@ -557,15 +566,15 @@ export function describeTunnelConnector(c: TunnelConnector): { title: string; me
   const label = TUNNEL_PROVIDER_LABEL[c.provider];
   const scope = c.scope === 'public-edge' ? 'public edge' : 'private overlay';
   const byPath = (path: TunnelPath) => c.reaches.filter(r => r.path === path).map(r => r.service);
-  const certain = byPath('shared-namespace');
+  const namespaced = byPath('shared-namespace');
   const networked = byPath('shared-network');
   const hosted = byPath('host-network');
   const sentences = [`Service "${c.service}" runs a ${label} connector (${scope}), which ${c.provider === 'cloudflared' ? 'can publish whatever its ingress routes to, to anyone on the internet through Cloudflare\'s edge' : `opens what it reaches to ${tunnelScopePhrase(c.provider)}`}.${audienceCaveat(c.provider)}`];
-  if (certain.length > 0) {
-    const { verb, they } = shareVerb(certain);
+  if (namespaced.length > 0) {
+    const { verb, they } = shareVerb(namespaced);
     sentences.push(c.provider === 'cloudflared'
-      ? `${quotedList(certain)} ${verb} the connector's network namespace, so the connector can reach ${certain.length > 1 ? 'them' : 'it'} on localhost; whether Cloudflare's ingress routes incoming requests there is unverified.`
-      : `${quotedList(certain)} ${verb} the connector's network namespace, so ${they} reachable at the connector's own address.`);
+      ? `${quotedList(namespaced)} ${verb} the connector's network namespace, so the connector can reach ${namespaced.length > 1 ? 'them' : 'it'} on localhost; whether Cloudflare's ingress routes incoming requests there is unverified.`
+      : `${quotedList(namespaced)} ${verb} the connector's network namespace, so ${they} reachable at the connector's own address.`);
   }
   if (networked.length > 0) {
     sentences.push(`${quotedList(networked)} ${shareVerb(networked).verb} a network with the connector and can be reached if the connector's routing points there.`);

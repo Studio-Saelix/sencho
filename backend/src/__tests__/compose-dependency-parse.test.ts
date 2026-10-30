@@ -182,8 +182,15 @@ describe('parseComposeDependencies - what Compose resolves before the services a
       '  tun:',
       '    <<: *cf',
       '',
-    ].join('\n'));
+    ].join('\n'), { mergeKeys: true });
     expect(r.services[0]).toMatchObject({ name: 'tun', image: 'cloudflare/cloudflared:latest', envKeys: ['TUNNEL_TOKEN'], commandHints: ['tunnel'] });
+  });
+
+  it('reads a merge key as written unless the caller opts in, so stored drift baselines keep their meaning', () => {
+    const file = 'x-web: &web\n  ports:\n    - "8080:80"\n  networks: [front]\nservices:\n  web:\n    <<: *web\n';
+    expect(parseComposeDependencies(file).services[0]).toMatchObject({ ports: [], networks: [] });
+    expect(parseComposeDependencies(file, { mergeKeys: true }).services[0]).toMatchObject({ networks: ['front'] });
+    expect(parseComposeDependencies(file, { mergeKeys: true }).services[0].ports).toHaveLength(1);
   });
 
   it('flags a layer that uses a !reset or !override tag, and carries the flag through a merge', () => {

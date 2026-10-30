@@ -1,7 +1,8 @@
 /**
  * Docker-backed: the tunnel facts the light summary reports must match a real
  * `docker compose config` render for the configuration shapes the summary
- * resolves itself (service env files, interpolation, and COMPOSE_FILE layers).
+ * resolves itself (service env files, interpolation, YAML merge keys, and
+ * COMPOSE_FILE layers) and report a stack whose env file is missing as unreadable.
  * Skipped automatically when Docker is unavailable.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
