@@ -323,6 +323,14 @@ describe('MobileFleet crowded node row', () => {
       pin: 'Pilot',
       node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
     },
+    {
+      // The only case that may ellipsize: the name alone is wider than the
+      // row, so max-w-full caps it and truncate supplies the ellipsis.
+      label: 'a name wider than the card',
+      name: 'sencho-test-01-primary-europe-west-availability-zone-one',
+      pin: 'Pilot',
+      node: { type: 'remote', mode: 'pilot_agent', status: 'offline', cordoned: true },
+    },
   ];
 
   it.each(cases)('keeps the name legible with $label', async ({ name, pin, node, active, devImage }) => {
