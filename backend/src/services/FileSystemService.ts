@@ -1292,13 +1292,18 @@ export class FileSystemService {
         { code: 'stack_deletion_in_progress' },
       );
     }
+    const baseResolved = path.resolve(this.baseDir);
+    const resolvedDir = path.resolve(stackDir);
+    if (!resolvedDir.startsWith(baseResolved + path.sep)) {
+      throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+    }
     try {
-      await fsPromises.access(stackDir);
+      await fsPromises.access(resolvedDir);
       return false;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.mkdir(resolvedDir, { recursive: true });
     return true;
   }
 
