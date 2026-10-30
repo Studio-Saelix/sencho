@@ -291,14 +291,12 @@ function skipToStatement(text: string, from: number): number {
 
 /**
  * Read one file's assignments into `assign`, resolving references through
- * `lookup` (the process environment, then everything already read). `onKey` is
- * told every assignment name it sees, including one that only inherits a value.
+ * `lookup` (the process environment, then everything already read).
  */
 function parseEnvFileText(
   content: string,
   lookup: ComposeEnvLookup,
   assign: (name: string, value: string) => void,
-  onKey?: (name: string) => void,
 ): void {
   let cursor = 0;
   for (;;) {
@@ -344,7 +342,6 @@ function parseEnvFileText(
       // assignment (a bare `NAME`, or `export NAME`, with no line break).
       const key = trimRightUnicodeSpace(statement);
       if (key === '' || key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
-      onKey?.(key);
       const inheritedValue = lookup(key);
       if (inheritedValue !== undefined) assign(key, inheritedValue);
       return;
@@ -352,7 +349,6 @@ function parseEnvFileText(
 
     const key = trimRightUnicodeSpace(statement.slice(0, keyEnd));
     if (key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
-    onKey?.(key);
     cursor += keyEnd + 1;
 
     if (inherited) {
@@ -424,19 +420,6 @@ function readQuotedValue(text: string, openIndex: number, quote: string): { raw:
 }
 
 /**
- * The assignment KEY names of an env file, in file order, without their values.
- * Throws `ComposeEnvFileError` when the file uses syntax this Compose reader
- * cannot reproduce, so a caller never treats a partially understood file as
- * complete.
- */
-export function composeEnvFileKeyNames(content: string): string[] {
-  const keys: string[] = [];
-  const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
-  parseEnvFileText(text, () => undefined, () => undefined, name => keys.push(name));
-  return [...new Set(keys)];
-}
-
-/**
  * The interpolation environment Compose builds from a stack's env files: the
  * process environment first, then everything read so far, in file order. A name
  * that is set to an empty string is present, which is what separates `${VAR}`
@@ -459,8 +442,22 @@ export class ComposeEnvFiles {
     return this.values.get(name);
   }
 
-  /** Read one file's text, adding its assignments. Throws on unreadable syntax. */
-  read(content: string): void {
+  /** The names the files read so far assigned, in file order. A name that only
+   *  inherits (`NAME` on its own line) is included when the base lookup or an
+   *  earlier file answers it, and left out otherwise, as Compose leaves it out
+   *  of the container's environment. */
+  assignedNames(): string[] {
+    return [...this.values.keys()];
+  }
+
+  /** Read one file's text, adding its assignments. Throws on unreadable syntax.
+   *  `raw` is Compose's `format: raw`: each line is `NAME=value` with the value
+   *  kept literally, quotes, `$` and `#` included. */
+  read(content: string, options: { raw?: boolean } = {}): void {
+    if (options.raw) {
+      this.readRaw(content);
+      return;
+    }
     // Compose reads a file's bytes and drops a leading BOM before parsing it
     // (`bytes.TrimPrefix(data, utf8BOM)`), which is what an editor-saved file
     // starts with. Only the first character is considered, so a BOM elsewhere
@@ -469,5 +466,27 @@ export class ComposeEnvFiles {
     parseEnvFileText(text, (name) => this.lookup(name), (name, value) => {
       this.values.set(name, value);
     });
+  }
+
+  private readRaw(content: string): void {
+    // Compose's raw reader skips blank lines and lines whose first non-space
+    // character is `#`, rejects a name that is empty or holds whitespace, and
+    // lets a line with no `=` inherit the name's value. Whether it drops a
+    // leading BOM, as it does for a dotenv file, is unverified, so this reader
+    // refuses one rather than guess.
+    if (content.startsWith(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file starts with a byte order mark');
+    for (const line of content.split('\n')) {
+      const entry = (line.endsWith('\r') ? line.slice(0, -1) : line).trimStart();
+      if (entry === '' || entry.startsWith(COMMENT)) continue;
+      const eq = entry.indexOf('=');
+      const name = eq === -1 ? entry : entry.slice(0, eq);
+      if (name === '' || /\s/.test(name)) throw new ComposeEnvFileError('a raw variable name is empty or contains whitespace');
+      if (eq !== -1) {
+        this.values.set(name, entry.slice(eq + 1));
+        continue;
+      }
+      const inherited = this.lookup(name);
+      if (inherited !== undefined) this.values.set(name, inherited);
+    }
   }
 }

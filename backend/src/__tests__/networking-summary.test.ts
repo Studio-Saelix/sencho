@@ -739,6 +739,78 @@ describe('networking summary', () => {
     expect(res.body.unreadable.stacks).toContain(STACK);
   });
 
+  describe('effective environment assignments', () => {
+    const ts = (service: string) => `services:\n  ts:\n    image: tailscale/tailscale\n${service}  app:\n    image: example/app:1\n`;
+    const edge = (service: string) => `services:\n  edge:\n    image: example/edge:1\n${service}  app:\n    image: example/app:1\n`;
+    const WG = (port: string) => `services:\n  wg:\n    image: lscr.io/linuxserver/wireguard:latest\n    ports:\n      - ${port}\n  app:\n    image: example/app:1\n`;
+
+    // Each case states what `docker compose config` renders for the same files
+    // (see the Docker-backed parity cases) and what the summary must report.
+    it.each<[string, Record<string, string>, boolean]>([
+      ['a long-form protocol the project environment answers', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=udp\n' }, true],
+      ['a long-form protocol that resolves to tcp', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=tcp\n' }, false],
+      ['an upper-case long-form protocol', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: UDP }') }, true],
+      ['a short-form protocol the project environment answers', { 'compose.yaml': WG('"127.0.0.1:51820:51820/${PROTO}"'), '.env': 'PROTO=udp\n' }, true],
+      ['a required reference to an earlier assignment in the same env_file', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nARGS=--advertise-exit-node\nTS_EXTRA_ARGS=${ARGS:?set ARGS}\n' }, true],
+      ['a required reference the project environment answers', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=${ARGS:?set ARGS}\n', '.env': 'ARGS=--advertise-routes=10.0.0.0/8\n' }, true],
+      ['a bare env_file key with nothing to inherit', { 'compose.yaml': edge('    env_file: ./edge.env\n'), 'edge.env': 'TUNNEL_TOKEN\n' }, false],
+      ['a bare env_file key the project environment answers', { 'compose.yaml': edge('    env_file: ./edge.env\n'), 'edge.env': 'TUNNEL_TOKEN\n', '.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a quoted flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': "TS_AUTHKEY=k\nTS_EXTRA_ARGS='--advertise-exit-node'\n" }, false],
+      ['an unquoted flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n' }, true],
+      ['a null environment key over an env_file provider key', { 'compose.yaml': edge('    env_file: ./edge.env\n    environment:\n      TUNNEL_TOKEN:\n'), 'edge.env': 'TUNNEL_TOKEN=t\n' }, false],
+      ['a null environment key over an env_file forwarding key', { 'compose.yaml': ts('    env_file: ./ts.env\n    environment:\n      TS_ROUTES: ~\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_ROUTES=10.0.0.0/8\n' }, false],
+      ['a list-form key with no value that nothing answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n') }, false],
+      ['a list-form key with no value that the project environment answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n'), '.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a null TS_EXTRA_ARGS over an env_file value', { 'compose.yaml': ts('    env_file: ./ts.env\n    environment:\n      TS_EXTRA_ARGS:\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n' }, false],
+      ['a later boolean flag between repeated forwarding flags', { 'compose.yaml': ts('    environment:\n      TS_AUTHKEY: k\n      TS_EXTRA_ARGS: --advertise-exit-node=true --accept-dns --advertise-exit-node=false\n') }, false],
+      ['a later boolean flag between repeated flags in an env_file', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-routes=10.0.0.0/8 --accept-routes --advertise-routes=\n' }, false],
+    ])('%s', async (_label, files, exposed) => {
+      for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+      if (exposed) {
+        expect(res.body.exposed.stacks).toContain(STACK);
+        expect(res.body.unknownExposure.stacks).toContain(STACK);
+      } else {
+        expect(res.body.exposed.stacks).not.toContain(STACK);
+      }
+    });
+
+    it('lets a later layer unset a key an earlier layer set, and set one it left unset', async () => {
+      fs.writeFileSync(path.join(stackDir, 'override.yaml'), 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN:\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    environment:\n      TUNNEL_TOKEN: t\n'));
+      fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=compose.yaml:override.yaml\n');
+      const unset = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(unset.body.exposed.stacks).not.toContain(STACK);
+      expect(unset.body.unreadable.stacks).not.toContain(STACK);
+
+      fs.writeFileSync(path.join(stackDir, 'override.yaml'), 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN: t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    environment:\n      TUNNEL_TOKEN:\n'));
+      const set = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(set.body.exposed.stacks).toContain(STACK);
+    });
+
+    it.each([
+      ['a bare environment key', edge('    environment:\n      - TUNNEL_TOKEN\n'), {}],
+      ['a bare env_file key', edge('    env_file: ./edge.env\n'), { 'edge.env': 'TUNNEL_TOKEN\n' }],
+      ['a null environment key', edge('    environment:\n      TUNNEL_TOKEN:\n'), {}],
+    ])('reports %s as unreadable when the interpolation lookup is unavailable', async (_label, compose, extra) => {
+      fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose);
+      for (const [file, content] of Object.entries(extra)) fs.writeFileSync(path.join(stackDir, file), content);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    });
+
+    it('reports a raw env_file it cannot read the way Compose does as unreadable', async () => {
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), 'export TUNNEL_TOKEN=t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    env_file:\n      - path: ./edge.env\n        format: raw\n'));
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    });
+  });
+
   it('keeps one stack\'s unexpected failure from failing the whole node summary', async () => {
     const other = `${STACK}-other`;
     const otherDir = path.join(process.env.COMPOSE_DIR as string, other);

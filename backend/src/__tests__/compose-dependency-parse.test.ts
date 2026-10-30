@@ -101,6 +101,73 @@ describe('parseComposeDependencies - ports', () => {
     const r = parseComposeDependencies('services:\n  web:\n    ports:\n      - target: 80\n        published: 8080\n        host_ip: 10.0.0.5\n        protocol: udp\n');
     expect(r.services[0].ports).toEqual([{ hostIp: '10.0.0.5', publishedPort: 8080, protocol: 'udp' }]);
   });
+
+  it('interpolates a long-form protocol like the published port and host_ip, and defaults an empty one to tcp', () => {
+    const yaml = 'services:\n  web:\n    ports:\n      - { target: 80, published: "${PORT}", host_ip: "${IP}", protocol: "${PROTO}" }\n';
+    const vars: Record<string, string> = { PORT: '51820', IP: '127.0.0.1', PROTO: 'udp' };
+    const lookup = (name: string) => vars[name];
+    expect(parseComposeDependencies(yaml, { lookup }).services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 51820, protocol: 'udp' }]);
+    expect(parseComposeDependencies(yaml, { lookup: name => (name === 'PROTO' ? '' : vars[name]) }).services[0].ports[0].protocol).toBe('tcp');
+    // The short form expands the whole entry, so both forms agree.
+    const short = 'services:\n  web:\n    ports:\n      - "${IP}:${PORT}:80/${PROTO}"\n';
+    expect(parseComposeDependencies(short, { lookup }).services[0].ports).toEqual(parseComposeDependencies(yaml, { lookup }).services[0].ports);
+    // A template Compose refuses stays visible to a caller that needs a complete answer.
+    const required = 'services:\n  web:\n    ports:\n      - { target: 80, published: 51820, protocol: "${PROTO:?set it}" }\n';
+    expect(parseComposeDependencies(required, { lookup: () => undefined }).services[0].unresolvedDetection).toBe(true);
+  });
+});
+
+describe('parseComposeDependencies - environment keys', () => {
+  const parse = (environment: string, lookup?: (name: string) => string | undefined) =>
+    parseComposeDependencies(`services:\n  a:\n    image: a\n    environment:\n${environment}`, { lookup }).services[0];
+
+  it('counts a key with a value, including an empty one, as set', () => {
+    const svc = parse('      A: "1"\n      B: ""\n      C: 0\n', () => undefined);
+    expect(svc.envKeys).toEqual(['A', 'B', 'C']);
+    expect(svc.unsetEnvKeys).toEqual([]);
+    expect(svc.needsInterpolation).toBe(false);
+  });
+
+  it('sets a value-less key only when the lookup answers it, in map and list form', () => {
+    const vars: Record<string, string> = { ANSWERED: 'x', EMPTY: '' };
+    const lookup = (name: string) => vars[name];
+    for (const environment of [
+      '      ANSWERED:\n      EMPTY: ~\n      MISSING:\n',
+      '      - ANSWERED\n      - EMPTY\n      - MISSING\n',
+    ]) {
+      const svc = parse(environment, lookup);
+      expect(svc.envKeys).toEqual(['ANSWERED', 'EMPTY']);
+      expect(svc.unsetEnvKeys).toEqual(['MISSING']);
+      expect(svc.needsInterpolation).toBe(true);
+    }
+  });
+
+  it('cannot tell without a lookup, so it keeps the key and asks for one', () => {
+    const svc = parse('      TUNNEL_TOKEN:\n');
+    expect(svc.envKeys).toEqual(['TUNNEL_TOKEN']);
+    expect(svc.unsetEnvKeys).toEqual([]);
+    expect(svc.needsInterpolation).toBe(true);
+  });
+
+  it('lets a later layer replace an earlier layer\'s entry for a key, whichever way it goes', () => {
+    const lookup = () => undefined;
+    const layer = (environment: string) => parseComposeDependencies(`services:\n  a:\n    image: a\n    environment:\n${environment}`, { lookup });
+    const unset = mergeDeclaredCompose([layer('      K: v\n      KEEP: v\n'), layer('      K:\n')]).services[0];
+    expect(unset.envKeys).toEqual(['KEEP']);
+    expect(unset.unsetEnvKeys).toEqual(['K']);
+    const set = mergeDeclaredCompose([layer('      K:\n'), layer('      K: v\n')]).services[0];
+    expect(set.envKeys).toEqual(['K']);
+    expect(set.unsetEnvKeys).toEqual([]);
+  });
+
+  it('records an env_file written with format: raw', () => {
+    const svc = parseComposeDependencies('services:\n  a:\n    image: a\n    env_file:\n      - plain.env\n      - path: raw.env\n        format: raw\n      - path: dotenv.env\n        format: dotenv\n').services[0];
+    expect(svc.envFiles).toEqual([
+      { path: 'plain.env', required: true },
+      { path: 'raw.env', required: true, raw: true },
+      { path: 'dotenv.env', required: true },
+    ]);
+  });
 });
 
 describe('parseComposeDependencies - network_mode', () => {

@@ -39,6 +39,144 @@ function reachedServices(stackDir: string, files: string[]): string[] {
   return [...tunnelExposureByService(detectTunnels(model)).keys()].sort();
 }
 
+/**
+ * Each case is a stack as authored. The oracle is `docker compose config`: the
+ * services effective detection reaches on its output are the services the light
+ * summary must report as exposed (and, with no intent set, unknown), and the
+ * summary must not call the stack unreadable. The cases are the input variants
+ * the summary adapts: port protocols, env-file assignments and formats, unset
+ * variables, and repeated Tailscale flags.
+ */
+interface ParityCase {
+  name: string;
+  files: Record<string, string>;
+  /** Compose files to render, in order; `compose.yaml` alone by default. */
+  layers?: string[];
+  reached: string[];
+  /** The stack is unknown-exposure without a tunnel path: it publishes a port, even on loopback. */
+  publishes?: boolean;
+}
+
+const WIREGUARD = (ports: string, extra = '') => [
+  'services:',
+  '  wireguard:',
+  '    image: lscr.io/linuxserver/wireguard:latest',
+  '    ports:',
+  ports,
+  '  app:',
+  '    image: busybox:1.36.1',
+  extra,
+].join('\n') + '\n';
+
+const TAILSCALE = (service: string) => [
+  'services:',
+  '  ts:',
+  '    image: tailscale/tailscale',
+  service,
+  '  app:',
+  '    image: busybox:1.36.1',
+  '',
+].join('\n');
+
+const CUSTOM = (service: string) => [
+  'services:',
+  '  edge:',
+  '    image: example/edge:1',
+  service,
+  '  app:',
+  '    image: busybox:1.36.1',
+  '',
+].join('\n');
+
+const PARITY: ParityCase[] = [
+  // Interpolated and differently written port protocols (a UDP WireGuard port on loopback).
+  { name: 'short-form UDP on loopback', files: { 'compose.yaml': WIREGUARD('      - "127.0.0.1:51820:51820/udp"') }, reached: ['app'] },
+  { name: 'long-form UDP on loopback', files: { 'compose.yaml': WIREGUARD('      - { target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: udp }') }, reached: ['app'] },
+  { name: 'long-form protocol from the project environment', files: { 'compose.yaml': WIREGUARD('      - { target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=udp\n' }, reached: ['app'] },
+  { name: 'short-form protocol from the project environment', files: { 'compose.yaml': WIREGUARD('      - "127.0.0.1:51820:51820/${PROTO}"'), '.env': 'PROTO=udp\n' }, reached: ['app'] },
+  { name: 'long-form protocol with a default', files: { 'compose.yaml': WIREGUARD('      - { target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO:-udp}" }') }, reached: ['app'] },
+  { name: 'long-form upper-case UDP', files: { 'compose.yaml': WIREGUARD('      - { target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: UDP }') }, reached: ['app'] },
+  { name: 'long-form protocol that resolves to TCP', files: { 'compose.yaml': WIREGUARD('      - { target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=tcp\n' }, reached: [], publishes: true },
+
+  // Env-file assignments Compose resolves in order.
+  {
+    name: 'a required reference to an earlier assignment in the same env file',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nARGS=--advertise-exit-node\nTS_EXTRA_ARGS=${ARGS:?must set ARGS}\n' },
+    reached: ['app'],
+  },
+  {
+    name: 'a required reference resolved through the project environment',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${ARGS:?must set ARGS}\n', '.env': 'ARGS=--advertise-routes=10.0.0.0/8\n' },
+    reached: ['app'],
+  },
+  { name: 'a bare provider key in an env file with no value to inherit', files: { 'compose.yaml': CUSTOM('    env_file: ./edge.env'), 'edge.env': 'TUNNEL_TOKEN\n' }, reached: [] },
+  { name: 'a bare provider key in an env file that inherits a project value', files: { 'compose.yaml': CUSTOM('    env_file: ./edge.env'), 'edge.env': 'TUNNEL_TOKEN\n', '.env': 'TUNNEL_TOKEN=tunnel-secret\n' }, reached: ['app'] },
+  { name: 'a provider key assigned an empty value', files: { 'compose.yaml': CUSTOM('    env_file: ./edge.env'), 'edge.env': 'TUNNEL_TOKEN=\n' }, reached: ['app'] },
+  {
+    name: 'a raw env file keeps the quotes around a flag',
+    files: { 'compose.yaml': TAILSCALE('    env_file:\n      - path: ./ts.env\n        format: raw'), 'ts.env': "TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS='--advertise-exit-node'\n" },
+    reached: [],
+  },
+  {
+    name: 'a raw env file with an unquoted flag',
+    files: { 'compose.yaml': TAILSCALE('    env_file:\n      - path: ./ts.env\n        format: raw'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n' },
+    reached: ['app'],
+  },
+
+  // `environment` entries with no value.
+  {
+    name: 'an unresolved environment key overrides an env-file provider key',
+    files: { 'compose.yaml': CUSTOM('    env_file: ./edge.env\n    environment:\n      TUNNEL_TOKEN:'), 'edge.env': 'TUNNEL_TOKEN=tunnel-secret\n' },
+    reached: [],
+  },
+  {
+    name: 'an unresolved environment key set to null removes an env-file forwarding key',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env\n    environment:\n      TS_ROUTES: ~'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_ROUTES=10.0.0.0/8\n' },
+    reached: [],
+  },
+  {
+    name: 'a value-less environment entry in list form that the project environment answers',
+    files: { 'compose.yaml': CUSTOM('    environment:\n      - TUNNEL_TOKEN'), '.env': 'TUNNEL_TOKEN=tunnel-secret\n' },
+    reached: ['app'],
+  },
+  { name: 'a value-less environment entry in list form that nothing answers', files: { 'compose.yaml': CUSTOM('    environment:\n      - TUNNEL_TOKEN') }, reached: [] },
+  { name: 'a value-less environment key in map form that nothing answers', files: { 'compose.yaml': CUSTOM('    environment:\n      TUNNEL_TOKEN:') }, reached: [] },
+  {
+    name: 'a later layer unsets a key an earlier layer set',
+    files: { 'compose.yaml': CUSTOM('    environment:\n      TUNNEL_TOKEN: tunnel-secret'), 'override.yaml': 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN:\n' },
+    layers: ['compose.yaml', 'override.yaml'],
+    reached: [],
+  },
+  {
+    name: 'a later layer sets a key an earlier layer left unset',
+    files: { 'compose.yaml': CUSTOM('    environment:\n      TUNNEL_TOKEN:'), 'override.yaml': 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN: tunnel-secret\n' },
+    layers: ['compose.yaml', 'override.yaml'],
+    reached: ['app'],
+  },
+
+  // Repeated forwarding flags with a boolean between them.
+  {
+    name: 'a disabled exit node after an intervening boolean flag',
+    files: { 'compose.yaml': TAILSCALE('    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: "--advertise-exit-node=true --accept-dns --advertise-exit-node=false"') },
+    reached: [],
+  },
+  {
+    name: 'emptied routes after an intervening boolean flag',
+    files: { 'compose.yaml': TAILSCALE('    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: "--advertise-routes=10.0.0.0/8 --accept-routes --advertise-routes="') },
+    reached: [],
+  },
+  {
+    name: 'a flag that is the value of the flag before it',
+    files: { 'compose.yaml': TAILSCALE('    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: "--advertise-exit-node --hostname --advertise-exit-node=false"') },
+    reached: ['app'],
+  },
+  {
+    name: 'a disabled exit node after a boolean flag, in an env file',
+    files: { 'compose.yaml': TAILSCALE('    env_file: ./ts.env'), 'ts.env': 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node --accept-dns --advertise-exit-node=false\n' },
+    reached: [],
+  },
+];
+
 describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs Compose renders', () => {
   let tmpDir: string;
   let stackDir: string;
@@ -158,5 +296,20 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     const summary = await computeNodeNetworkingSummary(1);
     expect(summary.unreadable?.stacks).toContain(STACK);
     expect(summary.exposed.stacks).not.toContain(STACK);
+  });
+
+  it.each(PARITY)('$name', async ({ files, layers = ['compose.yaml'], reached, publishes = false }) => {
+    fs.rmSync(stackDir, { recursive: true, force: true });
+    fs.mkdirSync(stackDir, { recursive: true });
+    for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);
+    if (layers.length > 1) fs.appendFileSync(path.join(stackDir, '.env'), `COMPOSE_FILE=${layers.join(':')}\n`);
+
+    expect(reachedServices(stackDir, layers)).toEqual(reached);
+    const summary = await computeNodeNetworkingSummary(1);
+    expect(summary.unreadable?.stacks).not.toContain(STACK);
+    if (reached.length > 0) expect(summary.exposed.stacks).toContain(STACK);
+    else expect(summary.exposed.stacks).not.toContain(STACK);
+    if (reached.length > 0 || publishes) expect(summary.unknownExposure.stacks).toContain(STACK);
+    else expect(summary.unknownExposure.stacks).not.toContain(STACK);
   });
 });

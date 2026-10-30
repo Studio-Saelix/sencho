@@ -310,7 +310,9 @@ function parseStorageMounts(volumes: unknown, tmpfs: unknown): EffStorageMount[]
   return mounts;
 }
 
-/** Environment KEY names only. Never returns a value. */
+/** Environment KEY names only. Never returns a value. A rendered `KEY: null` is
+ *  a variable Compose could not resolve and leaves out of the container's
+ *  environment, so it names no key. */
 function envKeysOf(env: unknown): string[] {
   if (Array.isArray(env)) {
     return env
@@ -319,7 +321,9 @@ function envKeysOf(env: unknown): string[] {
       .map(s => s.split('=')[0])
       .filter(Boolean);
   }
-  if (env && typeof env === 'object') return Object.keys(env as Record<string, unknown>);
+  if (env && typeof env === 'object') {
+    return Object.entries(env as Record<string, unknown>).filter(([, value]) => value !== null).map(([key]) => key);
+  }
   return [];
 }
 
@@ -550,7 +554,9 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       capAdd: stringList(svc.cap_add),
       devices: deviceHostPaths(svc.devices),
       commandHints: cloudflaredCommandHints(svc.command, svc.entrypoint),
-      tailscaleFlags: tailscaleForwardFlags(svc.environment),
+      // Rendered output has resolved every variable it could: a null
+      // `TS_EXTRA_ARGS` is unset, so the empty lookup is the whole environment.
+      tailscaleFlags: tailscaleForwardFlags(svc.environment, () => undefined),
       hasServiceUrl: serviceUrlFromLabels(svc.labels) !== null,
     });
   }

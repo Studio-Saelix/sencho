@@ -19,6 +19,8 @@ export interface DeclaredPort {
 export interface DeclaredEnvFile {
   path: string;
   required: boolean;
+  /** `format: raw` keeps values literal: no quotes, escapes, or interpolation. */
+  raw?: boolean;
 }
 
 export interface DeclaredService {
@@ -34,9 +36,14 @@ export interface DeclaredService {
   image?: string;
   /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
   networkMode?: string;
-  /** Environment KEY names (never values), for tunnel detection. Absent on hand-built fixtures. */
+  /** Environment KEY names (never values) the service's `environment` sets, for
+   *  tunnel detection. Absent on hand-built fixtures. */
   envKeys?: string[];
-  /** Service `env_file:` entries, whose KEY names join `envKeys`. */
+  /** `environment` keys written with no value (`KEY` or `KEY:`) that the
+   *  interpolation environment does not answer. Compose leaves them out of the
+   *  container's environment, which also overrides an `env_file` assignment. */
+  unsetEnvKeys?: string[];
+  /** Service `env_file:` entries, whose assigned KEY names join `envKeys`. */
   envFiles?: DeclaredEnvFile[];
   /** `command` hints alone. Kept separate from `entrypointHints` so an
    *  override that replaces only one of the two keeps the other. */
@@ -57,7 +64,9 @@ export interface DeclaredService {
   capAdd?: string[];
   /** Host device paths from `devices`, for tunnel detection. */
   devices?: string[];
-  /** A detection-relevant field holds a Compose `${VAR}`/`$VAR` to interpolate. */
+  /** A detection-relevant field holds a Compose `${VAR}`/`$VAR` to interpolate,
+   *  or an `environment` key has no value, so only the interpolation
+   *  environment can say whether it is set. */
   needsInterpolation?: boolean;
   /** A detection field still holds a template after interpolation, so the
    *  stack's exact exposure cannot be established. */
@@ -97,17 +106,44 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Environment KEY names from list (`KEY=value`) or map form. Values are never kept. */
-function envKeyNames(env: unknown, lookup?: ComposeEnvLookup): string[] {
+/** What a service's `environment` (list `KEY=value` or map form) sets. */
+interface EnvironmentKeys {
+  /** Keys with a value, or without one that the lookup answers. */
+  set: string[];
+  /** Keys without a value that the lookup does not answer. */
+  unset: string[];
+  /** Some key has no value, so a caller with no lookup cannot tell the two apart. */
+  needsLookup: boolean;
+}
+
+/** Environment KEY names from list (`KEY=value`) or map form, split by whether
+ *  Compose sets them. A key with no value (`KEY`, `KEY:`, `KEY: ~`) takes the
+ *  variable of the same name and is left out when that is unset. Values are
+ *  never kept. With no lookup, such a key counts as set. */
+function environmentKeys(env: unknown, lookup?: ComposeEnvLookup): EnvironmentKeys {
+  const keys: EnvironmentKeys = { set: [], unset: [], needsLookup: false };
+  const add = (key: string, valued: boolean): void => {
+    if (!key) return;
+    if (valued) {
+      keys.set.push(key);
+      return;
+    }
+    keys.needsLookup = true;
+    if (!lookup || lookup(key) !== undefined) keys.set.push(key);
+    else keys.unset.push(key);
+  };
   if (Array.isArray(env)) {
-    return env
-      .map(asString)
-      .filter((v): v is string => v !== undefined)
-      .map(v => interpolateString(v, lookup) ?? v)
-      .map(v => v.split('=')[0])
-      .filter(Boolean);
+    for (const entry of env) {
+      const text = asString(entry);
+      if (text === undefined) continue;
+      const expanded = interpolateString(text, lookup) ?? text;
+      const eq = expanded.indexOf('=');
+      add(eq === -1 ? expanded : expanded.slice(0, eq), eq !== -1);
+    }
+  } else if (env && typeof env === 'object') {
+    for (const [key, value] of Object.entries(env as Record<string, unknown>)) add(key, value !== null && value !== undefined);
   }
-  return env && typeof env === 'object' ? Object.keys(env as Record<string, unknown>) : [];
+  return keys;
 }
 
 /** A detection-relevant string, expanded the way Compose interpolates it. On a
@@ -176,7 +212,9 @@ function envFileEntries(value: unknown): DeclaredEnvFile[] {
     if (entry && typeof entry === 'object') {
       const obj = entry as Record<string, unknown>;
       const filePath = asString(obj.path);
-      if (filePath !== undefined) return { path: filePath, required: obj.required !== false };
+      if (filePath !== undefined) {
+        return { path: filePath, required: obj.required !== false, ...(obj.format === 'raw' ? { raw: true } : {}) };
+      }
     }
     return null;
   };
@@ -339,7 +377,7 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     return {
       hostIp: interpolateString(asString(obj.host_ip), lookup) ?? '',
       publishedPort: published,
-      protocol: asString(obj.protocol) ?? 'tcp',
+      protocol: interpolateString(asString(obj.protocol), lookup) || 'tcp',
     };
   }
   return null;
@@ -454,7 +492,8 @@ export function parseComposeDependencies(
     const ports = Array.isArray(svc.ports)
       ? svc.ports.map(port => declaredPort(port, lookup)).filter((p): p is DeclaredPort => p !== null)
       : [];
-    const rawEnvKeys = envKeyNames(svc.environment);
+    const rawEnvironment = environmentKeys(svc.environment);
+    const environment = environmentKeys(svc.environment, lookup);
     const commandDeclared = svc.command !== undefined;
     const entrypointDeclared = svc.entrypoint !== undefined;
     const rawEnvFiles = envFileEntries(svc.env_file);
@@ -472,7 +511,7 @@ export function parseComposeDependencies(
       asString(svc.image),
       asString(svc.network_mode),
       ...collectKeys(svc.networks),
-      ...rawEnvKeys,
+      ...rawEnvironment.set,
       ...rawCommandParts,
       ...rawEnvFiles.map(entry => entry.path),
       ...stringList(svc.cap_add),
@@ -480,7 +519,7 @@ export function parseComposeDependencies(
       ...volumeStrings(svc.volumes),
       ...portStrings(svc.ports),
     ];
-    const needsInterpolation = detectionInputs.some(holdsTemplate);
+    const needsInterpolation = detectionInputs.some(holdsTemplate) || rawEnvironment.needsLookup;
     const unresolvedDetection = needsInterpolation && detectionInputs.some(value => !expandsFully(value, lookup));
     services.push({
       name,
@@ -490,7 +529,8 @@ export function parseComposeDependencies(
       ports,
       image: interpolateString(asString(svc.image), lookup),
       networkMode: interpolateString(asString(svc.network_mode), lookup),
-      envKeys: envKeyNames(svc.environment, lookup),
+      envKeys: environment.set,
+      unsetEnvKeys: environment.unset,
       envFiles,
       commandHints: cloudflaredCommandHints(interpolateCommand(svc.command, lookup), undefined),
       entrypointHints: cloudflaredCommandHints(undefined, interpolateCommand(svc.entrypoint, lookup)),
@@ -536,7 +576,8 @@ function unionKeys(a: string[] | undefined, b: string[] | undefined): string[] {
  * key (top-level networks and volumes merge field by field), a later scalar
  * replaces an earlier one, `ports` and `env_file` entries append, and the other
  * lists (`depends_on`, networks, volumes, `cap_add`, `devices`) union.
- * `environment` is represented by its KEY names, so later layers add keys;
+ * `environment` is represented by its KEY names, so later layers add keys and
+ * a later value-less entry removes an earlier one;
  * `command`, `entrypoint`, and `TS_EXTRA_ARGS` replace when the later layer
  * declares them.
  */
@@ -569,6 +610,7 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
           volumes: [...svc.volumes],
           ports: [...svc.ports],
           envKeys: [...(svc.envKeys ?? [])],
+          unsetEnvKeys: [...(svc.unsetEnvKeys ?? [])],
           envFiles: [...(svc.envFiles ?? [])],
           commandHints: [...(svc.commandHints ?? [])],
           entrypointHints: [...(svc.entrypointHints ?? [])],
@@ -587,7 +629,9 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
         ports: [...prior.ports, ...svc.ports],
         image: svc.image ?? prior.image,
         networkMode: svc.networkMode ?? prior.networkMode,
-        envKeys: unionKeys(prior.envKeys, svc.envKeys),
+        // A later layer's entry for a key replaces an earlier one, even a value-less one.
+        envKeys: unionKeys((prior.envKeys ?? []).filter(key => !(svc.unsetEnvKeys ?? []).includes(key)), svc.envKeys),
+        unsetEnvKeys: unionKeys((prior.unsetEnvKeys ?? []).filter(key => !(svc.envKeys ?? []).includes(key)), svc.unsetEnvKeys),
         envFiles: [...(prior.envFiles ?? []), ...(svc.envFiles ?? [])],
         commandHints: svc.commandDeclared === true ? svc.commandHints ?? [] : prior.commandHints,
         entrypointHints: svc.entrypointDeclared === true ? svc.entrypointHints ?? [] : prior.entrypointHints,

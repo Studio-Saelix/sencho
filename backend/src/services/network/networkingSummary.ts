@@ -8,12 +8,14 @@
  *
  * Tunnel detection needs the inputs Compose actually uses. The summary resolves
  * the deploy spec's layers, `COMPOSE_FILE`, auto-discovered override files,
- * YAML merge keys, service `env_file` KEY names plus the one `TS_EXTRA_ARGS`
+ * YAML merge keys, the names a service's `env_file` entries and `environment`
+ * set (a key with no value is set only when the interpolation environment
+ * answers it, and then overrides an `env_file`) plus the one `TS_EXTRA_ARGS`
  * value (parsed with the stack's interpolation environment, then discarded),
  * and interpolation, and follows networks and namespaces the same way the
  * detailed views do. When an input cannot be read completely (a required env
  * file, an include or extends, a `!reset` or `!override` tag, an unresolved
- * template in a detection field, or a layer selector it cannot reproduce), the
+ * template or value-less key in a detection field, or a layer selector it cannot reproduce), the
  * stack is reported as unreadable rather than counted as not exposed. It does
  * not apply Compose profiles, so a profile-gated connector counts as present.
  */
@@ -44,7 +46,7 @@ import {
   composeInterpolation,
 } from '../../utils/authoredComposeArgs';
 import { COMPOSE_OVERRIDE_FILENAMES } from '../../utils/composeFilenames';
-import { ComposeEnvFileError, ComposeEnvFiles, composeEnvFileKeyNames, type ComposeEnvLookup } from '../../utils/composeDotenv';
+import { ComposeEnvFileError, ComposeEnvFiles, type ComposeEnvLookup } from '../../utils/composeDotenv';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { isDebugEnabled } from '../../utils/debug';
 
@@ -103,11 +105,6 @@ function noteUnreadable(stack: string, reason: string, error?: unknown): void {
   }
   console.warn('[NetworkingSummary] Stack %s reported unreadable: %s%s.', sanitizeForLog(stack), reason, cause);
 }
-
-/** An env_file line that sets `TS_EXTRA_ARGS` from a variable the stack's
- *  interpolation environment must answer: a `${VAR}`/`$VAR` template in the
- *  value, or the bare name that inherits it, each with or without `export`. */
-const ENV_FILE_ARGS_NEEDS_LOOKUP = /^\s*(?:export\s+)?TS_EXTRA_ARGS(?:\s*[:=][^\n]*\$(?:\{|[A-Za-z_])|\s*$)/m;
 
 function isMissingFile(error: unknown): boolean {
   return !!error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
@@ -297,14 +294,18 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
 
   const fsSvc = FileSystemService.getInstance(nodeId);
   for (const service of declared.services) {
-    const keys = new Set(service.envKeys ?? []);
     // Compose merges env_file values into the container environment, so a
-    // Tailscale forwarding flag can live there too. Later files override the
-    // same key; a service `environment` entry overrides every env_file. Values
-    // may reference the stack's interpolation environment, so the reader starts
-    // from the lookup the rest of the detection fields use.
-    const reader = new ComposeEnvFiles(lookup ?? (() => undefined));
-    let envFileTemplate = false;
+    // provider key or Tailscale forwarding flag can live there too. Later files
+    // override the same key; a service `environment` entry overrides every
+    // env_file, even one with no value that leaves the key unset. The files are
+    // read in order with the stack's interpolation environment (the reader's
+    // base lookup), so a name that only inherits an unset variable is absent.
+    // With no lookup, a file that needed one cannot be judged.
+    let lookupNeeded = false;
+    const reader = new ComposeEnvFiles(lookup ?? (() => {
+      lookupNeeded = true;
+      return undefined;
+    }));
     for (const envFile of service.envFiles ?? []) {
       if (holdsTemplate(envFile.path)) {
         noteUnreadable(stack, 'a service env_file path is an unresolved template');
@@ -312,10 +313,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
         continue;
       }
       try {
-        const content = await fsSvc.readEnvFile(path.resolve(contents.projectDir, envFile.path));
-        for (const key of composeEnvFileKeyNames(content)) keys.add(key);
-        if (ENV_FILE_ARGS_NEEDS_LOOKUP.test(content)) envFileTemplate = true;
-        reader.read(content);
+        reader.read(await fsSvc.readEnvFile(path.resolve(contents.projectDir, envFile.path)), { raw: envFile.raw });
       } catch (error) {
         if (!envFile.required && isMissingFile(error)) continue;
         // Keys and flags this file would add are unknown, so no absence can be claimed.
@@ -323,11 +321,16 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
         unreadable = true;
       }
     }
-    if (lookup === undefined && envFileTemplate) unreadable = true;
+    if (lookupNeeded) unreadable = true;
+    const keys = new Set(reader.assignedNames());
+    for (const key of service.unsetEnvKeys ?? []) keys.delete(key);
+    for (const key of service.envKeys ?? []) keys.add(key);
     service.envKeys = [...keys];
     const extraArgs = reader.assigned('TS_EXTRA_ARGS');
     if (!service.tailscaleArgsDeclared && extraArgs !== undefined) {
-      service.tailscaleFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
+      // The reader has already interpolated (or kept literal) this value, so a
+      // `$` left in it is text, not a template for the flag reader to expand.
+      service.tailscaleFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs.split('$').join('$$') });
     }
   }
 

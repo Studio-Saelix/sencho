@@ -1,16 +1,29 @@
 /**
- * The key-name reader used by the node summary must see every assignment,
- * including Compose's inherited form where the file ends right after the name.
+ * The names a service env_file assigns are what Compose puts in the container's
+ * environment: read in file order with the same interpolation as the values, so
+ * a name that only inherits an unset variable is absent, and a `format: raw`
+ * file is read literally.
  */
 import { describe, expect, it } from 'vitest';
-import { ComposeEnvFiles, composeEnvFileKeyNames } from '../utils/composeDotenv';
+import { ComposeEnvFileError, ComposeEnvFiles } from '../utils/composeDotenv';
 
-describe('service env_file key names', () => {
-  it('keeps a bare final key as an inherited assignment', () => {
-    expect(composeEnvFileKeyNames('A=1\nB')).toEqual(['A', 'B']);
-    const reader = new ComposeEnvFiles(name => (name === 'B' ? 'from-process' : undefined));
-    reader.read('A=1\nB');
-    expect(reader.lookup('B')).toBe('from-process');
+const none = () => undefined;
+
+describe('service env_file assigned names', () => {
+  it('keeps a bare final key as an inherited assignment only when the variable is set', () => {
+    const set = new ComposeEnvFiles(name => (name === 'B' ? 'from-process' : undefined));
+    set.read('A=1\nB');
+    expect(set.assignedNames()).toEqual(['A', 'B']);
+    expect(set.lookup('B')).toBe('from-process');
+    const unset = new ComposeEnvFiles(none);
+    unset.read('A=1\nB');
+    expect(unset.assignedNames()).toEqual(['A']);
+  });
+
+  it('leaves out an inherited name with no value, with or without export', () => {
+    const files = new ComposeEnvFiles(none);
+    files.read('TUNNEL_TOKEN\nexport TUNNEL_TOKEN_FILE\nEMPTY=\n');
+    expect(files.assignedNames()).toEqual(['EMPTY']);
   });
 
   it('separates a file assignment from the interpolation environment', () => {
@@ -20,8 +33,45 @@ describe('service env_file key names', () => {
     expect(reader.assigned('TS_EXTRA_ARGS')).toBe('--advertise-exit-node');
   });
 
-  it('returns keys but never values', () => {
-    expect(composeEnvFileKeyNames('TUNNEL_TOKEN=secret\nTS_EXTRA_ARGS=--advertise-exit-node\n'))
-      .toEqual(['TUNNEL_TOKEN', 'TS_EXTRA_ARGS']);
+  it('resolves a required reference through an earlier assignment in the same file or the project environment', () => {
+    const files = new ComposeEnvFiles(name => (name === 'FROM_PROJECT' ? '--advertise-routes=10.0.0.0/8' : undefined));
+    files.read('ARGS=--advertise-exit-node\nTS_EXTRA_ARGS=${ARGS:?must set ARGS}\nOTHER=${FROM_PROJECT:?set it}\n');
+    expect(files.assignedNames()).toEqual(['ARGS', 'TS_EXTRA_ARGS', 'OTHER']);
+    expect(files.assigned('TS_EXTRA_ARGS')).toBe('--advertise-exit-node');
+    expect(() => new ComposeEnvFiles(none).read('TS_EXTRA_ARGS=${ARGS:?must set ARGS}\n')).toThrow(ComposeEnvFileError);
+  });
+
+  describe('format: raw', () => {
+    it('keeps quotes, dollar signs and comments in a value literally', () => {
+      const files = new ComposeEnvFiles(none);
+      files.read([
+        '# comment',
+        '',
+        "TS_EXTRA_ARGS='--advertise-exit-node'",
+        'TPL=${A}',
+        'QUOTED="q" # not a comment',
+        '  INDENT=3',
+        'EMPTY=',
+        '',
+      ].join('\r\n'), { raw: true });
+      expect(files.assigned('TS_EXTRA_ARGS')).toBe("'--advertise-exit-node'");
+      expect(files.assigned('TPL')).toBe('${A}');
+      expect(files.assigned('QUOTED')).toBe('"q" # not a comment');
+      expect(files.assigned('INDENT')).toBe('3');
+      expect(files.assigned('EMPTY')).toBe('');
+      expect(files.assignedNames()).toEqual(['TS_EXTRA_ARGS', 'TPL', 'QUOTED', 'INDENT', 'EMPTY']);
+    });
+
+    it('lets a line with no equals sign inherit only a variable that is set', () => {
+      const files = new ComposeEnvFiles(name => (name === 'SET' ? 'v' : undefined));
+      files.read('SET\nUNSET\n', { raw: true });
+      expect(files.assignedNames()).toEqual(['SET']);
+    });
+
+    it('refuses what Compose refuses or reads differently from a dotenv file', () => {
+      for (const bad of ['B = 2\n', 'export D=4\n', '=x\n', '﻿A=1\n']) {
+        expect(() => new ComposeEnvFiles(none).read(bad, { raw: true }), bad).toThrow(ComposeEnvFileError);
+      }
+    });
   });
 });

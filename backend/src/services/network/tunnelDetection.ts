@@ -182,7 +182,9 @@ const TAILSCALE_FORWARD_KEYS = ['TS_ROUTES', 'TS_SERVE_CONFIG', 'TS_DEST_IP'];
  *  a node forward to other addresses, or `unresolved` when the value cannot be
  *  read, which is treated as forwarding: a key with no value or a `${VAR}` with
  *  no lookup to answer it, a value that is not a string, or a template Compose
- *  refuses (malformed, or a required `${VAR:?}` with no value). */
+ *  refuses (malformed, or a required `${VAR:?}` with no value). It is also added
+ *  beside a named flag when a flag Sencho does not know leaves it unclear
+ *  whether a later occurrence is a flag or that flag's value. */
 export type TailscaleForwardFlag = '--advertise-routes' | '--advertise-exit-node' | 'unresolved';
 
 const TAILSCALE_FORWARD_FLAGS: ReadonlySet<string> = new Set(['--advertise-routes', '--advertise-exit-node']);
@@ -244,7 +246,9 @@ function interpolateTunnelEntry(value: string, lookup: ComposeEnvLookup | undefi
  *  still holds `${VAR}`/`$VAR` is expanded with `lookup` the way Compose
  *  interpolates it; a key with no value takes the variable of the same name. */
 function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined): string | null {
-  if (value === undefined || value === null) return lookup?.('TS_EXTRA_ARGS') ?? null;
+  // A key with no value takes the variable of the same name, and Compose drops
+  // it when the variable is unset: an answering lookup is the whole environment.
+  if (value === undefined || value === null) return lookup ? lookup('TS_EXTRA_ARGS') ?? '' : null;
   if (typeof value !== 'string') return null;
   if (!/\$\{|\$[A-Za-z_]/.test(value.replace(/\$\$/g, ''))) return value;
   if (!lookup) return null;
@@ -259,6 +263,29 @@ function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined)
 }
 
 /**
+ * The `tailscale up` flags that take no value argument (Go's `IsBoolFlag`), so
+ * the token after one is always its own flag. `--host-routes` is hidden but
+ * registered the same way.
+ */
+const TAILSCALE_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+  '--accept-dns', '--accept-routes', '--advertise-connector', '--advertise-exit-node',
+  '--exit-node-allow-lan-access', '--force-reauth', '--host-routes', '--json', '--qr',
+  '--report-posture', '--reset', '--shields-up', '--snat-subnet-routes', '--ssh',
+  '--stateful-filtering', '--unattended',
+]);
+
+/**
+ * The `tailscale up` flags written without `=` that take the next token as
+ * their value, even when it starts with a dash (Go's flag package). `--authkey`
+ * is the pre-1.60 spelling of `--auth-key`.
+ */
+const TAILSCALE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '--accept-risk', '--advertise-routes', '--advertise-tags', '--audience', '--auth-key',
+  '--authkey', '--client-id', '--client-secret', '--exit-node', '--hostname', '--id-token',
+  '--login-server', '--netfilter-mode', '--nickname', '--operator', '--qr-format', '--timeout',
+]);
+
+/**
  * The Tailscale forwarding flags (`--advertise-routes`, `--advertise-exit-node`,
  * in Go's single- or double-dash form) named in a service's `TS_EXTRA_ARGS`,
  * from list (`KEY=value`, last entry wins as in Compose) or map form. Go's flag
@@ -267,9 +294,16 @@ function readableExtraArgs(value: unknown, lookup: ComposeEnvLookup | undefined)
  * earlier enabled occurrence off again. `--advertise-routes` takes a route
  * list, so such a spelling there is an invalid route that makes `tailscale up`
  * fail, which forwards nothing either.
- * `lookup` expands an uninterpolated value (the raw YAML); without it, or when
- * the value still cannot be read, the result is `unresolved`. Only membership
- * in that fixed set is kept; the routes and every other flag are discarded.
+ * A flag written without `=` takes the next token as its value unless it is a
+ * boolean, so that token is not a flag. Sencho knows `tailscale up`'s flags;
+ * after a flag it does not know, the next token may be either, so a forwarding
+ * occurrence there that would change the result adds `unresolved` (forwarding,
+ * like every value it cannot read) instead of being decided by guesswork.
+ * `lookup` expands an uninterpolated value (the raw YAML) and, when given, is
+ * the complete variable environment: a `TS_EXTRA_ARGS` key it does not answer
+ * is unset and names no flag. Without it, or when the value still cannot be
+ * read, the result is `unresolved`. Only membership in that fixed set is kept;
+ * the routes and every other flag are discarded.
  */
 export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvLookup): TailscaleForwardFlag[] {
   let present = false;
@@ -289,23 +323,31 @@ export function tailscaleForwardFlags(environment: unknown, lookup?: ComposeEnvL
   const text = readableExtraArgs(value, lookup);
   if (text === null) return ['unresolved'];
   const flags = new Map<Exclude<TailscaleForwardFlag, 'unresolved'>, boolean>();
-  // Go gives a flag written without `=` the next argument as its value unless it
-  // is a boolean. Sencho cannot tell which other flags are booleans, so a
-  // disabling occurrence right after such a flag may be that flag's value and
-  // does not switch the earlier occurrence off; an enabling one always counts.
-  let mayBeValue = false;
+  let ambiguous = false;
+  // What the previous token, a flag written without `=`, makes of this one.
+  let previous: 'flag' | 'value' | 'unknown' = 'flag';
   for (const token of text.split(/\s+/)) {
+    if (token === '') continue;
+    const mayBeValue = previous === 'unknown';
+    if (previous === 'value') {
+      previous = 'flag';
+      continue;
+    }
+    previous = 'flag';
+    if (!token.startsWith('-')) continue;
     const eq = token.indexOf('=');
     const name = (eq === -1 ? token : token.slice(0, eq)).replace(/^-{1,2}/, '--');
-    const consumable = mayBeValue;
-    mayBeValue = eq === -1 && token.startsWith('-') && name !== '--advertise-exit-node';
+    if (eq === -1 && !TAILSCALE_BOOLEAN_FLAGS.has(name)) {
+      previous = TAILSCALE_VALUE_FLAGS.has(name) ? 'value' : 'unknown';
+    }
     if (!isTailscaleForwardFlag(name)) continue;
     const setting = eq === -1 ? undefined : token.slice(eq + 1);
     const enabled = setting !== '' && !(setting !== undefined && GO_FALSE.has(setting));
-    if (!enabled && consumable) continue;
-    flags.set(name, enabled);
+    if (mayBeValue && enabled !== (flags.get(name) === true)) ambiguous = true;
+    if (enabled || !mayBeValue) flags.set(name, enabled);
   }
-  return [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
+  const forwarding: TailscaleForwardFlag[] = [...flags].filter(([, enabled]) => enabled).map(([name]) => name);
+  return ambiguous ? [...forwarding, 'unresolved'] : forwarding;
 }
 
 function providerOf(svc: TunnelDetectionService): { provider: TunnelProvider; byImage: boolean } | null {
@@ -316,6 +358,11 @@ function providerOf(svc: TunnelDetectionService): { provider: TunnelProvider; by
     if (fromEnv) return { provider: fromEnv, byImage: false };
   }
   return null;
+}
+
+/** Compose lowercases a short-form protocol but keeps a long-form one as written. */
+function isUdpPort(port: { protocol: string }): boolean {
+  return port.protocol.toLowerCase() === 'udp';
 }
 
 function hasCloudflaredConfigMount(svc: TunnelDetectionService): boolean {
@@ -330,7 +377,7 @@ function isExposingConnector(svc: TunnelDetectionService, provider: TunnelProvid
   if (provider === 'wireguard') {
     if (svc.image && imageBaseName(svc.image) === 'wg-easy') return true;
     if (!byImage) return true; // identified by WG_HOST, a server-only key
-    return svc.envKeys.some(k => WIREGUARD_SERVER_KEYS.includes(k)) || svc.ports.some(p => p.protocol === 'udp');
+    return svc.envKeys.some(k => WIREGUARD_SERVER_KEYS.includes(k)) || svc.ports.some(isUdpPort);
   }
   if (provider === 'cloudflared') {
     const hints = svc.commandHints ?? [];
@@ -348,7 +395,7 @@ function signalsOf(svc: TunnelDetectionService, provider: TunnelProvider, byImag
   for (const key of ENV_HINTS[provider]) if (svc.envKeys.includes(key)) signals.push(`env:${key}`);
   if ((svc.capAdd ?? []).some(c => c.toUpperCase().replace(/^CAP_/, '') === 'NET_ADMIN')) signals.push('cap:NET_ADMIN');
   if ((svc.devices ?? []).includes('/dev/net/tun')) signals.push('device:/dev/net/tun');
-  if (provider === 'wireguard' && svc.ports.some(p => p.protocol === 'udp')) signals.push('udp-port');
+  if (provider === 'wireguard' && svc.ports.some(isUdpPort)) signals.push('udp-port');
   if (provider === 'tailscale') for (const flag of svc.tailscaleFlags ?? []) signals.push(`flag:${flag}`);
   return signals;
 }

@@ -891,12 +891,65 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tunnelExposureByService(detectTunnels(model)).has('db')).toBe(false);
   });
 
-  it('does not let a disabling occurrence cancel a flag when a preceding value flag may have taken it as its value', () => {
+  it('does not let a disabling occurrence cancel a flag when a preceding value flag took it as its value', () => {
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --hostname --advertise-routes=' })).toEqual(['--advertise-routes']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-exit-node --login-server --advertise-exit-node=false' })).toEqual(['--advertise-exit-node']);
     // After the boolean exit-node flag, or a flag written with `=`, the next token is its own flag.
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --advertise-exit-node --advertise-routes=' })).toEqual(['--advertise-exit-node']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--advertise-routes=10.0.0.0/8 --hostname=a --advertise-routes=' })).toEqual([]);
+  });
+
+  it('honors a disabling final occurrence after a boolean flag, in both dash forms and both flags', () => {
+    const forwarding = (args: string) => tailscaleForwardFlags({ TS_EXTRA_ARGS: args });
+    // `--accept-dns` and `--accept-routes` are booleans: they never take the next token.
+    expect(forwarding('--advertise-exit-node=true --accept-dns --advertise-exit-node=false')).toEqual([]);
+    expect(forwarding('--advertise-routes=10.0.0.0/8 --accept-routes --advertise-routes=')).toEqual([]);
+    expect(forwarding('-advertise-exit-node -accept-dns -advertise-exit-node=0')).toEqual([]);
+    expect(forwarding('-advertise-routes=10.0.0.0/8 -accept-routes -advertise-routes=')).toEqual([]);
+    // Every `tailscale up` boolean behaves the same, written bare or with an explicit value.
+    for (const boolean of ['--accept-dns', '--accept-routes', '--shields-up', '--ssh', '--reset', '--json', '--accept-dns=false', '--ssh=true']) {
+      expect(forwarding(`--advertise-exit-node ${boolean} --advertise-exit-node=false`), boolean).toEqual([]);
+      expect(forwarding(`--advertise-routes=10.0.0.0/8 ${boolean} --advertise-routes=`), boolean).toEqual([]);
+    }
+    // A later enabling occurrence after a boolean still turns it back on.
+    expect(forwarding('--advertise-exit-node=false --accept-dns --advertise-exit-node')).toEqual(['--advertise-exit-node']);
+    // Repetitions separated by several booleans and a flag written with `=`.
+    expect(forwarding('--advertise-exit-node --accept-dns --accept-routes --hostname=a --advertise-exit-node=false')).toEqual([]);
+  });
+
+  it('takes the token after a value flag as its value, whatever it looks like', () => {
+    const forwarding = (args: string) => tailscaleForwardFlags({ TS_EXTRA_ARGS: args });
+    // A known value flag consumes the next token even when it starts with a dash,
+    // so that token is neither a disabling nor an enabling occurrence.
+    expect(forwarding('--advertise-exit-node --hostname --advertise-exit-node=false')).toEqual(['--advertise-exit-node']);
+    expect(forwarding('--advertise-routes=10.0.0.0/8 --login-server --advertise-routes=')).toEqual(['--advertise-routes']);
+    expect(forwarding('-advertise-exit-node -hostname -advertise-exit-node=false')).toEqual(['--advertise-exit-node']);
+    expect(forwarding('--hostname --advertise-exit-node')).toEqual([]);
+    expect(forwarding('--advertise-routes 10.1.0.0/16 --advertise-routes=')).toEqual([]);
+    expect(forwarding('--advertise-routes --advertise-exit-node=false --advertise-exit-node')).toEqual(['--advertise-routes', '--advertise-exit-node']);
+  });
+
+  it('says so when a flag it does not know leaves a forwarding occurrence ambiguous', () => {
+    const forwarding = (args: string) => tailscaleForwardFlags({ TS_EXTRA_ARGS: args });
+    // The unknown flag may take the next token, or be a boolean: the exit node is on or off.
+    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node=false')).toEqual(['--advertise-exit-node', 'unresolved']);
+    expect(forwarding('--advertise-exit-node=false --from-a-newer-tailscale --advertise-exit-node')).toEqual(['--advertise-exit-node', 'unresolved']);
+    // When both readings agree there is nothing to say.
+    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node')).toEqual(['--advertise-exit-node']);
+    expect(forwarding('--from-a-newer-tailscale --advertise-exit-node=false')).toEqual([]);
+    // After a flag written with `=` the next token is its own flag.
+    expect(forwarding('--advertise-exit-node --from-a-newer-tailscale=1 --advertise-exit-node=false')).toEqual([]);
+    const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: '--advertise-exit-node --from-a-newer-tailscale --advertise-exit-node=false' } }, db }), 'ts');
+    expect(c.signals).toEqual(expect.arrayContaining(['flag:--advertise-exit-node', 'flag:unresolved']));
+  });
+
+  it('applies the final-occurrence rule through list, map and interpolated forms, and in a rendered model', () => {
+    const args = '--advertise-exit-node=true --accept-dns --advertise-exit-node=false';
+    expect(tailscaleForwardFlags([`TS_EXTRA_ARGS=${args}`])).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: args })).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${ARGS}' }, name => (name === 'ARGS' ? args : undefined))).toEqual([]);
+    const model = render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: args } }, db });
+    expect(tunnelExposureByService(detectTunnels(model)).has('db')).toBe(false);
   });
 
   it('expands an uninterpolated TS_EXTRA_ARGS with the stack\'s variables the way Compose does', () => {
@@ -921,12 +974,23 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS}' })).toEqual(['unresolved']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=$HOSTNAME' })).toEqual(['unresolved']);
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '--hostname=box$$1' })).toEqual([]);
-    // A lookup that cannot answer, or a template Compose refuses, stays unresolved.
-    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'], () => undefined)).toEqual(['unresolved']);
+    // A template Compose refuses stays unresolved.
     expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: '${TS_ARGS:?set it}' }, () => undefined)).toEqual(['unresolved']);
-    const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: null } }, db }), 'ts');
+    // The summary hands detection `unresolved` when it cannot read the value: the node counts as forwarding.
+    const model = render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY } }, db });
+    for (const service of model.services) if (service.name === 'ts') service.tailscaleFlags = ['unresolved'];
+    const c = connector(model, 'ts');
     expect(reachOf(c)).toEqual({ db: 'shared-network' });
     expect(c.signals).toContain('flag:unresolved');
+  });
+
+  it('reads a key with no value as unset when the lookup is the whole environment, as a rendered model is', () => {
+    expect(tailscaleForwardFlags(['TS_EXTRA_ARGS'], () => undefined)).toEqual([]);
+    expect(tailscaleForwardFlags({ TS_EXTRA_ARGS: null }, () => undefined)).toEqual([]);
+    // docker compose config renders an unresolved `TS_EXTRA_ARGS:` as null: unset, so it forwards nothing.
+    const c = connector(render({ ts: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: TS_KEY, TS_EXTRA_ARGS: null } }, db }), 'ts');
+    expect(reachOf(c)).toEqual({});
+    expect(c.signals).not.toContain('flag:unresolved');
   });
 
   it('does not say a subnet router reaches only itself when no service shares its network', () => {
@@ -943,6 +1007,37 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
     const via = describeServiceTunnel(tunnelExposureByService([c]).get('app')!);
     expect(via).toBe('It shares a network with the Cloudflare Tunnel connector "cloudflared", so anyone on the internet through Cloudflare\'s edge can reach it if the tunnel routes there; that routing is unverified. Cloudflare Access, where it is set up, can restrict who gets through.');
     expect(describeTunnelConnector(c).message).toContain('through Cloudflare\'s edge. Cloudflare Access, where it is set up, can restrict who gets through.');
+  });
+});
+
+describe('a rendered model reads Compose\'s unset variables and port protocols as Compose does', () => {
+  it('does not count a null environment entry as a key', () => {
+    // `docker compose config` renders a variable it could not resolve as null and leaves it out of the container.
+    const custom = { image: 'example/edge:1', networks: { default: null } };
+    expect(detectTunnels(render({ edge: { ...custom, environment: { TUNNEL_TOKEN: null } }, app }))).toEqual([]);
+    expect(detectTunnels(render({ edge: { ...custom, environment: { TUNNEL_TOKEN: '' } }, app })).map(c => c.service)).toEqual(['edge']);
+    expect(detectTunnels(render({ edge: { ...custom, environment: { TUNNEL_TOKEN: 'cf-secret' } }, app })).map(c => c.service)).toEqual(['edge']);
+  });
+
+  it('does not let an unset forwarding key make a Tailscale node forward', () => {
+    const ts = (environment: Record<string, unknown>) => connector(render({ ts: { image: 'tailscale/tailscale', environment }, app }), 'ts');
+    expect(reachOf(ts({ TS_AUTHKEY: TS_KEY, TS_ROUTES: null }))).toEqual({});
+    expect(reachOf(ts({ TS_AUTHKEY: TS_KEY, TS_SERVE_CONFIG: null, TS_DEST_IP: null }))).toEqual({});
+    expect(reachOf(ts({ TS_AUTHKEY: TS_KEY, TS_ROUTES: '192.168.1.0/24' }))).toEqual({ app: 'shared-network' });
+  });
+
+  it('keeps a null key out of the model every detector consumer reads', () => {
+    const model = render({ edge: { image: 'example/edge:1', environment: { TUNNEL_TOKEN: null, KEPT: 'x' } }, app });
+    expect(model.services.find(service => service.name === 'edge')?.envKeys).toEqual(['KEPT']);
+  });
+
+  it('recognizes a UDP port however its protocol is cased', () => {
+    const wireguard = (protocol: string) => connector(render({
+      wireguard: { image: 'lscr.io/linuxserver/wireguard:latest', ports: [{ published: '51820', target: 51820, protocol, host_ip: '127.0.0.1' }] },
+      app,
+    }), 'wireguard');
+    for (const protocol of ['udp', 'UDP', 'Udp']) expect(wireguard(protocol).signals, protocol).toContain('udp-port');
+    expect(() => connector(render({ wireguard: { image: 'lscr.io/linuxserver/wireguard:latest', ports: [{ published: '51820', target: 51820, protocol: 'tcp' }] }, app }), 'wireguard')).toThrow('no connector');
   });
 });
 
