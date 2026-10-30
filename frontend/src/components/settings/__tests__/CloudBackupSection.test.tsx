@@ -369,6 +369,83 @@ describe('CloudBackupSection managed vault discovery', () => {
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
         expect(screen.getByRole('combobox')).toHaveTextContent('Custom S3 (BYOB)');
     });
+
+    async function fillCustomForm(user: ReturnType<typeof userEvent.setup>) {
+        await user.type(await screen.findByPlaceholderText('https://s3.us-east-1.amazonaws.com'), 'https://s3.example.com');
+        await user.type(screen.getByPlaceholderText('my-sencho-backups'), 'snap-bucket');
+        await user.type(screen.getByPlaceholderText('AKIA...'), 'AKIAEXAMPLE');
+    }
+
+    it('rolls back to the server-confirmed provider after an encryption save made on an unsaved selection', async () => {
+        mockProvider('disabled', [200, 500]);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        expect(await screen.findByText('Custom S3 Configuration')).toBeInTheDocument();
+
+        await user.click(screen.getByRole('switch', { name: 'Encrypt archives' }));
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Archive passphrase saved.'));
+        const puts = apiFetch.mock.calls.filter(call => call[1]?.method === 'PUT');
+        expect(puts).toHaveLength(1);
+        expect(JSON.parse(puts[0][1].body)).not.toHaveProperty('provider');
+
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Disabled'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Disabled');
+        expect(screen.queryByText('Custom S3 Configuration')).not.toBeInTheDocument();
+    });
+
+    it('rolls back to Custom S3 after a failed switch following a Save of the Custom S3 form', async () => {
+        mockProvider('disabled', [200, 500]);
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await fillCustomForm(user);
+        await user.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Custom S3 configuration saved.'));
+
+        await user.click(screen.getByRole('combobox'));
+        await user.click(await screen.findByText('Disabled'));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Custom S3 (BYOB)');
+    });
+
+    it('holds the storage mode picker while an encryption save is in flight', async () => {
+        const pending = deferredResponse();
+        mockProvider('custom', 200, FILLED_CUSTOM);
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && options?.method === 'PUT' ? pending.promise : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('switch', { name: 'Encrypt archives' }));
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeDisabled());
+
+        pending.resolve(json({}));
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
+    });
+
+    it('holds the Encrypt archives switch while a provider save is in flight', async () => {
+        const pending = deferredResponse();
+        mockProvider('disabled', 200, FILLED_CUSTOM);
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && options?.method === 'PUT' ? pending.promise : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = await openStorageModes();
+        await user.click(await screen.findByText('Custom S3 (BYOB)'));
+        await waitFor(() => expect(screen.getByRole('switch', { name: 'Encrypt archives' })).toBeDisabled());
+
+        pending.resolve(json({}));
+        await waitFor(() => expect(screen.getByRole('switch', { name: 'Encrypt archives' })).toBeEnabled());
+    });
 });
 
 const customConfig = {
