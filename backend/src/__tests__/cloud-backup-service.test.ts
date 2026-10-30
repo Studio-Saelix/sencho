@@ -685,6 +685,109 @@ describe('CloudBackupService archive fidelity', () => {
         expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
     });
 
+    it.each([
+        ['an embedded NUL', 'edge\u0000hidden'],
+        ['a leading NUL', '\u0000leading'],
+    ])('refuses plaintext and sealed uploads when a node name has %s', async (_label, nodeName) => {
+        for (const sealed of [false, true]) {
+            seedCustomBucket();
+            const db = DatabaseService.getInstance();
+            if (sealed) {
+                db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+                db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+            }
+            const snapshotId = db.createSnapshot('Unstorable node name', 'admin', 1, 1, '[]');
+            db.insertSnapshotFiles(snapshotId, [
+                { nodeId: 1, nodeName, stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+            ]);
+            sentSpy.mockClear();
+
+            await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId))
+                .rejects.toThrow(/cannot be stored/);
+            expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
+            const status = CloudBackupService.getInstance().getUploadStatus(snapshotId);
+            expect(status.status).toBe('failed');
+            expect(status.error).toMatch(/cannot be stored/);
+        }
+    });
+
+    it.each([
+        ['an ordinary name', 'gateway'],
+        ['a Unicode name', 'café-復旧'],
+        ['a lone surrogate', 'edge\uD800hidden'],
+        ['an embedded NUL', 'edge\u0000hidden'],
+        ['a leading NUL', '\u0000leading'],
+        ['a PAX-length multibyte name', '復旧'.repeat(40)],
+    ])('publishes an importable archive or refuses before PutObject for %s', async (_label, nodeName) => {
+        for (const sealed of [false, true]) {
+            seedCustomBucket();
+            const db = DatabaseService.getInstance();
+            if (sealed) {
+                db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+                db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+            }
+            const snapshotId = db.createSnapshot('Name compatibility', 'admin', 1, 1, '[]');
+            db.insertSnapshotFiles(snapshotId, [
+                { nodeId: 1, nodeName, stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+            ]);
+            sentSpy.mockClear();
+
+            let published = false;
+            try {
+                await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+                published = true;
+            } catch (error) {
+                expect((error as Error).message).toMatch(/cannot be stored/);
+            }
+            const putCalls = sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand');
+            if (!published) {
+                // Refused: nothing left the instance and the row reports a failure.
+                expect(putCalls).toHaveLength(0);
+                expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('failed');
+                continue;
+            }
+
+            // Published: the object the provider stored must import unchanged.
+            expect(putCalls).toHaveLength(1);
+            expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('success');
+            const uploaded = putObjectInput();
+            sentSpy.mockImplementation(async (cmd: { name: string }) => {
+                if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+                return {};
+            });
+            const importedId = await CloudBackupService.getInstance()
+                .importSnapshot(uploaded.Key, sealed ? ARCHIVE_PASSPHRASE : null);
+            expect(db.getSnapshotFiles(importedId)).toHaveLength(1);
+        }
+    });
+
+    it('refuses an upload that includes a node name stored before the input check existed', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        // A row created by an older release or written outside the node routes
+        // can still carry a name the archive format cannot store. The producer
+        // must refuse it instead of publishing an object the import path fails.
+        const nodeId = db.addNode({
+            name: 'edge\u0000hidden',
+            type: 'remote',
+            compose_dir: '/app/compose',
+            is_default: false,
+            api_url: 'http://192.168.1.90:1852',
+        });
+        const stored = db.getNode(nodeId)!;
+        expect(stored.name).toBe('edge\u0000hidden');
+        const snapshotId = db.createSnapshot('Legacy node name', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId, nodeName: stored.name, stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        sentSpy.mockClear();
+
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId))
+            .rejects.toThrow(/cannot be stored/);
+        expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
+        expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('failed');
+    });
+
     it('marks a legacy archive without warning fields as unknown', async () => {
         seedCustomBucket();
         const db = DatabaseService.getInstance();
@@ -812,6 +915,41 @@ describe('CloudBackupService disaster recovery', () => {
         const imported = db.getSnapshot(importedId)!;
         expect(imported.source_instance_id).toBe('test-instance-id');
         expect(db.getSnapshotFiles(importedId)).toHaveLength(1);
+    });
+
+    it('recovers a sealed archive with Unicode and PAX-length paths unchanged', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('cloud_backup_encrypt_archives', '1');
+        db.updateGlobalSetting('cloud_backup_archive_passphrase', CryptoService.getInstance().encrypt(ARCHIVE_PASSPHRASE));
+        // Long multibyte names force PAX records in the tar, the framing the
+        // producer meters and the reader must accept on the recovery path too.
+        const nodeName = '復旧'.repeat(40);
+        const stackName = `stäck-${'x'.repeat(90)}`;
+        const snapshotId = db.createSnapshot('Unicode disaster', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId: 1, nodeName, stackName, filename: 'compose.yaml', content: 'services: {}\n' },
+            { nodeId: 1, nodeName, stackName, filename: '.env', content: 'A=1\n' },
+        ]);
+        sentSpy.mockResolvedValue({});
+        await CloudBackupService.getInstance().uploadSnapshot(snapshotId);
+        const uploaded = putObjectInput();
+        expect(isEncryptedArchive(uploaded.Body)).toBe(true);
+
+        db.setSystemState('instance_id', 'fresh-instance');
+        sentSpy.mockImplementation(async (cmd: { name: string }) => {
+            if (cmd.name === 'GetObjectCommand') return { Body: Readable.from(uploaded.Body) };
+            return {};
+        });
+        const importedId = await CloudBackupService.getInstance()
+            .importRecoveryArchive(uploaded.Key, ARCHIVE_PASSPHRASE);
+        const files = db.getSnapshotFiles(importedId);
+        expect(files).toHaveLength(2);
+        for (const file of files) {
+            expect(file.node_name).toBe(nodeName);
+            expect(file.stack_name).toBe(stackName);
+        }
+        expect(files.map(file => file.filename).sort()).toEqual(['.env', 'compose.yaml']);
     });
 
     it('refuses a plaintext archive on the recovery path', async () => {

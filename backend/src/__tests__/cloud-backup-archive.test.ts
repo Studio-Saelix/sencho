@@ -10,6 +10,7 @@ import {
     assertArchiveObjectSize,
     decryptArchive,
     encryptArchive,
+    isArchiveStorableName,
     isEncryptedArchive,
     openSnapshotArchive,
     packSnapshotArchive,
@@ -451,4 +452,65 @@ describe('producer archive limits', () => {
         }));
         await expect(packSnapshotArchive(entries)).rejects.toMatchObject({ code: 'TOO_LARGE' });
     }, 60_000);
+});
+
+describe('producer entry name fidelity', () => {
+    function planned(name: string): Array<{ name: string; content: string }> {
+        return [
+            { name: 'metadata.json', content: metadata() },
+            { name, content: 'services: {}\n' },
+        ];
+    }
+
+    it.each([
+        ['an embedded NUL', 'nodes/1_edge\u0000hidden/web/compose.yaml'],
+        ['a leading NUL', 'nodes/1_\u0000leading/web/compose.yaml'],
+        ['an unpaired high surrogate', 'nodes/1_edge\uD800hidden/web/compose.yaml'],
+        ['an unpaired low surrogate', 'nodes/1_edge\uDC00hidden/web/compose.yaml'],
+        ['an empty node segment', 'nodes/1_/web/compose.yaml'],
+        ['an empty stack segment', 'nodes/1_edge//compose.yaml'],
+        ['a NUL stack segment', 'nodes/1_edge/web\u0000hidden/compose.yaml'],
+        ['a NUL filename segment', 'nodes/1_edge/web/compose.yaml\u0000hidden'],
+        ['a disallowed filename', 'nodes/1_edge/web/other.yaml'],
+        ['a backslash separator', 'nodes/1_edge\\web/compose.yaml'],
+        ['a traversal segment', 'nodes/1_edge/../compose.yaml'],
+    ])('refuses %s before packing', async (_label, name) => {
+        await expect(packSnapshotArchive(planned(name))).rejects.toMatchObject({
+            code: 'INVALID_ENTRY_NAME',
+            message: expect.stringContaining('cannot be stored'),
+        });
+    });
+
+    it('packs ordinary, Unicode, and PAX-length names the importer reads back unchanged', async () => {
+        const cases = [
+            { name: 'nodes/1_gateway/web/compose.yaml', nodeName: 'gateway', stackName: 'web', filename: 'compose.yaml' },
+            { name: 'nodes/1_café/web/.env', nodeName: 'café', stackName: 'web', filename: '.env' },
+            {
+                name: `nodes/1_${'復旧'.repeat(40)}/stäck-${'x'.repeat(90)}/compose.yaml`,
+                nodeName: '復旧'.repeat(40),
+                stackName: `stäck-${'x'.repeat(90)}`,
+                filename: 'compose.yaml',
+            },
+        ];
+        for (const testCase of cases) {
+            const packed = await packSnapshotArchive(planned(testCase.name));
+            const opened = await openSnapshotArchive(packed, null);
+            expect(opened.files).toHaveLength(1);
+            expect(opened.files[0]).toMatchObject({
+                nodeName: testCase.nodeName,
+                stackName: testCase.stackName,
+                filename: testCase.filename,
+                content: 'services: {}\n',
+            });
+        }
+    });
+
+    it('recognises the strings the tar writer cannot store byte-for-byte', () => {
+        expect(isArchiveStorableName('gateway')).toBe(true);
+        expect(isArchiveStorableName('café')).toBe(true);
+        expect(isArchiveStorableName('edge\u0000hidden')).toBe(false);
+        expect(isArchiveStorableName('\u0000leading')).toBe(false);
+        expect(isArchiveStorableName('edge\uD800')).toBe(false);
+        expect(isArchiveStorableName('edge\uDC00')).toBe(false);
+    });
 });

@@ -69,7 +69,8 @@ export type ArchiveErrorCode =
     | 'PASSPHRASE_REQUIRED'
     | 'INVALID_PASSPHRASE'
     | 'BAD_ARCHIVE'
-    | 'TOO_LARGE';
+    | 'TOO_LARGE'
+    | 'INVALID_ENTRY_NAME';
 
 export class ArchiveFormatError extends Error {
     readonly code: ArchiveErrorCode;
@@ -253,17 +254,46 @@ export interface ArchiveEntryPlan {
 }
 
 /**
+ * True when a string survives the tar writer byte-for-byte. The writer stores a
+ * header name as NUL-terminated UTF-8, so an embedded NUL truncates the name
+ * and an unpaired surrogate is replaced with U+FFFD. Either one makes the
+ * stored entry differ from the planned one, which the importer then rejects.
+ */
+export function isArchiveStorableName(name: string): boolean {
+    if (name.includes('\u0000')) return false;
+    return Buffer.from(name, 'utf8').toString('utf8') === name;
+}
+
+/**
+ * Refuse a plan the importer would reject before anything is packed or
+ * published. The reader owns the name allowlist, so the producer checks its
+ * own output with the same function instead of a second copy of the rules.
+ */
+function assertPublishableEntries(entries: ArchiveEntryPlan[]): void {
+    for (const entry of entries) {
+        if (isArchiveStorableName(entry.name) && isAllowedEntryName(entry.name)) continue;
+        throw new ArchiveFormatError(
+            'INVALID_ENTRY_NAME',
+            `Archive entry ${JSON.stringify(entry.name)} cannot be stored in the archive format the import path reads. Rename the node or stack and upload again.`,
+        );
+    }
+}
+
+/**
  * Pack and compress the archive an upload publishes, then refuse it when the
- * reader's bounds would reject it. The tar is metered as it is produced rather
- * than estimated from the payloads: PAX headers for long entry paths are real
- * bytes the reader counts, and a payload-only estimate let a successful upload
- * be an archive the importer refuses. Metering during the stream also stops an
+ * reader would reject it. Entry names are checked against the same allowlist
+ * and byte-fidelity rules the reader applies, so a stored object is always one
+ * the import path can open. The tar is metered as it is produced rather than
+ * estimated from the payloads: PAX headers for long entry paths are real bytes
+ * the reader counts, and a payload-only estimate let a successful upload be an
+ * archive the importer refuses. Metering during the stream also stops an
  * outsized entry path before it is buffered in memory.
  */
 export async function packSnapshotArchive(
     entries: ArchiveEntryPlan[],
     limits: ArchiveLimits = ARCHIVE_LIMITS,
 ): Promise<Buffer> {
+    assertPublishableEntries(entries);
     const pack = tar.pack();
     for (const entry of entries) pack.entry({ name: entry.name }, entry.content);
     pack.finalize();
