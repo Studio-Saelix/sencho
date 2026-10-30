@@ -74,5 +74,8 @@ docs/internal/
 # Transient temp dir a file-roots test creates under the backend working dir
 backend/sfr-app-*/
 
+# Runtime database a probe can create under the backend working dir
+backend/null/
+
 # Local-only (was tracked; keep on disk, do not publish)
 hardened-pipeline-skeleton/

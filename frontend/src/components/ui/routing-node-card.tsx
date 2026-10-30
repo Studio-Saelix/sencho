@@ -1,11 +1,13 @@
 import * as React from 'react';
-import { Loader2, Play, Plus, RotateCw, ServerCog } from 'lucide-react';
+import { Check, Copy, Loader2, Play, Plus, RotateCw, ServerCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TogglePill } from '@/components/ui/toggle-pill';
+import { toast } from '@/components/ui/toast-store';
 import { useDensity } from '@/hooks/use-density';
 import { formatAgeShort } from '@/lib/relativeTime';
 import { cn } from '@/lib/utils';
+import { copyToClipboard } from '@/lib/clipboard';
 
 export type RoutingNodeState = 'meshed' | 'idle' | 'connecting' | 'degraded' | 'offline';
 
@@ -430,8 +432,36 @@ interface AliasRowProps {
     onTestAlias?: (alias: string) => void;
 }
 
+/** The hostname gives way to an ellipsis before the port does: the port is what a connection string needs. */
+function AliasAddress({ host, port }: { host: string; port: number }) {
+    return (
+        <>
+            <span className="min-w-0 truncate">{host}</span>
+            <span className="shrink-0 text-brand">:{port}</span>
+        </>
+    );
+}
+
 function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
     const isSuspended = row.kind === 'suspended';
+    const [copied, setCopied] = React.useState(false);
+    const resetCopiedTimer = React.useRef<number | null>(null);
+    React.useEffect(() => () => {
+        if (resetCopiedTimer.current !== null) window.clearTimeout(resetCopiedTimer.current);
+    }, []);
+    const address = `${row.host}:${row.port}`;
+    const copyAddress = async (): Promise<void> => {
+        try {
+            await copyToClipboard(address);
+            setCopied(true);
+            if (resetCopiedTimer.current !== null) window.clearTimeout(resetCopiedTimer.current);
+            resetCopiedTimer.current = window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+            // Same failure surface as the route sheet's copy control: the address
+            // stays selectable on screen, but a click that did nothing must say so.
+            toast.error('Could not copy to the clipboard');
+        }
+    };
     const dot: DotTone = isSuspended
         ? 'warning'
         : row.lastTested
@@ -451,16 +481,31 @@ function AliasRow({ row, onShowAlias, onTestAlias }: AliasRowProps) {
                 : onShowAlias
                     ? <button
                         type="button"
-                        className="flex-1 min-w-0 truncate text-left font-mono text-[11px] text-stat-value hover:text-brand transition-colors"
+                        className="flex flex-1 min-w-0 text-left font-mono text-[11px] text-stat-value hover:text-brand transition-colors"
+                        title={address}
                         onClick={() => onShowAlias(row.host)}
                     >
-                        {row.host}<span className="text-brand">:{row.port}</span>
+                        <AliasAddress host={row.host} port={row.port} />
                     </button>
-                    : <span className="flex-1 min-w-0 truncate font-mono text-[11px] text-stat-value">
-                        {row.host}<span className="text-brand">:{row.port}</span>
+                    : <span className="flex flex-1 min-w-0 font-mono text-[11px] text-stat-value" title={address}>
+                        <AliasAddress host={row.host} port={row.port} />
                     </span>}
             {!isSuspended && ageLabel && (
                 <span className={cn(KICKER, 'shrink-0 text-stat-subtitle tabular-nums')}>{ageLabel}</span>
+            )}
+            {!isSuspended && (
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { void copyAddress(); }}
+                    className="h-[22px] w-[22px] p-0 shrink-0"
+                    aria-label={copied ? `Copied ${address}` : `Copy ${address}`}
+                    title={copied ? 'Copied' : 'Copy address'}
+                >
+                    {copied
+                        ? <Check className="w-3 h-3 text-success" strokeWidth={1.75} />
+                        : <Copy className="w-3 h-3" strokeWidth={1.75} />}
+                </Button>
             )}
             <Button
                 variant="ghost"

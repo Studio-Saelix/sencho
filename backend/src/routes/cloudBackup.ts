@@ -145,48 +145,61 @@ cloudBackupRouter.put('/config', (req: Request, res: Response): void => {
     try {
         const body = req.body ?? {};
         const provider = body.provider as string | undefined;
-        if (!provider || !VALID_PROVIDERS.has(provider)) {
+        if (provider !== undefined && (typeof provider !== 'string' || !VALID_PROVIDERS.has(provider))) {
             res.status(400).json({ error: 'provider must be one of: disabled, sencho, custom' });
             return;
         }
-        if (!gateForRequestedProvider(req, res, provider)) return;
+        if (provider !== undefined && !gateForRequestedProvider(req, res, provider)) return;
         const archivePlan = planArchiveSettings(body as Record<string, unknown>);
         if (typeof archivePlan === 'string') {
             res.status(400).json({ error: archivePlan });
             return;
         }
+        // An encryption-only write must not touch the destination: saving a
+        // passphrase never carries unsaved S3 form drafts with it.
+        if (provider === undefined && !archivePlan) {
+            res.status(400).json({ error: 'No cloud backup changes were supplied' });
+            return;
+        }
         const db = DatabaseService.getInstance();
         const crypto = CryptoService.getInstance();
-        db.updateGlobalSetting('cloud_backup_provider', provider);
 
+        // Validate the whole destination before writing anything, so a rejected
+        // field cannot leave a half-applied provider change behind.
+        let custom: { endpoint: string; region: string; bucket: string; accessKey: string; pathPrefix: string; autoUpload: string; secretKey: string } | null = null;
         if (provider === 'custom') {
             const c = body.custom ?? {};
-            const endpoint = typeof c.endpoint === 'string' ? c.endpoint.trim() : '';
-            const region = typeof c.region === 'string' ? c.region.trim() : '';
-            const bucket = typeof c.bucket === 'string' ? c.bucket.trim() : '';
-            const accessKey = typeof c.access_key === 'string' ? c.access_key.trim() : '';
-            const pathPrefix = typeof c.path_prefix === 'string' ? c.path_prefix.trim() : 'sencho/';
-            const autoUpload = c.auto_upload === true || c.auto_upload === '1' ? '1' : '0';
-
-            if (!endpoint || !bucket || !accessKey) {
+            custom = {
+                endpoint: typeof c.endpoint === 'string' ? c.endpoint.trim() : '',
+                region: typeof c.region === 'string' ? c.region.trim() : '',
+                bucket: typeof c.bucket === 'string' ? c.bucket.trim() : '',
+                accessKey: typeof c.access_key === 'string' ? c.access_key.trim() : '',
+                pathPrefix: typeof c.path_prefix === 'string' ? c.path_prefix.trim() : 'sencho/',
+                autoUpload: c.auto_upload === true || c.auto_upload === '1' ? '1' : '0',
+                secretKey: typeof c.secret_key === 'string' ? c.secret_key : '',
+            };
+            if (!custom.endpoint || !custom.bucket || !custom.accessKey) {
                 res.status(400).json({ error: 'endpoint, bucket, and access_key are required for custom S3.' });
                 return;
             }
-            if (!/^https?:\/\//i.test(endpoint)) {
+            if (!/^https?:\/\//i.test(custom.endpoint)) {
                 res.status(400).json({ error: 'endpoint must start with http:// or https://' });
                 return;
             }
+        }
 
-            db.updateGlobalSetting('cloud_backup_endpoint', endpoint);
-            db.updateGlobalSetting('cloud_backup_region', region);
-            db.updateGlobalSetting('cloud_backup_bucket', bucket);
-            db.updateGlobalSetting('cloud_backup_access_key', accessKey);
-            db.updateGlobalSetting('cloud_backup_path_prefix', pathPrefix);
-            db.updateGlobalSetting('cloud_backup_auto_upload', autoUpload);
+        if (provider !== undefined) db.updateGlobalSetting('cloud_backup_provider', provider);
 
-            const incomingSecret = typeof c.secret_key === 'string' ? c.secret_key : '';
-            if (incomingSecret && incomingSecret !== SECRET_REDACTED) {
-                db.updateGlobalSetting('cloud_backup_secret_key', crypto.encrypt(incomingSecret));
+        if (custom) {
+            db.updateGlobalSetting('cloud_backup_endpoint', custom.endpoint);
+            db.updateGlobalSetting('cloud_backup_region', custom.region);
+            db.updateGlobalSetting('cloud_backup_bucket', custom.bucket);
+            db.updateGlobalSetting('cloud_backup_access_key', custom.accessKey);
+            db.updateGlobalSetting('cloud_backup_path_prefix', custom.pathPrefix);
+            db.updateGlobalSetting('cloud_backup_auto_upload', custom.autoUpload);
+
+            if (custom.secretKey && custom.secretKey !== SECRET_REDACTED) {
+                db.updateGlobalSetting('cloud_backup_secret_key', crypto.encrypt(custom.secretKey));
             }
         }
 
@@ -259,6 +272,21 @@ cloudBackupRouter.get('/snapshots', async (req: Request, res: Response): Promise
     }
 });
 
+// Archives from other instances, so a fresh installation can find what it is
+// recovering. Read-only: recovery still needs the passphrase.
+cloudBackupRouter.get('/recovery-archives', async (req: Request, res: Response): Promise<void> => {
+    if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
+    try {
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        res.json(listing);
+    } catch (error) {
+        console.error('[CloudBackup] recovery list error:', error);
+        res.status(502).json({ error: getErrorMessage(error, 'Failed to list recovery archives') });
+    }
+});
+
 cloudBackupRouter.post('/upload/:id', async (req: Request, res: Response): Promise<void> => {
     if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
     if (!requireAdmin(req, res)) return;
@@ -327,6 +355,32 @@ cloudBackupRouter.post('/object/:keyB64/import', async (req: Request, res: Respo
         res.status(201).json({ snapshot_id: snapshotId });
     } catch (error) {
         sendArchiveFailure(res, error, 'Failed to import cloud snapshot');
+    }
+});
+
+// Disaster recovery from another installation. A fresh instance has a new
+// instance id, so its own prefix cannot reach the old archives; this path reads
+// any instance's archive in the configured bucket and accepts only a sealed
+// archive opened with the supplied passphrase.
+cloudBackupRouter.post('/recover', async (req: Request, res: Response): Promise<void> => {
+    if (rejectApiTokenScope(req, res, SCOPE_MESSAGE)) return;
+    if (!requireAdmin(req, res)) return;
+    if (!gateForCurrentProvider(req, res)) return;
+    const objectKey = typeof req.body?.object_key === 'string' ? req.body.object_key.trim() : '';
+    if (!objectKey) {
+        res.status(400).json({ error: 'object_key is required' });
+        return;
+    }
+    const passphrase = passphraseFromBody(req);
+    if (!passphrase) {
+        res.status(409).json({ error: 'A passphrase is required to recover an archive', code: 'PASSPHRASE_REQUIRED' });
+        return;
+    }
+    try {
+        const snapshotId = await CloudBackupService.getInstance().importRecoveryArchive(objectKey, passphrase);
+        res.status(201).json({ snapshot_id: snapshotId });
+    } catch (error) {
+        sendArchiveFailure(res, error, 'Failed to recover cloud snapshot');
     }
 });
 

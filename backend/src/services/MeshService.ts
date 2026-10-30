@@ -65,13 +65,34 @@ export const MESH_SUBNET_CANDIDATES = [
     '10.43.0.0/24',
 ];
 
+/** Operator-facing explanation for each dial failure, shown on the node card. */
 const REACHABLE_REASON: Record<DialFailureCode, string> = {
     auth_failed: 'api token rejected by remote',
-    endpoint_not_found: 'remote does not support proxy mesh',
-    tls_failed: 'TLS handshake failed',
+    scope_denied: 'node token is not full-admin; generate a full-admin Node Token on the remote',
+    tier_denied: 'license tier does not include mesh',
+    endpoint_not_found: 'remote does not support proxy mesh (update it, or check the proxy forwards /api/mesh/proxy-tunnel)',
+    blocked_by_proxy: 'blocked by an access proxy in front of the remote (Cloudflare Access, SSO); add a bypass or SENCHO_MESH_PROXY_HEADERS',
+    remote_refused: 'the remote Sencho refused the mesh connection; check the node token scope and the remote mesh setup',
+    refused_unverified: 'the remote or a proxy in front of it refused or redirected the mesh connection without identifying itself; check the node token first, then the access gateway or WAF',
+    proxy_upstream_error: 'reverse proxy or tunnel in front of the remote cannot reach Sencho',
+    upgrade_rejected: 'WebSocket upgrade refused; check the proxy forwards Upgrade and Connection headers',
+    tls_failed: 'TLS handshake failed. For a private CA, set SENCHO_MESH_PROXY_CA_FILE for the mesh dial; fleet requests need NODE_EXTRA_CA_CERTS pointed at the same file and a restart. Otherwise check the URL scheme matches the server',
+    dns_failed: 'remote hostname does not resolve',
+    connection_refused: 'connection refused by remote host',
+    timeout: 'remote did not answer in time',
+    blocked_address: 'remote address is loopback or reserved and cannot be dialed',
+    config_invalid: 'mesh dial settings are invalid (SENCHO_MESH_PROXY_HEADERS or SENCHO_MESH_PROXY_CA_FILE)',
     no_target: 'proxy target missing',
     network_error: 'remote unreachable',
 };
+
+/**
+ * Operator-facing explanation for a dial failure code. Kept as a function so
+ * tests can assert the wording the node card will show, not only the enum.
+ */
+export function meshReachableReason(code: DialFailureCode): string {
+    return REACHABLE_REASON[code] ?? 'remote unreachable';
+}
 
 /**
  * One service in a meshed stack, with the container ports the mesh routes.
@@ -3867,8 +3888,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // storm.
             const failure = MeshProxyTunnelDialer.getInstance().getRecentFailure(node.id);
             if (failure) {
-                const reason = REACHABLE_REASON[failure.code] ?? failure.message ?? 'remote unreachable';
-                return { mode: 'unreachable', reason };
+                return { mode: 'unreachable', reason: meshReachableReason(failure.code) };
             }
             return { mode: 'proxy', reason: null };
         }

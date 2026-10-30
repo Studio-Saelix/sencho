@@ -14,6 +14,7 @@ import { HealthGateService } from '../services/HealthGateService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
+import { RecoveryOperationStore } from '../services/recovery/operations';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { SuppressionRetractionRetryService } from '../services/SuppressionRetractionRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
@@ -136,6 +137,30 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
 }
 
 /**
+ * Settle recovery work a previous process left behind: operations it left
+ * queued or running end as completion_unknown and their locks turn stale,
+ * before anything can start new recovery work. A failure is logged and Sencho
+ * still starts: the store refuses to move to running, finish or lock any of
+ * that work, because it belongs to an epoch that never runs again and only
+ * reconciliation can settle it. A build that cannot use the recovery schema
+ * leaves those rows alone.
+ */
+export function runRecoveryReconcile(): void {
+  if (DatabaseService.getInstance().getRecoverySchemaOutcome().kind !== 'current') return;
+  try {
+    const settled = RecoveryOperationStore.getInstance().reconcileAtStartup();
+    if (settled.interruptedOperations + settled.unknownPoints + settled.staleLocks > 0) {
+      console.warn(
+        '[Startup] Recovery reconcile: %d interrupted operations, %d unknown points, %d stale locks',
+        settled.interruptedOperations, settled.unknownPoints, settled.staleLocks,
+      );
+    }
+  } catch (err) {
+    console.error('[Startup] Recovery reconcile failed:', err);
+  }
+}
+
+/**
  * Run the startup sequence: stack-directory migration, service initialization,
  * background watchdogs, then bind the HTTP server. The caller passes the
  * already-constructed server so tests can import the module without binding a
@@ -215,6 +240,8 @@ export async function startServer(server: Server): Promise<void> {
     throw err;
   }
   StackUpdateRecoveryService.getInstance().start();
+
+  runRecoveryReconcile();
 
   // Interrupted creates are settled here, ahead of the background mutators and
   // the HTTP bind below, because a scheduler or webhook that fired first could

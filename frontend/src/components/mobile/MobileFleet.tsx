@@ -7,13 +7,15 @@ import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { BusyButton } from '@/components/ui/busy-button';
-import { formatBytes } from '@/lib/utils';
+import { cn, formatBytes } from '@/lib/utils';
 import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConfirmDialog';
 import { ReconnectingOverlay } from '@/components/FleetView/ReconnectingOverlay';
 import { useFleetUpdateStatus } from '@/components/FleetView/hooks/useFleetUpdateStatus';
 import type { FleetNode, NodeUpdateStatus } from '@/components/FleetView/types';
+import { NodeConnectionPin } from '@/components/FleetView/NodeConnectionPin';
+import { nodeConnection } from '@/components/FleetView/nodeConnection';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
 
@@ -98,10 +100,22 @@ function StatCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
+type NodeException = 'offline' | 'critical' | 'cordoned';
+
+// Exception-only status: offline or critical (never both), plus cordoned on top.
+// A healthy, uncordoned node returns [] and shows no state word.
+function nodeExceptions(node: FleetNode): NodeException[] {
+  const exceptions: NodeException[] = [];
+  if (node.status !== 'online') exceptions.push('offline');
+  else if (isCritical(node)) exceptions.push('critical');
+  if (node.cordoned) exceptions.push('cordoned');
+  return exceptions;
+}
+
+function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNode; mode: string | undefined; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
   const tone = nodeTone(node);
   const local = node.type === 'local';
-  const stateLabel = node.status !== 'online' ? 'offline' : isCritical(node) ? 'critical' : 'online';
+  const exceptions = nodeExceptions(node);
   return (
     <button
       type="button"
@@ -109,27 +123,45 @@ function NodeCard({ node, isActive, isDevImage, onOpen }: { node: FleetNode; isA
       className={`relative w-full overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card text-left shadow-card-bevel ${node.status === 'online' ? '' : 'opacity-60'}`}
     >
       {local ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" /> : null}
-      <div className="flex items-center gap-2.5 px-[13px] pb-2.5 pt-3">
-        <StateDot tone={tone} size={7} glow pulse={local} />
-        <span className="min-w-0 flex-1 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
-        {local ? (
-          <span className="rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
-            you are here
-          </span>
-        ) : null}
-        {isActive && !local ? (
-          <span className="rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
-            active
-          </span>
-        ) : null}
-        {isDevImage ? (
-          <span className="flex items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
-            <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
-          </span>
-        ) : null}
-        <Kicker className={tone === 'destructive' ? 'text-destructive' : tone === 'warning' ? 'text-warning' : 'text-stat-subtitle'}>
-          {node.cordoned ? 'cordoned' : stateLabel}
-        </Kicker>
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 px-[13px] pb-2.5 pt-3">
+        {/* The dot and the name are one non-wrapping unit, so a name that fills
+            the row ellipsizes beside its dot instead of pushing the dot onto a
+            line of its own above the name. The name keeps its content width
+            until the unit alone is wider than the row, then it shrinks. */}
+        <span className="flex min-w-0 items-center gap-x-2.5">
+          {tone === 'success' ? (
+            // An online node that is not critical has no offline or critical word, so the dot
+            // carries "Online" for assistive tech (a cordoned word, if any, is announced beside it).
+            <span role="img" aria-label="Online" className="inline-flex shrink-0">
+              <StateDot tone={tone} size={7} glow />
+            </span>
+          ) : (
+            <StateDot tone={tone} size={7} glow />
+          )}
+          <span className="min-w-0 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
+        </span>
+        {/* Everything that qualifies the name is one block: when the row is crowded
+            the block wraps below the name as a unit, so the qualifiers never squeeze
+            a name that would otherwise fit and the pin never strands itself on a line
+            of its own. */}
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
+          {isActive && !local ? (
+            <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
+              active
+            </span>
+          ) : null}
+          {isDevImage ? (
+            <span className="flex shrink-0 items-center gap-1 rounded-[5px] bg-warning/[0.12] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-warning">
+              <FlaskConical className="h-2.5 w-2.5" strokeWidth={1.5} /> integration
+            </span>
+          ) : null}
+          {exceptions.length > 0 ? (
+            <Kicker className={cn('shrink-0 whitespace-nowrap', tone === 'destructive' ? 'text-destructive' : 'text-warning')}>
+              {exceptions.join(' · ')}
+            </Kicker>
+          ) : null}
+          <NodeConnectionPin type={node.type} mode={mode} className="shrink-0" />
+        </span>
       </div>
       <div className="flex items-stretch divide-x divide-hairline border-t border-hairline">
         <StatCell label="stacks" value={`${node.stacks?.length ?? 0}`} />
@@ -233,7 +265,7 @@ function NodeDetail({
           <StatePill tone={tone} live={!online}>{node.cordoned ? 'cordoned' : online ? (isCritical(node) ? 'degraded' : 'online') : 'offline'}</StatePill>
         </div>
         <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">
-          {`${node.type} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - lastSeen)}` : ''}`}
+          {`${nodeConnection(node.type, registryNode?.mode ?? node.mode)} · ${stacks.length} stacks${lastSeen ? ` · last seen ${formatAgo(now - lastSeen)}` : ''}`}
         </div>
       </div>
 
@@ -319,7 +351,7 @@ function NodeDetail({
 
 export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: MobileFleetProps) {
   const { nodes, loading, lastSyncAt, refetch } = useMobileFleet();
-  const { activeNode } = useNodes();
+  const { activeNode, nodes: registryNodes } = useNodes();
   const { isAdmin } = useAuth();
   const updateStatus = useFleetUpdateStatus();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -437,6 +469,7 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
                   <div key={node.id} className="flex flex-col gap-2.5">
                     <NodeCard
                       node={node}
+                      mode={registryNodes.find(n => n.id === node.id)?.mode ?? node.mode}
                       isActive={activeNode?.id === node.id}
                       isDevImage={Boolean(nodeUpdateStatus?.isDevImage)}
                       onOpen={() => setSelectedId(node.id)}

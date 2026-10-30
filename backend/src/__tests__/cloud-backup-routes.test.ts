@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Readable } from 'stream';
 import * as zlib from 'zlib';
+import * as tar from 'tar-stream';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 import { encryptArchive } from '../services/cloudBackupArchive';
@@ -482,5 +483,147 @@ describe('Sencho Snapshot Vault provisioning', () => {
         const res = await request(app).get('/api/cloud-backup/usage').set('Cookie', authCookie);
         expect(res.status).toBe(400);
         expect(res.body.error).toBe('Usage is only available for Sencho Snapshot Vault');
+    });
+});
+
+describe('Cloud backup encryption writes its own settings only', () => {
+    it('saves encryption without submitting or changing the destination', async () => {
+        const db = DatabaseService.getInstance();
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            provider: 'custom',
+            custom: {
+                endpoint: 'https://saved.example.com',
+                region: 'saved-region',
+                bucket: 'saved-bucket',
+                access_key: 'saved-key',
+                secret_key: 'saved-secret',
+                path_prefix: 'saved/',
+                auto_upload: true,
+            },
+        });
+        const before = db.getGlobalSettings();
+
+        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            encrypt_archives: true,
+            archive_passphrase: 'correct-horse-battery',
+        });
+        expect(res.status).toBe(204);
+
+        const after = db.getGlobalSettings();
+        expect(after.cloud_backup_encrypt_archives).toBe('1');
+        expect(after.cloud_backup_archive_passphrase.startsWith('enc:')).toBe(true);
+        expect(after.cloud_backup_provider).toBe(before.cloud_backup_provider);
+        expect(after.cloud_backup_endpoint).toBe(before.cloud_backup_endpoint);
+        expect(after.cloud_backup_region).toBe(before.cloud_backup_region);
+        expect(after.cloud_backup_bucket).toBe(before.cloud_backup_bucket);
+        expect(after.cloud_backup_access_key).toBe(before.cloud_backup_access_key);
+        expect(after.cloud_backup_secret_key).toBe(before.cloud_backup_secret_key);
+        expect(after.cloud_backup_path_prefix).toBe(before.cloud_backup_path_prefix);
+        expect(after.cloud_backup_auto_upload).toBe(before.cloud_backup_auto_upload);
+    });
+
+    it('accepts an encryption-only write on Community when the saved provider is custom', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        mockCommunity();
+        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({
+            encrypt_archives: true,
+            archive_passphrase: 'correct-horse-battery',
+        });
+        expect(res.status).toBe(204);
+    });
+
+    it('rejects a write that carries no change', async () => {
+        const res = await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send({});
+        expect(res.status).toBe(400);
+    });
+});
+
+describe('Cloud backup recovery', () => {
+    const recoveryKey = 'p/instances/old-instance/snapshots/5_2026-01-01_sealed.tar.gz.senc';
+    const passphrase = 'correct-horse-battery';
+
+    async function sealedArchiveObject(instanceId: string): Promise<Buffer> {
+        const pack = tar.pack();
+        pack.entry({ name: 'metadata.json' }, JSON.stringify({
+            description: 'from the old instance',
+            created_by: 'ada',
+            created_at: 1_700_000_000_000,
+            node_count: 1,
+            stack_count: 1,
+            skipped_nodes: [],
+            skipped_stacks: [],
+            instance_id: instanceId,
+            archive_version: 2,
+        }));
+        pack.entry({ name: 'nodes/1_original/web/compose.yaml' }, 'services: {}\n');
+        pack.finalize();
+        const gzip = zlib.createGzip();
+        const chunks: Buffer[] = [];
+        const plain = await new Promise<Buffer>((resolve, reject) => {
+            gzip.on('data', (chunk: Buffer) => chunks.push(chunk));
+            gzip.on('end', () => resolve(Buffer.concat(chunks)));
+            gzip.on('error', reject);
+            pack.on('error', reject);
+            pack.pipe(gzip);
+        });
+        return encryptArchive(plain, passphrase);
+    }
+
+    it('lists only other instances archives', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        DatabaseService.getInstance().setSystemState('instance_id', 'new-instance');
+        sentSpy.mockResolvedValue({
+            Contents: [
+                { Key: 'p/instances/new-instance/snapshots/1_mine.tar.gz.senc', Size: 1, LastModified: new Date('2026-01-01T00:00:00Z') },
+                { Key: recoveryKey, Size: 2, LastModified: new Date('2026-02-01T00:00:00Z') },
+            ],
+        });
+        const res = await request(app).get('/api/cloud-backup/recovery-archives').set('Cookie', authCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.entries.map((entry: { objectKey: string }) => entry.objectKey)).toEqual([recoveryKey]);
+        expect(res.body.truncated).toBe(false);
+    });
+
+    it('requires a passphrase and refuses a plaintext archive', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        DatabaseService.getInstance().setSystemState('instance_id', 'new-instance');
+
+        const missing = await request(app).post('/api/cloud-backup/recover').set('Cookie', authCookie).send({ object_key: recoveryKey });
+        expect(missing.status).toBe(409);
+        expect(missing.body.code).toBe('PASSPHRASE_REQUIRED');
+
+        sentSpy.mockResolvedValue({ Body: Readable.from(zlib.gzipSync(Buffer.from('plain'))) });
+        const plaintext = await request(app).post('/api/cloud-backup/recover').set('Cookie', authCookie)
+            .send({ object_key: recoveryKey, passphrase });
+        expect(plaintext.status).toBe(400);
+        expect(plaintext.body.error).toMatch(/Only an encrypted archive/);
+    });
+
+    it('recovers a sealed archive after the instance identity changed', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        const db = DatabaseService.getInstance();
+        db.setSystemState('instance_id', 'new-instance');
+        const blob = await sealedArchiveObject('old-instance');
+        sentSpy.mockResolvedValue({ Body: Readable.from(blob) });
+
+        const res = await request(app).post('/api/cloud-backup/recover').set('Cookie', authCookie)
+            .send({ object_key: recoveryKey, passphrase });
+        expect(res.status).toBe(201);
+        const imported = db.getSnapshot(res.body.snapshot_id)!;
+        expect(imported.source_instance_id).toBe('old-instance');
+        expect(imported.description).toBe('from the old instance');
+        expect(imported.warnings_known).toBe(1);
+    });
+
+    it('rejects a recovery key outside the bucket snapshot area', async () => {
+        await request(app).put('/api/cloud-backup/config').set('Cookie', authCookie).send(customConfigBody);
+        const res = await request(app).post('/api/cloud-backup/recover').set('Cookie', authCookie)
+            .send({ object_key: 'p/elsewhere/1.tar.gz.senc', passphrase });
+        expect(res.status).toBe(400);
+    });
+
+    it('requires authentication', async () => {
+        const res = await request(app).post('/api/cloud-backup/recover').send({ object_key: recoveryKey, passphrase });
+        expect(res.status).toBe(401);
     });
 });

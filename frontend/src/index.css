@@ -97,9 +97,6 @@
   --data-line-width: 1.25px;
   --data-peak: var(--warning);
 
-  /* Fleet Action card transformative chip (reuses the purple label hue) */
-  --action-transformative: var(--label-purple);
-
   /* ─────────────── Dim defaults (the default theme) ─────────────── */
   /* Raw lightness vars */
   --bg: 0.160;  --card-l: 0.212;  --band-l: 0.190;  --well-l: 0.128;
@@ -584,7 +581,6 @@ html[data-effects="reduced"] .masthead-rail-shimmer {
   --color-update-foreground: var(--update-foreground);
   --color-update-muted: var(--update-muted);
   --color-destructive-muted: var(--destructive-muted);
-  --color-action-transformative: var(--action-transformative);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);

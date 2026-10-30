@@ -150,6 +150,37 @@ export function serveRepos(
   });
 }
 
+/**
+ * Commit a change in a fixture repo's work tree and push it into the bare
+ * repository `serveRepos` is serving, which is what a developer's `git push`
+ * does to a hosted remote. Returns the new commit's full SHA.
+ *
+ * `serveRepos` records each served bare repository in the map it was given
+ * under `<name>.git`, so a caller passes `repoDirs['app.git']` as `bareDir`.
+ */
+export function pushFixtureCommit(
+  workDir: string,
+  bareDir: string,
+  change: { write?: Record<string, string>; remove?: string[]; message?: string },
+  branch = 'main',
+): string {
+  const run = (args: string[]) => {
+    const r = spawnSync('git', args, { cwd: workDir, encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  for (const [rel, content] of Object.entries(change.write ?? {})) {
+    const abs = path.join(workDir, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+  }
+  for (const rel of change.remove ?? []) fs.rmSync(path.join(workDir, rel), { force: true });
+  run(['add', '-A']);
+  run(['commit', '-m', change.message ?? 'fixture update']);
+  run(['push', '--quiet', bareDir, `${branch}:${branch}`]);
+  return run(['rev-parse', 'HEAD']);
+}
+
 /** The full-project fixture: compose + env file + config + build context. */
 export function fullProjectFiles(): Record<string, string> {
   return {

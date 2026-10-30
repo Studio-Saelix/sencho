@@ -94,6 +94,9 @@ describe('Fleet snapshot read authorization', () => {
         const res = await request(app).get('/api/fleet/snapshots').set('Cookie', adminCookie);
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body.snapshots)).toBe(true);
+        const seeded = (res.body.snapshots as Array<Record<string, unknown>>)
+            .find(snapshot => snapshot.id === snapshotId);
+        expect(seeded).toMatchObject({ origin: 'local', warnings_known: 1 });
     });
 
     it('GET /api/fleet/snapshots/:id returns 403 for a non-admin', async () => {
@@ -273,6 +276,158 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(res.body.redeployed).toBe(false);
         expect(fs.readFileSync(composePath('restore-web'), 'utf-8')).toContain('app: {}');
         expect(fs.readFileSync(envPath('restore-web'), 'utf-8')).toContain('SECRET=restored-value');
+    });
+
+    it('creates a stack that does not exist on the target, as on a fresh instance', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-fresh-instance', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-absent', filename: 'compose.yaml', content: 'services:\n  recovered: {}\n' },
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-absent', filename: '.env', content: 'RECOVERED=1\n' },
+        ]);
+        expect(fs.existsSync(path.dirname(composePath('restore-absent')))).toBe(false);
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-absent' });
+
+        expect(res.status).toBe(200);
+        expect(res.body.redeployed).toBe(false);
+        expect(fs.readFileSync(composePath('restore-absent'), 'utf-8')).toContain('recovered: {}');
+        expect(fs.readFileSync(envPath('restore-absent'), 'utf-8')).toContain('RECOVERED=1');
+    });
+
+    describe('absent stack whose snapshot has no compose.yaml', () => {
+        afterEach(() => vi.unstubAllGlobals());
+
+        function envOnlySnapshot(label: string, stackName: string, nodeId = LOCAL_NODE_ID): number {
+            const db = DatabaseService.getInstance();
+            const id = db.createSnapshot(label, 'admin', 1, 1, '[]', '[]');
+            db.insertSnapshotFiles(id, [
+                { nodeId, nodeName: 'n', stackName, filename: '.env', content: 'ONLY=env\n' },
+            ]);
+            return id;
+        }
+
+        it('refuses a single restore with 409 and leaves nothing that blocks Create Stack', async () => {
+            const id = envOnlySnapshot('restore-env-only', 'restore-env-only');
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-env-only' });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+            expect(fs.existsSync(path.dirname(envPath('restore-env-only')))).toBe(false);
+            await expect(FileSystemService.getInstance(LOCAL_NODE_ID).createStack('restore-env-only')).resolves.toBeUndefined();
+        });
+
+        it('records the stack as failed in restore-all, creates no directory, and restores its siblings', async () => {
+            const db = DatabaseService.getInstance();
+            const id = db.createSnapshot('restore-all-env-only', 'admin', 1, 2, '[]', '[]');
+            db.insertSnapshotFiles(id, [
+                { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-env-only', filename: '.env', content: 'ONLY=env\n' },
+                { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'all-env-sibling', filename: 'compose.yaml', content: 'services:\n  sibling: {}\n' },
+            ]);
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore-all`)
+                .set('Cookie', adminCookie)
+                .send({});
+
+            expect(res.status).toBe(200);
+            expect(res.body.restored).toBe(1);
+            expect(res.body.failed).toBe(1);
+            const failed = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>)
+                .find(r => r.stackName === 'all-env-only');
+            expect(failed?.success).toBe(false);
+            expect(failed?.error).toContain('no compose.yaml');
+            expect(fs.existsSync(path.dirname(envPath('all-env-only')))).toBe(false);
+            expect(fs.readFileSync(composePath('all-env-sibling'), 'utf-8')).toContain('sibling: {}');
+        });
+
+        it('answers 409 from the receiving node route and creates no directory', async () => {
+            const res = await request(app)
+                .post('/api/stacks/receiver-env-only/fleet-snapshot-apply')
+                .set('Cookie', adminCookie)
+                .send({ files: [{ filename: '.env', content: 'ONLY=env\n' }] });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+            expect(fs.existsSync(path.dirname(envPath('receiver-env-only')))).toBe(false);
+        });
+
+        it('removes the directory the receiving node route created when a file write fails', async () => {
+            vi.spyOn(FileSystemService.prototype, 'saveEnvContent')
+                .mockRejectedValue(new Error('disk full'));
+
+            const res = await request(app)
+                .post('/api/stacks/receiver-half-written/fleet-snapshot-apply')
+                .set('Cookie', adminCookie)
+                .send({ files: [
+                    { filename: 'compose.yaml', content: 'services:\n  half: {}\n' },
+                    { filename: '.env', content: 'HALF=1\n' },
+                ] });
+
+            expect(res.status).toBe(500);
+            expect(fs.existsSync(path.dirname(composePath('receiver-half-written')))).toBe(false);
+        });
+
+        it('propagates the receiving node refusal through the remote proxy as 409', async () => {
+            const db = DatabaseService.getInstance();
+            const remoteId = db.addNode({ name: 'remote-env-only', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+            const id = envOnlySnapshot('restore-remote-env-only', 'remote-env-only', remoteId);
+            vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+            vi.stubGlobal('fetch', vi.fn(async () => ({
+                ok: false,
+                status: 409,
+                text: async () => JSON.stringify({ error: 'no compose.yaml', code: 'snapshot_compose_missing' }),
+            }) as unknown as Response));
+
+            const res = await request(app)
+                .post(`/api/fleet/snapshots/${id}/restore`)
+                .set('Cookie', adminCookie)
+                .send({ nodeId: remoteId, stackName: 'remote-env-only' });
+
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({ code: 'snapshot_compose_missing' });
+        });
+    });
+
+    it('returns 409 stack_deletion_in_progress when compose still exists but deletion is pending', async () => {
+        const db = DatabaseService.getInstance();
+        const now = Date.now();
+        db.insertCleanupPending({
+            id: randomUUID(),
+            node_id: LOCAL_NODE_ID,
+            stack_name: 'restore-deletion-pending',
+            status: 'prepared',
+            target_kind: 'local_socket',
+            rollback_tags_json: '[]',
+            override_paths_json: '[]',
+            prune_volumes_requested: 0,
+            required_blueprint_id: null,
+            created_at: now,
+            updated_at: now,
+        });
+        const id = db.createSnapshot('restore-deletion-block', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'restore-deletion-pending', filename: 'compose.yaml', content: 'services:\n  snap: {}\n' },
+        ]);
+        const preCompose = 'services:\n  live: {}\n';
+        seedStackDir('restore-deletion-pending');
+        fs.writeFileSync(composePath('restore-deletion-pending'), preCompose);
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'restore-deletion-pending' });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toMatchObject({ code: 'stack_deletion_in_progress' });
+        expect(fs.readFileSync(composePath('restore-deletion-pending'), 'utf-8')).toBe(preCompose);
     });
 
     it('returns 409 when the deploy policy blocks the redeploy', async () => {
@@ -1477,6 +1632,25 @@ describe('Snapshot restore: recovery generation contract', () => {
         expectCurrentGenerationMatches('apply-existing', preCompose, preEnv);
     });
 
+    it('POST /api/stacks/:stackName/fleet-snapshot-apply creates a stack directory that does not exist yet', async () => {
+        expect(fs.existsSync(path.join(process.env.COMPOSE_DIR as string, 'apply-fresh'))).toBe(false);
+
+        const res = await request(app)
+            .post('/api/stacks/apply-fresh/fleet-snapshot-apply')
+            .set('Cookie', adminCookie)
+            .send({
+                files: [
+                    { filename: 'compose.yaml', content: 'services:\n  fresh: {}\n' },
+                    { filename: '.env', content: 'SNAP=1\n' },
+                ],
+            });
+
+        expect(res.status).toBe(200);
+        expect(res.body.capturedGenerationId).toBeNull();
+        expect(fs.readFileSync(composePath('apply-fresh'), 'utf-8')).toContain('fresh: {}');
+        expect(fs.readFileSync(envPath('apply-fresh'), 'utf-8')).toBe('SNAP=1\n');
+    });
+
     it('POST /api/stacks/:stackName/fleet-snapshot-apply returns 400 when no restoreable files remain', async () => {
         seedStackDir('apply-empty');
         const res = await request(app)
@@ -1688,4 +1862,586 @@ describe('Fleet snapshot restore: remote node refuses the redeploy to protect it
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('stack_op_in_progress');
     });
+});
+
+// A snapshot imported from another instance keeps that instance's node ids.
+// Restore must never treat a number that happens to exist here as the target.
+describe('Imported snapshot node mapping', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const importSnapshot = (options: {
+    sourceInstanceId: string | null;
+    stacks: Array<{ sourceNodeId: number; stackName: string }>;
+    documentation?: string;
+  }): number => {
+    const db = DatabaseService.getInstance();
+    return db.importSnapshotArchive({
+      description: 'imported',
+      createdBy: 'ada',
+      createdAt: Date.now(),
+      nodeCount: new Set(options.stacks.map(stack => stack.sourceNodeId)).size,
+      stackCount: options.stacks.length,
+      skippedNodes: '[]',
+      skippedStacks: '[]',
+      warningsKnown: true,
+      sourceInstanceId: options.sourceInstanceId,
+      documentation: options.documentation ?? '',
+      files: options.stacks.map(stack => ({
+        nodeId: stack.sourceNodeId,
+        nodeName: `archived-${stack.sourceNodeId}`,
+        stackName: stack.stackName,
+        filename: 'compose.yaml',
+        content: 'services:\n  imported: {}\n',
+      })),
+    });
+  };
+
+  const mapNodes = async (snapshotId: number, mappings: Array<{ sourceNodeId: number; targetNodeId: number }>) => {
+    return request(app)
+      .put(`/api/fleet/snapshots/${snapshotId}/node-mapping`)
+      .set('Cookie', adminCookie)
+      .send({ mappings });
+  };
+
+  it('refuses a foreign snapshot whose archived id matches a local node', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'collision-web' }] });
+    seedStackDir('collision-web');
+    fs.writeFileSync(composePath('collision-web'), 'services:\n  live: {}\n');
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'collision-web' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('collision-web'), 'utf-8')).toContain('live');
+  });
+
+  it('restores a foreign snapshot to the explicitly mapped local node', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 4242, stackName: 'mapped-local' }] });
+    seedStackDir('mapped-local');
+    const mapped = await mapNodes(id, [{ sourceNodeId: 4242, targetNodeId: LOCAL_NODE_ID }]);
+    expect(mapped.status).toBe(200);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 4242, stackName: 'mapped-local', expectedTargetNodeId: LOCAL_NODE_ID });
+
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(composePath('mapped-local'), 'utf-8')).toContain('imported');
+  });
+
+  it('dispatches a mapped foreign snapshot to the mapped remote node, not a same-numbered local one', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'mapped-remote', type: 'remote', api_url: '', api_token: '', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'mapped-remote-web' }] });
+    seedStackDir('mapped-remote-web');
+    await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: remoteId }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'mapped-remote-web', expectedTargetNodeId: remoteId });
+
+    // The mapped node is a remote with no reachable proxy target; a local write
+    // would have returned 200 and created the file.
+    expect(res.status).toBe(503);
+    expect(fs.existsSync(composePath('mapped-remote-web'))).toBe(false);
+  });
+
+  it('dispatches a mapped foreign snapshot to the mapped Pilot node', async () => {
+    const db = DatabaseService.getInstance();
+    const pilotId = db.addNode({
+      name: 'mapped-pilot',
+      type: 'remote',
+      mode: 'pilot_agent',
+      api_url: 'http://pilot:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'mapped-pilot-web' }] });
+    seedStackDir('mapped-pilot-web');
+    await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: pilotId }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'mapped-pilot-web', expectedTargetNodeId: pilotId });
+
+    expect(res.status).toBe(503);
+    expect(fs.existsSync(composePath('mapped-pilot-web'))).toBe(false);
+  });
+
+  it('restore-all restores mapped groups and reports unmapped groups without writing', async () => {
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [
+        { sourceNodeId: 1, stackName: 'mapped-all' },
+        { sourceNodeId: 2, stackName: 'unmapped-all' },
+      ],
+    });
+    seedStackDir('mapped-all');
+    seedStackDir('unmapped-all');
+    await mapNodes(id, [{ sourceNodeId: 1, targetNodeId: LOCAL_NODE_ID }]);
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore-all`)
+      .set('Cookie', adminCookie)
+      .send({ expectedMappingVersion: detail.body.mappingVersion });
+
+    expect(res.status).toBe(200);
+    expect(res.body.restored).toBe(1);
+    expect(res.body.failed).toBe(1);
+    const rows = res.body.results as Array<{ stackName: string; success: boolean; code?: string }>;
+    expect(rows.find(row => row.stackName === 'mapped-all')?.success).toBe(true);
+    const unmapped = rows.find(row => row.stackName === 'unmapped-all');
+    expect(unmapped?.success).toBe(false);
+    expect(unmapped?.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('mapped-all'), 'utf-8')).toContain('imported');
+    expect(fs.existsSync(composePath('unmapped-all'))).toBe(false);
+  });
+
+  it('restores notes to the mapped node, not the archived id', async () => {
+    const db = DatabaseService.getInstance();
+    const docJson = JSON.stringify({
+      generated_at: 'x',
+      stacks: [{ nodeId: 77, nodeName: 'archived-77', stackName: 'mapped-notes', dossier: { ...BLANK_FIELDS, purpose: 'from the archive' } }],
+      warnings: [],
+    });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [{ sourceNodeId: 77, stackName: 'mapped-notes' }],
+      documentation: docJson,
+    });
+    seedStackDir('mapped-notes');
+    await mapNodes(id, [{ sourceNodeId: 77, targetNodeId: LOCAL_NODE_ID }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 77, stackName: 'mapped-notes', restoreNotes: true, expectedTargetNodeId: LOCAL_NODE_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notesRestored).toBe(true);
+    expect(db.getStackDossier(LOCAL_NODE_ID, 'mapped-notes')?.purpose).toBe('from the archive');
+  });
+
+  it('restores a snapshot imported from this instance without a mapping', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: db.getInstanceId(), stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'own-archive' }] });
+    seedStackDir('own-archive');
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'own-archive' });
+
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(composePath('own-archive'), 'utf-8')).toContain('imported');
+  });
+
+  it('reports the mapping and the target name on the detail payload', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'detail-web' }] });
+    const before = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(before.body.requiresNodeMapping).toBe(true);
+    expect(before.body.nodes[0].targetNodeId).toBeNull();
+    expect(before.body.nodes[0].targetNodeName).toBeNull();
+
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    const after = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(after.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(after.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
+  it('reports identity targets for a locally captured snapshot', async () => {
+    const db = DatabaseService.getInstance();
+    const id = db.createSnapshot('local-detail', 'admin', 1, 1, '[]', '[]');
+    db.insertSnapshotFiles(id, [
+      { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'local-detail-web', filename: 'compose.yaml', content: 'services: {}\n' },
+    ]);
+    const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.requiresNodeMapping).toBe(false);
+    expect(res.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(res.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
+  it('reports identity targets for a snapshot imported from this instance', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: db.getInstanceId(), stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'own-detail' }] });
+    const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.requiresNodeMapping).toBe(false);
+    expect(res.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(res.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
+  it('validates the mapping route', async () => {
+    const db = DatabaseService.getInstance();
+    const foreign = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'validate-web' }] });
+    const unknownSource = await mapNodes(foreign, [{ sourceNodeId: 99, targetNodeId: LOCAL_NODE_ID }]);
+    expect(unknownSource.status).toBe(400);
+    const unknownTarget = await mapNodes(foreign, [{ sourceNodeId: 5, targetNodeId: 99999 }]);
+    expect(unknownTarget.status).toBe(400);
+    const duplicate = await mapNodes(foreign, [
+      { sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID },
+      { sourceNodeId: 6, targetNodeId: LOCAL_NODE_ID },
+    ]);
+    expect(duplicate.status).toBe(400);
+
+    const local = db.createSnapshot('local-map', 'admin', 1, 1, '[]', '[]');
+    const localRes = await mapNodes(local, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: LOCAL_NODE_ID }]);
+    expect(localRes.status).toBe(400);
+  });
+
+  it('treats an imported archive with no source instance as foreign', async () => {
+    const id = importSnapshot({ sourceInstanceId: null, stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'unknown-source' }] });
+    seedStackDir('unknown-source');
+    fs.writeFileSync(composePath('unknown-source'), 'services:\n  live: {}\n');
+
+    const restore = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: LOCAL_NODE_ID, stackName: 'unknown-source' });
+    expect(restore.status).toBe(409);
+    expect(restore.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.readFileSync(composePath('unknown-source'), 'utf-8')).toContain('live');
+
+    const mapped = await mapNodes(id, [{ sourceNodeId: LOCAL_NODE_ID, targetNodeId: LOCAL_NODE_ID }]);
+    expect(mapped.status).toBe(200);
+  });
+
+  it('refuses a mapping whose destination node was deleted', async () => {
+    const db = DatabaseService.getInstance();
+    const doomed = db.addNode({ name: 'doomed-target', type: 'remote', api_url: '', api_token: '', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'deleted-target' }] });
+    seedStackDir('deleted-target');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: doomed }]);
+    db.deleteNode(doomed);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'deleted-target' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_NODE_UNMAPPED');
+    expect(fs.existsSync(composePath('deleted-target'))).toBe(false);
+
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(detail.body.nodes[0].targetNodeId).toBeNull();
+  });
+
+  it('drops the mapping when the snapshot is deleted', async () => {
+    const db = DatabaseService.getInstance();
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'delete-map' }] });
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    expect(db.getSnapshotNodeMap(id)).toHaveLength(1);
+
+    const res = await request(app).delete(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(db.getSnapshotNodeMap(id)).toHaveLength(0);
+  });
+
+  it('keeps imported snapshots out of local coverage claims', () => {
+    const db = DatabaseService.getInstance();
+    const localId = db.createSnapshot('local coverage', 'admin', 1, 1, '[]', '[]');
+    db.insertSnapshotFiles(localId, [
+      { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'coverage-web', filename: 'compose.yaml', content: 'services: {}\n' },
+    ]);
+    const importedId = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: LOCAL_NODE_ID, stackName: 'coverage-web' }] });
+    expect(importedId).toBeGreaterThan(localId);
+    expect(db.getLatestSnapshotTimestampFor(LOCAL_NODE_ID, 'coverage-web')).toBe(db.getSnapshot(localId)?.created_at);
+    expect(db.getLatestLocalSnapshot()?.id).toBe(localId);
+  });
+
+  it('refuses a stale individual confirmation instead of redirecting the write', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'stale-remote', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'stale-web' }] });
+    seedStackDir('stale-web');
+    fs.writeFileSync(composePath('stale-web'), 'services:\n  live: {}\n');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+
+    // What the operator saw in the detail view before confirming.
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(detail.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+
+    // Another session remaps the archived node to a remote before the confirm.
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: remoteId }]);
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 200, text: async () => '' } as unknown as Response));
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'stale-web', expectedTargetNodeId: LOCAL_NODE_ID });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_MAPPING_CHANGED');
+    expect(fs.readFileSync(composePath('stale-web'), 'utf-8')).toContain('live');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('requires the confirmed destination for a foreign restore', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'no-confirm' }] });
+    seedStackDir('no-confirm');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'no-confirm' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_MAPPING_CHANGED');
+    expect(fs.existsSync(composePath('no-confirm'))).toBe(false);
+  });
+
+  it('freezes every restore-all destination before the first apply', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteA = db.addNode({ name: 'frozen-remote-a', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const remoteB = db.addNode({ name: 'frozen-remote-b', type: 'remote', api_url: 'http://remote2:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const remoteC = db.addNode({ name: 'frozen-remote-c', type: 'remote', api_url: 'http://localhost:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [
+        { sourceNodeId: 5, stackName: 'frozen-a-web' },
+        { sourceNodeId: 6, stackName: 'frozen-b-web' },
+      ],
+    });
+    seedStackDir('frozen-a-web');
+    seedStackDir('frozen-b-web');
+    await mapNodes(id, [
+      { sourceNodeId: 5, targetNodeId: remoteA },
+      { sourceNodeId: 6, targetNodeId: remoteB },
+    ]);
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+
+    // Hold the first apply (archived node 5 -> remote A) open, then remap the
+    // stack that has not been reached yet (archived node 6) to remote C.
+    let releaseApply: () => void = () => {};
+    const applyGate = new Promise<void>(resolve => { releaseApply = resolve; });
+    const appliedUrls: string[] = [];
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((nodeId: number) => ({
+      apiUrl: nodeId === remoteA ? 'http://remote:1852' : nodeId === remoteB ? 'http://remote2:1852' : 'http://localhost:1852',
+      apiToken: 'tok',
+      trustedLoopback: false,
+    }));
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      appliedUrls.push(url);
+      if (appliedUrls.length === 1) await applyGate;
+      return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+    }));
+
+    // Start the run without waiting for it: supertest only sends once the
+    // thenable is observed, and the mapping change must land mid-run.
+    const pending = Promise.resolve(
+      request(app)
+        .post(`/api/fleet/snapshots/${id}/restore-all`)
+        .set('Cookie', adminCookie)
+        .send({ expectedMappingVersion: detail.body.mappingVersion }),
+    );
+
+    await vi.waitFor(() => expect(appliedUrls).toHaveLength(1));
+    await mapNodes(id, [
+      { sourceNodeId: 5, targetNodeId: remoteA },
+      { sourceNodeId: 6, targetNodeId: remoteC },
+    ]);
+    releaseApply();
+    const res = await pending;
+
+    expect(res.status).toBe(200);
+    expect(res.body.restored).toBe(2);
+    // Node 6 keeps the destination frozen at request start: the second apply
+    // still reaches remote B, and remote C never receives that stack.
+    expect(appliedUrls).toEqual([
+      'http://remote:1852/api/stacks/frozen-a-web/fleet-snapshot-apply',
+      'http://remote2:1852/api/stacks/frozen-b-web/fleet-snapshot-apply',
+    ]);
+    expect(fs.existsSync(composePath('frozen-a-web'))).toBe(false);
+    expect(fs.existsSync(composePath('frozen-b-web'))).toBe(false);
+  });
+
+  it('redeploys a mapped restore on the mapped local node', async () => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue({
+      recoveryId: null,
+      deployedGenerationId: null,
+      gitopsOperationId: null,
+    });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'mapped-redeploy' }] });
+    seedStackDir('mapped-redeploy');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'mapped-redeploy', redeploy: true, expectedTargetNodeId: LOCAL_NODE_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.redeployed).toBe(true);
+    expect(deploySpy).toHaveBeenCalledWith('mapped-redeploy', undefined, undefined, {
+      source: 'fleet_snapshot',
+      actor: 'system:fleet-snapshot',
+    });
+  });
+
+  it('sends mapped bulk files and notes to the mapped remote node', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'mapped-bulk-remote', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const docJson = JSON.stringify({
+      generated_at: 'x',
+      stacks: [{ nodeId: 5, nodeName: 'archived-5', stackName: 'mapped-bulk-web', dossier: { ...BLANK_FIELDS, purpose: 'bulk notes' } }],
+      warnings: [],
+    });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [{ sourceNodeId: 5, stackName: 'mapped-bulk-web' }],
+      documentation: docJson,
+    });
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: remoteId }]);
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string; body?: string }) => {
+      calls.push({ url, method: opts?.method, body: opts?.body });
+      return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+    }));
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore-all`)
+      .set('Cookie', adminCookie)
+      .send({ restoreNotes: true, expectedMappingVersion: detail.body.mappingVersion });
+
+    expect(res.status).toBe(200);
+    expect(res.body.restored).toBe(1);
+    expect(calls.some(call => /\/fleet-snapshot-apply$/.test(call.url) && call.body?.includes('imported'))).toBe(true);
+    expect(calls.some(call => /\/dossier$/.test(call.url) && call.method === 'PUT' && call.body?.includes('bulk notes'))).toBe(true);
+    expect(fs.existsSync(composePath('mapped-bulk-web'))).toBe(false);
+  });
+
+  it('refuses restore-all when the mapping changed after the detail loaded', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'stale-all-remote', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'stale-all-web' }] });
+    seedStackDir('stale-all-web');
+    fs.writeFileSync(composePath('stale-all-web'), 'services:\n  live: {}\n');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    const detail = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: remoteId }]);
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 200, text: async () => '' } as unknown as Response));
+    vi.stubGlobal('fetch', fetchSpy);
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore-all`)
+      .set('Cookie', adminCookie)
+      .send({ expectedMappingVersion: detail.body.mappingVersion });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('SNAPSHOT_MAPPING_CHANGED');
+    expect(fs.readFileSync(composePath('stale-all-web'), 'utf-8')).toContain('live');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends mapped files and notes to the mapped remote node', async () => {
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'mapped-files-remote', type: 'remote', api_url: 'http://remote:1852', api_token: 'tok', compose_dir: '/app/compose', is_default: false });
+    const docJson = JSON.stringify({
+      generated_at: 'x',
+      stacks: [{ nodeId: 5, nodeName: 'archived-5', stackName: 'mapped-files-web', dossier: { ...BLANK_FIELDS, purpose: 'from the archive' } }],
+      warnings: [],
+    });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [{ sourceNodeId: 5, stackName: 'mapped-files-web' }],
+      documentation: docJson,
+    });
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: remoteId }]);
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string; body?: string }) => {
+      calls.push({ url, method: opts?.method, body: opts?.body });
+      return { ok: true, status: 200, text: async () => '', json: async () => ({}) } as unknown as Response;
+    }));
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'mapped-files-web', restoreNotes: true, expectedTargetNodeId: remoteId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notesRestored).toBe(true);
+    const apply = calls.find(call => /\/fleet-snapshot-apply$/.test(call.url));
+    expect(apply?.body).toContain('imported');
+    const notes = calls.find(call => /\/dossier$/.test(call.url));
+    expect(notes?.method).toBe('PUT');
+    expect(notes?.body).toContain('from the archive');
+    expect(fs.existsSync(composePath('mapped-files-web'))).toBe(false);
+  });
+
+  it('sends mapped files and notes to the mapped Pilot node', async () => {
+    const db = DatabaseService.getInstance();
+    const pilotId = db.addNode({
+      name: 'mapped-files-pilot',
+      type: 'remote',
+      mode: 'pilot_agent',
+      api_url: 'http://remote:1852',
+      api_token: 'tok',
+      compose_dir: '/app/compose',
+      is_default: false,
+    });
+    const docJson = JSON.stringify({
+      generated_at: 'x',
+      stacks: [{ nodeId: 5, nodeName: 'archived-5', stackName: 'mapped-pilot-files', dossier: { ...BLANK_FIELDS, purpose: 'pilot notes' } }],
+      warnings: [],
+    });
+    const id = importSnapshot({
+      sourceInstanceId: 'other-instance',
+      stacks: [{ sourceNodeId: 5, stackName: 'mapped-pilot-files' }],
+      documentation: docJson,
+    });
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: pilotId }]);
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tok', trustedLoopback: false });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: { method?: string; body?: string }) => {
+      calls.push({ url, method: opts?.method, body: opts?.body });
+      return { ok: true, status: 200, text: async () => '' } as unknown as Response;
+    }));
+
+    const res = await request(app)
+      .post(`/api/fleet/snapshots/${id}/restore`)
+      .set('Cookie', adminCookie)
+      .send({ nodeId: 5, stackName: 'mapped-pilot-files', restoreNotes: true, expectedTargetNodeId: pilotId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notesRestored).toBe(true);
+    expect(calls.some(call => /\/fleet-snapshot-apply$/.test(call.url))).toBe(true);
+    expect(calls.some(call => /\/dossier$/.test(call.url) && call.method === 'PUT')).toBe(true);
+    expect(fs.existsSync(composePath('mapped-pilot-files'))).toBe(false);
+  });
+
+  it('reports a changed mapping fingerprint on the detail payload', async () => {
+    const id = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'version-web' }] });
+    const before = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(before.body.mappingVersion).toBe('');
+    await mapNodes(id, [{ sourceNodeId: 5, targetNodeId: LOCAL_NODE_ID }]);
+    const after = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(after.body.mappingVersion).toBe(`5:${LOCAL_NODE_ID}`);
+    const localId = DatabaseService.getInstance().createSnapshot('local-version', 'admin', 1, 1, '[]', '[]');
+    DatabaseService.getInstance().insertSnapshotFiles(localId, [
+      { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'local-version-web', filename: 'compose.yaml', content: 'services: {}\n' },
+    ]);
+    const local = await request(app).get(`/api/fleet/snapshots/${localId}`).set('Cookie', adminCookie);
+    expect(local.body.mappingVersion).toBe('');
+  });
 });

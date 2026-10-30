@@ -1,8 +1,10 @@
 import path from 'path';
+import { DatabaseService } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { isValidStackName } from '../utils/validation';
+import { sanitizeForLog } from '../utils/safeLog';
 import { invalidateNodeCaches } from './cacheInvalidation';
 import {
   FLEET_SNAPSHOT_APPLY_FILENAMES,
@@ -43,16 +45,34 @@ export function getCodedError(error: unknown): CodedError | undefined {
   return error as CodedError;
 }
 
-export type FleetSnapshotApplyConflictCode = 'stack_op_in_progress' | 'HEALTH_GATE_OBSERVING';
+export type FleetSnapshotApplyConflictCode =
+  | 'stack_op_in_progress'
+  | 'HEALTH_GATE_OBSERVING'
+  | 'stack_deletion_in_progress'
+  | 'snapshot_compose_missing';
 
 export function fleetSnapshotApplyConflictCode(error: unknown): FleetSnapshotApplyConflictCode | undefined {
   const code = getCodedError(error)?.code;
-  if (code === 'stack_op_in_progress' || code === 'HEALTH_GATE_OBSERVING') return code;
+  if (
+    code === 'stack_op_in_progress'
+    || code === 'HEALTH_GATE_OBSERVING'
+    || code === 'stack_deletion_in_progress'
+    || code === 'snapshot_compose_missing'
+  ) return code;
   return undefined;
 }
 
 function codedError(message: string, code: string): CodedError {
   return Object.assign(new Error(message), { code });
+}
+
+function assertNoBlockingDeletionForRestore(nodeId: number, stackName: string): void {
+  if (DatabaseService.getInstance().hasBlockingDeletionIntent(nodeId, stackName)) {
+    throw codedError(
+      `Stack "${stackName}" has a deletion in progress and cannot be restored until cleanup finishes.`,
+      'stack_deletion_in_progress',
+    );
+  }
 }
 
 async function writeApplyFile(
@@ -70,13 +90,22 @@ async function writeApplyFile(
   }
 }
 
+async function removeCreatedStackDir(fsSvc: FileSystemService, stackName: string): Promise<void> {
+  try {
+    await fsSvc.deleteStack(stackName);
+  } catch (cleanupError) {
+    console.error('[FleetSnapshot] Could not remove the directory created for a failed restore: %s', sanitizeForLog(stackName), cleanupError);
+  }
+}
+
 /**
  * Capture-then-write used by Fleet snapshot restore on the node that owns the
  * stack. Takes the stack-op lock, then captures and writes. An existing Compose
  * project creates the current recovery generation before the first snapshot
  * file is written. Capture failure aborts with the live files unchanged. A
  * directory with no compose file is treated as a new stack and has no recovery
- * generation to roll back to.
+ * generation to roll back to; it needs a compose.yaml in the snapshot, and a
+ * directory this restore created is removed again when a write fails.
  */
 export async function applyFleetSnapshotFiles(
   input: ApplyFleetSnapshotFilesInput,
@@ -95,18 +124,43 @@ export async function applyFleetSnapshotFiles(
     'backup',
     actor,
     async () => {
+      assertNoBlockingDeletionForRestore(nodeId, stackName);
       const fsSvc = FileSystemService.getInstance(nodeId);
       const exists = await fsSvc.hasComposeFile(path.join(fsSvc.getBaseDir(), stackName));
       let capturedGenerationId: string | null = null;
+      let createdDir = false;
       if (exists) {
         capturedGenerationId = (await StackUpdateRecoveryService.getInstance().captureCurrentBackup({
           nodeId,
           stackName,
           createdBy: actor,
         })).id;
+      } else {
+        // A restore may target a stack this node does not have yet (every stack
+        // in a recovered archive is absent on a fresh instance). Create its
+        // directory so the captured files can be written there, but only when
+        // the result will be a stack: a directory without a compose file is
+        // not listed and blocks Create Stack with "already exists".
+        if (!files.some((file) => file.filename === 'compose.yaml')) {
+          throw codedError(
+            `Stack "${stackName}" does not exist on this node and the snapshot has no compose.yaml for it, so it cannot be restored.`,
+            'snapshot_compose_missing',
+          );
+        }
+        createdDir = await fsSvc.ensureStackDir(stackName);
       }
-      for (const file of files) {
-        await writeApplyFile(fsSvc, stackName, file);
+      try {
+        for (const file of files) {
+          await writeApplyFile(fsSvc, stackName, file);
+        }
+      } catch (error) {
+        // Remove only a directory this restore created; a half-written new
+        // stack must not outlive the failed request.
+        if (createdDir) {
+          await removeCreatedStackDir(fsSvc, stackName);
+          invalidateNodeCaches(nodeId);
+        }
+        throw error;
       }
       invalidateNodeCaches(nodeId);
       return { capturedGenerationId };

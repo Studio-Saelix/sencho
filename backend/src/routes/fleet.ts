@@ -3,7 +3,7 @@ import path from 'path';
 import semver from 'semver';
 import si from 'systeminformation';
 import type Dockerode from 'dockerode';
-import { DatabaseService, type Node, type StackDossierFields } from '../services/DatabaseService';
+import { DatabaseService, type FleetSnapshot, type Node, type StackDossierFields } from '../services/DatabaseService';
 import { awaitHubPostUpdateVerification } from '../services/hubPostUpdateVerification';
 import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } from '../services/FleetSyncService';
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
@@ -2394,13 +2394,13 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 
 // ─── Fleet Actions: blast-radius preview endpoints (non-destructive) ───
 //
-// Power the live readouts in the Fleet Action cards. Same auth gates as the
-// destructive endpoints above so the surface stays uniform: an operator who
-// can fire `fleet-stop` is also the operator who can ask how big it would be.
+// Power the live plans in the Fleet Actions sheets and the amount on the Actions
+// list row. Each preview has its own gate: node:read for the label previews,
+// admin for the prune estimate.
 
 // Per-label fleet preview. Fans out to every node authoritatively (local DB +
 // live remote reads via collectFleetLabelSummaries) and reports, per node, the
-// matching stacks, whether the label exists at all, and reachability. The card
+// matching stacks, whether the label exists at all, and reachability. The sheet
 // uses these to distinguish "0 matching stacks" from "label exists but no
 // stacks assigned" from "remote unavailable".
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -2449,7 +2449,7 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
 // `/api/node-labels` namespace) are deliberately never folded in, because
 // fleet-stop targets stack labels only; the `scope: 'stack'` tag makes that
 // explicit. Labels with zero matching stacks fleet-wide are dropped (stopping
-// them is a no-op). `unreachableNodes`/`partial` tell the card the counts cover
+// them is a no-op). `unreachableNodes`/`partial` tell the sheet the counts cover
 // only the nodes it could reach.
 fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
@@ -2811,14 +2811,29 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
       }
     }
 
-    const nodes = Array.from(nodesMap.values()).map(n => ({
-      nodeId: n.nodeId,
-      nodeName: n.nodeName,
-      stacks: Array.from(n.stacks.entries()).map(([stackName, stackFiles]) => ({
-        stackName,
-        files: stackFiles,
-      })),
-    }));
+    // Archived nodes keep the source installation's ids and names. Resolve each
+    // one to a destination node here: identity for a locally captured snapshot,
+    // the recorded mapping for an imported one, and null when nothing is mapped.
+    const requiresNodeMapping = snapshotRequiresNodeMapping(snapshot);
+    const capturedHere = !requiresNodeMapping;
+    const archivedMapping = db.getSnapshotNodeMap(id);
+    const mappingBySource = new Map(
+      archivedMapping.map(m => [m.source_node_id, m.target_node_id] as const),
+    );
+    const nodes = Array.from(nodesMap.values()).map(n => {
+      const targetNodeId = capturedHere ? n.nodeId : mappingBySource.get(n.nodeId) ?? null;
+      const targetNode = targetNodeId !== null ? db.getNode(targetNodeId) : undefined;
+      return {
+        nodeId: n.nodeId,
+        nodeName: n.nodeName,
+        targetNodeId: targetNode ? targetNode.id : null,
+        targetNodeName: targetNode ? targetNode.name : null,
+        stacks: Array.from(n.stacks.entries()).map(([stackName, stackFiles]) => ({
+          stackName,
+          files: stackFiles,
+        })),
+      };
+    });
 
     // Surface the captured dossier metadata when present so the detail view can
     // render notes and offer to restore them. The list payload stays lean (only
@@ -2843,10 +2858,83 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
     }
 
     if (isDebugEnabled()) console.debug('[Fleet:debug] Snapshot detail:', id, files.length, 'files');
-    res.json({ ...snapshot, nodes, documentation, fileDecryptWarnings });
+    res.json({
+      ...snapshot,
+      nodes,
+      documentation,
+      fileDecryptWarnings,
+      requiresNodeMapping,
+      // The exact mapping the operator is confirming. Restore-all echoes it back
+      // so a mapping change made elsewhere cannot redirect a run in flight.
+      mappingVersion: requiresNodeMapping ? snapshotMappingVersion(archivedMapping) : '',
+    });
   } catch (error) {
     console.error('[Fleet Snapshot] Detail error:', error);
     res.status(500).json({ error: 'Failed to fetch snapshot details' });
+  }
+});
+
+// Records the archived-node -> destination-node mapping an imported snapshot
+// needs before it can write anything. Partial mappings are allowed; restore of
+// an unmapped group is refused rather than guessed.
+fleetRouter.put('/snapshots/:id/node-mapping', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const id = parseIntParam(req, res, 'id', 'snapshot ID');
+    if (id === null) return;
+    const db = DatabaseService.getInstance();
+    const snapshot = db.getSnapshot(id);
+    if (!snapshot) {
+      res.status(404).json({ error: 'Snapshot not found' });
+      return;
+    }
+    if (!snapshotRequiresNodeMapping(snapshot)) {
+      res.status(400).json({ error: 'This snapshot was captured by this instance, so its nodes need no mapping' });
+      return;
+    }
+
+    const raw = req.body?.mappings;
+    if (!Array.isArray(raw)) {
+      res.status(400).json({ error: 'mappings must be an array' });
+      return;
+    }
+    const archivedNodes = db.getSnapshotSourceNodes(id);
+    const archivedIds = new Set(archivedNodes.map(node => node.node_id));
+    const seenSources = new Set<number>();
+    const seenTargets = new Set<number>();
+    const mappings: Array<{ sourceNodeId: number; targetNodeId: number }> = [];
+    for (const entry of raw as unknown[]) {
+      const sourceNodeId = Number((entry as { sourceNodeId?: unknown })?.sourceNodeId);
+      const targetNodeId = Number((entry as { targetNodeId?: unknown })?.targetNodeId);
+      if (!Number.isSafeInteger(sourceNodeId) || !archivedIds.has(sourceNodeId)) {
+        res.status(400).json({ error: 'Each mapping must name a node that exists in this archive' });
+        return;
+      }
+      if (!Number.isSafeInteger(targetNodeId) || !db.getNode(targetNodeId)) {
+        res.status(400).json({ error: 'Each mapping must name an existing destination node' });
+        return;
+      }
+      if (seenSources.has(sourceNodeId) || seenTargets.has(targetNodeId)) {
+        res.status(400).json({ error: 'Each archived node maps to one destination node, and each destination node to one archived node' });
+        return;
+      }
+      seenSources.add(sourceNodeId);
+      seenTargets.add(targetNodeId);
+      mappings.push({ sourceNodeId, targetNodeId });
+    }
+
+    db.setSnapshotNodeMap(id, mappings);
+    res.json({
+      mappings: db.getSnapshotNodeMap(id).map(mapping => ({
+        sourceNodeId: mapping.source_node_id,
+        targetNodeId: mapping.target_node_id,
+        targetNodeName: db.getNode(mapping.target_node_id)?.name ?? null,
+      })),
+    });
+  } catch (error) {
+    console.error('[Fleet Snapshot] Node mapping error:', error);
+    res.status(500).json({ error: 'Failed to save the snapshot node mapping' });
   }
 });
 
@@ -2919,8 +3007,10 @@ function buildRemoteProxyContext(node: Node): RemoteProxyContext | null {
 // Writes a snapshot stack's files back to its node. Existing stacks capture a
 // recovery generation before the first write; capture failure aborts with no
 // mutation. A later write failure can leave live files changed; the captured
-// generation remains. Throws SnapshotProxyTargetError when the remote has no
-// proxy target. A non-OK apply response becomes an Error with the remote
+// generation remains. A stack missing on the node is created only when the
+// snapshot holds its compose.yaml (otherwise snapshot_compose_missing), and a
+// directory created for it is removed again when a write fails. Throws
+// SnapshotProxyTargetError when the remote has no proxy target. A non-OK apply response becomes an Error with the remote
 // status and body (capture, lock, or write).
 async function applySnapshotStackFiles(
   node: Node,
@@ -3016,6 +3106,105 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<{ p
   return policyEvidence ? { policyEvidence } : {};
 }
 
+/**
+ * True when the snapshot's archived node ids belong to another installation,
+ * so no archived id can name a live node without a recorded mapping.
+ */
+function snapshotRequiresNodeMapping(snapshot: FleetSnapshot): boolean {
+  if (snapshot.origin !== 'imported') return false;
+  const db = DatabaseService.getInstance();
+  return !snapshot.source_instance_id || snapshot.source_instance_id !== db.getInstanceId();
+}
+
+/**
+ * Fingerprint of a snapshot's archived-node -> destination mapping. Every
+ * mapping write replaces the rows, so a changed fingerprint means the
+ * destinations differ from the set the operator confirmed in the detail view.
+ */
+function snapshotMappingVersion(mappings: Array<{ source_node_id: number; target_node_id: number }>): string {
+  return mappings
+    .slice()
+    .sort((a, b) => a.source_node_id - b.source_node_id)
+    .map(mapping => `${mapping.source_node_id}:${mapping.target_node_id}`)
+    .join(',');
+}
+
+type SnapshotNodeTargetFailure = {
+  error: string;
+  code: 'SNAPSHOT_NODE_UNMAPPED' | 'SNAPSHOT_TARGET_NODE_MISSING';
+  status: 404 | 409;
+};
+
+type SnapshotNodeTarget = { node: Node } | SnapshotNodeTargetFailure;
+
+/**
+ * Resolve the live node a snapshot group may be written to.
+ *
+ * A locally captured snapshot names this installation's nodes, so its archived
+ * id is the target. An imported snapshot keeps the source installation's ids;
+ * those become actionable only through an explicit mapping. Numeric equality
+ * with a node here never authorises a foreign snapshot.
+ */
+function resolveArchivedNodeTarget(
+  snapshot: FleetSnapshot,
+  sourceNodeId: number,
+  requiresMapping: boolean,
+  targetBySource: Map<number, number>,
+): SnapshotNodeTarget {
+  const db = DatabaseService.getInstance();
+  const targetNodeId = requiresMapping ? targetBySource.get(sourceNodeId) : sourceNodeId;
+  if (targetNodeId === undefined) {
+    return {
+      error: 'This snapshot came from another instance and this archived node has no destination mapping. Map it to a node here before restoring.',
+      code: 'SNAPSHOT_NODE_UNMAPPED',
+      status: 409,
+    };
+  }
+  const node = db.getNode(targetNodeId);
+  if (!node) {
+    return requiresMapping
+      ? {
+        error: 'The destination node this archived node is mapped to no longer exists. Update the mapping before restoring.',
+        code: 'SNAPSHOT_NODE_UNMAPPED',
+        status: 409,
+      }
+      : { error: 'Target node no longer exists', code: 'SNAPSHOT_TARGET_NODE_MISSING', status: 404 };
+  }
+  return { node };
+}
+
+/**
+ * Resolve every archived node in a snapshot in one synchronous pass. A restore
+ * request plans from this frozen map before its first write, so a mapping change
+ * made by another session mid-operation cannot move work that is already under
+ * way. `mappingVersion` lets a caller prove it is acting on the mapping the
+ * operator confirmed.
+ */
+function planSnapshotRestoreTargets(
+  snapshot: FleetSnapshot,
+  archivedNodeIds: readonly number[],
+): {
+  requiresMapping: boolean;
+  mappingVersion: string;
+  /** Same order as `archivedNodeIds`. */
+  targets: SnapshotNodeTarget[];
+} {
+  const db = DatabaseService.getInstance();
+  const requiresMapping = snapshotRequiresNodeMapping(snapshot);
+  const mappings = db.getSnapshotNodeMap(snapshot.id);
+  const targetBySource = new Map(mappings.map(mapping => [mapping.source_node_id, mapping.target_node_id] as const));
+  return {
+    requiresMapping,
+    mappingVersion: snapshotMappingVersion(mappings),
+    targets: archivedNodeIds.map(sourceNodeId => resolveArchivedNodeTarget(snapshot, sourceNodeId, requiresMapping, targetBySource)),
+  };
+}
+
+/** The mapping the operator confirmed changed before the request arrived. */
+const SNAPSHOT_MAPPING_CHANGED = 'SNAPSHOT_MAPPING_CHANGED';
+const SNAPSHOT_MAPPING_CHANGED_ERROR =
+  'The destination mapping for this snapshot is not the one this request confirmed. Reload the snapshot and confirm the destinations again.';
+
 // Looks up the dossier notes a snapshot preserved for one stack, or undefined
 // when no usable dossier entry exists for that stack (no documentation, an
 // unparseable blob, or no matching entry).
@@ -3106,10 +3295,24 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       console.debug('[Fleet:debug] Restore: snapshot=%s, node=%s, stack="%s", files=[%s], redeploy=%s', sanitizeForLog(snapshotId), sanitizeForLog(nodeId), sanitizeForLog(stackName), sanitizeForLog(fileNames), sanitizeForLog(redeploy));
     }
 
-    const node = db.getNode(nodeId);
-    if (!node) {
-      res.status(404).json({ error: 'Target node no longer exists' });
+    const plan = planSnapshotRestoreTargets(snapshot, [nodeId]);
+    const [target] = plan.targets;
+    if ('error' in target) {
+      res.status(target.status).json({ error: target.error, code: target.code });
       return;
+    }
+    const node = target.node;
+
+    // Bind the write to the destination the confirmation named. The detail view
+    // shows one mapped node per archived node; if another session changed that
+    // mapping since it loaded, this request is stale and must be refused
+    // instead of being redirected to a machine the operator never confirmed.
+    if (plan.requiresMapping) {
+      const expected = req.body?.expectedTargetNodeId;
+      if (typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected !== node.id) {
+        res.status(409).json({ error: SNAPSHOT_MAPPING_CHANGED_ERROR, code: SNAPSHOT_MAPPING_CHANGED });
+        return;
+      }
     }
 
     await applySnapshotStackFiles(node, stackName, writableFiles);
@@ -3235,12 +3438,27 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
       entry.files.push(file);
     }
 
+    // Freeze every destination before the first write. Restore-all is a long
+    // sequence of asynchronous applies; re-reading the mapping between them
+    // would let a mapping change made in another session redirect the stacks
+    // that had not been reached yet. The confirmed fingerprint proves this run
+    // is the one the operator started.
+    const groupList = Array.from(groups.values());
+    const plan = planSnapshotRestoreTargets(snapshot, groupList.map(group => group.nodeId));
+    if (plan.requiresMapping) {
+      const expected = req.body?.expectedMappingVersion;
+      if (typeof expected !== 'string' || expected !== plan.mappingVersion) {
+        res.status(409).json({ error: SNAPSHOT_MAPPING_CHANGED_ERROR, code: SNAPSHOT_MAPPING_CHANGED });
+        return;
+      }
+    }
+
     const policyOptions = buildPolicyGateOptions(req);
     const results: SnapshotRestoreResult[] = [];
 
     // Restore every stack independently: one stack failing (unreachable node,
     // blocked deploy, write error) is recorded and the rest still proceed.
-    for (const group of groups.values()) {
+    for (const [index, group] of groupList.entries()) {
       try {
         if (!isValidStackName(group.stackName)) throw new Error('Invalid stack name');
         if (group.files.some(f => !f.available)) {
@@ -3255,8 +3473,21 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
           });
           continue;
         }
-        const node = db.getNode(group.nodeId);
-        if (!node) throw new Error('Target node no longer exists');
+        const target = plan.targets[index];
+        if ('error' in target) {
+          results.push({
+            nodeId: group.nodeId,
+            nodeName: group.nodeName,
+            stackName: group.stackName,
+            success: false,
+            redeployed: false,
+            notesRestored: false,
+            error: target.error,
+            code: target.code,
+          });
+          continue;
+        }
+        const node = target.node;
 
         const writableFiles = group.files
           .filter((f): f is Extract<typeof f, { available: true }> => f.available)

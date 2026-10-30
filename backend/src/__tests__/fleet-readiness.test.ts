@@ -853,7 +853,7 @@ describe('GET /api/fleet/readiness aggregation', () => {
     // answer rather than a surviving sibling.
     const nodeId = addOnlineProxyNode('throwing-row');
     mockFetch(nodeReadHandler(evidenceBody(), summaryBody([])));
-    vi.spyOn(DatabaseService.getInstance(), 'getSnapshots').mockImplementation(() => {
+    vi.spyOn(DatabaseService.getInstance(), 'getLatestLocalSnapshot').mockImplementation(() => {
       throw new Error('database is locked');
     });
 

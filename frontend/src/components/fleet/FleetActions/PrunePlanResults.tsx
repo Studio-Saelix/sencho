@@ -1,3 +1,4 @@
+import { plural } from '@/lib/blueprintTargets';
 import { cn, formatBytes } from '@/lib/utils';
 import type {
   FleetPruneNodeResult,
@@ -88,6 +89,27 @@ function ItemRow({ item, outcome }: { item: PrunePlanItem; outcome?: PruneItemOu
   );
 }
 
+/** Volumes and networks report no size, so a node whose plan has none counts items instead of showing 0 Bytes. */
+function planSize(plan: FleetPruneNodeResult): string {
+  const bytes = plan.reclaimableBytes ?? 0;
+  const items = plan.items?.length ?? 0;
+  return bytes > 0 || items === 0 ? formatBytes(bytes) : plural(items, 'item');
+}
+
+function executionSize(execution: FleetPruneNodeResult): string {
+  const bytes = execution.reclaimedBytes ?? 0;
+  const removed = execution.outcomes?.filter((outcome) => outcome.status === 'removed').length ?? 0;
+  return bytes > 0 || removed === 0 ? formatBytes(bytes) : `${removed} removed`;
+}
+
+/** Counts the items a finished node failed or skipped, so a collapsed node still shows its exceptions. */
+function unremovedSummary(outcomes: PruneItemOutcome[]): string {
+  const skipped = outcomes.filter((outcome) => outcome.status === 'skipped').length;
+  const failed = outcomes.filter((outcome) => outcome.status === 'failed').length;
+  return [failed > 0 && `${failed} failed`, skipped > 0 && `${skipped} skipped`]
+    .filter(Boolean).map((part) => ` · ${part}`).join('');
+}
+
 function NodePlan({ plan, execution }: { plan: FleetPruneNodeResult; execution?: FleetPruneNodeResult }) {
   if (!plan.reachable || !plan.fingerprint) {
     return (
@@ -102,9 +124,10 @@ function NodePlan({ plan, execution }: { plan: FleetPruneNodeResult; execution?:
     execution?.outcomes?.map((outcome) => [`${outcome.target}\0${outcome.id}`, outcome]) ?? [],
   );
   return (
-    <details open className="rounded border border-card-border/60 bg-card/30">
+    <details className="rounded border border-card-border/60 bg-card/30">
       <summary className="cursor-pointer px-2.5 py-2 font-mono text-xs text-stat-value">
-        {plan.nodeName} · {formatBytes(execution?.reclaimedBytes ?? plan.reclaimableBytes ?? 0)}
+        {plan.nodeName} · {execution ? executionSize(execution) : planSize(plan)}
+        {execution?.outcomes && <span className="text-stat-subtitle">{unremovedSummary(execution.outcomes)}</span>}
       </summary>
       <div className="space-y-2 border-t border-card-border/50 p-2.5">
         {execution?.error && (
@@ -118,7 +141,7 @@ function NodePlan({ plan, execution }: { plan: FleetPruneNodeResult; execution?:
           return (
             <details key={target} open={targetItems.length > 0} className="rounded border border-card-border/40">
               <summary className="cursor-pointer px-2 py-1.5 font-mono text-[11px] text-stat-subtitle">
-                {TARGET_LABELS[target]} · {targetItems.length} · {formatBytes(bytes)}
+                {TARGET_LABELS[target]} · {targetItems.length}{bytes > 0 || targetItems.length === 0 ? ` · ${formatBytes(bytes)}` : ''}
               </summary>
               {targetItems.length > 0 && (
                 <ul className="space-y-1.5 border-t border-card-border/40 p-2">

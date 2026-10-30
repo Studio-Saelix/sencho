@@ -8,8 +8,8 @@
  * transport line to the node's actual transport so a proxy peer never reports a
  * "Pilot tunnel".
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import type { MeshNodeStatus, MeshRouteDiagnostic } from '@/types/mesh';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -26,7 +26,9 @@ vi.mock('@xyflow/react', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { MeshRouteDetailSheet } from './MeshRouteDetailSheet';
+import { expectVisibleInDialog } from '@/__tests__/dialogVisibility';
 
 const ALIAS = 'web.api.peer.sencho';
 
@@ -66,7 +68,7 @@ function renderSheet(canManage: boolean, onChanged: () => void = () => {}) {
             onOpenChange={() => {}}
             alias={ALIAS}
             canManage={canManage}
-            status={STATUS}
+            fleetStatus={STATUS}
             aliases={[]}
             onChanged={onChanged}
         />,
@@ -96,7 +98,7 @@ describe('MeshRouteDetailSheet remove gate', () => {
         const onChanged = vi.fn();
         renderSheet(true, onChanged);
         fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
-        fireEvent.click(await screen.findByRole('button', { name: /Remove and redeploy/i }));
+        fireEvent.click(await screen.findByRole('button', { name: /Remove and restart/i }));
         await waitFor(() => {
             expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
                 '/mesh/nodes/2/stacks/api/opt-out',
@@ -104,6 +106,37 @@ describe('MeshRouteDetailSheet remove gate', () => {
             );
         });
         await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    });
+
+    it('shows the removal impact visibly and never claims to remove zero hostnames', async () => {
+        // The live alias list can lag a stack that just stopped. "This removes
+        // 0 hostnames" reads like a bug, so the count is only promised when
+        // there is one.
+        renderSheet(true);
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/api on peer-a restarts now/);
+        expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/0 hostnames/);
+    });
+
+    it('states the hostname count when the alias list knows the stack', async () => {
+        vi.mocked(apiFetch).mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ ...DIAG, events: [] }),
+        } as unknown as Response);
+        render(
+            <MeshRouteDetailSheet
+                open
+                onOpenChange={() => {}}
+                alias={ALIAS}
+                canManage
+                fleetStatus={STATUS}
+                aliases={[{ host: ALIAS, nodeId: 2, nodeName: 'peer-a', stackName: 'api', serviceName: 'web', port: 80 }]}
+                onChanged={() => {}}
+            />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/This removes 1 hostname published by api\./);
     });
 
     it('ignores a superseded alias diagnostic whose body resolves after switching aliases', async () => {
@@ -124,13 +157,13 @@ describe('MeshRouteDetailSheet remove gate', () => {
         });
 
         const { rerender } = render(
-            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasA" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasA" canManage fleetStatus={STATUS} aliases={[]} onChanged={() => {}} />,
         );
         // Let alias A's fetches resolve so its effect parks on the deferred body read.
         await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
         rerender(
-            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasB" canManage status={STATUS} aliases={[]} onChanged={() => {}} />,
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias="aliasB" canManage fleetStatus={STATUS} aliases={[]} onChanged={() => {}} />,
         );
         expect(await screen.findByText('API proxy bridge')).toBeInTheDocument();
 
@@ -140,5 +173,165 @@ describe('MeshRouteDetailSheet remove gate', () => {
         // Alias B's proxy transport label survives; alias A (node 9, not in status)
         // would have flipped it to an unknown transport had it overwritten.
         expect(screen.getByText('API proxy bridge')).toBeInTheDocument();
+    });
+
+    it('says the change cannot be applied when its node is unreachable', async () => {
+        const down: MeshNodeStatus[] = [{ ...STATUS[0], reachableMode: 'unreachable', reachableReason: 'api token missing' }];
+        render(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        expectVisibleInDialog(/api on peer-a cannot be removed from the mesh while that node is unreachable\./);
+        expect(screen.getByRole('alertdialog')).not.toHaveTextContent(/restarts now/);
+    });
+
+    it('offers no restart action when the changed stack\'s node is unreachable, and Close issues no request', async () => {
+        const down: MeshNodeStatus[] = [{ ...STATUS[0], reachableMode: 'unreachable', reachableReason: 'api token missing' }];
+        render(
+            <MeshRouteDetailSheet open onOpenChange={() => {}} alias={ALIAS} canManage fleetStatus={down} aliases={[]} onChanged={() => {}} />,
+        );
+        fireEvent.click(await screen.findByRole('button', { name: /Remove from mesh/i }));
+        const dialog = await screen.findByRole('alertdialog');
+        expect(within(dialog).getByRole('button', { name: /Remove and restart/i })).toBeDisabled();
+        const calls = vi.mocked(apiFetch).mock.calls.length;
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+        expect(vi.mocked(apiFetch).mock.calls.length).toBe(calls);
+    });
+});
+
+describe('MeshRouteDetailSheet state chip after a probe', () => {
+    const answer = (diag: object, probe: { status?: number; body: object } | (() => Promise<Response>)) => {
+        vi.mocked(apiFetch).mockImplementation(async (url: string, init?: { method?: string }) => {
+            if (url.endsWith('/test') && init?.method === 'POST') {
+                if (typeof probe === 'function') return probe();
+                const status = probe.status ?? 200;
+                return { ok: status < 400, status, json: async () => probe.body } as unknown as Response;
+            }
+            return { ok: true, status: 200, json: async () => ({ ...diag, events: [] }) } as unknown as Response;
+        });
+    };
+    const runTest = () => fireEvent.click(screen.getByRole('button', { name: /Test probe/i }));
+
+    it('does not keep a healthy chip beside a failed no_route probe', async () => {
+        answer(DIAG, { body: { ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' } });
+        renderSheet(true);
+        expect(await screen.findByText('healthy')).toBeInTheDocument();
+        runTest();
+        expect(await screen.findByText('test failed')).toBeInTheDocument();
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+        expect(screen.getByText('not authorized')).toBeInTheDocument();
+    });
+
+    it('shows tunnel down when the probe failed in the tunnel', async () => {
+        answer(DIAG, { body: { ok: false, where: 'pilot_tunnel', code: 'tunnel_down', message: 'no bridge' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        expect(await screen.findByText('tunnel down')).toBeInTheDocument();
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+    });
+
+    it('shows unreachable when the probe reached the node but not the container', async () => {
+        answer(DIAG, { body: { ok: false, where: 'agent_dial', code: 'unreachable', message: 'refused' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        expect(await screen.findByText('unreachable')).toBeInTheDocument();
+    });
+
+    it('leaves the diagnostic chip alone when the probe passes', async () => {
+        answer({ ...DIAG, state: 'tunnel down' }, { body: { ok: true, latencyMs: 4 } });
+        renderSheet(true);
+        expect(await screen.findByText('tunnel down')).toBeInTheDocument();
+        runTest();
+        expect(await screen.findByText('ok 4ms')).toBeInTheDocument();
+        expect(screen.getByText('tunnel down')).toBeInTheDocument();
+    });
+
+    it('keeps the last result visible while the next probe runs', async () => {
+        answer(DIAG, { body: { ok: false, where: 'no_route', code: 'no_route', message: 'alias not found' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        await screen.findByText('test failed');
+        let release: (r: Response) => void = () => {};
+        answer(DIAG, () => new Promise<Response>((resolve) => { release = resolve; }));
+        runTest();
+        await screen.findByRole('button', { name: /Probing/i });
+        expect(screen.queryByText('healthy')).not.toBeInTheDocument();
+        await act(async () => {
+            release({ ok: true, status: 200, json: async () => ({ ok: true, latencyMs: 5 }) } as unknown as Response);
+        });
+        expect(await screen.findByText('ok 5ms')).toBeInTheDocument();
+    });
+
+    it('does not read an error response as a failed probe', async () => {
+        vi.mocked(toast.error).mockClear();
+        answer(DIAG, { status: 500, body: { error: 'Probe failed' } });
+        renderSheet(true);
+        await screen.findByText('healthy');
+        runTest();
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not run the test. Try again.'));
+        expect(screen.getByText('healthy')).toBeInTheDocument();
+        expect(screen.queryByText('test failed')).not.toBeInTheDocument();
+    });
+});
+
+describe('MeshRouteDetailSheet copy address on a plain-HTTP origin', () => {
+    // The sheet is a modal with a focus trap. The clipboard fallback has to
+    // select its text inside that dialog, or the trap hands focus back, the
+    // copy copies nothing, and the success toast is a lie.
+    const originalExec = Object.getOwnPropertyDescriptor(document, 'execCommand');
+    const originalSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+
+    beforeEach(() => {
+        vi.mocked(toast.success).mockClear();
+        vi.mocked(toast.error).mockClear();
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+    });
+    afterEach(() => {
+        if (originalExec) Object.defineProperty(document, 'execCommand', originalExec);
+        else delete (document as { execCommand?: unknown }).execCommand;
+        if (originalSecure) Object.defineProperty(window, 'isSecureContext', originalSecure);
+    });
+
+    function stubExec(result: boolean): { selectedAtCopy: () => string | null } {
+        let selected: string | null = null;
+        Object.defineProperty(document, 'execCommand', {
+            configurable: true,
+            writable: true,
+            value: vi.fn(() => {
+                const active = document.activeElement;
+                selected = active instanceof HTMLTextAreaElement
+                    ? active.value.slice(active.selectionStart, active.selectionEnd)
+                    : null;
+                return result;
+            }),
+        });
+        return { selectedAtCopy: () => selected };
+    }
+
+    async function clickCopy(): Promise<void> {
+        const copy = await screen.findByRole('button', { name: `Copy ${ALIAS}:80` });
+        copy.focus();
+        await act(async () => { fireEvent.click(copy); });
+    }
+
+    it('copies the address from inside the sheet and confirms it', async () => {
+        const exec = stubExec(true);
+        renderSheet(true);
+        await clickCopy();
+        expect(exec.selectedAtCopy()).toBe(`${ALIAS}:80`);
+        expect(toast.success).toHaveBeenCalledWith(`Copied ${ALIAS}:80`);
+        expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('reports the failure instead of confirming a copy that did not happen', async () => {
+        stubExec(false);
+        renderSheet(true);
+        await clickCopy();
+        expect(toast.error).toHaveBeenCalledWith('Could not copy to the clipboard');
+        expect(toast.success).not.toHaveBeenCalled();
     });
 });

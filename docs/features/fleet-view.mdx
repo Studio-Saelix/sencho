@@ -48,7 +48,7 @@ The strip is a single row: the monitoring tabs (Overview, Readiness, Map, Docker
 | **Blueprints** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Limited availability | Cross-node service routing via Sencho Mesh when that surface is enabled on the instance. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
-| **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
+| **Actions** | Community | Fleet-wide bulk operations: stop stacks by label, assign a label to stacks, reclaim Docker disk space. See [Fleet Actions](/features/fleet-actions). |
 | **Secrets** | Community (admin role) | Encrypted env-var bundles you push to labeled nodes across the fleet. See [Fleet Secrets](/features/fleet-secrets). |
 
 ### Action buttons
@@ -125,14 +125,14 @@ Edit, delete, cordon, and mute stay gated on `node:manage` or mute permission as
 Switch the segmented control to **Topology** to swap the grid for a hub-and-spoke graph. The local node sits in the centre with a cyan ring and the remotes radiate outward; the layout is computed automatically from the registered fleet.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-topology.png" alt="Fleet Topology view in Hub layout. The Local node card sits at the centre with an Online pill, a 'prod' label pill, CPU / MEM / DISK bars, and '15 stacks · 16 running' below. Three remote cards radiate to the right (SLX-Mars, Pitt-Moba, Opsix), each with an Online pill, a 'dev' label pill where assigned, CPU/MEM/DISK bars, a stack/running summary, and a millisecond latency reading. Cyan connector lines run from the local node to each remote. ReactFlow zoom controls sit at the bottom-left and the navigator minimap is pinned to the bottom-right." />
+  <img src="/images/fleet-view/fleet-topology.png" alt="Fleet Topology view in Hub layout. The Local node card sits at the centre with a healthy status dot, a ★ Local pin, a 'prod' label pill, CPU / MEM / DISK bars, and '15 stacks · 16 running' below. Three remote cards radiate to the right (SLX-Mars, Pitt-Moba, Opsix), each with a healthy status dot, a Proxy pin, a 'dev' label pill where assigned, CPU/MEM/DISK bars, a stack/running summary, and a millisecond latency reading. Cyan connector lines run from the local node to each remote. ReactFlow zoom controls sit at the bottom-left and the navigator minimap is pinned to the bottom-right." />
 </Frame>
 
 Each node card in the topology graph carries:
 
-- A **status pill** at the top reading `Online`, `Critical`, or `Offline`, with a coloured dot.
-- A **Local** or **Remote** label in the top-right.
-- A **lightning icon** when the node is critical; a clock icon when a pilot-tunnel node's heartbeat has gone stale; the card frame mutes when the node is offline.
+- A **status dot** at the top. A healthy node shows only the dot; a node that needs attention adds `Critical` or `Offline` beside it.
+- The same marker as the grid cards in the top-right: `★ Local` for the control instance itself, `Proxy` or `Pilot` for how it reaches a remote.
+- A clock icon when a pilot-tunnel node's heartbeat has gone stale; the card frame mutes when the node is offline.
 - The node name with a server icon.
 - A row of **node label** pills, when the node carries any (matching the labels set in **Settings · Infrastructure · Nodes**), with a `+N` overflow tooltip past the first few.
 - Three compact **CPU / MEM / DISK** bars with the percent value at the right of each row.

@@ -30,6 +30,7 @@ vi.mock('@/context/AuthContext', () => ({
 
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { SCHEDULED_ACTIONS } from '@/lib/scheduledActions';
+import { toast } from '@/components/ui/toast-store';
 import ScheduledOperationsView from '../ScheduledOperationsView';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
@@ -809,6 +810,59 @@ describe('ScheduledOperationsView', () => {
         // Compiled from the weekday selection, not the legacy default literal.
         expect(JSON.parse(postCall![1].body).cron_expression).toBe('0 3 * * 1,3');
       });
+    });
+  });
+
+  describe('run history copy', () => {
+    // The run history is a focus-trapping sheet. Copying a run's output has to
+    // report the clipboard's real outcome, not a success the fallback never had.
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const originalSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+    afterEach(() => {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+      if (originalSecure) Object.defineProperty(window, 'isSecureContext', originalSecure);
+    });
+
+    async function openRunHistory(): Promise<HTMLElement> {
+      tasksFixture = [makeTask({ id: 7, name: 'nightly-prune' })];
+      mockedFetch.mockImplementation(async (url: string) => {
+        if (url.startsWith('/scheduled-tasks/7/runs')) {
+          return jsonResponse({
+            runs: [{ id: 1, task_id: 7, started_at: 1000, completed_at: 3000, status: 'success', output: 'pruned 3 images', error: null, triggered_by: 'scheduled' }],
+            total: 1,
+          });
+        }
+        if (url === '/scheduled-tasks') return jsonResponse(tasksFixture);
+        if (url === '/nodes') return jsonResponse(nodesFixture);
+        if (url === '/stacks') return jsonResponse([]);
+        return jsonResponse({});
+      });
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Execution history' }));
+      const output = await screen.findByTitle('pruned 3 images');
+      return output.parentElement as HTMLElement;
+    }
+
+    it('confirms a copy that worked', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+      const row = await openRunHistory();
+      await userEvent.click(within(row).getByRole('button'));
+      await waitFor(() => expect(toast.info).toHaveBeenCalledWith('Copied to clipboard'));
+      expect(writeText).toHaveBeenCalledWith('pruned 3 images');
+    });
+
+    it('says so when the clipboard is unavailable instead of confirming a copy', async () => {
+      Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+      const exec = vi.fn(() => false);
+      Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: exec });
+      const row = await openRunHistory();
+      await userEvent.click(within(row).getByRole('button'));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not copy to the clipboard'));
+      expect(toast.info).not.toHaveBeenCalledWith('Copied to clipboard');
     });
   });
 });

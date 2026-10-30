@@ -1,6 +1,4 @@
-import { CheckCircle2, XCircle, MinusCircle } from 'lucide-react';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { CheckCircle2, XCircle } from 'lucide-react';
 
 export interface ResultRow {
   key: string;
@@ -13,10 +11,7 @@ export interface ResultRow {
 }
 
 interface ResultsListProps {
-  title?: string;
   results: ResultRow[];
-  /** Override the empty-state message when there is nothing to render yet. */
-  emptyHint?: string;
 }
 
 function Row({ row, indent = 0 }: { row: ResultRow; indent?: number }) {
@@ -39,38 +34,11 @@ function Row({ row, indent = 0 }: { row: ResultRow; indent?: number }) {
   );
 }
 
-export function ResultsList({ title, results, emptyHint }: ResultsListProps) {
-  const succeeded = results.filter(r => r.success).length;
-  const failed = results.length - succeeded;
+/** Per-node outcome rows. The Answer above carries the counts; this is the evidence behind it. */
+export function ResultsList({ results }: ResultsListProps) {
   return (
-    <Card className="bg-card shadow-card-bevel mt-4">
-      <CardContent className="p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <span className="text-xs font-medium uppercase tracking-wide text-stat-subtitle">
-            {title ?? 'Results'}
-          </span>
-          {results.length > 0 ? (
-            <>
-              <Badge variant="outline" className="text-[10px] font-normal py-0 px-1.5 text-success">
-                {succeeded} ok
-              </Badge>
-              {failed > 0 && (
-                <Badge variant="outline" className="text-[10px] font-normal py-0 px-1.5 text-destructive">
-                  {failed} failed
-                </Badge>
-              )}
-            </>
-          ) : (
-            <span className="text-xs text-stat-subtitle inline-flex items-center gap-1">
-              <MinusCircle className="h-3 w-3" strokeWidth={1.5} />
-              {emptyHint ?? 'No results yet.'}
-            </span>
-          )}
-        </div>
-        <div className="space-y-0">
-          {results.map((row) => <Row key={row.key} row={row} />)}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="rounded border border-card-border/60 bg-card/40 px-3 py-2">
+      {results.map((row) => <Row key={row.key} row={row} />)}
+    </div>
   );
 }

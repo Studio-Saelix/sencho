@@ -105,6 +105,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /fleet/snapshots': 'Created fleet backup',
   'DELETE /fleet/snapshots': 'Deleted fleet backup',
   'POST /fleet/snapshots/*/restore': 'Restored fleet backup',
+  'PUT /fleet/snapshots/*/node-mapping': 'Mapped fleet backup nodes',
   'POST /fleet/nodes/*/update': 'Triggered fleet node update',
   'POST /fleet/nodes/*/reapply-compose': 'Triggered fleet node compose reapply',
   'POST /fleet/update-all': 'Triggered fleet-wide update',
@@ -117,6 +118,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /cloud-backup/provision': 'Provisioned Sencho Snapshot Vault',
   'POST /cloud-backup/upload': 'Uploaded snapshot to cloud',
   'POST /cloud-backup/object/*/import': 'Imported cloud snapshot',
+  'POST /cloud-backup/recover': 'Recovered cloud snapshot archive',
   'DELETE /cloud-backup/object': 'Deleted cloud snapshot',
 
   // SSO

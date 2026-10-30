@@ -60,7 +60,12 @@ function cloudFetch(endpoint: string, options: ApiFetchOptions = {}) {
 }
 
 function encodeObjectKey(objectKey: string): string {
-    return btoa(objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    // The API decodes this path segment as UTF-8. btoa() alone only accepts
+    // Latin-1 and throws on any other character, so encode the string's UTF-8
+    // bytes first; a configured prefix must survive every archive action.
+    let binary = '';
+    for (const byte of new TextEncoder().encode(objectKey)) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function archiveFileName(objectKey: string): string {
@@ -126,6 +131,7 @@ export function CloudBackupSection() {
     const [testing, setTesting] = useState(false);
     const [provisioning, setProvisioning] = useState(false);
     const [deleteKey, setDeleteKey] = useState<string | null>(null);
+    const [deleteBusy, setDeleteBusy] = useState(false);
     const [page, setPage] = useState(0);
     const [encryptArchives, setEncryptArchives] = useState(false);
     const [passphraseSaved, setPassphraseSaved] = useState(false);
@@ -137,6 +143,28 @@ export function CloudBackupSection() {
     const [promptPassphrase, setPromptPassphrase] = useState('');
     const [promptError, setPromptError] = useState('');
     const [archiveBusy, setArchiveBusy] = useState(false);
+    const [recoveryOpen, setRecoveryOpen] = useState(false);
+    const [recoveryArchives, setRecoveryArchives] = useState<CloudSnapshotEntry[]>([]);
+    const [recoveryTruncated, setRecoveryTruncated] = useState(false);
+    const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+    const [recoveryPassphrase, setRecoveryPassphrase] = useState('');
+    const [recoveryError, setRecoveryError] = useState('');
+    const [recoveryLoading, setRecoveryLoading] = useState(false);
+    const [recoveryListError, setRecoveryListError] = useState('');
+    const [recoveryBusy, setRecoveryBusy] = useState(false);
+    // A ref, not the state flag: two clicks in the same tick both see the
+    // pre-render value of state, and a double-click must issue one request.
+    const archiveBusyRef = useRef(false);
+    const recoveryBusyRef = useRef(false);
+    const deleteBusyRef = useRef(false);
+    // Discovery can be restarted (reopen, retry) while an earlier listing is
+    // still in flight; only the newest request may write its result.
+    const recoveryListSeqRef = useRef(0);
+    // The recovery error is rendered above the archive list and the effect
+    // below scrolls it into view, so a failed passphrase is visible even when
+    // the operator scrolled to the passphrase field at the bottom of a long
+    // list.
+    const recoveryErrorRef = useRef<HTMLParagraphElement | null>(null);
 
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
@@ -196,6 +224,14 @@ export function CloudBackupSection() {
         if (provider !== 'disabled') loadSnapshots();
         else setSnapshots([]);
     }, [provider, loadSnapshots]);
+
+    useEffect(() => {
+        if (!recoveryError) return;
+        const error = recoveryErrorRef.current;
+        if (error && typeof error.scrollIntoView === 'function') {
+            error.scrollIntoView({ block: 'nearest' });
+        }
+    }, [recoveryError]);
 
     const handleProviderChange = async (next: string) => {
         const nextProvider = next as Provider;
@@ -290,17 +326,13 @@ export function CloudBackupSection() {
     };
 
     const persistEncryption = async (enabled: boolean, passphrase: string) => {
-        const body: Record<string, unknown> = {
-            provider,
+        // Encryption only. The destination and its credentials are saved by
+        // their own Save action, so toggling encryption never submits an
+        // unsaved S3 draft.
+        const body = {
             encrypt_archives: enabled,
             archive_passphrase: passphrase,
         };
-        if (provider === 'custom') {
-            body.custom = {
-                ...custom,
-                secret_key: custom.secret_key || (originalSecretSaved ? '***' : ''),
-            };
-        }
         const res = await cloudFetch('/cloud-backup/config', {
             method: 'PUT',
             body: JSON.stringify(body),
@@ -358,6 +390,8 @@ export function CloudBackupSection() {
     };
 
     const requestArchive = async (objectKey: string, action: ArchiveAction, passphrase: string | null) => {
+        if (archiveBusyRef.current || deleteBusyRef.current) return;
+        archiveBusyRef.current = true;
         setArchiveBusy(true);
         try {
             const encoded = encodeObjectKey(objectKey);
@@ -394,7 +428,71 @@ export function CloudBackupSection() {
         } catch (err) {
             toast.error((err as Error)?.message || 'Request failed.');
         } finally {
+            archiveBusyRef.current = false;
             setArchiveBusy(false);
+        }
+    };
+
+    const loadRecoveryArchives = useCallback(async () => {
+        const seq = ++recoveryListSeqRef.current;
+        setRecoveryLoading(true);
+        setRecoveryListError('');
+        setRecoveryArchives([]);
+        setRecoveryTruncated(false);
+        // A retry starts a new listing, so a selection made against the
+        // previous one no longer describes an archive we can see.
+        setRecoveryKey(null);
+        setRecoveryPassphrase('');
+        setRecoveryError('');
+        try {
+            const res = await cloudFetch('/cloud-backup/recovery-archives');
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error || `Failed to list recovery archives (${res.status})`);
+            }
+            const data = await res.json() as { entries: CloudSnapshotEntry[]; truncated: boolean };
+            if (seq !== recoveryListSeqRef.current) return;
+            setRecoveryArchives(data.entries);
+            setRecoveryTruncated(data.truncated === true);
+        } catch (err) {
+            if (seq !== recoveryListSeqRef.current) return;
+            setRecoveryListError((err as Error)?.message || 'Failed to list recovery archives.');
+        } finally {
+            if (seq === recoveryListSeqRef.current) setRecoveryLoading(false);
+        }
+    }, []);
+
+    const openRecovery = () => {
+        setRecoveryOpen(true);
+        void loadRecoveryArchives();
+    };
+
+    const handleRecover = async () => {
+        if (!recoveryKey || recoveryBusyRef.current || deleteBusyRef.current) return;
+        if (!recoveryPassphrase) {
+            setRecoveryError('Enter the passphrase that sealed this archive.');
+            return;
+        }
+        recoveryBusyRef.current = true;
+        setRecoveryBusy(true);
+        setRecoveryError('');
+        try {
+            const res = await cloudFetch('/cloud-backup/recover', {
+                method: 'POST',
+                body: JSON.stringify({ object_key: recoveryKey, passphrase: recoveryPassphrase }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error || 'Recovery failed');
+            }
+            toast.success('Archive recovered as an imported snapshot. Find it in Fleet → Snapshots.');
+            setRecoveryOpen(false);
+            loadSnapshots();
+        } catch (err) {
+            setRecoveryError((err as Error)?.message || 'Recovery failed.');
+        } finally {
+            recoveryBusyRef.current = false;
+            setRecoveryBusy(false);
         }
     };
 
@@ -420,7 +518,9 @@ export function CloudBackupSection() {
     };
 
     const confirmDelete = async () => {
-        if (!deleteKey) return;
+        if (!deleteKey || deleteBusyRef.current || archiveBusyRef.current || recoveryBusyRef.current) return;
+        deleteBusyRef.current = true;
+        setDeleteBusy(true);
         try {
             const res = await cloudFetch(`/cloud-backup/object/${encodeObjectKey(deleteKey)}`, { method: 'DELETE' });
             if (!res.ok) {
@@ -433,6 +533,8 @@ export function CloudBackupSection() {
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to delete cloud snapshot.');
         } finally {
+            deleteBusyRef.current = false;
+            setDeleteBusy(false);
             setDeleteKey(null);
         }
     };
@@ -723,10 +825,18 @@ export function CloudBackupSection() {
                                     </Button>
                                 </>
                             )}
-                            <Button size="sm" variant="ghost" onClick={loadSnapshots}>
+                            <Button size="sm" variant="ghost" onClick={loadSnapshots} disabled={archiveBusy}>
                                 <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
                             </Button>
                         </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-glass-border px-3 py-2">
+                        <p className="text-xs text-muted-foreground">
+                            Lost the original instance? Recover one of its sealed archives with its passphrase.
+                        </p>
+                        <Button size="sm" variant="outline" onClick={openRecovery} disabled={archiveBusy}>
+                            Recover archive
+                        </Button>
                     </div>
                     {snapshots.length === 0 ? (
                         <div className="flex items-start gap-2 text-xs text-muted-foreground py-2">
@@ -752,6 +862,7 @@ export function CloudBackupSection() {
                                                         variant="ghost"
                                                         className="h-7 w-7"
                                                         aria-label="Import snapshot"
+                                                        disabled={archiveBusy}
                                                         onClick={() => requestArchive(s.objectKey, 'import', null)}
                                                     >
                                                         <FolderInput className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -768,6 +879,7 @@ export function CloudBackupSection() {
                                                         variant="ghost"
                                                         className="h-7 w-7"
                                                         aria-label="Download snapshot"
+                                                        disabled={archiveBusy}
                                                         onClick={() => requestArchive(s.objectKey, 'download', null)}
                                                     >
                                                         <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -783,6 +895,8 @@ export function CloudBackupSection() {
                                                         size="icon"
                                                         variant="ghost"
                                                         className="h-7 w-7"
+                                                        aria-label="Delete snapshot"
+                                                        disabled={archiveBusy || deleteBusy}
                                                         onClick={() => setDeleteKey(s.objectKey)}
                                                     >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -806,6 +920,7 @@ export function CloudBackupSection() {
                 kicker="CLOUD · DELETE · IRREVERSIBLE"
                 title="Delete cloud snapshot"
                 confirmLabel="Delete"
+                confirming={deleteBusy}
                 onConfirm={confirmDelete}
             >
                 <p className="text-sm text-stat-subtitle">
@@ -856,6 +971,98 @@ export function CloudBackupSection() {
                             }}
                         >
                             {archivePrompt?.action === 'download' ? 'Download' : 'Import'}
+                        </BusyButton>
+                    )}
+                />
+            </Modal>
+
+            <Modal
+                open={recoveryOpen}
+                onOpenChange={open => {
+                    if (open || recoveryBusy) return;
+                    setRecoveryOpen(false);
+                }}
+            >
+                <ModalHeader kicker="CLOUD · RECOVERY" title="Recover an archive from another instance" />
+                <ModalBody className="space-y-3">
+                    <p className="text-sm text-stat-subtitle">
+                        Archives from other instances in this bucket are listed here. Recovery needs the passphrase that sealed the archive, and the imported snapshot stays unmapped until you choose destination nodes in Fleet → Snapshots.
+                    </p>
+                    {recoveryError ? (
+                        <p
+                            ref={recoveryErrorRef}
+                            role="alert"
+                            className="text-sm text-destructive"
+                        >
+                            {recoveryError}
+                        </p>
+                    ) : null}
+                    {recoveryLoading ? (
+                        <div role="status" aria-busy="true" className="flex items-center gap-2 text-sm text-stat-subtitle">
+                            <Loader2 className="w-4 h-4 animate-spin shrink-0" strokeWidth={1.5} />
+                            Looking for sealed archives from other instances...
+                        </div>
+                    ) : recoveryListError ? (
+                        <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+                            <p className="text-sm text-destructive">{recoveryListError}</p>
+                            <Button size="sm" variant="outline" onClick={() => void loadRecoveryArchives()}>
+                                Try again
+                            </Button>
+                        </div>
+                    ) : recoveryArchives.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                            No sealed archives from other instances were found.
+                        </p>
+                    ) : (
+                        <ul className="space-y-1.5">
+                            {recoveryArchives.map(entry => (
+                                <li key={entry.objectKey}>
+                                    <button
+                                        type="button"
+                                        aria-pressed={recoveryKey === entry.objectKey}
+                                        disabled={!entry.encrypted}
+                                        onClick={() => setRecoveryKey(entry.objectKey)}
+                                        className={`w-full rounded-md border px-3 py-2 text-left text-xs disabled:opacity-50 ${recoveryKey === entry.objectKey ? 'border-brand bg-brand/10' : 'border-glass-border hover:bg-muted/50'}`}
+                                    >
+                                        <span className="font-mono block truncate">{entry.objectKey.split('/').pop()}</span>
+                                        <span className="text-[10px] text-stat-subtitle font-mono">
+                                            {formatBytes(entry.sizeBytes)} {entry.lastModified ? `· ${new Date(entry.lastModified).toLocaleString()}` : ''}
+                                            {entry.encrypted ? '' : ' · not encrypted'}
+                                        </span>
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    {recoveryTruncated && (
+                        <p className="text-xs text-warning">
+                            The list stopped at the first 10,000 archives. Use your bucket console to find one that is not listed.
+                        </p>
+                    )}
+                    <div className="space-y-1.5">
+                        <Label htmlFor="recovery-passphrase" className="text-sm">Passphrase for this archive</Label>
+                        <Input
+                            id="recovery-passphrase"
+                            type="password"
+                            autoComplete="current-password"
+                            value={recoveryPassphrase}
+                            onChange={e => {
+                                setRecoveryPassphrase(e.target.value);
+                                if (recoveryError) setRecoveryError('');
+                            }}
+                        />
+                    </div>
+                </ModalBody>
+                <ModalFooter
+                    secondary={<Button variant="outline" onClick={() => setRecoveryOpen(false)} disabled={recoveryBusy}>Cancel</Button>}
+                    primary={(
+                        <BusyButton
+                            pending={recoveryBusy}
+                            busyLabel="Recovering"
+                            disabled={!recoveryKey}
+                            onClick={handleRecover}
+                        >
+                            Recover
                         </BusyButton>
                     )}
                 />
