@@ -95,7 +95,8 @@ describe('evaluateRootCoverage', () => {
     expect(evaluateCoverage({ volumeProtection: 'available', roots: [root(s, [clean], [verified(clean)])], now: NOW }).state).not.toBe('protected');
     // A complete point beside it still covers the root.
     const complete = point(s);
-    expect(reasonOf(root(s, [clean, complete], [verified(clean), verified(complete)]))).toBe('covered');
+    expect(evaluateRootCoverage(root(s, [clean, complete], [verified(clean), verified(complete)]), NOW, ROOT_COVERAGE_FRESHNESS_MS))
+      .toMatchObject({ reason: 'covered', coveringPointId: complete.id });
   });
 
   it('does not trust a succeeded row whose capture reports skipped files or unreadable exclusions', () => {

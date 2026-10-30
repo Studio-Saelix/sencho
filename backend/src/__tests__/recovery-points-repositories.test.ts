@@ -90,6 +90,18 @@ describe('RecoveryPointStore', () => {
     expect(store().get(clean.id)?.status).toBe('partial');
   });
 
+  it('has the database itself refuse a point whose storage or repository does not exist', () => {
+    const insert = (storageId: string, repositoryId: string) => recoveryDb().prepare(`
+      INSERT INTO recovery_points
+        (id, schema_version, storage_id, storage_generation, kind, repository_id, status, consistency,
+         trigger_kind, actor, source_operation_id, source_node_key, engine_id, capability_version, started_at)
+      VALUES (?, 1, ?, 1, 'root', ?, 'pending', 'unknown', 'manual', 'admin', 'op', ?, 'e', 1, 1)
+    `).run(`fk-${++counter}`, storageId, repositoryId, ENGINE);
+    expect(() => insert(storage.id, repository.id)).not.toThrow();
+    expect(() => insert('no-such-storage', repository.id)).toThrow(/FOREIGN KEY/);
+    expect(() => insert(storage.id, 'no-such-repo')).toThrow(/FOREIGN KEY/);
+  });
+
   it('records a failure with its class and no evidence', () => {
     const failed = store().finalize(beginRoot().id, { status: 'failed', errorClass: 'source_unreadable' });
     expect(failed).toMatchObject({ status: 'failed', failureClass: 'source_unreadable', snapshotId: null, capture: null });

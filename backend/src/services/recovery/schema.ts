@@ -9,8 +9,9 @@ import type Database from 'better-sqlite3';
  * `newer`, so recovery fails closed on this build instead of writing rows a
  * newer schema would misread. Sencho itself still boots.
  *
- * The `REFERENCES` clauses are declarative only: `PRAGMA foreign_keys` is off
- * on the Sencho connection, so each store checks the parents it inserts.
+ * The `REFERENCES` clauses are enforced (the SQLite build behind better-sqlite3
+ * turns foreign keys on). The stores still check the parents they insert, so a
+ * caller gets a recovery error class instead of a raw constraint failure.
  *
  * Two invariants are enforced by the database rather than by callers:
  *   - a recovery point is immutable once its status leaves `pending`;

@@ -321,7 +321,7 @@ export interface RecoveryOperation {
   errorClass: RecoveryErrorClass | null;
   /** Fixed, sanitized description of `errorClass`; never raw engine output. */
   errorDetail: string | null;
-  /** Process epoch that last owned the operation; a different epoch at boot means interrupted. */
+  /** Process epoch that created and owns the operation; a different epoch at boot means interrupted. */
   processEpoch: string;
   createdAt: number;
   updatedAt: number;

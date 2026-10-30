@@ -175,6 +175,7 @@ export class RecoveryOperationStore {
     `).run(now, id, this.processEpoch);
     const op = this.require(id);
     if (result.changes === 0 && !(op.state === 'running' && op.processEpoch === this.processEpoch)) {
+      if (!isTerminal(op.state) && op.processEpoch !== this.processEpoch) this.refuseOtherProcess('start', op);
       throw new RecoveryError('invalid_request');
     }
     return op;
@@ -196,15 +197,20 @@ export class RecoveryOperationStore {
    * settles it.
    * Locks are released on a known outcome and turned stale on
    * `completion_unknown`, which needs review before the storage is reused.
+   * The returned operation is the stored one: a caller reports its `state`, not
+   * the outcome it asked for.
    */
   finish(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
+    // The union already fixes these rules; they hold for a caller that built
+    // the outcome from untyped data. Only an ending in `failed` or `partial`
+    // carries the caller's class, and a live state is not an ending.
+    if (!isTerminal(outcome.state)) throw new RecoveryError('invalid_request');
     let errorClass: RecoveryErrorClass | null = null;
-    if ('errorClass' in outcome) errorClass = outcome.errorClass;
-    else if (outcome.state === 'completion_unknown') errorClass = 'interrupted';
-    // The union already requires a class for these endings; this holds the
-    // rule for a caller that built the outcome from untyped data.
-    if ((outcome.state === 'failed' || outcome.state === 'partial') && !isRecoveryErrorClass(errorClass)) {
-      throw new RecoveryError('invalid_request');
+    if (outcome.state === 'failed' || outcome.state === 'partial') {
+      errorClass = outcome.errorClass;
+      if (!isRecoveryErrorClass(errorClass)) throw new RecoveryError('invalid_request');
+    } else if (outcome.state === 'completion_unknown') {
+      errorClass = 'interrupted';
     }
     const db = recoveryDb();
     const logLate = (stored: RecoveryOperation): void => {
@@ -215,19 +221,16 @@ export class RecoveryOperationStore {
         );
       }
     };
+    // Immediate, so a second process finishing or reconciling the same row
+    // waits for this write and then finds it terminal, instead of failing on
+    // the upgrade from a read to a write.
     return db.transaction((): RecoveryOperation => {
       const current = this.require(id);
       if (isTerminal(current.state)) {
         logLate(current);
         return current;
       }
-      if (current.processEpoch !== this.processEpoch) {
-        console.warn(
-          '[Recovery] Refused a %s completion for operation %s: it is %s under another process',
-          outcome.state, id, current.state,
-        );
-        throw new RecoveryError('invalid_request');
-      }
+      if (current.processEpoch !== this.processEpoch) this.refuseOtherProcess('finish', current);
       if (outcome.state === 'succeeded' || outcome.state === 'partial') {
         const pending = db.prepare(
           "SELECT 1 FROM recovery_points WHERE source_operation_id = ? AND status = 'pending'",
@@ -239,8 +242,9 @@ export class RecoveryOperationStore {
         WHERE id = ? AND state IN ('queued','running') AND process_epoch = ?
       `).run(outcome.state, errorClass, now, now, id, this.processEpoch);
       if (ended.changes === 0) {
-        // Another writer ended the operation after it was read. Its outcome and
-        // its locks stand.
+        // Defensive: the transaction holds the write lock from its first read,
+        // so this is not reachable today. If another writer did end the
+        // operation after it was read, its outcome and its locks stand.
         const stored = this.require(id);
         if (!isTerminal(stored.state)) throw new RecoveryError('invalid_request');
         logLate(stored);
@@ -263,7 +267,7 @@ export class RecoveryOperationStore {
         db.prepare('DELETE FROM recovery_locks WHERE owner_operation_id = ?').run(id);
       }
       return this.require(id);
-    })();
+    }).immediate();
   }
 
   /**
@@ -272,7 +276,8 @@ export class RecoveryOperationStore {
    * neither is refused, so a lock taken on the wrong id cannot sit beside the
    * real one. The owner taking it again in this process is a replay and
    * succeeds; anyone else gets `lock_held`, and a lock that is stale or left by
-   * a dead process gets `lock_stale`.
+   * a dead process gets `lock_stale`. An operation a dead process left is never
+   * given a lock here, even when none exists: it is refused as `interrupted`.
    */
   acquireLock(scope: RecoveryLockScope, resourceKey: string, operationId: string, now = Date.now()): RecoveryLock {
     const db = recoveryDb();
@@ -292,7 +297,7 @@ export class RecoveryOperationStore {
         return toLock(existing);
       }
       // A dead process's operation can never take a lock here, even if boot reconciliation failed.
-      if (op.processEpoch !== this.processEpoch) throw new RecoveryError('invalid_request');
+      if (op.processEpoch !== this.processEpoch) this.refuseOtherProcess('lock', op);
       db.prepare(`
         INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at)
         VALUES (?, ?, ?, ?, ?)
@@ -353,7 +358,7 @@ export class RecoveryOperationStore {
         UPDATE recovery_locks SET stale_since = ? WHERE process_epoch <> ? AND stale_since IS NULL
       `).run(now, this.processEpoch).changes;
       return { interruptedOperations: interrupted.length, unknownPoints, staleLocks };
-    })();
+    }).immediate();
     this.reconciled = true;
     return settled;
   }
@@ -362,6 +367,16 @@ export class RecoveryOperationStore {
     return recoveryDb().prepare(
       'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
     ).get(scope, resourceKey) as LockRow | undefined;
+  }
+
+  /**
+   * An operation a dead process left queued or running is never started,
+   * finished or locked here; it waits for boot reconciliation. Reported as
+   * `interrupted`, which is what happened to it.
+   */
+  private refuseOtherProcess(action: string, op: RecoveryOperation): never {
+    console.warn('[Recovery] Refused to %s operation %s: it is %s under another process', action, op.id, op.state);
+    throw new RecoveryError('interrupted');
   }
 
   private require(id: string): RecoveryOperation {

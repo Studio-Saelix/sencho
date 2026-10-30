@@ -230,7 +230,7 @@ export class RecoveryPointStore {
     if (storage.state !== 'current' || storage.generation_token !== input.expectedGenerationToken) {
       throw new RecoveryError('identity_unknown');
     }
-    // The REFERENCES clause is not enforced on this connection, so this check is the guard.
+    // Checked here as well as by the foreign key, so the caller gets a recovery error class.
     if (!db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(input.repositoryId)) {
       throw new RecoveryError('repository_unavailable');
     }
@@ -257,8 +257,9 @@ export class RecoveryPointStore {
    * (after a restart settled the point, say) is refused as `invalid_request`
    * and logged, never applied. Evidence that fails validation ends the point
    * `failed` rather than leaving it pending until the next boot. A `failed`
-   * outcome without a known error class is refused as `invalid_request` and logged; the
-   * point stays pending until its operation, or the next boot, settles it.
+   * outcome without a known error class is refused as `invalid_request` and
+   * logged; the point stays pending until its operation, or the next boot,
+   * settles it.
    */
   finalize(pointId: string, outcome: PointFinalization, now = Date.now()): RecoveryPoint {
     const db = recoveryDb();

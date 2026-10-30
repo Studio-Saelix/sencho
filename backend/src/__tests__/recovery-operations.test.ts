@@ -5,7 +5,7 @@
  * by a dead process can never be resumed in place, even when boot
  * reconciliation did not run.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -29,6 +29,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
+afterEach(() => vi.restoreAllMocks());
 
 function classOf(fn: () => unknown): string | null {
   try {
@@ -129,6 +130,17 @@ describe('operations', () => {
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
     expect(classOf(() => s.markRunning(operation.id))).toBe('invalid_request');
+  });
+
+  it('ignores an error class on an ending that carries none, and refuses a live state as an ending', () => {
+    const s = new ops.RecoveryOperationStore('epoch-a');
+    const op = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
+    expect(classOf(() => s.finish(op.id, { state: 'running' } as never))).toBe('invalid_request');
+    expect(classOf(() => s.finish(op.id, { state: 'queued' } as never))).toBe('invalid_request');
+    expect(s.get(op.id)?.state).toBe('queued');
+    expect(s.finish(op.id, { state: 'succeeded', errorClass: 'internal' } as never)).toMatchObject({ state: 'succeeded', errorClass: null, errorDetail: null });
+    const cancelled = s.start({ idempotencyKey: key(), kind: 'verify_point', actor: 'admin', transport: 'local' }).operation;
+    expect(s.finish(cancelled.id, { state: 'cancelled', errorClass: 'not a class' } as never)).toMatchObject({ state: 'cancelled', errorClass: null, errorDetail: null });
   });
 
   it('ties each ending to its error class', () => {
@@ -314,11 +326,11 @@ describe('restart reconciliation', () => {
 
     const after = new ops.RecoveryOperationStore('epoch-without-reconcile');
     // Neither a queued nor a running operation of the dead process can be started here.
-    expect(classOf(() => after.markRunning(queued.id))).toBe('invalid_request');
+    expect(classOf(() => after.markRunning(queued.id))).toBe('interrupted');
     expect(after.get(queued.id)).toMatchObject({ state: 'queued', processEpoch: 'epoch-crashed' });
     // A replayed request gets the old operation back, but cannot pick it up.
     expect(after.start({ idempotencyKey: running.idempotencyKey, kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).replayed).toBe(true);
-    expect(classOf(() => after.markRunning(running.id))).toBe('invalid_request');
+    expect(classOf(() => after.markRunning(running.id))).toBe('interrupted');
     expect(classOf(() => after.acquireLock('storage', st.storageKey, running.id))).toBe('lock_stale');
     const other = after.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     expect(classOf(() => after.acquireLock('storage', st.storageKey, other.id))).toBe('lock_stale');
@@ -328,23 +340,25 @@ describe('restart reconciliation', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     for (const ending of [
       { state: 'succeeded' as const },
+      { state: 'partial' as const, errorClass: 'source_unreadable' as const },
       { state: 'failed' as const, errorClass: 'internal' as const },
       { state: 'cancelled' as const },
       { state: 'completion_unknown' as const },
     ]) {
-      expect(classOf(() => after.finish(running.id, ending))).toBe('invalid_request');
-      expect(classOf(() => after.finish(queued.id, ending))).toBe('invalid_request');
+      // The queued operation has no point, so this ending is refused for its owner alone.
+      expect(classOf(() => after.finish(queued.id, ending))).toBe('interrupted');
+      expect(classOf(() => after.finish(running.id, ending))).toBe('interrupted');
       expect(after.get(running.id)).toMatchObject({ state: 'running', errorClass: null, completedAt: null, processEpoch: 'epoch-crashed' });
       expect(after.get(queued.id)).toMatchObject({ state: 'queued', errorClass: null, completedAt: null });
       expect(after.getLock('storage', st.storageKey)).toMatchObject({ ownerOperationId: running.id, staleSince: null, processEpoch: 'epoch-crashed' });
       expect(points.RecoveryPointStore.getInstance().get(pending.id)?.status).toBe('pending');
     }
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Refused'), 'succeeded', running.id, 'running');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Refused'), 'finish', running.id, 'running');
     warn.mockRestore();
 
     // It cannot take a lock for the dead process's operation either, with or without an existing lock.
     const free = storage('unreconciled_free');
-    expect(classOf(() => after.acquireLock('storage', free.storageKey, queued.id))).toBe('invalid_request');
+    expect(classOf(() => after.acquireLock('storage', free.storageKey, queued.id))).toBe('interrupted');
     expect(after.getLock('storage', free.storageKey)).toBeNull();
 
     // A later boot settles it; only then does the lock become stale.
@@ -356,20 +370,25 @@ describe('restart reconciliation', () => {
   it('lets the first committed ending win when a completion races reconciliation', () => {
     const st = storage('race_data');
     const owner = new ops.RecoveryOperationStore('epoch-race-old');
+    const repo = repository('race_repo');
     const op = owner.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     owner.markRunning(op.id);
     owner.acquireLock('storage', st.storageKey, op.id);
+    const pending = beginPoint(st.id, 'g', repo.id, op.id);
 
     // The old process read the operation as running, and the new process's
     // reconcile commits before the old one's write: the reconcile wins.
     const stale = owner.get(op.id) as NonNullable<ReturnType<typeof owner.get>>;
     new ops.RecoveryOperationStore('epoch-race-new').reconcileAtStartup(7_000);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(owner, 'get').mockReturnValueOnce(stale);
-    expect(owner.finish(op.id, { state: 'succeeded' }, 8_000)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted', completedAt: 7_000 });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'succeeded', 'no class', op.id, 'completion_unknown', 'interrupted');
-    warn.mockRestore();
+    const read = vi.spyOn(owner, 'get').mockReturnValueOnce(stale);
+    expect(owner.finish(op.id, { state: 'failed', errorClass: 'internal' }, 8_000))
+      .toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted', completedAt: 7_000 });
+    // The stale read was the one finish acted on, so the conditional write ran and changed nothing.
+    expect(read.mock.results[0].value).toBe(stale);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'failed', 'internal', op.id, 'completion_unknown', 'interrupted');
     expect(owner.getLock('storage', st.storageKey)?.staleSince).toBe(7_000);
+    expect(points.RecoveryPointStore.getInstance().get(pending.id)).toMatchObject({ status: 'completion_unknown', completedAt: 7_000 });
 
     // The other order: the completion commits first and a later reconcile leaves it alone.
     const st2 = storage('race_data_two');
