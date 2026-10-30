@@ -788,6 +788,31 @@ describe('CloudBackupService archive fidelity', () => {
         expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('failed');
     });
 
+    it('keeps refusing a snapshot captured under a name the node has since been renamed from', async () => {
+        seedCustomBucket();
+        const db = DatabaseService.getInstance();
+        const nodeId = db.addNode({
+            name: 'legacy\u0000captured',
+            type: 'remote',
+            compose_dir: '/app/compose',
+            is_default: false,
+            api_url: 'http://192.168.1.91:1852',
+        });
+        const snapshotId = db.createSnapshot('Captured before rename', 'admin', 1, 1, '[]');
+        db.insertSnapshotFiles(snapshotId, [
+            { nodeId, nodeName: 'legacy\u0000captured', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        db.updateNode(nodeId, { name: 'edge' });
+        sentSpy.mockClear();
+
+        // A snapshot records the name it captured, so renaming the node does not
+        // repair an existing snapshot; the operator takes a new one.
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId))
+            .rejects.toThrow(/cannot be stored/);
+        expect(sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand')).toHaveLength(0);
+        expect(CloudBackupService.getInstance().getUploadStatus(snapshotId).status).toBe('failed');
+    });
+
     it('marks a legacy archive without warning fields as unknown', async () => {
         seedCustomBucket();
         const db = DatabaseService.getInstance();

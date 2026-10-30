@@ -255,9 +255,10 @@ export interface ArchiveEntryPlan {
 
 /**
  * True when a string survives the tar writer byte-for-byte. The writer stores a
- * header name as NUL-terminated UTF-8, so an embedded NUL truncates the name
- * and an unpaired surrogate is replaced with U+FFFD. Either one makes the
- * stored entry differ from the planned one, which the importer then rejects.
+ * header name as NUL-terminated UTF-8, so a NUL truncates the stored name, and
+ * an unpaired surrogate is not valid UTF-8 and is written as U+FFFD. Both
+ * silently change the name an import reads back, so the producer refuses them
+ * instead of publishing an archive whose entries no longer match the capture.
  */
 export function isArchiveStorableName(name: string): boolean {
     if (name.includes('\u0000')) return false;
@@ -274,7 +275,7 @@ function assertPublishableEntries(entries: ArchiveEntryPlan[]): void {
         if (isArchiveStorableName(entry.name) && isAllowedEntryName(entry.name)) continue;
         throw new ArchiveFormatError(
             'INVALID_ENTRY_NAME',
-            `Archive entry ${JSON.stringify(entry.name)} cannot be stored in the archive format the import path reads. Rename the node or stack and upload again.`,
+            `Archive entry ${JSON.stringify(entry.name)} cannot be stored in the archive format the import path reads. Rename the node or stack it belongs to and take a new snapshot before uploading again.`,
         );
     }
 }
