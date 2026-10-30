@@ -55,6 +55,28 @@ interface CloudSnapshotEntry {
 
 type ArchiveAction = 'import' | 'download';
 
+type CustomDestination = Pick<CustomConfig, 'endpoint' | 'region' | 'bucket' | 'access_key' | 'path_prefix'>;
+
+// What the server has stored and every destination-bound request resolves
+// against. The picker and the Custom S3 form hold a draft that can differ.
+interface ConfirmedDestination {
+    provider: Provider;
+    custom: CustomDestination;
+}
+
+function customDestination(c: CustomConfig): CustomDestination {
+    return { endpoint: c.endpoint, region: c.region, bucket: c.bucket, access_key: c.access_key, path_prefix: c.path_prefix };
+}
+
+function sameCustomDestination(a: CustomDestination, b: CustomDestination): boolean {
+    return a.endpoint === b.endpoint && a.region === b.region && a.bucket === b.bucket
+        && a.access_key === b.access_key && a.path_prefix === b.path_prefix;
+}
+
+function sameDestination(a: ConfirmedDestination, b: ConfirmedDestination): boolean {
+    return a.provider === b.provider && (a.provider !== 'custom' || sameCustomDestination(a.custom, b.custom));
+}
+
 function cloudFetch(endpoint: string, options: ApiFetchOptions = {}) {
     return apiFetch(endpoint, { ...options, localOnly: true });
 }
@@ -83,6 +105,8 @@ const EMPTY_CUSTOM: CustomConfig = {
     auto_upload: false,
 };
 
+const INITIAL_CONFIRMED: ConfirmedDestination = { provider: 'disabled', custom: customDestination(EMPTY_CUSTOM) };
+
 const BASE_PROVIDER_OPTIONS = [
     { value: 'disabled', label: 'Disabled' },
     { value: 'custom', label: 'Custom S3 (BYOB)' },
@@ -107,9 +131,12 @@ export function CloudBackupSection() {
     const [saving, setSaving] = useState(false);
     const [provider, setProvider] = useState<Provider>('disabled');
     const [loadedProvider, setLoadedProvider] = useState<Provider>('disabled');
-    // Last provider the server confirmed, so a failed save returns the picker
-    // to what is actually stored rather than to an unsaved local selection.
-    const savedProviderRef = useRef<Provider>('disabled');
+    // The destination the server last confirmed. A failed save returns the
+    // picker to it, and Test, the archive list and every archive action are
+    // offered only while the displayed destination equals it. The ref serves
+    // async handlers; the state drives rendering.
+    const confirmedRef = useRef<ConfirmedDestination>(INITIAL_CONFIRMED);
+    const [confirmed, setConfirmed] = useState<ConfirmedDestination>(INITIAL_CONFIRMED);
     // Set when the stored configuration could not be read: there is no
     // confirmed server state to roll back to, so the picker stays locked until
     // a retry succeeds.
@@ -160,16 +187,66 @@ export function CloudBackupSection() {
     // Discovery can be restarted (reopen, retry) while an earlier listing is
     // still in flight; only the newest request may write its result.
     const recoveryListSeqRef = useRef(0);
+    // Same for the normal listing: a response that began before the confirmed
+    // destination changed describes the old destination and is dropped.
+    const snapshotSeqRef = useRef(0);
     // The recovery error is rendered above the archive list and the effect
     // below scrolls it into view, so a failed passphrase is visible even when
     // the operator scrolled to the passphrase field at the bottom of a long
     // list.
     const recoveryErrorRef = useRef<HTMLParagraphElement | null>(null);
 
+    // The destination on screen is the confirmed one only when the picker has
+    // not moved off it and the Custom S3 form has no unsaved edits. Until then
+    // Test and the archive list stay out of reach, because the server resolves
+    // them against the confirmed destination, not the draft.
+    const customDraftDirty = provider === 'custom' && confirmed.provider === 'custom'
+        && (custom.secret_key !== '' || !sameCustomDestination(customDestination(custom), confirmed.custom));
+    const destinationShown = !loadFailed && provider !== 'disabled' && provider === confirmed.provider && !customDraftDirty;
+    const destinationReady = destinationShown && !saving;
+    // A destination write must not start while a request that resolves against
+    // the current destination is still running.
+    const operationBusy = testing || provisioning || archiveBusy || deleteBusy || recoveryBusy;
+
     const totalPages = Math.max(1, Math.ceil(snapshots.length / PAGE_SIZE));
     const safePage = Math.min(page, totalPages - 1);
     const pagedSnapshots = snapshots.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
     const needsPagination = snapshots.length > PAGE_SIZE;
+
+    const loadSnapshots = useCallback(async () => {
+        const seq = ++snapshotSeqRef.current;
+        try {
+            const res = await cloudFetch('/cloud-backup/snapshots');
+            if (!res.ok) return;
+            const data = await res.json();
+            if (seq === snapshotSeqRef.current) setSnapshots(data);
+        } catch {
+            // Best-effort; the panel renders empty when listing fails.
+        }
+    }, []);
+
+    // Called whenever the server confirms a destination (config load, picker
+    // save, Custom S3 save, auto-upload save). A different destination drops
+    // everything scoped to the previous one: the inventory, any listing still
+    // in flight, and every dialog holding one of its object keys.
+    const confirmDestination = useCallback((provider: Provider, custom: CustomDestination) => {
+        const next: ConfirmedDestination = { provider, custom };
+        const changed = !sameDestination(confirmedRef.current, next);
+        confirmedRef.current = next;
+        setConfirmed(next);
+        if (!changed) return;
+        snapshotSeqRef.current += 1;
+        recoveryListSeqRef.current += 1;
+        setSnapshots([]);
+        setPage(0);
+        setDeleteKey(null);
+        setArchivePrompt(null);
+        setPromptPassphrase('');
+        setPromptError('');
+        setRecoveryOpen(false);
+        setRecoveryLoading(false);
+        if (provider !== 'disabled') void loadSnapshots();
+    }, [loadSnapshots]);
 
     const loadConfig = useCallback(async () => {
         try {
@@ -178,7 +255,7 @@ export function CloudBackupSection() {
             const data: ConfigResponse = await res.json();
             setProvider(data.provider);
             setLoadedProvider(data.provider);
-            savedProviderRef.current = data.provider;
+            confirmDestination(data.provider, customDestination(data.custom));
             setLoadFailed(false);
             setSenchoProvisioned(data.sencho_provisioned);
             setCustom({ ...data.custom, secret_key: '' });
@@ -192,7 +269,7 @@ export function CloudBackupSection() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [confirmDestination]);
 
     const loadUsage = useCallback(async () => {
         try {
@@ -203,27 +280,13 @@ export function CloudBackupSection() {
         }
     }, []);
 
-    const loadSnapshots = useCallback(async () => {
-        try {
-            const res = await cloudFetch('/cloud-backup/snapshots');
-            if (res.ok) setSnapshots(await res.json());
-        } catch {
-            // Best-effort; the panel renders empty when listing fails.
-        }
-    }, []);
-
     useEffect(() => {
         loadConfig();
     }, [loadConfig]);
 
     useEffect(() => {
-        if (provider === 'sencho' && senchoProvisioned) loadUsage();
-    }, [provider, senchoProvisioned, loadUsage]);
-
-    useEffect(() => {
-        if (provider !== 'disabled') loadSnapshots();
-        else setSnapshots([]);
-    }, [provider, loadSnapshots]);
+        if (confirmed.provider === 'sencho' && senchoProvisioned) loadUsage();
+    }, [confirmed.provider, senchoProvisioned, loadUsage]);
 
     useEffect(() => {
         if (!recoveryError) return;
@@ -250,10 +313,10 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to save provider');
             }
-            savedProviderRef.current = nextProvider;
+            confirmDestination(nextProvider, nextProvider === 'custom' ? customDestination(custom) : confirmedRef.current.custom);
             toast.success('Cloud backup provider updated.');
         } catch (err) {
-            setProvider(savedProviderRef.current);
+            setProvider(confirmedRef.current.provider);
             toast.error((err as Error)?.message || 'Failed to update provider.');
         } finally {
             setSaving(false);
@@ -283,11 +346,10 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to save configuration');
             }
-            savedProviderRef.current = 'custom';
+            confirmDestination('custom', customDestination(custom));
             toast.success('Custom S3 configuration saved.');
             setCustom(c => ({ ...c, secret_key: '' }));
             setOriginalSecretSaved(true);
-            loadSnapshots();
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to save configuration.');
         } finally {
@@ -296,6 +358,7 @@ export function CloudBackupSection() {
     };
 
     const handleTest = async () => {
+        if (!destinationReady) return;
         setTesting(true);
         try {
             const res = await cloudFetch('/cloud-backup/test', { method: 'POST' });
@@ -389,7 +452,7 @@ export function CloudBackupSection() {
     };
 
     const requestArchive = async (objectKey: string, action: ArchiveAction, passphrase: string | null) => {
-        if (archiveBusyRef.current || deleteBusyRef.current) return;
+        if (!destinationReady || archiveBusyRef.current || deleteBusyRef.current) return;
         archiveBusyRef.current = true;
         setArchiveBusy(true);
         try {
@@ -462,12 +525,13 @@ export function CloudBackupSection() {
     }, []);
 
     const openRecovery = () => {
+        if (!destinationReady) return;
         setRecoveryOpen(true);
         void loadRecoveryArchives();
     };
 
     const handleRecover = async () => {
-        if (!recoveryKey || recoveryBusyRef.current || deleteBusyRef.current) return;
+        if (!destinationReady || !recoveryKey || recoveryBusyRef.current || deleteBusyRef.current) return;
         if (!recoveryPassphrase) {
             setRecoveryError('Enter the passphrase that sealed this archive.');
             return;
@@ -497,6 +561,7 @@ export function CloudBackupSection() {
 
     const handleAutoUploadToggle = async (next: boolean) => {
         setCustom(c => ({ ...c, auto_upload: next }));
+        setSaving(true);
         try {
             const res = await cloudFetch('/cloud-backup/config', {
                 method: 'PUT',
@@ -509,15 +574,17 @@ export function CloudBackupSection() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Failed to update auto-upload');
             }
-            savedProviderRef.current = 'custom';
+            confirmDestination('custom', customDestination(custom));
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to update auto-upload.');
             setCustom(c => ({ ...c, auto_upload: !next }));
+        } finally {
+            setSaving(false);
         }
     };
 
     const confirmDelete = async () => {
-        if (!deleteKey || deleteBusyRef.current || archiveBusyRef.current || recoveryBusyRef.current) return;
+        if (!destinationReady || !deleteKey || deleteBusyRef.current || archiveBusyRef.current || recoveryBusyRef.current) return;
         deleteBusyRef.current = true;
         setDeleteBusy(true);
         try {
@@ -528,7 +595,7 @@ export function CloudBackupSection() {
             }
             toast.success('Cloud snapshot deleted.');
             loadSnapshots();
-            if (provider === 'sencho') loadUsage();
+            if (confirmed.provider === 'sencho') loadUsage();
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to delete cloud snapshot.');
         } finally {
@@ -553,10 +620,10 @@ export function CloudBackupSection() {
             : [
                 {
                     label: 'PROVIDER',
-                    value: provider,
-                    tone: provider === 'disabled' ? 'subtitle' : 'value',
+                    value: confirmed.provider,
+                    tone: confirmed.provider === 'disabled' ? 'subtitle' : 'value',
                 },
-                ...(provider === 'sencho' && usage
+                ...(confirmed.provider === 'sencho' && usage
                     ? [{
                         label: 'USED',
                         value: `${formatBytes(usage.used_bytes)} / ${formatBytes(usage.quota_bytes)}`,
@@ -641,7 +708,7 @@ export function CloudBackupSection() {
                     options={providerOptions}
                     value={provider}
                     onValueChange={handleProviderChange}
-                    disabled={saving || savingEncryption || loadFailed}
+                    disabled={saving || savingEncryption || loadFailed || operationBusy}
                 />
                 <p className="text-xs text-muted-foreground">
                     Choose where fleet snapshots are replicated.
@@ -667,7 +734,7 @@ export function CloudBackupSection() {
                     <p className="text-xs text-muted-foreground">
                         Activates a 500 MB allowance backed by Cloudflare R2, scoped to this Admiral license.
                     </p>
-                    <SettingsPrimaryButton size="sm" onClick={handleProvision} disabled={provisioning}>
+                    <SettingsPrimaryButton size="sm" onClick={handleProvision} disabled={provisioning || saving}>
                         {provisioning ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : <Cloud className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />}
                         Activate
                     </SettingsPrimaryButton>
@@ -682,11 +749,11 @@ export function CloudBackupSection() {
                             <span className="font-medium text-sm">Sencho Snapshot Vault</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
+                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || !destinationReady}>
                                 {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
                                 Test
                             </Button>
-                            <Button size="sm" variant="ghost" onClick={handleProvision} disabled={provisioning}>
+                            <Button size="sm" variant="ghost" onClick={handleProvision} disabled={provisioning || saving}>
                                 <RefreshCw className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />
                                 Reprovision
                             </Button>
@@ -732,11 +799,11 @@ export function CloudBackupSection() {
                             <span className="font-medium text-sm">Custom S3 Configuration</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || saving}>
+                            <Button size="sm" variant="outline" onClick={handleTest} disabled={testing || !destinationReady}>
                                 {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
                                 Test
                             </Button>
-                            <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving}>
+                            <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving || operationBusy}>
                                 {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : null}
                                 Save
                             </SettingsPrimaryButton>
@@ -800,13 +867,25 @@ export function CloudBackupSection() {
                             <Label className="text-sm">Auto-upload</Label>
                             <p className="text-xs text-muted-foreground">Automatically upload every fleet snapshot to this bucket.</p>
                         </div>
-                        <TogglePill checked={custom.auto_upload} onChange={handleAutoUploadToggle} />
+                        <TogglePill checked={custom.auto_upload} disabled={saving || operationBusy} onChange={handleAutoUploadToggle} />
                     </div>
                     {encryptionFields}
                 </div>
             )}
 
-            {provider !== 'disabled' && (
+            {provider !== 'disabled' && !loadFailed && !destinationShown && (
+                <div className={PANEL_CLASS}>
+                    <span className="font-medium text-sm">Cloud Snapshots</span>
+                    <div className="flex items-start gap-2 text-xs text-muted-foreground py-2">
+                        <CloudOff className="w-4 h-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+                        {provider === 'sencho'
+                            ? 'Snapshots, Test and recovery appear once the Sencho Snapshot Vault is active.'
+                            : 'Snapshots, Test and recovery appear once this Custom S3 configuration is saved.'}
+                    </div>
+                </div>
+            )}
+
+            {destinationShown && (
                 <div className={PANEL_CLASS}>
                     <div className="flex items-center justify-between">
                         <span className="font-medium text-sm">Cloud Snapshots</span>
@@ -824,7 +903,7 @@ export function CloudBackupSection() {
                                     </Button>
                                 </>
                             )}
-                            <Button size="sm" variant="ghost" onClick={loadSnapshots} disabled={archiveBusy}>
+                            <Button size="sm" variant="ghost" onClick={() => void loadSnapshots()} disabled={archiveBusy || !destinationReady}>
                                 <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />
                             </Button>
                         </div>
@@ -833,7 +912,7 @@ export function CloudBackupSection() {
                         <p className="text-xs text-muted-foreground">
                             Lost the original instance? Recover one of its sealed archives with its passphrase.
                         </p>
-                        <Button size="sm" variant="outline" onClick={openRecovery} disabled={archiveBusy}>
+                        <Button size="sm" variant="outline" onClick={openRecovery} disabled={archiveBusy || !destinationReady}>
                             Recover archive
                         </Button>
                     </div>
@@ -861,7 +940,7 @@ export function CloudBackupSection() {
                                                         variant="ghost"
                                                         className="h-7 w-7"
                                                         aria-label="Import snapshot"
-                                                        disabled={archiveBusy}
+                                                        disabled={archiveBusy || !destinationReady}
                                                         onClick={() => requestArchive(s.objectKey, 'import', null)}
                                                     >
                                                         <FolderInput className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -878,7 +957,7 @@ export function CloudBackupSection() {
                                                         variant="ghost"
                                                         className="h-7 w-7"
                                                         aria-label="Download snapshot"
-                                                        disabled={archiveBusy}
+                                                        disabled={archiveBusy || !destinationReady}
                                                         onClick={() => requestArchive(s.objectKey, 'download', null)}
                                                     >
                                                         <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -895,7 +974,7 @@ export function CloudBackupSection() {
                                                         variant="ghost"
                                                         className="h-7 w-7"
                                                         aria-label="Delete snapshot"
-                                                        disabled={archiveBusy || deleteBusy}
+                                                        disabled={archiveBusy || deleteBusy || !destinationReady}
                                                         onClick={() => setDeleteKey(s.objectKey)}
                                                     >
                                                         <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />

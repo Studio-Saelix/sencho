@@ -120,7 +120,7 @@ Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own
 - **Access Key ID** and **Secret Access Key**
 - **Auto-upload** toggle
 
-Click **Test** to verify connectivity, then **Save**. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
+Click **Save**, then **Test** to verify connectivity. **Test**, the Cloud Snapshots list, and every archive action work on the saved configuration, so they stay out of reach while the form has unsaved edits and while a Custom S3 selection has not been saved yet. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
 
 <Frame>
   <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Snapshot Vault settings with Storage Mode set to Custom S3 (BYOB), empty fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, and Secret Access Key, Auto-upload and Encrypt archives toggles set to off, and an empty Cloud Snapshots panel" />
@@ -184,7 +184,7 @@ If a stored encrypted file cannot be decrypted (for example after on-disk corrup
     Restore all applies each stack independently, so a failure on one stack does not stop the others. A stack is reported as failed when its node has been removed from the fleet since the snapshot was taken, when a remote node is offline or unreachable, when a snapshot file for that stack could not be decrypted, or when its existing files cannot be written. The successful stacks are fully restored regardless. Resolve the underlying cause (re-add a removed node, bring an offline node back online, or pick a healthy snapshot) and run Restore all again, or restore the remaining stacks individually from the same snapshot.
   </Accordion>
   <Accordion title="Snapshot Vault Test reports an authentication error">
-    Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Test** again before saving.
+    Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Save**, then **Test** again.
   </Accordion>
   <Accordion title="Cloud upload returns a network timeout or 5xx error">
     Transient errors surface as a notification and leave the local snapshot in place. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which retries on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host (custom S3 endpoints often sit behind a different DNS or firewall path than the rest of your traffic).

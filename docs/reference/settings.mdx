@@ -384,7 +384,7 @@ Mirror fleet snapshots to any S3-compatible storage so a control-plane loss does
 | Mode | When to pick it |
 |------|-----------------|
 | **Disabled** | Snapshots stay on the control plane's local disk only. Default for fresh installs. |
-| **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Use **Test** to verify credentials, then toggle **Auto-upload** to start replicating snapshots. |
+| **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Click **Save**, then use **Test** to verify credentials; **Test** and the Cloud Snapshots list act on the saved configuration. Then toggle **Auto-upload** to start replicating snapshots. |
 
 The **Cloud Snapshots** list at the bottom of the section is an inventory of objects currently in the configured destination. Each row exposes **Import**, **Download**, and **Delete**. Import creates a new local snapshot and does not change live stack files. **Recover archive** lists archives that belong to other instances in the same bucket; only a sealed archive can be recovered, using its passphrase, and it creates a local snapshot with that instance's node identities, which you map to destinations in the snapshot detail view before restoring.
 
