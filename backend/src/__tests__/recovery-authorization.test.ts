@@ -187,9 +187,10 @@ describe('requireStorageAccess', () => {
       expect(status, access).toBe(403);
       expect(body, access).toEqual(denial);
     }
-    // A relayed request (proxy or Pilot) is refused with the same sentence.
+    // A relayed request (proxy or Pilot) refused for another stack's evidence gets the same sentence.
     for (const machine of ['node_proxy', 'pilot_tunnel'] as const) {
-      expect(answer(req({ role: 'deployer', machine }), 'configure', null).body, machine).toEqual(denial);
+      const relayed = req({ role: 'viewer', machine, evidence: { stackName: 'photos', actions: new Set<PermissionAction>(['stack:read', 'stack:edit']) } });
+      expect(answer(relayed, 'protect', target(sharedKey)), machine).toEqual({ allowed: false, status: 403, body: denial });
     }
   });
 });

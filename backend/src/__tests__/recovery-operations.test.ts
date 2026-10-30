@@ -69,6 +69,7 @@ function holdsWriteLockFromBegin(run: () => void): boolean {
     run();
   } finally {
     other.close();
+    vi.restoreAllMocks();
   }
   if (held === null) throw new Error('the transaction prepared no statement');
   return held;
@@ -360,7 +361,7 @@ describe('restart reconciliation', () => {
 
     const after = new ops.RecoveryOperationStore('epoch-without-reconcile');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Neither a queued nor a running operation of the dead process can be started here.
+    // Neither a queued nor a running operation of the dead process can be moved to running here.
     expect(classOf(() => after.markRunning(queued.id))).toBe('interrupted');
     expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('Refused'), 'run', queued.id, 'queued');
     expect(after.get(queued.id)).toMatchObject({ state: 'queued', processEpoch: 'epoch-crashed' });
@@ -444,22 +445,27 @@ describe('restart reconciliation', () => {
 
     // A read that claims the operation is this process's own gets past the
     // epoch check, so the conditional write is the only guard left: it must
-    // change nothing, and an operation that is still live afterwards is an error.
+    // change nothing, and an operation that is still live afterwards is refused.
     const stored = dead.get(op.id) as NonNullable<ReturnType<typeof dead.get>>;
     vi.spyOn(live, 'get').mockReturnValueOnce({ ...stored, processEpoch: 'epoch-lie-live' });
-    expect(classOf(() => live.finish(op.id, { state: 'succeeded' }))).toBe('invalid_request');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(classOf(() => live.finish(op.id, { state: 'succeeded' }))).toBe('interrupted');
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('Refused'), 'finish', op.id, 'running');
     expect(dead.get(op.id)).toMatchObject({ state: 'running', errorClass: null, completedAt: null, processEpoch: 'epoch-lie-dead' });
     expect(dead.getLock('storage', st.storageKey)).toMatchObject({ ownerOperationId: op.id, staleSince: null });
   });
 
-  it('takes the write lock when finish and reconciliation begin', () => {
+  it('takes the write lock when any transaction that reads before it writes begins', () => {
     const s = new ops.RecoveryOperationStore('epoch-immediate');
     const st = storage('immediate_data');
     const op = s.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    expect(holdsWriteLockFromBegin(() => s.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }))).toBe(true);
+    expect(holdsWriteLockFromBegin(() => s.acquireLock('storage', st.storageKey, op.id))).toBe(true);
     s.markRunning(op.id);
-    expect(holdsWriteLockFromBegin(() => s.finish(op.id, { state: 'succeeded' }))).toBe(true);
-    vi.restoreAllMocks();
-    expect(holdsWriteLockFromBegin(() => new ops.RecoveryOperationStore('epoch-immediate-next').reconcileAtStartup())).toBe(true);
+    expect(holdsWriteLockFromBegin(() => s.finish(op.id, { state: 'completion_unknown' }))).toBe(true);
+    expect(holdsWriteLockFromBegin(() => s.releaseStaleLock('storage', st.storageKey, 'admin'))).toBe(true);
+    const next = new ops.RecoveryOperationStore('epoch-immediate-next');
+    expect(holdsWriteLockFromBegin(() => next.reconcileAtStartup())).toBe(true);
   });
 
   it('keeps a point finalized before the crash, while its operation ends completion_unknown', () => {

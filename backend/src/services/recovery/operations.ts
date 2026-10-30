@@ -155,7 +155,7 @@ export class RecoveryOperationStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
       `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, this.processEpoch, now, now);
       return { operation: this.require(id), replayed: false };
-    })();
+    }).immediate();
   }
 
   get(id: string): RecoveryOperation | null {
@@ -186,8 +186,8 @@ export class RecoveryOperationStore {
    * the operation can finish it: another process's `queued` or `running`
    * operation is refused and keeps its state and its locks until boot
    * reconciliation settles it. The write is conditional on the operation still
-   * being live, so a completion that loses a race with reconciliation changes
-   * nothing. An operation cannot end `succeeded` or `partial` while one of its
+   * being live and owned by this process, so a completion that loses a race
+   * with reconciliation changes nothing. An operation cannot end `succeeded` or `partial` while one of its
    * points is still pending: the point is finalized first. Any other ending
    * settles the operation's own pending points in the same transaction
    * (`failed` with the operation's class, otherwise `completion_unknown`). A
@@ -223,7 +223,8 @@ export class RecoveryOperationStore {
     };
     // Immediate, so a second process finishing or reconciling the same row
     // waits for this write and then finds it terminal, instead of failing on
-    // the upgrade from a read to a write.
+    // the upgrade from a read to a write. Every transaction here that reads
+    // before it writes is immediate for the same reason.
     return db.transaction((): RecoveryOperation => {
       const current = this.require(id);
       if (isTerminal(current.state)) {
@@ -244,9 +245,12 @@ export class RecoveryOperationStore {
       if (ended.changes === 0) {
         // Defensive: the transaction holds the write lock from its start,
         // so this is not reachable today. If another writer did end the
-        // operation after it was read, its outcome and its locks stand.
+        // operation after it was read, its outcome and its locks stand. An
+        // operation that is still live was not ours to end (the write also
+        // requires this process's epoch), so it is refused like any other
+        // process's work.
         const stored = this.require(id);
-        if (!isTerminal(stored.state)) throw new RecoveryError('invalid_request');
+        if (!isTerminal(stored.state)) this.refuseOtherProcess('finish', stored);
         logLate(stored);
         return stored;
       }
@@ -303,7 +307,7 @@ export class RecoveryOperationStore {
         VALUES (?, ?, ?, ?, ?)
       `).run(scope, resourceKey, operationId, this.processEpoch, now);
       return toLock(this.findLockRow(scope, resourceKey) as LockRow);
-    })();
+    }).immediate();
   }
 
   getLock(scope: RecoveryLockScope, resourceKey: string): RecoveryLock | null {
@@ -326,7 +330,7 @@ export class RecoveryOperationStore {
         scope, sanitizeForLog(reviewedBy), row.owner_operation_id,
       );
       return toLock(row);
-    })();
+    }).immediate();
   }
 
   /**
@@ -369,8 +373,8 @@ export class RecoveryOperationStore {
   }
 
   /**
-   * An operation a dead process left queued or running is never started,
-   * finished or locked here; it waits for boot reconciliation. Reported as
+   * An operation a dead process left queued or running is never moved to
+   * running, finished or locked here; it waits for boot reconciliation. Reported as
    * `interrupted`, which is what happened to it.
    */
   private refuseOtherProcess(action: string, op: RecoveryOperation): never {
