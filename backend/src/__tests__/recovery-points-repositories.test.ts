@@ -178,6 +178,7 @@ describe('RecoveryPointStore', () => {
     expect(() => store().finalize(oversized.id, {
       status: 'succeeded', evidence: evidence({ snapshotId: 'a'.repeat(129) }),
     })).toThrow(expect.objectContaining({ errorClass: 'internal' }));
+    expect(store().get(oversized.id)?.status).toBe('failed');
     const malformed = beginRoot();
     expect(() => store().finalize(malformed.id, {
       status: 'succeeded',

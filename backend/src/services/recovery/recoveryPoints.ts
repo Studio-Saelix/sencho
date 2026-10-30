@@ -256,7 +256,9 @@ export class RecoveryPointStore {
    * Write the point's only terminal state. A late or duplicated completion
    * (after a restart settled the point, say) is refused as `invalid_request`
    * and logged, never applied. Evidence that fails validation ends the point
-   * `failed` rather than leaving it pending until the next boot.
+   * `failed` rather than leaving it pending until the next boot. A `failed`
+   * outcome without a known error class is refused as `invalid_request` and the
+   * point stays pending until its operation, or the next boot, settles it.
    */
   finalize(pointId: string, outcome: PointFinalization, now = Date.now()): RecoveryPoint {
     const db = recoveryDb();
