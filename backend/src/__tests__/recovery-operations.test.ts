@@ -5,6 +5,7 @@
  * by a dead process can never be resumed in place, even when boot
  * reconciliation did not run.
  */
+import Database from 'better-sqlite3';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -38,6 +39,39 @@ function classOf(fn: () => unknown): string | null {
   } catch (err) {
     return (err as { errorClass?: string }).errorClass ?? `unexpected:${String(err)}`;
   }
+}
+
+/**
+ * Whether the transaction `run` opens already holds the database's write lock
+ * when its first statement is prepared: a second connection that cannot begin
+ * an immediate transaction at that moment is locked out by it. A deferred
+ * transaction holds nothing until its first statement runs.
+ */
+function holdsWriteLockFromBegin(run: () => void): boolean {
+  const db = recoveryDb();
+  const other = new Database(db.name, { timeout: 0 });
+  const prepare = db.prepare.bind(db);
+  let held: boolean | null = null;
+  vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+    if (held === null) {
+      try {
+        other.exec('BEGIN IMMEDIATE');
+        other.exec('ROLLBACK');
+        held = false;
+      } catch (err) {
+        if ((err as { code?: string }).code !== 'SQLITE_BUSY') throw err;
+        held = true;
+      }
+    }
+    return prepare(sql);
+  }) as typeof db.prepare);
+  try {
+    run();
+  } finally {
+    other.close();
+  }
+  if (held === null) throw new Error('the transaction prepared no statement');
+  return held;
 }
 
 /** A storage that exists, so its key is a valid lock target. */
@@ -325,8 +359,10 @@ describe('restart reconciliation', () => {
     const queued = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
 
     const after = new ops.RecoveryOperationStore('epoch-without-reconcile');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // Neither a queued nor a running operation of the dead process can be started here.
     expect(classOf(() => after.markRunning(queued.id))).toBe('interrupted');
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('Refused'), 'run', queued.id, 'queued');
     expect(after.get(queued.id)).toMatchObject({ state: 'queued', processEpoch: 'epoch-crashed' });
     // A replayed request gets the old operation back, but cannot pick it up.
     expect(after.start({ idempotencyKey: running.idempotencyKey, kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).replayed).toBe(true);
@@ -337,7 +373,6 @@ describe('restart reconciliation', () => {
 
     // Nor can it be finished here: no ending records an outcome for the dead
     // process's restore, releases its lock or settles its point.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     for (const ending of [
       { state: 'succeeded' as const },
       { state: 'partial' as const, errorClass: 'source_unreadable' as const },
@@ -354,11 +389,11 @@ describe('restart reconciliation', () => {
       expect(points.RecoveryPointStore.getInstance().get(pending.id)?.status).toBe('pending');
     }
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Refused'), 'finish', running.id, 'running');
-    warn.mockRestore();
 
     // It cannot take a lock for the dead process's operation either, with or without an existing lock.
     const free = storage('unreconciled_free');
     expect(classOf(() => after.acquireLock('storage', free.storageKey, queued.id))).toBe('interrupted');
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('Refused'), 'take a lock for', queued.id, 'queued');
     expect(after.getLock('storage', free.storageKey)).toBeNull();
 
     // A later boot settles it; only then does the lock become stale.
@@ -397,6 +432,34 @@ describe('restart reconciliation', () => {
     owner.finish(second.id, { state: 'succeeded' }, 9_000);
     new ops.RecoveryOperationStore('epoch-race-newer').reconcileAtStartup(10_000);
     expect(owner.get(second.id)).toMatchObject({ state: 'succeeded', errorClass: null, completedAt: 9_000 });
+  });
+
+  it('refuses a completion whose stored row belongs to another epoch, even when the read said otherwise', () => {
+    const dead = new ops.RecoveryOperationStore('epoch-lie-dead');
+    const live = new ops.RecoveryOperationStore('epoch-lie-live');
+    const st = storage('epoch_predicate_data');
+    const op = dead.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    dead.markRunning(op.id);
+    dead.acquireLock('storage', st.storageKey, op.id);
+
+    // A read that claims the operation is this process's own gets past the
+    // epoch check, so the conditional write is the only guard left: it must
+    // change nothing, and an operation that is still live afterwards is an error.
+    const stored = dead.get(op.id) as NonNullable<ReturnType<typeof dead.get>>;
+    vi.spyOn(live, 'get').mockReturnValueOnce({ ...stored, processEpoch: 'epoch-lie-live' });
+    expect(classOf(() => live.finish(op.id, { state: 'succeeded' }))).toBe('invalid_request');
+    expect(dead.get(op.id)).toMatchObject({ state: 'running', errorClass: null, completedAt: null, processEpoch: 'epoch-lie-dead' });
+    expect(dead.getLock('storage', st.storageKey)).toMatchObject({ ownerOperationId: op.id, staleSince: null });
+  });
+
+  it('takes the write lock when finish and reconciliation begin', () => {
+    const s = new ops.RecoveryOperationStore('epoch-immediate');
+    const st = storage('immediate_data');
+    const op = s.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    s.markRunning(op.id);
+    expect(holdsWriteLockFromBegin(() => s.finish(op.id, { state: 'succeeded' }))).toBe(true);
+    vi.restoreAllMocks();
+    expect(holdsWriteLockFromBegin(() => new ops.RecoveryOperationStore('epoch-immediate-next').reconcileAtStartup())).toBe(true);
   });
 
   it('keeps a point finalized before the crash, while its operation ends completion_unknown', () => {

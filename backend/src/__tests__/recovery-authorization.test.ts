@@ -157,16 +157,39 @@ describe('authorizeStorageAccess', () => {
 });
 
 describe('requireStorageAccess', () => {
-  it('answers 403 without naming the stacks', () => {
+  const denial = { error: 'You do not have permission for this recovery action.', code: 'PERMISSION_DENIED' };
+
+  function answer(request: Request, access: 'read' | 'protect' | 'restore' | 'configure', storage: ReturnType<typeof target> | null) {
     let status = 0;
     let body: unknown;
     const res = {
       status(code: number) { status = code; return this; },
       json(payload: unknown) { body = payload; return this; },
     } as unknown as Response;
-    expect(auth.requireStorageAccess(req({ role: 'viewer', userId: scopedUserId }), res, 'protect', target(sharedKey))).toBe(false);
+    const allowed = auth.requireStorageAccess(request, res, access, storage);
+    return { allowed, status, body };
+  }
+
+  it('answers 403 without naming the stacks', () => {
+    const { allowed, status, body } = answer(req({ role: 'viewer', userId: scopedUserId }), 'protect', target(sharedKey));
+    expect(allowed).toBe(false);
     expect(status).toBe(403);
-    expect(body).toEqual({ error: 'You do not have permission for this recovery action.', code: 'PERMISSION_DENIED' });
+    expect(body).toEqual(denial);
     expect(JSON.stringify(body)).not.toContain('tools');
+  });
+
+  it('answers the same sentence for a refused settings change as for a refused stack action', () => {
+    // Stack actions and settings are refused by different rules; none names a stack.
+    const viewer = req({ role: 'viewer', userId: scopedUserId });
+    for (const [access, storage] of [['protect', target(sharedKey)], ['restore', target(sharedKey)], ['configure', null]] as const) {
+      const { allowed, status, body } = answer(viewer, access, storage);
+      expect(allowed, access).toBe(false);
+      expect(status, access).toBe(403);
+      expect(body, access).toEqual(denial);
+    }
+    // A relayed request (proxy or Pilot) is refused with the same sentence.
+    for (const machine of ['node_proxy', 'pilot_tunnel'] as const) {
+      expect(answer(req({ role: 'deployer', machine }), 'configure', null).body, machine).toEqual(denial);
+    }
   });
 });

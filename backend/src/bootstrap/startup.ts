@@ -139,7 +139,7 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
 /**
  * Settle recovery work a previous process left behind: operations it left
  * queued or running end as completion_unknown and their locks turn stale,
- * before anything can start new recovery work. Nothing recovery-related runs at
+ * before anything can start new recovery work. No backup or restore starts at
  * boot, so a failure is logged and Sencho still starts; the store then refuses
  * to resume, finish or lock for any of that work, because it belongs to an
  * epoch that never runs again and only reconciliation can settle it. A build

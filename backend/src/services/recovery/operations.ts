@@ -164,9 +164,9 @@ export class RecoveryOperationStore {
   }
 
   /**
-   * Start an operation this process queued. Running one this process already
-   * started is a no-op replay. An operation queued or started by another
-   * process is refused: it waits for boot reconciliation, never runs here.
+   * Move an operation this process queued to running. Running one this process
+   * already moved is a no-op replay. An operation queued or running under
+   * another process is refused: it waits for boot reconciliation, never runs here.
    */
   markRunning(id: string, now = Date.now()): RecoveryOperation {
     const result = recoveryDb().prepare(`
@@ -175,7 +175,7 @@ export class RecoveryOperationStore {
     `).run(now, id, this.processEpoch);
     const op = this.require(id);
     if (result.changes > 0 || (op.state === 'running' && op.processEpoch === this.processEpoch)) return op;
-    if (!isTerminal(op.state) && op.processEpoch !== this.processEpoch) this.refuseOtherProcess('start', op);
+    if (!isTerminal(op.state) && op.processEpoch !== this.processEpoch) this.refuseOtherProcess('run', op);
     throw new RecoveryError('invalid_request');
   }
 
@@ -297,7 +297,7 @@ export class RecoveryOperationStore {
         return toLock(existing);
       }
       // A dead process's operation can never take a lock here, even if boot reconciliation failed.
-      if (op.processEpoch !== this.processEpoch) this.refuseOtherProcess('lock', op);
+      if (op.processEpoch !== this.processEpoch) this.refuseOtherProcess('take a lock for', op);
       db.prepare(`
         INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at)
         VALUES (?, ?, ?, ?, ?)
