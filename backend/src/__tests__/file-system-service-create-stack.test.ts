@@ -25,6 +25,7 @@ vi.mock('../services/NodeRegistry', () => ({
 }));
 
 import { FileSystemService } from '../services/FileSystemService';
+import { DatabaseService } from '../services/DatabaseService';
 
 describe('FileSystemService.createStack', () => {
   let tmpBase: string;
@@ -94,5 +95,52 @@ describe('FileSystemService.createStack', () => {
   it('rejects creation when the stack directory already exists', async () => {
     await FileSystemService.getInstance().createStack('hotel');
     await expect(FileSystemService.getInstance().createStack('hotel')).rejects.toThrow(/already exists/);
+  });
+});
+
+describe('FileSystemService.ensureStackDir', () => {
+  let tmpBase: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-ensure-stack-'));
+    mockState.composeDir = tmpBase;
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('creates the stack directory without publishing a compose file', async () => {
+    const created = await FileSystemService.getInstance().ensureStackDir('restored');
+
+    expect(created).toBe(true);
+    const stat = await fs.stat(path.join(tmpBase, 'restored'));
+    expect(stat.isDirectory()).toBe(true);
+    await expect(fs.access(path.join(tmpBase, 'restored', 'compose.yaml'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('reports an existing directory without touching its files', async () => {
+    const stackDir = path.join(tmpBase, 'present');
+    await fs.mkdir(stackDir);
+    await fs.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+
+    const created = await FileSystemService.getInstance().ensureStackDir('present');
+
+    expect(created).toBe(false);
+    expect(await fs.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('services: {}\n');
+  });
+
+  it('refuses to restore a stack while a deletion is in progress', async () => {
+    vi.spyOn(DatabaseService.getInstance(), 'hasBlockingDeletionIntent').mockReturnValue(true);
+
+    await expect(FileSystemService.getInstance().ensureStackDir('deleting'))
+      .rejects.toMatchObject({ code: 'stack_deletion_in_progress' });
+    await expect(fs.access(path.join(tmpBase, 'deleting'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a stack name that escapes the compose root', async () => {
+    await expect(FileSystemService.getInstance().ensureStackDir('../escape'))
+      .rejects.toMatchObject({ code: 'INVALID_STACK_NAME' });
   });
 });

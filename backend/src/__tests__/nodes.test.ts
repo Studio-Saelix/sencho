@@ -370,6 +370,79 @@ describe('PUT /api/nodes/:id name collision', () => {
   });
 });
 
+describe('node name archive storage', () => {
+  const STORAGE_ERROR = 'Node name must be valid Unicode text without NUL characters';
+
+  async function createRemoteWithName(name: string) {
+    return request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({
+        name,
+        type: 'remote',
+        mode: 'proxy',
+        api_url: 'http://192.168.1.77:1852',
+        api_token: 'tok-archive-name',
+        compose_dir: '/app/compose',
+      });
+  }
+
+  it('rejects a NUL character in a new node name and creates no row', async () => {
+    const name = `edge\u0000hidden-${Date.now()}`;
+    const res = await createRemoteWithName(name);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(STORAGE_ERROR);
+    expect(DatabaseService.getInstance().getNodes().some((node) => node.name === name)).toBe(false);
+  });
+
+  it('rejects an unpaired surrogate in a new node name', async () => {
+    const res = await createRemoteWithName(`edge\uD800hidden-${Date.now()}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(STORAGE_ERROR);
+  });
+
+  it('still accepts a Unicode node name', async () => {
+    const name = `café-復旧-${Date.now()}`;
+    const res = await createRemoteWithName(name);
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getNode(res.body.id)?.name).toBe(name);
+  });
+
+  it('rejects a rename to a NUL name and leaves the stored name unchanged', async () => {
+    const created = await createRemoteWithName(`rename-guard-${Date.now()}`);
+    expect(created.status).toBe(200);
+    const id = created.body.id as number;
+    const before = DatabaseService.getInstance().getNode(id)!.name;
+
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name: 'edge\u0000hidden' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(STORAGE_ERROR);
+    expect(DatabaseService.getInstance().getNode(id)!.name).toBe(before);
+  });
+
+  it('lets a legacy NUL name be renamed to a storable one', async () => {
+    const id = DatabaseService.getInstance().addNode({
+      name: 'edge\u0000hidden',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/app/compose',
+      is_default: false,
+      api_url: 'http://192.168.1.77:1852',
+      api_token: 'tok-legacy-name',
+    });
+    const renamed = `recovered-${Date.now()}`;
+    const res = await request(app)
+      .put(`/api/nodes/${id}`)
+      .set('Authorization', authHeader)
+      .send({ name: renamed });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getNode(id)!.name).toBe(renamed);
+  });
+});
+
 describe('POST /api/nodes/:id/test authorization (H-3)', () => {
   it('403s a non-admin (viewer) with PERMISSION_DENIED', async () => {
     const id = await createRemoteNode(authHeader);
