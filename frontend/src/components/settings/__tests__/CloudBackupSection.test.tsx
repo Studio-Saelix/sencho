@@ -989,10 +989,18 @@ describe('CloudBackupSection destination binding', () => {
         provisioned: boolean;
         custom: StoredCustom;
         log: string[];
+        // Destination every listing request resolved against.
+        lists: string[];
         putHolds: Array<ReturnType<typeof deferredResponse>>;
         snapshotHolds: Array<ReturnType<typeof deferredResponse>>;
         recoveryHolds: Array<ReturnType<typeof deferredResponse>>;
         opHold: ReturnType<typeof deferredResponse> | null;
+        // Status for the next configuration writes, in order; 200 when empty.
+        putStatuses: number[];
+        // Next write is stored by the hub but its response never reaches the client.
+        dropNextPutResponse: boolean;
+        // Next listings answer 502.
+        snapshotFailures: number;
     }
 
     function destinationOf(server: Server): string {
@@ -1021,21 +1029,31 @@ describe('CloudBackupSection destination binding', () => {
             provisioned: initial.provider === 'sencho' || initial.provisioned === true,
             custom: STORED,
             log: [],
+            lists: [],
             putHolds: [],
             snapshotHolds: [],
             recoveryHolds: [],
             opHold: null,
+            putStatuses: [],
+            dropNextPutResponse: false,
+            snapshotFailures: 0,
             ...initial,
         };
         apiFetch.mockImplementation(async (path: string, options?: { method?: string; body?: string }) => {
             const method = options?.method ?? 'GET';
             if (path === '/cloud-backup/config' && method === 'PUT') {
                 const body = JSON.parse(options?.body ?? '{}');
+                const status = server.putStatuses.shift() ?? 200;
+                if (status >= 400) return json({ error: 'save refused' }, status);
                 if (body.provider === 'custom' && !isSavableCustom(body.custom ?? {})) return json({ error: 'Invalid custom S3 settings' }, 400);
                 if (body.provider) server.provider = body.provider;
                 if (body.provider === 'custom') server.custom = { ...server.custom, ...body.custom };
                 const hold = server.putHolds.shift();
                 if (hold) await hold.promise;
+                if (server.dropNextPutResponse) {
+                    server.dropNextPutResponse = false;
+                    throw new Error('network down');
+                }
                 return json({}, 200);
             }
             if (path === '/cloud-backup/config') {
@@ -1050,9 +1068,14 @@ describe('CloudBackupSection destination binding', () => {
             }
             if (path === '/cloud-backup/usage') return json({ used_bytes: 0, quota_bytes: 100, object_count: 0 });
             if (path === '/cloud-backup/snapshots') {
+                server.lists.push(destinationOf(server));
                 const rows = inventoryOf(destinationOf(server)).map(entry);
                 const hold = server.snapshotHolds.shift();
                 if (hold) await hold.promise;
+                if (server.snapshotFailures > 0) {
+                    server.snapshotFailures -= 1;
+                    return json({ error: 'Failed to list cloud snapshots' }, 502);
+                }
                 return json(rows);
             }
             if (path === '/cloud-backup/recovery-archives') {
@@ -1064,7 +1087,15 @@ describe('CloudBackupSection destination binding', () => {
             const destination = destinationOf(server);
             if (path === '/cloud-backup/test') {
                 server.log.push(`test@${destination}`);
+                if (server.opHold) await server.opHold.promise;
                 return json({ success: true });
+            }
+            if (path === '/cloud-backup/provision') {
+                server.log.push('provision');
+                if (server.opHold) await server.opHold.promise;
+                server.provisioned = true;
+                server.provider = 'sencho';
+                return json({});
             }
             if (path === '/cloud-backup/recover') {
                 server.log.push(`recover@${destination}`);
@@ -1080,7 +1111,7 @@ describe('CloudBackupSection destination binding', () => {
         return server;
     }
 
-    const DESTINATION_ACTIONS = ['Test', 'Import snapshot', 'Download snapshot', 'Delete snapshot', 'Recover archive', 'Reprovision'];
+    const DESTINATION_ACTIONS = ['Test', 'Import snapshot', 'Download snapshot', 'Delete snapshot', 'Recover archive', 'Reprovision', 'Refresh snapshots'];
 
     // Names of the destination-bound controls a click could act on right now.
     function enabledActions(): string[] {
@@ -1117,20 +1148,31 @@ describe('CloudBackupSection destination binding', () => {
 
         expect(enabledActions()).toEqual([]);
         expect(snapshotRows()).toEqual([]);
-        expect(screen.getByText(/appear once this Custom S3 configuration is saved/)).toBeInTheDocument();
+        expect(screen.getByText(/once this Custom S3 configuration is saved/)).toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: 'Test' }));
         expect(server.log).toEqual([]);
         expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(false);
     });
 
-    it('offers no action for an inactive destination when the stored provider is Disabled', async () => {
-        startServer({ provider: 'disabled', custom: BLANK });
+    it('offers no action under an unsaved Custom selection when the stored provider is Disabled', async () => {
+        const server = startServer({ provider: 'disabled', custom: BLANK });
         render(<CloudBackupSection />);
         const user = userEvent.setup();
         await pick(user, CUSTOM);
         expect(await screen.findByText('Custom S3 Configuration')).toBeInTheDocument();
         expect(enabledActions()).toEqual([]);
-        expect(apiFetch.mock.calls.some(call => call[0] === '/cloud-backup/snapshots')).toBe(false);
+        expect(server.lists).toEqual([]);
+    });
+
+    it('lists and acts on a complete stored Custom bucket once it is saved from Disabled', async () => {
+        const server = startServer({ provider: 'disabled' });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await pick(user, CUSTOM);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        expect(server.lists).toEqual(['custom:first-bucket']);
+        await user.click(screen.getByRole('button', { name: 'Import snapshot' }));
+        await waitFor(() => expect(server.log).toEqual(['import@custom:first-bucket']));
     });
 
     it('offers no custom-bucket action under an unprovisioned managed selection', async () => {
@@ -1144,7 +1186,7 @@ describe('CloudBackupSection destination binding', () => {
 
         expect(enabledActions()).toEqual([]);
         expect(snapshotRows()).toEqual([]);
-        expect(screen.getByText(/appear once the Sencho Snapshot Vault is active/)).toBeInTheDocument();
+        expect(screen.getByText(/once the Sencho Snapshot Vault is active/)).toBeInTheDocument();
         expect(server.log).toEqual([]);
     });
 
@@ -1186,7 +1228,7 @@ describe('CloudBackupSection destination binding', () => {
         await waitFor(() => expect(server.log).toEqual([`delete@custom:first-bucket`]));
     });
 
-    it('keeps a pending listing for the stored destination when the switch fails', async () => {
+    it('keeps a pending listing for the stored destination when an unsaved Custom selection is abandoned', async () => {
         const server = startServer({ provider: 'sencho', custom: BLANK });
         const pendingManaged = deferredResponse();
         server.snapshotHolds.push(pendingManaged);
@@ -1265,6 +1307,250 @@ describe('CloudBackupSection destination binding', () => {
         await waitFor(() => expect(enabledActions()).toContain('Delete snapshot'));
     });
 
+    it('keeps the pending listing for the stored destination when the switch is refused', async () => {
+        const server = startServer({ provider: 'sencho', putStatuses: [500] });
+        const pendingManaged = deferredResponse();
+        server.snapshotHolds.push(pendingManaged);
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await pick(user, CUSTOM);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(screen.getByRole('combobox')).toHaveTextContent('Sencho Snapshot Vault (included)');
+
+        pendingManaged.resolve(undefined);
+        expect(await screen.findByText('managed-1.tar.gz.senc')).toBeInTheDocument();
+        expect(server.lists).toEqual(['managed']);
+        await user.click(screen.getByRole('button', { name: 'Delete snapshot' }));
+        await user.click(await screen.findByRole('button', { name: 'Delete' }));
+        await waitFor(() => expect(server.log).toEqual(['delete@managed']));
+    });
+
+    it('rereads the stored destination when a switch fails without an answer', async () => {
+        const server = startServer({ provider: 'sencho', dropNextPutResponse: true });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await pick(user, CUSTOM);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        // The hub stored the switch before the connection dropped.
+        await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent(CUSTOM));
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        expect(screen.queryByText('managed-1.tar.gz.senc')).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Delete snapshot' }));
+        await user.click(await screen.findByRole('button', { name: 'Delete' }));
+        await waitFor(() => expect(server.log).toEqual(['delete@custom:first-bucket']));
+    });
+
+    it('locks the section when a switch fails without an answer and the stored destination cannot be read back', async () => {
+        const server = startServer({ provider: 'sencho', dropNextPutResponse: true });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await screen.findByText('managed-1.tar.gz.senc');
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && !options?.method ? json({ error: 'boom' }, 500) : base(path, options)
+        ));
+        await pick(user, CUSTOM);
+        expect(await screen.findByText(/could not be read/)).toBeInTheDocument();
+        expect(screen.getByRole('combobox')).toBeDisabled();
+        expect(enabledActions()).toEqual([]);
+        expect(server.log).toEqual([]);
+    });
+
+    it('keeps the unsaved form held after a refused Save and the stored bucket after a refused toggle', async () => {
+        const server = startServer({ provider: 'custom', putStatuses: [500, 500] });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        const bucket = screen.getByPlaceholderText('my-sencho-backups');
+        await user.clear(bucket);
+        await user.type(bucket, 'second-bucket');
+        await user.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('save refused'));
+        expect(enabledActions()).toEqual([]);
+        expect(server.custom.bucket).toBe('first-bucket');
+
+        await user.click(screen.getAllByRole('switch')[0]);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+        expect(screen.getAllByRole('switch')[0]).not.toBeChecked();
+        expect(enabledActions()).toEqual([]);
+
+        await user.clear(bucket);
+        await user.type(bucket, 'first-bucket');
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        expect(enabledActions()).toContain('Delete snapshot');
+    });
+
+    it('does not reload the listing when a Save stores the destination it already has', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Custom S3 configuration saved.'));
+        expect(server.lists).toEqual(['custom:first-bucket']);
+        expect(screen.getByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+    });
+
+    it.each([
+        ['endpoint', 'https://s3.us-east-1.amazonaws.com'],
+        ['region', 'us-east-1'],
+        ['access key', 'AKIA...'],
+        ['path prefix', 'sencho/'],
+    ])('holds the archive actions after an unsaved %s edit', async (_label, placeholder) => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.type(screen.getByPlaceholderText(placeholder), 'x');
+        expect(enabledActions()).toEqual([]);
+        expect(snapshotRows()).toEqual([]);
+        expect(server.log).toEqual([]);
+    });
+
+    it('holds the managed-vault controls while a switch from Custom S3 is saving', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        const server = startServer({ provider: 'custom', provisioned: true });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const put = deferredResponse();
+        server.putHolds.push(put);
+        const user = userEvent.setup();
+        await pick(user, 'Sencho Snapshot Vault (included)');
+        expect(await screen.findByRole('button', { name: 'Reprovision' })).toBeDisabled();
+        expect(enabledActions()).toEqual([]);
+
+        put.resolve(json({}));
+        expect(await screen.findByText('managed-1.tar.gz.senc')).toBeInTheDocument();
+        expect(enabledActions()).toContain('Test');
+    });
+
+    it('says the listing failed instead of reporting an empty vault, and retries', async () => {
+        const server = startServer({ provider: 'custom', snapshotFailures: 1 });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Failed to list cloud snapshots')).toBeInTheDocument();
+        expect(screen.queryByText(/No cloud snapshots yet/)).not.toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        expect(screen.queryByText('Failed to list cloud snapshots')).not.toBeInTheDocument();
+        expect(server.lists).toHaveLength(2);
+    });
+
+    it('shows a loading state, not an empty vault, while the listing runs', async () => {
+        const server = startServer({ provider: 'custom' });
+        const pending = deferredResponse();
+        server.snapshotHolds.push(pending);
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('Loading cloud snapshots...')).toBeInTheDocument();
+        expect(screen.queryByText(/No cloud snapshots yet/)).not.toBeInTheDocument();
+        pending.resolve(undefined);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+    });
+
+    it('refreshes the listing for the confirmed destination only', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Refresh snapshots' }));
+        await waitFor(() => expect(server.lists).toEqual(['custom:first-bucket', 'custom:first-bucket']));
+
+        await user.type(screen.getByPlaceholderText('my-sencho-backups'), 'x');
+        expect(screen.queryByRole('button', { name: 'Refresh snapshots' })).not.toBeInTheDocument();
+    });
+
+    it.each([
+        ['a Test', 'managed'],
+        ['a delete', 'managed'],
+        ['a provision', 'unprovisioned'],
+    ])('holds the storage mode picker while %s is in flight', async (_label, kind) => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
+        const server = startServer(kind === 'managed' ? { provider: 'sencho' } : { provider: 'disabled' });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        server.opHold = deferredResponse();
+        if (_label === 'a Test') {
+            await user.click(await screen.findByRole('button', { name: 'Test' }));
+            await waitFor(() => expect(server.log).toEqual(['test@managed']));
+        } else if (_label === 'a delete') {
+            await user.click(await screen.findByRole('button', { name: 'Delete snapshot' }));
+            await user.click(await screen.findByRole('button', { name: 'Delete' }));
+            await waitFor(() => expect(server.log).toEqual(['delete@managed']));
+        } else {
+            await pick(user, 'Sencho Snapshot Vault (included)');
+            await user.click(await screen.findByRole('button', { name: 'Activate' }));
+            await waitFor(() => expect(server.log).toEqual(['provision']));
+        }
+        // A confirmation dialog hides the page behind it from the accessibility tree.
+        expect(screen.getByRole('combobox', { hidden: true })).toBeDisabled();
+
+        server.opHold.resolve(undefined);
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
+    });
+
+    it('holds every action while a reprovision is running', async () => {
+        const server = startServer({ provider: 'sencho' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('managed-1.tar.gz.senc')).toBeInTheDocument();
+        server.opHold = deferredResponse();
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Reprovision' }));
+        await waitFor(() => expect(server.log).toEqual(['provision']));
+        expect(enabledActions()).toEqual([]);
+
+        server.opHold.resolve(undefined);
+        await waitFor(() => expect(enabledActions()).toContain('Delete snapshot'));
+    });
+
+    it('holds Save and the auto-upload toggle while an archive action is in flight', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        server.opHold = deferredResponse();
+        await user.click(await screen.findByRole('button', { name: 'Import snapshot' }));
+        await waitFor(() => expect(server.log).toEqual(['import@custom:first-bucket']));
+        expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+        expect(screen.getAllByRole('switch')[0]).toBeDisabled();
+
+        server.opHold.resolve(undefined);
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
+        expect(screen.getAllByRole('switch')[0]).toBeEnabled();
+    });
+
+    it('keeps a secret key typed while a Save is in flight', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const put = deferredResponse();
+        server.putHolds.push(put);
+        const user = userEvent.setup();
+        await user.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(true));
+        const secret = document.querySelector('input[type="password"]') as HTMLInputElement;
+        await user.type(secret, 'typed-late');
+
+        put.resolve(json({}));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Custom S3 configuration saved.'));
+        expect(secret).toHaveValue('typed-late');
+        expect(enabledActions()).toEqual([]);
+    });
+
+    it('tells the operator when the auto-upload toggle stored a different destination', async () => {
+        startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.click(screen.getAllByRole('switch')[0]);
+        await waitFor(() => expect(screen.getAllByRole('switch')[0]).toBeChecked());
+        expect(toast.success).not.toHaveBeenCalled();
+
+        const bucket = screen.getByPlaceholderText('my-sencho-backups');
+        await user.clear(bucket);
+        await user.type(bucket, 'second-bucket');
+        await user.click(screen.getAllByRole('switch')[0]);
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Custom S3 configuration saved.'));
+    });
+
     it('never shows a managed recovery listing that answers after the switch to Custom S3', async () => {
         const server = startServer({ provider: 'sencho' });
         render(<CloudBackupSection />);
@@ -1318,16 +1604,4 @@ describe('CloudBackupSection destination binding', () => {
         expect(screen.getByTestId('masthead')).not.toHaveTextContent('SNAPSHOTS');
     });
 
-    it('holds the storage mode picker while a Test or a delete is in flight', async () => {
-        const server = startServer({ provider: 'sencho' });
-        render(<CloudBackupSection />);
-        const user = userEvent.setup();
-        server.opHold = deferredResponse();
-        await user.click(await screen.findByRole('button', { name: 'Import snapshot' }));
-        await waitFor(() => expect(server.log).toEqual(['import@managed']));
-        expect(screen.getByRole('combobox')).toBeDisabled();
-
-        server.opHold.resolve(undefined);
-        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
-    });
 });
