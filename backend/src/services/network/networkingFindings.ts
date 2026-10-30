@@ -69,7 +69,7 @@ function editorAction(stack: string): NetworkingRecommendedAction {
 }
 
 function effectiveIntent(service: string, stackIntent: ExposureIntent | null, byService: Record<string, ExposureIntent>): ExposureIntent | null {
-  return byService[service] ?? stackIntent ?? null;
+  return Object.prototype.hasOwnProperty.call(byService, service) ? byService[service] : stackIntent ?? null;
 }
 
 /** Host-mode severity matrix, parameterized by documented Dossier access.

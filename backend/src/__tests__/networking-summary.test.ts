@@ -108,10 +108,10 @@ describe('networking summary', () => {
     expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
   });
 
-  it('counts a custom image identified by a provider key from an env_file, with an environment override', async () => {
+  it('counts a custom image identified by a provider key from an env_file', async () => {
     fs.writeFileSync(path.join(stackDir, 'edge.env'), 'TUNNEL_TOKEN=tunnel-secret\n');
     fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
-      'services:\n  edge:\n    image: example/edge:1\n    env_file: ./edge.env\n    environment:\n      TUNNEL_TOKEN_FILE: /run/secrets/cf\n  app:\n    image: example/app:1\n');
+      'services:\n  edge:\n    image: example/edge:1\n    env_file: ./edge.env\n  app:\n    image: example/app:1\n');
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(res.body.exposed.stacks).toContain(STACK);
     expect(res.body.unreadable.stacks).not.toContain(STACK);
@@ -243,7 +243,7 @@ describe('networking summary', () => {
     const refusedSpec = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(refusedSpec.body.exposed.stacks).toContain(STACK);
     const specLog = warn.mock.calls.map(args => format(...args)).join('\n');
-    expect(specLog).toContain(`Stack ${STACK} interpolation failed; TS_EXTRA_ARGS left unresolved: Error: Invalid context directory in deploy spec`);
+    expect(specLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: Error: Invalid context directory in deploy spec`);
     expect(specLog).not.toContain('env files cannot be read');
 
     // A selection read that fails keeps its own cause instead of blaming env files.
@@ -253,7 +253,7 @@ describe('networking summary', () => {
     const refusedSelection = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(refusedSelection.body.exposed.stacks).toContain(STACK);
     const selectionLog = warn.mock.calls.map(args => format(...args)).join('\n');
-    expect(selectionLog).toContain(`Stack ${STACK} interpolation failed; TS_EXTRA_ARGS left unresolved: Error: SQLITE_BUSY: database is locked`);
+    expect(selectionLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: Error: SQLITE_BUSY: database is locked`);
     expect(selectionLog).not.toContain('env files cannot be read');
 
     // An env-file error message can hold an interpolated value, so only its class name is logged.
@@ -263,7 +263,7 @@ describe('networking summary', () => {
     const failedRead = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(failedRead.body.exposed.stacks).toContain(STACK);
     const readLog = warn.mock.calls.map(args => format(...args)).join('\n');
-    expect(readLog).toContain('TS_EXTRA_ARGS left unresolved: ComposeEnvFileError');
+    expect(readLog).toContain('tunnel inputs left unresolved: ComposeEnvFileError');
     expect(readLog).not.toContain('hunter2-value');
   });
 
@@ -367,6 +367,7 @@ describe('networking summary', () => {
       expect(res.status).toBe(200);
       expect(res.body.exposed.stacks).not.toContain(linked);
       expect(res.body.unknownExposure.stacks).not.toContain(linked);
+      expect(res.body.unreadable.stacks).toContain(linked);
       const skipped = warn.mock.calls.find(call => call[1] === linked);
       expect(skipped?.[0]).toContain('Skipped stack');
     } finally {
@@ -465,6 +466,140 @@ describe('networking summary', () => {
     } finally {
       db.deleteNode(remoteId);
     }
+  });
+
+  it('expands a TS_EXTRA_ARGS template inside a service env_file from the stack .env', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${TS_ARGS}\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('reports a resolver-present but still unresolved long-form port as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('gives a service env_file assignment precedence over the project environment value', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_EXTRA_ARGS=--accept-dns=false\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('does not read a project environment TS_EXTRA_ARGS as the container value', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--accept-dns=false\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('interpolates a long-form published port from the stack .env', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'WEB_PORT=8080\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT}\n        host_ip: 0.0.0.0\n        protocol: tcp\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('loads the first auto-discovered override even when its name uses the other base family', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'docker-compose.override.yml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('loads only the first of two auto-discovered overrides, as Compose does', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  cf:\n    image: nginx:latest\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('merges a services-free authored layer instead of skipping the stack', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "0.0.0.0:8080:80"\n');
+    fs.writeFileSync(path.join(stackDir, 'networks.yaml'), 'networks:\n  edge:\n    name: project_edge\n');
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'networks.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack whose compose file does not parse as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services: [\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).toContain('does not parse');
+  });
+
+  it('reports a stack that uses extends as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: example/app:1\n    extends:\n      file: base.yaml\n      service: base\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports an env_file with syntax the Compose reader cannot follow as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY="unterminated\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports a required long-form port template as unreadable when the lookup is available but the value is not', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports a required long-form port template as unreadable when the lookup is available but the value is not', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports an unresolved detection field as unreadable when the interpolation lookup is unavailable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cf:\n    image: ${CF_IMAGE}\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
   });
 
   it('rejects an unauthenticated request to the node-local summary', async () => {

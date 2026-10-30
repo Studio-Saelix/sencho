@@ -598,5 +598,5 @@ export function describeServiceTunnel(e: ServiceTunnelExposure): string {
  *  WireGuard, whose overlay peers address the connector directly, but not for
  *  Cloudflare, whose ingress independently maps each hostname to an origin. */
 export function isCertainTunnelPath(e: Pick<ServiceTunnelExposure, 'provider' | 'path'>): boolean {
-  return e.path === 'shared-namespace' && e.provider !== 'cloudflared';
+  return e.path === 'shared-namespace' && (e.provider === 'tailscale' || e.provider === 'wireguard');
 }

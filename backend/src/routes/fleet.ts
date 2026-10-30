@@ -1049,10 +1049,13 @@ interface FleetNetworkingSummaryNode {
 function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  return (['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => {
-    const b = o[k] as { count?: unknown; stacks?: unknown } | undefined;
-    return !!b && typeof b.count === 'number' && Array.isArray(b.stacks);
-  });
+  const bucket = (b: unknown): boolean => {
+    if (!b || typeof b !== 'object') return false;
+    const value = b as { count?: unknown; stacks?: unknown };
+    return typeof value.count === 'number' && Array.isArray(value.stacks);
+  };
+  if (!(['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => bucket(o[k]))) return false;
+  return o.unreadable === undefined || bucket(o.unreadable);
 }
 
 /**

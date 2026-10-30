@@ -499,7 +499,7 @@ function parseResourceEntry(key: string, entry: unknown): EffResource {
 }
 
 function parseResources(value: unknown): Record<string, EffResource> {
-  const out: Record<string, EffResource> = {};
+  const out = Object.create(null) as Record<string, EffResource>;
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       out[key] = parseResourceEntry(key, entry);

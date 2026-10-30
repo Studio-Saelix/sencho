@@ -38,10 +38,15 @@ export interface DeclaredService {
   envKeys?: string[];
   /** Service `env_file:` entries, whose KEY names join `envKeys`. */
   envFiles?: DeclaredEnvFile[];
-  /** cloudflared subcommands named by `command`/`entrypoint`, for tunnel detection. Absent on hand-built fixtures. */
+  /** `command` hints alone. Kept separate from `entrypointHints` so an
+   *  override that replaces only one of the two keeps the other. */
   commandHints?: string[];
-  /** `command` or `entrypoint` was declared in this file. */
+  /** `entrypoint` hints alone. */
+  entrypointHints?: string[];
+  /** `command` was declared in this file. */
   commandDeclared?: boolean;
+  /** `entrypoint` was declared in this file. */
+  entrypointDeclared?: boolean;
   /** `TS_EXTRA_ARGS` was declared in this file. */
   tailscaleArgsDeclared?: boolean;
   /** Tailscale forwarding flags named by `TS_EXTRA_ARGS`, for tunnel detection. Absent on hand-built fixtures. */
@@ -54,6 +59,9 @@ export interface DeclaredService {
   devices?: string[];
   /** A detection-relevant field holds a Compose `${VAR}`/`$VAR` to interpolate. */
   needsInterpolation?: boolean;
+  /** A detection field still holds a template after interpolation, so the
+   *  stack's exact exposure cannot be established. */
+  unresolvedDetection?: boolean;
   /** Service `restart` from raw YAML parse. The effective-model path may set this via normalizeComposeRestartIntent (including deploy.restart_policy). Null when unset. */
   restart?: string | null;
 }
@@ -187,6 +195,26 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map(asString).filter((s): s is string => s !== undefined) : [];
 }
 
+/** Raw strings from short- or long-form `ports:` entries, for interpolation detection. */
+function portStrings(ports: unknown): string[] {
+  if (!Array.isArray(ports)) return [];
+  const out: string[] = [];
+  for (const entry of ports) {
+    if (typeof entry === 'string') {
+      out.push(entry);
+      continue;
+    }
+    if (entry && typeof entry === 'object') {
+      const obj = entry as Record<string, unknown>;
+      for (const key of ['published', 'host_ip', 'target', 'protocol']) {
+        const value = asString(obj[key]);
+        if (value !== undefined) out.push(value);
+      }
+    }
+  }
+  return out;
+}
+
 /** Host-side device paths from `devices` (short `host[:container[:perms]]` or long `{ source }` form). */
 function deviceHostPaths(devices: unknown): string[] {
   if (!Array.isArray(devices)) return [];
@@ -295,7 +323,7 @@ function declaredResource(entry: unknown): DeclaredResource {
 }
 
 function collectResources(value: unknown): Record<string, DeclaredResource> {
-  const out: Record<string, DeclaredResource> = {};
+  const out = Object.create(null) as Record<string, DeclaredResource>;
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       out[key] = declaredResource(entry);
@@ -319,7 +347,10 @@ function collectResources(value: unknown): Record<string, DeclaredResource> {
  * KEY names, networks, ports, `command`/`entrypoint`, volumes, `cap_add`,
  * `devices`, `env_file` paths, and `TS_EXTRA_ARGS`) the way Compose would.
  */
-export function parseComposeDependencies(content: string, options: { lookup?: ComposeEnvLookup } = {}): DeclaredCompose {
+export function parseComposeDependencies(
+  content: string,
+  options: { lookup?: ComposeEnvLookup; allowEmptyServices?: boolean } = {},
+): DeclaredCompose {
   if (content.length > MAX_COMPOSE_PARSE_BYTES) {
     return { services: [], networks: {}, volumes: {}, parseError: 'Compose file is too large to parse.' };
   }
@@ -333,7 +364,25 @@ export function parseComposeDependencies(content: string, options: { lookup?: Co
 
   const root = (parsed ?? {}) as Record<string, unknown>;
   const rawServices = root.services;
-  if (!rawServices || typeof rawServices !== 'object') {
+  if (root.services === undefined) {
+    // A layer that only declares top-level networks, volumes, anchors, or a
+    // project name is valid Compose. The summary merges it with the layers that
+    // do declare services; only a file with nothing at all is a parse error.
+    const topLevel = Object.keys(root);
+    const knownTopLevel = topLevel.every(key => ['name', 'networks', 'volumes', 'configs', 'secrets', 'include', 'version'].includes(key) || key.startsWith('x-'));
+    if (options.allowEmptyServices && topLevel.length > 0 && knownTopLevel) {
+      return {
+        services: [],
+        networks: collectResources(root.networks),
+        volumes: collectResources(root.volumes),
+        projectName: asString(root.name),
+        hasInclude: root.include !== undefined,
+        hasExtends: false,
+      };
+    }
+    return { services: [], networks: {}, volumes: {}, parseError: 'No services found in this file.' };
+  }
+  if (!rawServices || typeof rawServices !== 'object' || Array.isArray(rawServices)) {
     return { services: [], networks: {}, volumes: {}, parseError: 'No services found in this file.' };
   }
 
@@ -350,7 +399,8 @@ export function parseComposeDependencies(content: string, options: { lookup?: Co
       ? svc.ports.map(port => declaredPort(port, lookup)).filter((p): p is DeclaredPort => p !== null)
       : [];
     const rawEnvKeys = envKeyNames(svc.environment);
-    const commandDeclared = svc.command !== undefined || svc.entrypoint !== undefined;
+    const commandDeclared = svc.command !== undefined;
+    const entrypointDeclared = svc.entrypoint !== undefined;
     const envFiles = envFileEntries(svc.env_file).map(entry => ({
       ...entry,
       path: interpolateString(entry.path, lookup) ?? entry.path,
@@ -369,8 +419,21 @@ export function parseComposeDependencies(content: string, options: { lookup?: Co
       ...stringList(svc.cap_add),
       ...deviceHostPaths(svc.devices),
       ...volumeTargets(svc.volumes),
-      ...(Array.isArray(svc.ports) ? svc.ports.map(asString).filter((v): v is string => v !== undefined) : []),
+      ...portStrings(svc.ports),
     ].some(holdsTemplate);
+    const detectionValues: Array<string | undefined> = [
+      interpolateString(asString(svc.image), lookup),
+      interpolateString(asString(svc.network_mode), lookup),
+      ...interpolateKeys(collectKeys(svc.networks), lookup),
+      ...envKeyNames(svc.environment, lookup),
+      ...envFiles.map(entry => entry.path),
+      ...rawCommandParts.map(part => interpolateString(part, lookup)),
+      ...interpolateKeys(stringList(svc.cap_add), lookup),
+      ...interpolateKeys(deviceHostPaths(svc.devices), lookup),
+      ...interpolateKeys(volumeTargets(svc.volumes), lookup),
+      ...portStrings(svc.ports).map(port => interpolateString(port, lookup)),
+    ];
+    const unresolvedDetection = needsInterpolation && detectionValues.some(holdsTemplate);
     services.push({
       name,
       dependsOn: collectKeys(svc.depends_on),
@@ -381,14 +444,17 @@ export function parseComposeDependencies(content: string, options: { lookup?: Co
       networkMode: interpolateString(asString(svc.network_mode), lookup),
       envKeys: envKeyNames(svc.environment, lookup),
       envFiles,
-      commandHints: cloudflaredCommandHints(interpolateCommand(svc.command, lookup), interpolateCommand(svc.entrypoint, lookup)),
+      commandHints: cloudflaredCommandHints(interpolateCommand(svc.command, lookup), undefined),
+      entrypointHints: cloudflaredCommandHints(undefined, interpolateCommand(svc.entrypoint, lookup)),
       commandDeclared,
+      entrypointDeclared,
       tailscaleArgsDeclared: declaresEnvKey(svc.environment, 'TS_EXTRA_ARGS', lookup),
       tailscaleFlags: tailscaleForwardFlags(svc.environment, lookup),
       binds: interpolateKeys(volumeTargets(svc.volumes), lookup),
       capAdd: interpolateKeys(stringList(svc.cap_add), lookup),
       devices: interpolateKeys(deviceHostPaths(svc.devices), lookup),
       needsInterpolation,
+      unresolvedDetection,
       restart: asString(svc.restart) ?? null,
     });
   }
@@ -419,8 +485,8 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
   if (failed) return { services: [], networks: {}, volumes: {}, parseError: failed.parseError };
 
   const byName = new Map<string, DeclaredService>();
-  const networks: Record<string, DeclaredResource> = {};
-  const volumes: Record<string, DeclaredResource> = {};
+  const networks = Object.create(null) as Record<string, DeclaredResource>;
+  const volumes = Object.create(null) as Record<string, DeclaredResource>;
   let projectName: string | undefined;
   let hasInclude = false;
   let hasExtends = false;
@@ -443,6 +509,7 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
           envKeys: [...(svc.envKeys ?? [])],
           envFiles: [...(svc.envFiles ?? [])],
           commandHints: [...(svc.commandHints ?? [])],
+          entrypointHints: [...(svc.entrypointHints ?? [])],
           tailscaleFlags: [...(svc.tailscaleFlags ?? [])],
           binds: [...(svc.binds ?? [])],
           capAdd: [...(svc.capAdd ?? [])],
@@ -461,13 +528,16 @@ export function mergeDeclaredCompose(layers: DeclaredCompose[]): DeclaredCompose
         envKeys: unionKeys(prior.envKeys, svc.envKeys),
         envFiles: [...(prior.envFiles ?? []), ...(svc.envFiles ?? [])],
         commandHints: svc.commandDeclared === true ? svc.commandHints ?? [] : prior.commandHints,
+        entrypointHints: svc.entrypointDeclared === true ? svc.entrypointHints ?? [] : prior.entrypointHints,
         commandDeclared: prior.commandDeclared === true || svc.commandDeclared === true,
+        entrypointDeclared: prior.entrypointDeclared === true || svc.entrypointDeclared === true,
         tailscaleFlags: svc.tailscaleArgsDeclared === true ? svc.tailscaleFlags ?? [] : prior.tailscaleFlags,
         tailscaleArgsDeclared: prior.tailscaleArgsDeclared === true || svc.tailscaleArgsDeclared === true,
         binds: unionKeys(prior.binds, svc.binds),
         capAdd: unionKeys(prior.capAdd, svc.capAdd),
         devices: unionKeys(prior.devices, svc.devices),
         needsInterpolation: prior.needsInterpolation === true || svc.needsInterpolation === true,
+        unresolvedDetection: prior.unresolvedDetection === true || svc.unresolvedDetection === true,
         restart: svc.restart ?? prior.restart,
       });
     }

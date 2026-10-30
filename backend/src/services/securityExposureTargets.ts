@@ -66,7 +66,9 @@ function effectiveIntent(
   stackIntent: ExposureIntent | null,
   serviceIntents: Record<string, ExposureIntent>,
 ): ExposureIntent | null {
-  return serviceIntents[service] ?? stackIntent ?? null;
+  return Object.prototype.hasOwnProperty.call(serviceIntents, service)
+    ? serviceIntents[service]
+    : stackIntent ?? null;
 }
 
 /**

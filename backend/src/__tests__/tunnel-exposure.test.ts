@@ -257,6 +257,27 @@ describe('tunnelExposureByService', () => {
     expect(byService.get('db')).toEqual({ connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' });
     expect(byService.get('tailscale')).toEqual({ connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' });
   });
+
+  it('prefers a certain Tailscale namespace over a public cloudflared namespace', () => {
+    const model = render({
+      app,
+      cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'service:app' },
+      tailscale: { image: 'tailscale/tailscale', network_mode: 'service:app' },
+    });
+    const chosen = tunnelExposureByService(detectTunnels(model)).get('app');
+    expect(chosen).toMatchObject({ connector: 'tailscale', provider: 'tailscale', path: 'shared-namespace' });
+    expect(isCertainTunnelPath(chosen!)).toBe(true);
+  });
+
+  it('keeps a WireGuard namespace reach certain like a Tailscale one', () => {
+    const model = render({
+      wireguard: { image: 'linuxserver/wireguard', environment: { PEERS: '1' } },
+      app: { ...app, network_mode: 'service:wireguard' },
+    });
+    const chosen = tunnelExposureByService(detectTunnels(model)).get('app')!;
+    expect(chosen).toMatchObject({ provider: 'wireguard', path: 'shared-namespace' });
+    expect(isCertainTunnelPath(chosen)).toBe(true);
+  });
 });
 
 describe('deriveStackExposure with tunnels', () => {
@@ -644,6 +665,7 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
       const findings = byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled');
       expect(findings.find(finding => finding.service === 'app')?.severity).toBe('warning');
       expect(findings.find(finding => finding.service === 'app')?.remediation).toContain('Confirm the tunnel does not route');
+      expect(findings.find(finding => finding.service === 'app')?.remediation).toContain('move the service out of the connector\'s network namespace');
       const facts = assembleStackNetworkFacts('proj', model, null, null);
       vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
         getStackExposureIntents: vi.fn().mockReturnValue([{ service: '', intent: 'internal' }]),
@@ -653,6 +675,20 @@ describe('detectTunnels: connector attachment and identification edge cases', ()
       expect(live.find(finding => finding.service === 'app')?.severity).toBe('medium');
       vi.restoreAllMocks();
     }
+  });
+
+  it('does not let an inherited service name shadow the stack exposure intent', () => {
+    const model = render({
+      cloudflared: { image: 'cloudflare/cloudflared', environment: { TUNNEL_TOKEN: CF_TOKEN } },
+      constructor: { image: 'example/app:1' },
+    });
+    const findings = byRule(runRules(ctx(model, { stackIntent: 'internal' })), 'exposure-internal-tunneled');
+    expect(findings.find(finding => finding.service === 'constructor')?.severity).toBe('warning');
+    const exposure = deriveStackExposure(model, 'proj', 1);
+    const settled = settleTunnelExposure(1, [exposure], () => ({
+      available: true, stackIntent: 'internal', serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
+    }));
+    expect(settled[0].services.find(service => service.service === 'constructor')?.publiclyExposed).toBe(false);
   });
 
   it('does not loop or invent a reach on a network_mode cycle', () => {
@@ -978,7 +1014,7 @@ describe('Networking overview counters with tunnels', () => {
     } as unknown as ReturnType<typeof DockerController.getInstance>);
     vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
       renderConfig: vi.fn().mockResolvedValue({
-        rendered: JSON.stringify({ name: 'proj', services: { cloudflared: { image: 'cloudflare/cloudflared', networks: { default: null } }, app: { image: 'example/app', networks: { default: null } } }, networks: { default: { name: 'proj_default' } } }),
+        rendered: JSON.stringify({ name: 'proj', services: { cloudflared: { image: 'cloudflare/cloudflared', networks: { default: null } }, app: { image: 'example/app', network_mode: 'service:cloudflared' } }, networks: { default: { name: 'proj_default' } } }),
         stderr: '',
       }),
     } as unknown as ReturnType<typeof ComposeService.getInstance>);

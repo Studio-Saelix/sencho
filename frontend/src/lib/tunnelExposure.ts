@@ -35,7 +35,7 @@ export function tunnelScopeLabel(scope: TunnelScope): string {
  *  cloudflared sidecar can reach it on localhost, but Cloudflare's ingress
  *  independently chooses the origin, so that path stays unverified. */
 export function isRoutingUnverified(e: Pick<ServiceTunnelExposure, 'provider' | 'path'>): boolean {
-  return !(e.path === 'shared-namespace' && e.provider !== 'cloudflared');
+  return !(e.path === 'shared-namespace' && (e.provider === 'tailscale' || e.provider === 'wireguard'));
 }
 
 /** "via Cloudflare Tunnel (cloudflared), routing unverified" style phrase. */

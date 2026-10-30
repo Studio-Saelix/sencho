@@ -96,11 +96,14 @@ function holdsTemplate(value: string | undefined): boolean {
 /** A post-parse field that can still hide a connector behind an unexpanded template. */
 function unresolvedDetectionField(declared: DeclaredCompose): boolean {
   return declared.services.some(service =>
-    holdsTemplate(service.image)
-    || holdsTemplate(service.networkMode)
-    || service.networks.some(holdsTemplate)
-    || (service.envKeys ?? []).some(holdsTemplate)
-    || (service.envFiles ?? []).some(entry => holdsTemplate(entry.path)),
+    service.unresolvedDetection === true
+    || (service.needsInterpolation === true && (
+      holdsTemplate(service.image)
+      || holdsTemplate(service.networkMode)
+      || service.networks.some(holdsTemplate)
+      || (service.envKeys ?? []).some(holdsTemplate)
+      || (service.envFiles ?? []).some(entry => holdsTemplate(entry.path))
+    )),
   );
 }
 
@@ -111,21 +114,23 @@ async function readMainLayers(nodeId: number, stack: string, stackDir: string, o
   const layers: ComposeLayer[] = [{ name: main.filename, content: main.content }];
   let incomplete = opaque;
   if (!opaque) {
-    const family = main.filename.startsWith('docker-compose.') ? 'docker-compose' : 'compose';
-    for (const override of COMPOSE_OVERRIDE_FILENAMES.filter((name) => name.startsWith(family))) {
+    // Compose loads the first override that exists among its default names,
+    // regardless of which base filename it found, and ignores the rest.
+    for (const override of COMPOSE_OVERRIDE_FILENAMES) {
       const absolute = path.join(stackDir, override);
       try {
         await fsSvc.access(absolute);
       } catch (error) {
         if (isMissingFile(error)) continue;
         incomplete = true;
-        continue;
+        break;
       }
       try {
         layers.push({ name: override, content: await fsSvc.readEnvFile(absolute) });
       } catch {
         incomplete = true;
       }
+      break;
     }
   }
   return { layers, projectDir: stackDir, opaque: incomplete };
@@ -206,21 +211,21 @@ async function readComposeContents(nodeId: number, stack: string): Promise<Compo
 }
 
 /**
- * The stack's interpolation variables when a detection field needs them, with
- * the same warnings the counters always gave when a value cannot be read. A
- * failed lookup leaves the template in place, which `unresolvedDetectionField`
- * then reports as unreadable.
+ * The stack's interpolation variables when a detection field or a service
+ * env_file needs them, with the same warnings the counters always gave when a
+ * value cannot be read. A failed lookup leaves the template in place, which the
+ * caller reports as unreadable (or counts as forwarding for `TS_EXTRA_ARGS`).
  */
 async function interpolationLookup(nodeId: number, stack: string): Promise<ComposeEnvLookup | undefined> {
   try {
     const interpolation = await composeInterpolation(stack, nodeId);
     if (interpolation.kind === 'lookup') return interpolation.lookup;
     if (interpolation.reason === 'unreadable') {
-      console.warn('[NetworkingSummary] Stack %s env files cannot be read the way Compose reads them; TS_EXTRA_ARGS left unresolved.',
+      console.warn('[NetworkingSummary] Stack %s env files cannot be read the way Compose reads them; tunnel inputs left unresolved.',
         sanitizeForLog(stack));
     } else if (isDebugEnabled()) {
       // Ordinary configurations this reader does not model, so not a warning.
-      console.log('[NetworkingSummary:diag] Stack %s TS_EXTRA_ARGS left unresolved: %s.', sanitizeForLog(stack), interpolation.reason);
+      console.log('[NetworkingSummary:diag] Stack %s tunnel inputs left unresolved: %s.', sanitizeForLog(stack), interpolation.reason);
     }
     return undefined;
   } catch (error) {
@@ -230,7 +235,7 @@ async function interpolationLookup(nodeId: number, stack: string): Promise<Compo
     const detail = error instanceof ComposeEnvFileError
       ? 'ComposeEnvFileError'
       : error instanceof Error ? `${error.name}: ${error.message}` : 'unknown';
-    console.warn('[NetworkingSummary] Stack %s interpolation failed; TS_EXTRA_ARGS left unresolved:',
+    console.warn('[NetworkingSummary] Stack %s interpolation failed; tunnel inputs left unresolved:',
       sanitizeForLog(stack), sanitizeForLog(detail));
     return undefined;
   }
@@ -239,14 +244,16 @@ async function interpolationLookup(nodeId: number, stack: string): Promise<Compo
 /** The tunnel-reached services in the stack's effective inputs, and whether
  *  those inputs were complete enough to establish absence. */
 async function readTunnelInputs(nodeId: number, stack: string, contents: ComposeContents): Promise<TunnelInputs | null> {
-  const initial = contents.layers.map(layer => parseComposeDependencies(layer.content));
+  const initial = contents.layers.map(layer => parseComposeDependencies(layer.content, { allowEmptyServices: true }));
   if (initial.some(layer => layer.parseError)) return null;
 
   const needsLookup = initial.some(layer => layer.services.some(service =>
-    service.needsInterpolation === true || service.tailscaleFlags?.includes('unresolved')));
+    service.needsInterpolation === true
+    || service.tailscaleFlags?.includes('unresolved') === true
+    || (service.envFiles?.length ?? 0) > 0));
   const lookup = needsLookup ? await interpolationLookup(nodeId, stack) : undefined;
   const parsed = lookup
-    ? contents.layers.map(layer => parseComposeDependencies(layer.content, { lookup }))
+    ? contents.layers.map(layer => parseComposeDependencies(layer.content, { lookup, allowEmptyServices: true }))
     : initial;
   if (parsed.some(layer => layer.parseError)) return null;
 
@@ -262,8 +269,12 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
     const keys = new Set(service.envKeys ?? []);
     // Compose merges env_file values into the container environment, so a
     // Tailscale forwarding flag can live there too. Later files override the
-    // same key; a service `environment` entry overrides every env_file.
+    // same key; a service `environment` entry overrides every env_file. Values
+    // may reference the stack's interpolation environment, so the reader starts
+    // from the lookup the rest of the detection fields use.
+    const reader = new ComposeEnvFiles(lookup ?? (() => undefined));
     let envFileFlags: TailscaleForwardFlag[] | undefined;
+    let envFileTemplate = false;
     for (const envFile of service.envFiles ?? []) {
       if (holdsTemplate(envFile.path)) {
         unreadable = true;
@@ -272,16 +283,17 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       try {
         const content = await fsSvc.readEnvFile(path.resolve(contents.projectDir, envFile.path));
         for (const key of composeEnvFileKeyNames(content)) keys.add(key);
-        const reader = new ComposeEnvFiles(() => undefined);
+        if (/^\s*TS_EXTRA_ARGS\s*[:=][^\n]*\$(?:\{|[A-Za-z_])/m.test(content)) envFileTemplate = true;
         reader.read(content);
-        const extraArgs = reader.lookup('TS_EXTRA_ARGS');
-        if (extraArgs !== undefined) envFileFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
       } catch (error) {
         if (!envFile.required && isMissingFile(error)) continue;
         // Keys and flags this file would add are unknown, so no absence can be claimed.
         unreadable = true;
       }
     }
+    const extraArgs = reader.assigned('TS_EXTRA_ARGS');
+    if (extraArgs !== undefined) envFileFlags = tailscaleForwardFlags({ TS_EXTRA_ARGS: extraArgs });
+    if (lookup === undefined && envFileTemplate) unreadable = true;
     service.envKeys = [...keys];
     if (!service.tailscaleArgsDeclared && envFileFlags !== undefined) service.tailscaleFlags = envFileFlags;
   }
@@ -297,7 +309,7 @@ async function readTunnelInputs(nodeId: number, stack: string, contents: Compose
       binds: (service.binds ?? []).map(target => ({ target })),
       capAdd: service.capAdd,
       devices: service.devices,
-      commandHints: service.commandHints,
+      commandHints: [...(service.commandHints ?? []), ...(service.entrypointHints ?? [])],
       tailscaleFlags: service.tailscaleFlags,
     })),
     networks: Object.fromEntries(Object.entries(declared.networks)
@@ -339,11 +351,13 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
       // Unreadable compose (missing, a dangling link or one outside its stack dir, or an I/O error).
       console.warn('[NetworkingSummary] Skipped stack %s, compose file unreadable:',
         sanitizeForLog(stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      unreadable.push(stack);
       continue;
     }
     const inputs = await readTunnelInputs(nodeId, stack, contents);
     if (inputs === null) {
       console.warn('[NetworkingSummary] Skipped stack %s, compose file does not parse.', sanitizeForLog(stack));
+      unreadable.push(stack);
       continue;
     }
     if (inputs.unreadable) unreadable.push(stack);

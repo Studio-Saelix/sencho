@@ -339,7 +339,16 @@ function parseEnvFileText(
       if (NAME_LETTER_OR_NUMBER.test(char)) continue;
       throw new ComposeEnvFileError(`unexpected character ${JSON.stringify(char)} in a variable name`);
     }
-    if (keyEnd === -1) return;
+    if (keyEnd === -1) {
+      // Compose treats a file that ends right after a name as an inherited
+      // assignment (`export NAME` without a line break).
+      const key = trimRightUnicodeSpace(statement);
+      if (key === '' || key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
+      onKey?.(key);
+      const inheritedValue = lookup(key);
+      if (inheritedValue !== undefined) assign(key, inheritedValue);
+      return;
+    }
 
     const key = trimRightUnicodeSpace(statement.slice(0, keyEnd));
     if (key.includes(' ')) throw new ComposeEnvFileError('a variable name cannot contain a space');
@@ -441,6 +450,13 @@ export class ComposeEnvFiles {
   lookup(name: string): string | undefined {
     const fromProcess = this.processEnv(name);
     return fromProcess !== undefined ? fromProcess : this.values.get(name);
+  }
+
+  /** The value assigned by the files read so far, ignoring the base lookup.
+   *  Use this for a container env_file value, where the project environment is
+   *  interpolation input and an env_file assignment overrides it. */
+  assigned(name: string): string | undefined {
+    return this.values.get(name);
   }
 
   /** Read one file's text, adding its assignments. Throws on unreadable syntax. */

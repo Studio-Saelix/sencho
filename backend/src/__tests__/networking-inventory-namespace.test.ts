@@ -80,11 +80,13 @@ describe('per-network exposure counters follow the namespace owner', () => {
 
   it('follows a namespace chain and counts every reached application', () => {
     const snap = snapshot('tailscale');
+    // app is classified, so only a two-hop chain to worker keeps the stack
+    // unclassified. A one-hop resolver would report 0 here.
     const [row] = rows({
       tailscale: { image: 'tailscale/tailscale', environment: { TS_AUTHKEY: 'secret' }, networks: { default: null } },
       app: { image: 'example/app:1', network_mode: 'service:tailscale' },
       worker: { image: 'example/worker:1', network_mode: 'service:app' },
-    }, snap);
+    }, snap, 'proj_default', [{ service: 'app', intent: 'public' }]);
     expect(row.exposureSummary).toMatchObject({ broadExposureCount: 0, unclassifiedStackCount: 1 });
   });
 
@@ -97,11 +99,11 @@ describe('per-network exposure counters follow the namespace owner', () => {
     expect(row.exposureSummary).toMatchObject({ broadExposureCount: 1, unclassifiedStackCount: 1 });
   });
 
-  it('resolves default-bridge membership through network_mode: bridge', () => {
+  it('resolves default-bridge membership through network_mode: bridge and default', () => {
     const snap = snapshot('cloudflared', 'bridge');
     const [row] = rows({
       cloudflared: { image: 'cloudflare/cloudflared', network_mode: 'bridge', command: ['tunnel', 'run'] },
-      legacy: { image: 'example/legacy:1', network_mode: 'bridge' },
+      legacy: { image: 'example/legacy:1', network_mode: 'default' },
     }, snap, 'bridge');
     expect(row.exposureSummary).toMatchObject({ publishingStackCount: 1, broadExposureCount: 1, unclassifiedStackCount: 1 });
   });

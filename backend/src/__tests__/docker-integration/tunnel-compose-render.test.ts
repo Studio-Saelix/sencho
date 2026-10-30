@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from '../helpers/setupTestDb';
 import { parseEffectiveModel } from '../../services/preflight/effectiveModel';
+import { deriveStackExposure } from '../../services/preflight/exposure';
 import { detectTunnels, tunnelExposureByService } from '../../services/network/tunnelDetection';
 import { computeNodeNetworkingSummary } from '../../services/network/networkingSummary';
 
@@ -65,6 +66,8 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n');
 
     expect(reachedServices(stackDir, ['compose.yaml'])).toEqual(['app']);
+    const exposure = deriveStackExposure(parseEffectiveModel(render(stackDir, ['compose.yaml']), STACK), STACK, Date.now());
+    expect(exposure.services.find(service => service.service === 'app')).toMatchObject({ publiclyExposed: true, reason: 'tunnel' });
     const summary = await computeNodeNetworkingSummary(1);
     expect(summary.exposed.stacks).toContain(STACK);
     expect(summary.unreadable?.stacks).not.toContain(STACK);
@@ -83,6 +86,8 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     ].join('\n'));
 
     expect(reachedServices(stackDir, ['compose.yaml'])).toEqual(['app']);
+    const exposure = deriveStackExposure(parseEffectiveModel(render(stackDir, ['compose.yaml']), STACK), STACK, Date.now());
+    expect(exposure.services.find(service => service.service === 'app')).toMatchObject({ publiclyExposed: true, reason: 'tunnel' });
     const summary = await computeNodeNetworkingSummary(1);
     expect(summary.exposed.stacks).toContain(STACK);
     expect(summary.unreadable?.stacks).not.toContain(STACK);
@@ -107,6 +112,8 @@ describe.skipIf(!hasDocker)('the tunnel summary reads the same effective inputs 
     ].join('\n'));
 
     expect(reachedServices(stackDir, ['compose.yaml', 'override.yaml'])).toEqual(['app']);
+    const exposure = deriveStackExposure(parseEffectiveModel(render(stackDir, ['compose.yaml', 'override.yaml']), STACK), STACK, Date.now());
+    expect(exposure.services.find(service => service.service === 'app')).toMatchObject({ publiclyExposed: true, reason: 'tunnel' });
     const summary = await computeNodeNetworkingSummary(1);
     expect(summary.exposed.stacks).toContain(STACK);
     expect(summary.unreadable?.stacks).not.toContain(STACK);

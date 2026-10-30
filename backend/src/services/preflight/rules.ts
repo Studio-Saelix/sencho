@@ -985,7 +985,9 @@ const REVERSE_PROXY_LABEL_HINTS = ['traefik', 'caddy', 'virtual.host'];
 
 /** A service's effective intent: its own override, else the stack-level intent. */
 function effectiveIntent(ctx: PreflightContext, service: string): ExposureIntent | null {
-  return ctx.serviceIntents[service] ?? ctx.stackIntent;
+  return Object.prototype.hasOwnProperty.call(ctx.serviceIntents, service)
+    ? ctx.serviceIntents[service]
+    : ctx.stackIntent;
 }
 
 const exposureInternalPublished: PreflightRule = {
@@ -1039,7 +1041,8 @@ const exposureInternalTunneled: PreflightRule = {
       const certain = isCertainTunnelPath(tunnel);
       findings.push({
         ruleId: 'exposure-internal-tunneled',
-        // A shared network or the host network only means the tunnel could route here.
+        // A shared network, the host network, or a cloudflared namespace only
+        // means the tunnel could route here.
         severity: certain ? 'high' : 'warning',
         title: `"${service}" is classified ${intent} but is reachable through a tunnel`,
         message: `Service "${service}" is classified as ${intent} exposure. ${describeServiceTunnel(tunnel)}`,
@@ -1047,7 +1050,9 @@ const exposureInternalTunneled: PreflightRule = {
         service,
         remediation: certain
           ? 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.'
-          : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.',
+          : tunnel.path === 'shared-namespace'
+            ? 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service out of the connector\'s network namespace, or reclassify the exposure intent.'
+            : 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.',
       });
     }
     return findings;

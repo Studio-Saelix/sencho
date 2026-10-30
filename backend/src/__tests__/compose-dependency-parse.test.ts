@@ -4,7 +4,7 @@
  * the fail-soft parseError paths.
  */
 import { describe, it, expect } from 'vitest';
-import { parseComposeDependencies } from '../helpers/composeDependencyParse';
+import { mergeDeclaredCompose, parseComposeDependencies } from '../helpers/composeDependencyParse';
 
 const svc = (name: string, body: string) => `services:\n  ${name}:\n${body.split('\n').map((l) => l ? '    ' + l : l).join('\n')}\n`;
 
@@ -122,6 +122,28 @@ describe('parseComposeDependencies - top-level resources', () => {
   });
 });
 
+describe('parseComposeDependencies - effective fields', () => {
+  it('keeps a top-level __proto__ network as an own key', () => {
+    const r = parseComposeDependencies('services:\n  web:\n    image: nginx\n    networks:\n      - __proto__\nnetworks:\n  __proto__:\n    external: true\n');
+    expect(Object.prototype.hasOwnProperty.call(r.networks, '__proto__')).toBe(true);
+    expect(r.networks['__proto__']).toMatchObject({ external: true });
+    expect(r.services[0].networks).toEqual(['__proto__']);
+  });
+
+  it('flags a long-form templated port for interpolation', () => {
+    const r = parseComposeDependencies('services:\n  web:\n    image: nginx\n    ports:\n      - target: 80\n        published: "${WEB_PORT}"\n');
+    expect(r.services[0].needsInterpolation).toBe(true);
+  });
+
+  it('merges command and entrypoint independently', () => {
+    const base = parseComposeDependencies('services:\n  cf:\n    image: cloudflare/cloudflared\n    command: proxy-dns\n');
+    const override = parseComposeDependencies('services:\n  cf:\n    entrypoint: /bin/sh\n');
+    const merged = mergeDeclaredCompose([base, override]);
+    expect(merged.services[0].commandHints).toEqual(['proxy-dns']);
+    expect(merged.services[0].entrypointHints).toEqual([]);
+  });
+});
+
 describe('parseComposeDependencies - fail soft', () => {
   it('reports a parseError for invalid YAML and never throws', () => {
     const r = parseComposeDependencies('services:\n  web:\n  - this: : is broken\n :::');
@@ -132,6 +154,13 @@ describe('parseComposeDependencies - fail soft', () => {
   it('reports a parseError when there are no services', () => {
     const r = parseComposeDependencies('networks:\n  a:\n');
     expect(r.parseError).toBe('No services found in this file.');
+  });
+
+  it('accepts a services-free layer when the caller merges layers', () => {
+    const r = parseComposeDependencies('networks:\n  a:\n', { allowEmptyServices: true });
+    expect(r.parseError).toBeUndefined();
+    expect(r.services).toEqual([]);
+    expect(Object.keys(r.networks)).toEqual(['a']);
   });
 
   it('reports a parseError for an oversized file', () => {
