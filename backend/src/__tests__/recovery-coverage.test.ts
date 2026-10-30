@@ -88,6 +88,16 @@ describe('evaluateRootCoverage', () => {
     expect(reasonOf(root(s, [pending, unknown, failed]))).toBe('in_progress');
   });
 
+  it('does not count a partial point whose capture reports nothing skipped', () => {
+    const s = storage('a');
+    const clean = point(s, { status: 'partial' });
+    expect(reasonOf(root(s, [clean], [verified(clean)]))).toBe('partial_point');
+    expect(evaluateCoverage({ volumeProtection: 'available', roots: [root(s, [clean], [verified(clean)])], now: NOW }).state).not.toBe('protected');
+    // A complete point beside it still covers the root.
+    const complete = point(s);
+    expect(reasonOf(root(s, [clean, complete], [verified(clean), verified(complete)]))).toBe('covered');
+  });
+
   it('does not trust a succeeded row whose capture reports skipped files or unreadable exclusions', () => {
     const s = storage('a');
     const skipped = point(s, { capture: { fileCount: 1, byteCount: 1, skippedCount: 1 } });

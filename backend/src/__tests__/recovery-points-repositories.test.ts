@@ -84,6 +84,12 @@ describe('RecoveryPointStore', () => {
     expect(chosen.status).toBe('succeeded');
   });
 
+  it('keeps a partial claim partial even when the capture reports nothing skipped', () => {
+    const clean = store().finalize(beginRoot().id, { status: 'partial', evidence: evidence() });
+    expect(clean).toMatchObject({ status: 'partial', capture: { skippedCount: 0 }, exclusions: [] });
+    expect(store().get(clean.id)?.status).toBe('partial');
+  });
+
   it('records a failure with its class and no evidence', () => {
     const failed = store().finalize(beginRoot().id, { status: 'failed', errorClass: 'source_unreadable' });
     expect(failed).toMatchObject({ status: 'failed', failureClass: 'source_unreadable', snapshotId: null, capture: null });

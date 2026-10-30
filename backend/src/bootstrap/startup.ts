@@ -140,9 +140,9 @@ export async function runGitOpsSourceRecovery(): Promise<void> {
  * Settle recovery work a previous process left behind: operations it left
  * running end as completion_unknown and their locks turn stale, before anything
  * can start new recovery work. Nothing recovery-related runs at boot, so a
- * failure is logged and Sencho still starts; the store then refuses to resume
- * any of that work, because a dead process's operations and locks can only be
- * picked up by the epoch that owned them. A build that cannot use the recovery
+ * failure is logged and Sencho still starts; the store then refuses to resume,
+ * finish or lock for any of that work, because a dead process's operations and
+ * locks can only be picked up by the epoch that owned them. A build that cannot use the recovery
  * schema leaves those rows alone.
  */
 export function runRecoveryReconcile(): void {

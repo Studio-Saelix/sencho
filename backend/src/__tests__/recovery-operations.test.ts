@@ -92,6 +92,22 @@ describe('operations', () => {
     expect(classOf(() => s.start({ idempotencyKey: '  ', kind: 'create_point', actor: 'admin', transport: 'local' }))).toBe('invalid_request');
   });
 
+  it('refuses the same key with a different point id, and creates no second operation', () => {
+    const s = new ops.RecoveryOperationStore('epoch-a');
+    const k = key();
+    const first = s.start({ idempotencyKey: k, kind: 'verify_point', pointId: 'point-1', actor: 'alice', transport: 'local' });
+    expect(s.start({ idempotencyKey: k, kind: 'verify_point', pointId: 'point-1', actor: 'alice', transport: 'local' })).toEqual({ operation: first.operation, replayed: true });
+    for (const pointId of ['point-2', null]) {
+      expect(classOf(() => s.start({ idempotencyKey: k, kind: 'verify_point', pointId, actor: 'alice', transport: 'local' }))).toBe('invalid_request');
+    }
+    // The other direction: a key first used without a point is not handed to a request that names one.
+    const bare = key();
+    s.start({ idempotencyKey: bare, kind: 'verify_point', actor: 'alice', transport: 'local' });
+    expect(classOf(() => s.start({ idempotencyKey: bare, kind: 'verify_point', pointId: 'point-1', actor: 'alice', transport: 'local' }))).toBe('invalid_request');
+    const rows = recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key IN (?, ?)').get(k, bare) as { n: number };
+    expect(rows.n).toBe(2);
+  });
+
   it('records one terminal state; a duplicated or late completion changes nothing', () => {
     const s = new ops.RecoveryOperationStore('epoch-a');
     const { operation } = s.start({ idempotencyKey: key(), kind: 'verify_point', pointId: 'p', actor: 'admin', transport: 'node_proxy' });
@@ -288,9 +304,11 @@ describe('restart reconciliation', () => {
   it('keeps a dead process\'s work closed even when reconciliation never ran', () => {
     const before = new ops.RecoveryOperationStore('epoch-crashed');
     const st = storage('unreconciled_data');
+    const repo = repository('unreconciled_repo');
     const running = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     before.markRunning(running.id);
     before.acquireLock('storage', st.storageKey, running.id);
+    const pending = beginPoint(st.id, 'g', repo.id, running.id);
 
     const queued = before.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
 
@@ -304,6 +322,62 @@ describe('restart reconciliation', () => {
     expect(classOf(() => after.acquireLock('storage', st.storageKey, running.id))).toBe('lock_stale');
     const other = after.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
     expect(classOf(() => after.acquireLock('storage', st.storageKey, other.id))).toBe('lock_stale');
+
+    // Nor can it be finished here: no ending records an outcome for the dead
+    // process's restore, releases its lock or settles its point.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const ending of [
+      { state: 'succeeded' as const },
+      { state: 'failed' as const, errorClass: 'internal' as const },
+      { state: 'cancelled' as const },
+      { state: 'completion_unknown' as const },
+    ]) {
+      expect(classOf(() => after.finish(running.id, ending))).toBe('invalid_request');
+      expect(classOf(() => after.finish(queued.id, ending))).toBe('invalid_request');
+      expect(after.get(running.id)).toMatchObject({ state: 'running', errorClass: null, completedAt: null, processEpoch: 'epoch-crashed' });
+      expect(after.get(queued.id)).toMatchObject({ state: 'queued', errorClass: null, completedAt: null });
+      expect(after.getLock('storage', st.storageKey)).toMatchObject({ ownerOperationId: running.id, staleSince: null, processEpoch: 'epoch-crashed' });
+      expect(points.RecoveryPointStore.getInstance().get(pending.id)?.status).toBe('pending');
+    }
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Refused'), 'succeeded', running.id, 'running');
+    warn.mockRestore();
+
+    // It cannot take a lock for the dead process's operation either, with or without an existing lock.
+    const free = storage('unreconciled_free');
+    expect(classOf(() => after.acquireLock('storage', free.storageKey, queued.id))).toBe('invalid_request');
+    expect(after.getLock('storage', free.storageKey)).toBeNull();
+
+    // A later boot settles it; only then does the lock become stale.
+    new ops.RecoveryOperationStore('epoch-after-crash').reconcileAtStartup(5_000);
+    expect(after.get(running.id)).toMatchObject({ state: 'completion_unknown', completedAt: 5_000 });
+    expect(after.getLock('storage', st.storageKey)?.staleSince).toBe(5_000);
+  });
+
+  it('lets the first committed ending win when a completion races reconciliation', () => {
+    const st = storage('race_data');
+    const owner = new ops.RecoveryOperationStore('epoch-race-old');
+    const op = owner.start({ idempotencyKey: key(), kind: 'restore', storageId: st.id, actor: 'admin', transport: 'local' }).operation;
+    owner.markRunning(op.id);
+    owner.acquireLock('storage', st.storageKey, op.id);
+
+    // The old process read the operation as running, and the new process's
+    // reconcile commits before the old one's write: the reconcile wins.
+    const stale = owner.get(op.id) as NonNullable<ReturnType<typeof owner.get>>;
+    new ops.RecoveryOperationStore('epoch-race-new').reconcileAtStartup(7_000);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(owner, 'get').mockReturnValueOnce(stale);
+    expect(owner.finish(op.id, { state: 'succeeded' }, 8_000)).toMatchObject({ state: 'completion_unknown', errorClass: 'interrupted', completedAt: 7_000 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('late'), 'succeeded', 'no class', op.id, 'completion_unknown', 'interrupted');
+    warn.mockRestore();
+    expect(owner.getLock('storage', st.storageKey)?.staleSince).toBe(7_000);
+
+    // The other order: the completion commits first and a later reconcile leaves it alone.
+    const st2 = storage('race_data_two');
+    const second = owner.start({ idempotencyKey: key(), kind: 'restore', storageId: st2.id, actor: 'admin', transport: 'local' }).operation;
+    owner.markRunning(second.id);
+    owner.finish(second.id, { state: 'succeeded' }, 9_000);
+    new ops.RecoveryOperationStore('epoch-race-newer').reconcileAtStartup(10_000);
+    expect(owner.get(second.id)).toMatchObject({ state: 'succeeded', errorClass: null, completedAt: 9_000 });
   });
 
   it('keeps a point finalized before the crash, while its operation ends completion_unknown', () => {

@@ -31,11 +31,13 @@ import type {
  * same transport; anything else is refused rather than handed someone else's
  * operation.
  *
- * Work left by a dead process can never be resumed in place: `markRunning`
- * (for a queued or a running operation) and a lock owner's re-acquire both
- * require the current epoch, so even if boot reconciliation failed, an
- * interrupted operation and its locks stay closed until a later boot settles
- * them (after which a stale lock can be released on review).
+ * Work left by a dead process can never be resumed or completed in place:
+ * `markRunning`, `finish`, a lock owner's re-acquire and a new lock for that
+ * operation all require the current epoch, so even if boot reconciliation
+ * failed, an interrupted operation keeps its state and its locks until a later
+ * boot settles them (after which a stale lock can be released on review).
+ * Every terminal write is conditional on the operation still being `queued` or
+ * `running`, so whichever of `finish` and reconciliation commits first wins.
  */
 
 interface OperationRow {
@@ -181,12 +183,17 @@ export class RecoveryOperationStore {
   /**
    * Record the one terminal state. A finished operation is never rewritten, so
    * a late or duplicated completion cannot turn a failure into a success; one
-   * that disagrees with the stored outcome is logged. An operation cannot end
-   * `succeeded` or `partial` while one of its points is still pending: the point
-   * is finalized first. Any other ending settles the operation's own pending
-   * points in the same transaction (`failed` with the operation's class,
-   * otherwise `completion_unknown`). A point begun after its operation finished
-   * stays pending until the next boot settles it.
+   * that disagrees with the stored outcome is logged. Only the process that owns
+   * the operation can finish it: another process's `queued` or `running`
+   * operation is refused and keeps its state and its locks until boot
+   * reconciliation settles it. The write is conditional on the operation still
+   * being live, so a completion that loses a race with reconciliation changes
+   * nothing. An operation cannot end `succeeded` or `partial` while one of its
+   * points is still pending: the point is finalized first. Any other ending
+   * settles the operation's own pending points in the same transaction
+   * (`failed` with the operation's class, otherwise `completion_unknown`). A
+   * point begun after its operation finished stays pending until the next boot
+   * settles it.
    * Locks are released on a known outcome and turned stale on
    * `completion_unknown`, which needs review before the storage is reused.
    */
@@ -200,36 +207,56 @@ export class RecoveryOperationStore {
       throw new RecoveryError('invalid_request');
     }
     const db = recoveryDb();
+    const logLate = (stored: RecoveryOperation): void => {
+      if (stored.state !== outcome.state || stored.errorClass !== errorClass) {
+        console.warn(
+          '[Recovery] Ignored a late %s (%s) completion for operation %s, already %s (%s)',
+          outcome.state, errorClass ?? 'no class', id, stored.state, stored.errorClass ?? 'no class',
+        );
+      }
+    };
     return db.transaction((): RecoveryOperation => {
       const current = this.require(id);
       if (isTerminal(current.state)) {
-        if (current.state !== outcome.state || current.errorClass !== errorClass) {
-          console.warn(
-            '[Recovery] Ignored a late %s (%s) completion for operation %s, already %s (%s)',
-            outcome.state, errorClass ?? 'no class', id, current.state, current.errorClass ?? 'no class',
-          );
-        }
+        logLate(current);
         return current;
+      }
+      if (current.processEpoch !== this.processEpoch) {
+        console.warn(
+          '[Recovery] Refused a %s completion for operation %s: it is %s under another process',
+          outcome.state, id, current.state,
+        );
+        throw new RecoveryError('invalid_request');
       }
       if (outcome.state === 'succeeded' || outcome.state === 'partial') {
         const pending = db.prepare(
           "SELECT 1 FROM recovery_points WHERE source_operation_id = ? AND status = 'pending'",
         ).get(id);
         if (pending) throw new RecoveryError('invalid_request');
-      } else if (outcome.state === 'failed') {
+      }
+      const ended = db.prepare(`
+        UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ?
+        WHERE id = ? AND state IN ('queued','running') AND process_epoch = ?
+      `).run(outcome.state, errorClass, now, now, id, this.processEpoch);
+      if (ended.changes === 0) {
+        // Another writer ended the operation after it was read. Its outcome and
+        // its locks stand.
+        const stored = this.require(id);
+        if (!isTerminal(stored.state)) throw new RecoveryError('invalid_request');
+        logLate(stored);
+        return stored;
+      }
+      if (outcome.state === 'failed') {
         db.prepare(`
           UPDATE recovery_points SET status = 'failed', failure_class = ?, completed_at = ?
           WHERE source_operation_id = ? AND status = 'pending'
         `).run(errorClass, now, id);
-      } else {
+      } else if (outcome.state !== 'succeeded' && outcome.state !== 'partial') {
         db.prepare(`
           UPDATE recovery_points SET status = 'completion_unknown', failure_class = 'interrupted', completed_at = ?
           WHERE source_operation_id = ? AND status = 'pending'
         `).run(now, id);
       }
-      db.prepare(`
-        UPDATE recovery_operations SET state = ?, error_class = ?, updated_at = ?, completed_at = ? WHERE id = ?
-      `).run(outcome.state, errorClass, now, now, id);
       if (outcome.state === 'completion_unknown') {
         db.prepare('UPDATE recovery_locks SET stale_since = ? WHERE owner_operation_id = ? AND stale_since IS NULL').run(now, id);
       } else {
@@ -264,6 +291,8 @@ export class RecoveryOperationStore {
         if (existing.owner_operation_id !== operationId) throw new RecoveryError('lock_held');
         return toLock(existing);
       }
+      // A dead process's operation can never take a lock here, even if boot reconciliation failed.
+      if (op.processEpoch !== this.processEpoch) throw new RecoveryError('invalid_request');
       db.prepare(`
         INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at)
         VALUES (?, ?, ?, ?, ?)
@@ -304,16 +333,14 @@ export class RecoveryOperationStore {
     if (this.reconciled) return { interruptedOperations: 0, unknownPoints: 0, staleLocks: 0 };
     const db = recoveryDb();
     const settled = db.transaction((): StartupReconciliation => {
+      // One conditional statement, so an operation that already reached a
+      // terminal state is never rewritten.
       const interrupted = db.prepare(`
-        SELECT id FROM recovery_operations
-        WHERE state IN ('queued','running') AND process_epoch <> ?
-      `).all(this.processEpoch) as Array<{ id: string }>;
-      const markOp = db.prepare(`
         UPDATE recovery_operations
         SET state = 'completion_unknown', error_class = 'interrupted', updated_at = ?, completed_at = ?
-        WHERE id = ?
-      `);
-      for (const { id } of interrupted) markOp.run(now, now, id);
+        WHERE state IN ('queued','running') AND process_epoch <> ?
+        RETURNING id
+      `).all(now, now, this.processEpoch);
       // A pending point whose operation is no longer live was cut off mid-capture,
       // including one whose operation row was never written.
       const unknownPoints = db.prepare(`

@@ -110,7 +110,9 @@ describe('runRecoveryReconcile', () => {
 
   it('runs inside startServer before the HTTP bind', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'bootstrap', 'startup.ts'), 'utf8');
-    const body = source.slice(source.indexOf('export async function startServer'));
+    // Comments are stripped so a mention in prose cannot satisfy the match.
+    const body = source.slice(source.indexOf('export async function startServer'))
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
     const call = body.indexOf('runRecoveryReconcile();');
     expect(call).toBeGreaterThan(0);
     expect(call).toBeLessThan(body.indexOf('server.listen('));

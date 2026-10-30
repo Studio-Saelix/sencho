@@ -166,7 +166,7 @@ describe('requireStorageAccess', () => {
     } as unknown as Response;
     expect(auth.requireStorageAccess(req({ role: 'viewer', userId: scopedUserId }), res, 'protect', target(sharedKey))).toBe(false);
     expect(status).toBe(403);
-    expect(body).toEqual({ error: 'You do not have permission for every stack that uses this storage.', code: 'PERMISSION_DENIED' });
+    expect(body).toEqual({ error: 'You do not have permission for this recovery action.', code: 'PERMISSION_DENIED' });
     expect(JSON.stringify(body)).not.toContain('tools');
   });
 });

@@ -230,7 +230,7 @@ export class RecoveryPointStore {
     if (storage.state !== 'current' || storage.generation_token !== input.expectedGenerationToken) {
       throw new RecoveryError('identity_unknown');
     }
-    // Checked here as well as by the foreign key, so the caller gets a recovery error class.
+    // The REFERENCES clause is not enforced on this connection, so this check is the guard.
     if (!db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(input.repositoryId)) {
       throw new RecoveryError('repository_unavailable');
     }

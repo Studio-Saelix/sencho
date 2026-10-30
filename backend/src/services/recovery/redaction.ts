@@ -16,7 +16,7 @@ import type { RecoveryErrorClass } from './types';
 
 const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
   invalid_request: 'The request is not valid for this storage.',
-  permission_denied: 'You do not have permission for every stack that uses this storage.',
+  permission_denied: 'You do not have permission for this recovery action.',
   capability_unavailable: 'Volume protection is not available on this node.',
   update_required: 'This node needs an update before it can protect volumes.',
   schema_unsupported: 'This build cannot read the recovery records on this node.',
