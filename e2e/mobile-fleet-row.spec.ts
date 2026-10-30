@@ -12,9 +12,11 @@ import { test, expect, type Page } from '@playwright/test';
 import { loginAs } from './helpers';
 import type { FleetNode } from '../frontend/src/components/FleetView/types';
 
-// 30 characters: the width at which the dot used to wrap at 320px.
-const FILLS_320 = 'sencho-prod-eu-west-01-primary';
-// 61 characters: wider than the card at every phone width; the name truncates
+// 32 characters: crosses the old wrap threshold at 320px. The 30-character
+// name from the QA report measured inside the pre-fix row's remaining width
+// with the loaded font, so it could pass on the pre-fix code.
+const OVERFLOWS_320 = 'sencho-prod-eu-west-01-primary-2';
+// 56 characters: wider than the card at every phone width; the name truncates
 // with an ellipsis and must still keep the dot beside it.
 const WIDER_THAN_CARD = 'sencho-test-01-primary-europe-west-availability-zone-one';
 const NORMAL = 'sencho-test-01';
@@ -64,6 +66,10 @@ interface RowGeometry {
   nameBottom: number;
   nameLeft: number;
   nameTruncated: boolean;
+  pinTop: number | null;
+  pinCenterY: number | null;
+  wordsTop: number | null;
+  wordsCenterY: number | null;
   hasHorizontalOverflow: boolean;
 }
 
@@ -74,8 +80,15 @@ async function measureRow(page: Page, name: string): Promise<RowGeometry> {
     const identity = nameEl.parentElement;
     const dot = identity?.firstElementChild;
     if (!identity || !dot) throw new Error('node identity unit or status dot missing');
+    const card = nameEl.closest('button');
+    const findLabel = (text: string): HTMLElement | null =>
+      Array.from(card?.querySelectorAll('span') ?? []).find((el) => el.textContent === text) ?? null;
+    const pin = findLabel('Pilot');
+    const words = findLabel('offline · cordoned');
     const nameRect = nameEl.getBoundingClientRect();
     const dotRect = dot.getBoundingClientRect();
+    const pinRect = pin?.getBoundingClientRect() ?? null;
+    const wordsRect = words?.getBoundingClientRect() ?? null;
     return {
       dotRight: dotRect.right,
       dotCenterY: dotRect.top + dotRect.height / 2,
@@ -83,6 +96,10 @@ async function measureRow(page: Page, name: string): Promise<RowGeometry> {
       nameBottom: nameRect.bottom,
       nameLeft: nameRect.left,
       nameTruncated: nameEl.scrollWidth > nameEl.clientWidth + 1,
+      pinTop: pinRect?.top ?? null,
+      pinCenterY: pinRect ? pinRect.top + pinRect.height / 2 : null,
+      wordsTop: wordsRect?.top ?? null,
+      wordsCenterY: wordsRect ? wordsRect.top + wordsRect.height / 2 : null,
       hasHorizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   });
@@ -111,17 +128,26 @@ test.describe('Phone Fleet node row', () => {
       expect(row.dotCenterY).toBeGreaterThanOrEqual(row.nameTop);
       expect(row.dotCenterY).toBeLessThanOrEqual(row.nameBottom);
       expect(row.dotRight).toBeLessThanOrEqual(row.nameLeft + 1);
+      // The exception words and the pin wrap below the identity as one unit:
+      // both sit under the name line and share that line with each other, so
+      // neither the pin nor the words is stranded on a line of its own.
+      expect(row.pinTop, 'Pilot pin should render').not.toBeNull();
+      expect(row.wordsTop, 'exception words should render').not.toBeNull();
+      expect(row.pinTop!).toBeGreaterThanOrEqual(row.nameBottom);
+      expect(row.wordsTop!).toBeGreaterThanOrEqual(row.nameBottom);
+      expect(Math.abs(row.pinCenterY! - row.wordsCenterY!)).toBeLessThanOrEqual(4);
       expect(row.hasHorizontalOverflow).toBe(false);
     });
   }
 
-  test('keeps the status dot beside a 30-character name at 320px', async ({ page }) => {
-    await openFleet(page, 320, [makeNode(2, FILLS_320)]);
+  test('keeps the status dot beside a name that overflows the 320px row', async ({ page }) => {
+    await openFleet(page, 320, [makeNode(2, OVERFLOWS_320)]);
 
-    const row = await measureRow(page, FILLS_320);
+    const row = await measureRow(page, OVERFLOWS_320);
     expect(row.dotCenterY).toBeGreaterThanOrEqual(row.nameTop);
     expect(row.dotCenterY).toBeLessThanOrEqual(row.nameBottom);
     expect(row.dotRight).toBeLessThanOrEqual(row.nameLeft + 1);
+    expect(row.nameTruncated, 'the overflowing name should ellipsize').toBe(true);
     expect(row.hasHorizontalOverflow).toBe(false);
   });
 

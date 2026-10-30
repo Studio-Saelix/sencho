@@ -271,9 +271,10 @@ describe('MobileFleet node identity', () => {
 describe('MobileFleet crowded node row', () => {
   const hot = { cpu: { usage: '97.0', cores: 4 } };
 
-  // The row wraps its metadata instead of shrinking the name, whatever adds
-  // width: the pin, an exception word, the active or integration chip, or a
-  // name that already fills the card. jsdom has no layout, so the contract is
+  // The row wraps its metadata instead of shrinking a name that would
+  // otherwise fit, whatever adds width: the pin, an exception word, the active
+  // or integration chip, or a name that already fills the card. jsdom has no
+  // layout, so the contract is
   // asserted on the classes that decide it: the dot and the name share one
   // non-wrapping unit, and the name shrinks (min-w-0, truncate) only when that
   // unit alone is wider than the row, so it can never push the dot off the
@@ -326,7 +327,7 @@ describe('MobileFleet crowded node row', () => {
     },
     {
       // The only case that may ellipsize: the name alone is wider than the
-      // row, so max-w-full caps it and truncate supplies the ellipsis.
+      // row, so the identity unit shrinks it and truncate supplies the ellipsis.
       label: 'a name wider than the card',
       name: 'sencho-test-01-primary-europe-west-availability-zone-one',
       pin: 'Pilot',

@@ -141,8 +141,9 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
           <span className="min-w-0 truncate font-mono text-[14px] text-stat-value">{node.name}</span>
         </span>
         {/* Everything that qualifies the name is one block: when the row is crowded
-            the block wraps below the name as a unit, so the name never gives up
-            width and the pin never strands itself on a line of its own. */}
+            the block wraps below the name as a unit, so the qualifiers never squeeze
+            a name that would otherwise fit and the pin never strands itself on a line
+            of its own. */}
         <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1.5">
           {isActive && !local ? (
             <span className="shrink-0 rounded-[5px] bg-brand/[0.09] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.14em] text-brand">
