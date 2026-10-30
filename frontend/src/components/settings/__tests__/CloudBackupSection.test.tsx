@@ -258,13 +258,16 @@ describe('CloudBackupSection recovery from another instance', () => {
             if (path === '/cloud-backup/config') return json({ ...customConfig, encrypt_archives: true, archive_passphrase: '***' });
             if (path === '/cloud-backup/snapshots') return json([]);
             if (path === '/cloud-backup/recovery-archives') {
-                return json([{
-                    objectKey: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
-                    sizeBytes: 40,
-                    lastModified: null,
-                    snapshotId: 2,
-                    encrypted: true,
-                }]);
+                return json({
+                    entries: [{
+                        objectKey: 'sencho/instances/old-instance/snapshots/2_2026-01-01_old.tar.gz.senc',
+                        sizeBytes: 40,
+                        lastModified: null,
+                        snapshotId: 2,
+                        encrypted: true,
+                    }],
+                    truncated: false,
+                });
             }
             if (path === '/cloud-backup/recover') {
                 return json({ snapshot_id: 9 }, 201);

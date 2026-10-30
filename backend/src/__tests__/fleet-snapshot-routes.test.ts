@@ -1880,6 +1880,19 @@ describe('Imported snapshot node mapping', () => {
     expect(after.body.nodes[0].targetNodeName).toBe('Local');
   });
 
+  it('reports identity targets for a locally captured snapshot', async () => {
+    const db = DatabaseService.getInstance();
+    const id = db.createSnapshot('local-detail', 'admin', 1, 1, '[]', '[]');
+    db.insertSnapshotFiles(id, [
+      { nodeId: LOCAL_NODE_ID, nodeName: 'local', stackName: 'local-detail-web', filename: 'compose.yaml', content: 'services: {}\n' },
+    ]);
+    const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.requiresNodeMapping).toBe(false);
+    expect(res.body.nodes[0].targetNodeId).toBe(LOCAL_NODE_ID);
+    expect(res.body.nodes[0].targetNodeName).toBe('Local');
+  });
+
   it('validates the mapping route', async () => {
     const db = DatabaseService.getInstance();
     const foreign = importSnapshot({ sourceInstanceId: 'other-instance', stacks: [{ sourceNodeId: 5, stackName: 'validate-web' }] });

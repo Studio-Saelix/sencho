@@ -279,8 +279,8 @@ cloudBackupRouter.get('/recovery-archives', async (req: Request, res: Response):
     if (!requireAdmin(req, res)) return;
     if (!gateForCurrentProvider(req, res)) return;
     try {
-        const entries = await CloudBackupService.getInstance().listRecoveryArchives();
-        res.json(entries);
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        res.json(listing);
     } catch (error) {
         console.error('[CloudBackup] recovery list error:', error);
         res.status(502).json({ error: getErrorMessage(error, 'Failed to list recovery archives') });

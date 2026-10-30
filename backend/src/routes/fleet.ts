@@ -2818,12 +2818,13 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
     const sameInstance = imported
       && !!snapshot.source_instance_id
       && snapshot.source_instance_id === db.getInstanceId();
-    const requiresNodeMapping = imported && !sameInstance;
+    const capturedHere = !imported || sameInstance;
+    const requiresNodeMapping = !capturedHere;
     const mappingBySource = new Map(
       db.getSnapshotNodeMap(id).map(m => [m.source_node_id, m.target_node_id] as const),
     );
     const nodes = Array.from(nodesMap.values()).map(n => {
-      const targetNodeId = sameInstance ? n.nodeId : mappingBySource.get(n.nodeId) ?? null;
+      const targetNodeId = capturedHere ? n.nodeId : mappingBySource.get(n.nodeId) ?? null;
       const targetNode = targetNodeId !== null ? db.getNode(targetNodeId) : undefined;
       return {
         nodeId: n.nodeId,

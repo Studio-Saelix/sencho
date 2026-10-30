@@ -535,7 +535,8 @@ describe('Cloud backup recovery', () => {
         });
         const res = await request(app).get('/api/cloud-backup/recovery-archives').set('Cookie', authCookie);
         expect(res.status).toBe(200);
-        expect(res.body.map((entry: { objectKey: string }) => entry.objectKey)).toEqual([recoveryKey]);
+        expect(res.body.entries.map((entry: { objectKey: string }) => entry.objectKey)).toEqual([recoveryKey]);
+        expect(res.body.truncated).toBe(false);
     });
 
     it('requires a passphrase and refuses a plaintext archive', async () => {

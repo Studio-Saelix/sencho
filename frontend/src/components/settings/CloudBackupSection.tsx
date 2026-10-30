@@ -118,6 +118,7 @@ export function CloudBackupSection() {
     const [archiveBusy, setArchiveBusy] = useState(false);
     const [recoveryOpen, setRecoveryOpen] = useState(false);
     const [recoveryArchives, setRecoveryArchives] = useState<CloudSnapshotEntry[]>([]);
+    const [recoveryTruncated, setRecoveryTruncated] = useState(false);
     const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
     const [recoveryPassphrase, setRecoveryPassphrase] = useState('');
     const [recoveryError, setRecoveryError] = useState('');
@@ -334,7 +335,7 @@ export function CloudBackupSection() {
     };
 
     const requestArchive = async (objectKey: string, action: ArchiveAction, passphrase: string | null) => {
-        if (archiveBusyRef.current) return;
+        if (archiveBusyRef.current || deleteBusyRef.current) return;
         archiveBusyRef.current = true;
         setArchiveBusy(true);
         try {
@@ -383,17 +384,20 @@ export function CloudBackupSection() {
         setRecoveryPassphrase('');
         setRecoveryError('');
         setRecoveryArchives([]);
+        setRecoveryTruncated(false);
         try {
             const res = await cloudFetch('/cloud-backup/recovery-archives');
             if (!res.ok) throw new Error(`Failed to list recovery archives (${res.status})`);
-            setRecoveryArchives(await res.json());
+            const data = await res.json() as { entries: CloudSnapshotEntry[]; truncated: boolean };
+            setRecoveryArchives(data.entries);
+            setRecoveryTruncated(data.truncated === true);
         } catch (err) {
             setRecoveryError((err as Error)?.message || 'Failed to list recovery archives.');
         }
     };
 
     const handleRecover = async () => {
-        if (!recoveryKey || recoveryBusyRef.current) return;
+        if (!recoveryKey || recoveryBusyRef.current || deleteBusyRef.current) return;
         if (!recoveryPassphrase) {
             setRecoveryError('Enter the passphrase that sealed this archive.');
             return;
@@ -442,7 +446,7 @@ export function CloudBackupSection() {
     };
 
     const confirmDelete = async () => {
-        if (!deleteKey || deleteBusyRef.current) return;
+        if (!deleteKey || deleteBusyRef.current || archiveBusyRef.current) return;
         deleteBusyRef.current = true;
         setDeleteBusy(true);
         try {
@@ -919,6 +923,11 @@ export function CloudBackupSection() {
                                 </li>
                             ))}
                         </ul>
+                    )}
+                    {recoveryTruncated && (
+                        <p className="text-xs text-warning">
+                            Showing the newest archives only. Use your bucket console to find an older one.
+                        </p>
                     )}
                     <div className="space-y-1.5">
                         <Label htmlFor="recovery-passphrase" className="text-sm">Passphrase for this archive</Label>

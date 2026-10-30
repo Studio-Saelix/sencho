@@ -2347,7 +2347,10 @@ export class DatabaseService {
         if (addColIfMissing('fleet_snapshots', 'origin', "TEXT NOT NULL DEFAULT 'local'")) {
             // A row that already carries a source instance id was imported by an
             // earlier build of this change; mark it so restore never treats its
-            // archived node ids as local ones.
+            // archived node ids as local ones. Every row that predates the import
+            // feature was captured locally and stays 'local'. An import that
+            // could not name its source is only reachable from an unreleased
+            // build of this change, so no released database has one.
             this.db.prepare("UPDATE fleet_snapshots SET origin = 'imported' WHERE source_instance_id IS NOT NULL").run();
         }
         maybeAddCol('fleet_snapshots', 'warnings_known', 'INTEGER NOT NULL DEFAULT 1');

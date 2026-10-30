@@ -812,11 +812,29 @@ describe('CloudBackupService disaster recovery', () => {
                 IsTruncated: false,
             };
         });
-        const list = await CloudBackupService.getInstance().listRecoveryArchives();
-        expect(list.map(entry => entry.objectKey)).toEqual([
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(listing.truncated).toBe(false);
+        expect(listing.entries.map(entry => entry.objectKey)).toEqual([
             'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc',
             'sencho/instances/old-instance/snapshots/1_a.tar.gz.senc',
         ]);
+    });
+
+    it('reports when the recovery listing stopped at the page cap', async () => {
+        seedCustomBucket();
+        sentSpy.mockImplementation(async (cmd: { name: string; input: Record<string, unknown> }) => {
+            if (cmd.name !== 'ListObjectsV2Command') return {};
+            const token = cmd.input.ContinuationToken as string | undefined;
+            const page = token ? Number(token.split('-')[1]) : 1;
+            return {
+                Contents: [{ Key: `sencho/instances/old-instance/snapshots/${page}_x.tar.gz.senc`, Size: 1, LastModified: new Date(2026, 0, page) }],
+                IsTruncated: true,
+                NextContinuationToken: `page-${page + 1}`,
+            };
+        });
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(listing.entries).toHaveLength(10);
+        expect(listing.truncated).toBe(true);
     });
 
     it('lists only other instances snapshot archives for recovery', async () => {
@@ -828,11 +846,12 @@ describe('CloudBackupService disaster recovery', () => {
                 { Key: 'sencho/instances/old-instance/other/3_c.tar.gz', Size: 30, LastModified: new Date('2026-03-01T00:00:00Z') },
             ],
         });
-        const list = await CloudBackupService.getInstance().listRecoveryArchives();
-        expect(list.map(entry => entry.objectKey)).toEqual([
+        const listing = await CloudBackupService.getInstance().listRecoveryArchives();
+        expect(listing.truncated).toBe(false);
+        expect(listing.entries.map(entry => entry.objectKey)).toEqual([
             'sencho/instances/old-instance/snapshots/2_b.tar.gz.senc',
         ]);
-        expect(list[0].encrypted).toBe(true);
+        expect(listing.entries[0].encrypted).toBe(true);
     });
 });
 

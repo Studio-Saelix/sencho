@@ -111,6 +111,8 @@ export interface UploadStatusEntry {
 const SENCHO_CLOUD_BACKUP_API_DEFAULT = 'https://sencho.io';
 const PROVIDER_KEY = 'cloud_backup_provider';
 const SUCCESS_STATUS_TTL_MS = 5 * 60 * 1000;
+/** Recovery listing pages, 1,000 objects each. The response says when it stopped early. */
+const RECOVERY_LIST_PAGE_LIMIT = 10;
 
 export class CloudBackupService {
     private static instance: CloudBackupService;
@@ -361,17 +363,18 @@ export class CloudBackupService {
      * Archives in this bucket that belong to other instances, so a fresh
      * installation can find what it is recovering. Read-only: recovery still
      * needs the passphrase, and delete/download stay confined to this
-     * instance's prefix.
+     * instance's prefix. The listing follows continuation tokens up to a
+     * bounded number of pages and reports when it stopped early, so an
+     * incomplete list is never presented as complete.
      */
-    public async listRecoveryArchives(): Promise<CloudSnapshotEntry[]> {
+    public async listRecoveryArchives(): Promise<{ entries: CloudSnapshotEntry[]; truncated: boolean }> {
         const cfg = this.getResolvedConfig();
-        if (!cfg) return [];
+        if (!cfg) return { entries: [], truncated: false };
         const { client, sdk } = await this.buildS3Client(cfg);
-        // Follow continuation tokens so a bucket with more than one page of
-        // archives still lists every candidate the operator can recover.
         const objects: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
         let continuationToken: string | undefined;
-        for (let page = 0; page < 10; page += 1) {
+        let truncated = false;
+        for (let page = 0; page < RECOVERY_LIST_PAGE_LIMIT; page += 1) {
             const result = await client.send(new sdk.ListObjectsV2Command({
                 Bucket: cfg.bucket,
                 Prefix: `${cfg.pathPrefix}instances/`,
@@ -381,6 +384,7 @@ export class CloudBackupService {
             objects.push(...(result.Contents || []));
             if (!result.IsTruncated || !result.NextContinuationToken) break;
             continuationToken = result.NextContinuationToken;
+            truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
         }
         const current = this.getInstanceId();
         const entries: CloudSnapshotEntry[] = [];
@@ -399,7 +403,10 @@ export class CloudBackupService {
                 encrypted: key.endsWith('.tar.gz.senc'),
             });
         }
-        return entries.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+        return {
+            entries: entries.sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || '')),
+            truncated,
+        };
     }
 
     public async listCloudSnapshots(): Promise<CloudSnapshotEntry[]> {
