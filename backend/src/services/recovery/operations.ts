@@ -84,9 +84,8 @@ function toOperation(row: OperationRow): RecoveryOperation {
 
 function toLock(row: LockRow): RecoveryLock {
   return {
-    ...(row.scope === 'storage'
-      ? { scope: 'storage' as const, resourceKey: row.resource_key }
-      : { scope: 'repository' as const, resourceKey: row.resource_key }),
+    scope: row.scope,
+    resourceKey: row.resource_key,
     ownerOperationId: row.owner_operation_id,
     processEpoch: row.process_epoch,
     acquiredAt: row.acquired_at,
@@ -116,7 +115,6 @@ export interface StartupReconciliation {
   unknownPoints: number;
   staleLocks: number;
 }
-
 
 export class RecoveryOperationStore {
   private static instance: RecoveryOperationStore;
@@ -193,9 +191,9 @@ export class RecoveryOperationStore {
    * `completion_unknown`, which needs review before the storage is reused.
    */
   finish(id: string, outcome: OperationFinish, now = Date.now()): RecoveryOperation {
-    const errorClass: RecoveryErrorClass | null = 'errorClass' in outcome
-      ? outcome.errorClass
-      : outcome.state === 'completion_unknown' ? 'interrupted' : null;
+    let errorClass: RecoveryErrorClass | null = null;
+    if ('errorClass' in outcome) errorClass = outcome.errorClass;
+    else if (outcome.state === 'completion_unknown') errorClass = 'interrupted';
     // The union already requires a class for these endings; this holds the
     // rule for a caller that built the outcome from untyped data.
     if ((outcome.state === 'failed' || outcome.state === 'partial') && !isRecoveryErrorClass(errorClass)) {
@@ -258,9 +256,7 @@ export class RecoveryOperationStore {
         ? db.prepare('SELECT 1 FROM recovery_storage_identities WHERE storage_key = ? LIMIT 1').get(resourceKey)
         : db.prepare('SELECT 1 FROM recovery_repositories WHERE id = ?').get(resourceKey);
       if (!target) throw new RecoveryError('invalid_request');
-      const existing = db.prepare(
-        'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
-      ).get(scope, resourceKey) as LockRow | undefined;
+      const existing = this.findLockRow(scope, resourceKey);
       if (existing) {
         if (existing.stale_since !== null || existing.process_epoch !== this.processEpoch) {
           throw new RecoveryError('lock_stale');
@@ -272,14 +268,12 @@ export class RecoveryOperationStore {
         INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at)
         VALUES (?, ?, ?, ?, ?)
       `).run(scope, resourceKey, operationId, this.processEpoch, now);
-      return toLock(db.prepare('SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?').get(scope, resourceKey) as LockRow);
+      return toLock(this.findLockRow(scope, resourceKey) as LockRow);
     })();
   }
 
   getLock(scope: RecoveryLockScope, resourceKey: string): RecoveryLock | null {
-    const row = recoveryDb().prepare(
-      'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
-    ).get(scope, resourceKey) as LockRow | undefined;
+    const row = this.findLockRow(scope, resourceKey);
     return row ? toLock(row) : null;
   }
 
@@ -290,9 +284,7 @@ export class RecoveryOperationStore {
   releaseStaleLock(scope: RecoveryLockScope, resourceKey: string, reviewedBy: string): RecoveryLock {
     const db = recoveryDb();
     return db.transaction((): RecoveryLock => {
-      const row = db.prepare(
-        'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
-      ).get(scope, resourceKey) as LockRow | undefined;
+      const row = this.findLockRow(scope, resourceKey);
       if (!row || row.stale_since === null) throw new RecoveryError('invalid_request');
       db.prepare('DELETE FROM recovery_locks WHERE scope = ? AND resource_key = ?').run(scope, resourceKey);
       console.warn(
@@ -337,6 +329,12 @@ export class RecoveryOperationStore {
     })();
     this.reconciled = true;
     return settled;
+  }
+
+  private findLockRow(scope: RecoveryLockScope, resourceKey: string): LockRow | undefined {
+    return recoveryDb().prepare(
+      'SELECT * FROM recovery_locks WHERE scope = ? AND resource_key = ?',
+    ).get(scope, resourceKey) as LockRow | undefined;
   }
 
   private require(id: string): RecoveryOperation {

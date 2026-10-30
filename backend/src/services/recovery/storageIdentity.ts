@@ -143,18 +143,15 @@ export class StorageIdentityStore {
         "SELECT * FROM recovery_storage_identities WHERE storage_key = ? AND state = 'current'",
       ).get(storageKey) as IdentityRow | undefined;
 
-      if (!current || current.generation_token !== token) {
-        const seenBefore = db.prepare(
-          'SELECT 1 FROM recovery_storage_identities WHERE storage_key = ? AND generation_token = ?',
-        ).get(storageKey, token);
-        if (seenBefore) throw new RecoveryError('identity_unknown');
-      }
-
       let id: string;
       if (current && current.generation_token === token) {
         db.prepare('UPDATE recovery_storage_identities SET last_seen_at = ? WHERE id = ?').run(now, current.id);
         id = current.id;
       } else {
+        const seenBefore = db.prepare(
+          'SELECT 1 FROM recovery_storage_identities WHERE storage_key = ? AND generation_token = ?',
+        ).get(storageKey, token);
+        if (seenBefore) throw new RecoveryError('identity_unknown');
         if (current) {
           db.prepare("UPDATE recovery_storage_identities SET state = 'superseded' WHERE id = ?").run(current.id);
         }

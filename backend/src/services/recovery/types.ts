@@ -119,7 +119,6 @@ export type RecoveryPointTrigger = 'manual' | 'policy' | 'pre_change' | 'pre_res
 
 /** `pending` is the only status a point can leave; every other one is final. */
 export type RecoveryPointStatus = 'pending' | 'succeeded' | 'partial' | 'failed' | 'completion_unknown';
-export type TerminalRecoveryPointStatus = Exclude<RecoveryPointStatus, 'pending'>;
 
 /**
  * Consistency labels this contract version supports. Nothing stronger
@@ -284,8 +283,6 @@ export type VolumeProtectionStatus = {
     reason: 'node_unreachable' | 'node_refused' | 'node_error' | 'descriptor_invalid' | 'descriptor_mismatch';
   }
 );
-
-export type VolumeProtectionReason = VolumeProtectionStatus['reason'];
 
 /** What a node reports about its own recovery support. Metadata only. */
 export interface RecoveryNodeDescriptor {
