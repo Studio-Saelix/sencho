@@ -96,8 +96,35 @@ async function putConfig(body: unknown, fallback: string): Promise<void> {
     }
 }
 
-function cloudFetch(endpoint: string, options: ApiFetchOptions = {}) {
-    return apiFetch(endpoint, { ...options, localOnly: true });
+// Every request the panel holds a control on is bounded, so a hub or S3
+// endpoint that never answers releases the hold with an error instead of
+// leaving Save, the picker and Auto-upload disabled until the page is left.
+// A transfer (import, download, recover) gets longer because it moves a whole
+// archive.
+const REQUEST_DEADLINE_MS = 60_000;
+const TRANSFER_DEADLINE_MS = 180_000;
+
+class RequestTimeoutError extends Error {
+    constructor(deadlineMs: number) {
+        super(`The request timed out after ${Math.round(deadlineMs / 1000)} seconds.`);
+    }
+}
+
+function cloudFetch(endpoint: string, options: ApiFetchOptions = {}, deadlineMs = REQUEST_DEADLINE_MS): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = new RequestTimeoutError(deadlineMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+            // Aborting also cuts a body that stalls after the headers arrived,
+            // which is why the timer is not cleared when the response does.
+            controller.abort(timeout);
+            reject(timeout);
+        }, deadlineMs);
+    });
+    const request = apiFetch(endpoint, { ...options, localOnly: true, signal: controller.signal });
+    request.catch(() => clearTimeout(timer));
+    return Promise.race([request, expired]);
 }
 
 function encodeObjectKey(objectKey: string): string {
@@ -427,7 +454,9 @@ export function CloudBackupSection() {
             if (!res.ok || data?.error) throw new Error(data?.error || 'Provisioning failed.');
             toast.success('Sencho Snapshot Vault activated.');
             setSenchoProvisioned(true);
-            await Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
+            // The refreshes report their own failures; the hold covers the
+            // provision call only.
+            void Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
         } catch (err) {
             toast.error((err as Error)?.message || 'Provisioning failed.');
         } finally {
@@ -510,7 +539,7 @@ export function CloudBackupSection() {
                 : `/cloud-backup/object/${encoded}/download`;
             const res = await cloudFetch(path, withPass || action === 'import'
                 ? { method: 'POST', body: JSON.stringify(withPass ? { passphrase } : {}) }
-                : { method: 'GET' });
+                : { method: 'GET' }, TRANSFER_DEADLINE_MS);
             if (res.ok) {
                 if (action === 'download') {
                     const blob = await res.blob();
@@ -590,7 +619,7 @@ export function CloudBackupSection() {
             const res = await cloudFetch('/cloud-backup/recover', {
                 method: 'POST',
                 body: JSON.stringify({ object_key: recoveryKey, passphrase: recoveryPassphrase }),
-            });
+            }, TRANSFER_DEADLINE_MS);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err?.error || 'Recovery failed');

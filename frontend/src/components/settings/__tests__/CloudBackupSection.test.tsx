@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CloudBackupSection } from '../CloudBackupSection';
 import { MastheadStatsProvider, useMastheadStatsValue } from '../MastheadStatsContext';
@@ -1001,6 +1001,9 @@ describe('CloudBackupSection destination binding', () => {
         dropNextPutResponse: boolean;
         // Next listings answer 502.
         snapshotFailures: number;
+        // "<METHOD> <path prefix>" of requests that never answer, each consumed
+        // by the first request it matches.
+        hang: string[];
     }
 
     function destinationOf(server: Server): string {
@@ -1037,10 +1040,16 @@ describe('CloudBackupSection destination binding', () => {
             putStatuses: [],
             dropNextPutResponse: false,
             snapshotFailures: 0,
+            hang: [],
             ...initial,
         };
         apiFetch.mockImplementation(async (path: string, options?: { method?: string; body?: string }) => {
             const method = options?.method ?? 'GET';
+            const hung = server.hang.findIndex(prefix => `${method} ${path}`.startsWith(prefix));
+            if (hung >= 0) {
+                server.hang.splice(hung, 1);
+                return new Promise(() => {});
+            }
             if (path === '/cloud-backup/config' && method === 'PUT') {
                 const body = JSON.parse(options?.body ?? '{}');
                 const status = server.putStatuses.shift() ?? 200;
@@ -1515,6 +1524,174 @@ describe('CloudBackupSection destination binding', () => {
         server.opHold.resolve(undefined);
         await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
         expect(screen.getAllByRole('switch')[0]).toBeEnabled();
+    });
+
+    // Runs `trigger` under a fake clock and lets the deadline pass. The fake
+    // clock is dropped again before the assertions because Testing Library's
+    // waitFor needs real timers.
+    async function passDeadline(trigger: () => void, deadlineMs: number) {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+            trigger();
+            await act(async () => { await vi.advanceTimersByTimeAsync(deadlineMs); });
+        } finally {
+            vi.useRealTimers();
+        }
+    }
+
+    const REQUEST_DEADLINE = 60_000;
+    const TRANSFER_DEADLINE = 180_000;
+    const TIMED_OUT = (seconds: number) => `The request timed out after ${seconds} seconds.`;
+
+    // The controls Save, the picker and Auto-upload sit behind: each must be
+    // usable again once the request they waited on has been given up.
+    async function expectDestinationControlsFree() {
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
+        expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+        expect(screen.getAllByRole('switch')[0]).toBeEnabled();
+    }
+
+    it.each([
+        ['Test', 'POST /cloud-backup/test', REQUEST_DEADLINE],
+        ['Delete snapshot', 'DELETE /cloud-backup/object/', REQUEST_DEADLINE],
+        ['Import snapshot', 'POST /cloud-backup/object/', TRANSFER_DEADLINE],
+        ['Download snapshot', 'GET /cloud-backup/object/', TRANSFER_DEADLINE],
+    ])('frees Save, the picker and Auto-upload when %s never answers', async (action, hang, deadline) => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        server.hang.push(hang);
+        const button = screen.getAllByRole('button', { name: action })[0];
+        let confirmButton: HTMLElement | undefined;
+        if (action === 'Delete snapshot') {
+            fireEvent.click(button);
+            confirmButton = await screen.findByRole('button', { name: 'Delete' });
+        }
+        await passDeadline(() => fireEvent.click(confirmButton ?? button), deadline);
+
+        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(deadline / 1000));
+        await expectDestinationControlsFree();
+        expect(enabledActions()).toContain('Test');
+        // Save is usable, not merely enabled.
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(true));
+    });
+
+    it('frees the controls when a reprovision never answers', async () => {
+        const server = startServer({ provider: 'sencho' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('managed-1.tar.gz.senc')).toBeInTheDocument();
+        server.hang.push('POST /cloud-backup/provision');
+        await passDeadline(() => fireEvent.click(screen.getByRole('button', { name: 'Reprovision' })), REQUEST_DEADLINE);
+
+        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60));
+        await waitFor(() => expect(enabledActions()).toContain('Reprovision'));
+        expect(screen.getByRole('combobox')).toBeEnabled();
+    });
+
+    it('frees the controls when a recovery never answers', async () => {
+        const server = startServer({ provider: 'sencho' });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('button', { name: 'Recover archive' }));
+        await user.click(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ }));
+        await user.type(screen.getByLabelText('Passphrase for this archive'), 'correct-horse-battery');
+        server.hang.push('POST /cloud-backup/recover');
+        await passDeadline(() => fireEvent.click(screen.getByRole('button', { name: 'Recover' })), TRANSFER_DEADLINE);
+
+        expect(await screen.findByText(TIMED_OUT(180))).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Recover' })).toBeEnabled();
+        await user.click(screen.getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => expect(enabledActions()).toContain('Reprovision'));
+        expect(screen.getByRole('combobox')).toBeEnabled();
+    });
+
+    it('frees the picker and Save when a configuration write never answers, then rereads the stored destination', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        server.hang.push('PUT /cloud-backup/config');
+        await passDeadline(() => fireEvent.click(screen.getByRole('button', { name: 'Save' })), REQUEST_DEADLINE);
+
+        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60));
+        await expectDestinationControlsFree();
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        expect(enabledActions()).toContain('Test');
+    });
+
+    it('frees the Auto-upload toggle and restores it when its write never answers', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        server.hang.push('PUT /cloud-backup/config');
+        await passDeadline(() => fireEvent.click(screen.getAllByRole('switch')[0]), REQUEST_DEADLINE);
+
+        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60));
+        await expectDestinationControlsFree();
+        expect(screen.getAllByRole('switch')[0]).not.toBeChecked();
+    });
+
+    it('frees the Encrypt archives switch when its write never answers', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        server.hang.push('PUT /cloud-backup/config');
+        const toggle = screen.getByRole('switch', { name: 'Encrypt archives' });
+        await passDeadline(() => fireEvent.click(toggle), REQUEST_DEADLINE);
+
+        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60));
+        await waitFor(() => expect(toggle).toBeEnabled());
+        expect(toggle).toBeChecked();
+        expect(screen.getByRole('combobox')).toBeEnabled();
+    });
+
+    it('ends a listing that never answers with an error and a retry, not a spinner', async () => {
+        const server = startServer({ provider: 'custom' });
+        server.hang.push('GET /cloud-backup/snapshots');
+        await passDeadline(() => { render(<CloudBackupSection />); }, REQUEST_DEADLINE);
+
+        expect(await screen.findByText(TIMED_OUT(60))).toBeInTheDocument();
+        expect(screen.queryByText('Loading cloud snapshots...')).not.toBeInTheDocument();
+        expect(screen.queryByText(/No cloud snapshots yet/)).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+    });
+
+    it('ends a recovery listing that never answers with an error and a retry', async () => {
+        const server = startServer({ provider: 'sencho' });
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await screen.findByText('managed-1.tar.gz.senc');
+        server.hang.push('GET /cloud-backup/recovery-archives');
+        await passDeadline(() => fireEvent.click(screen.getByRole('button', { name: 'Recover archive' })), REQUEST_DEADLINE);
+
+        expect(await screen.findByText(TIMED_OUT(60))).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Try again' }));
+        expect(await screen.findByRole('button', { name: /2_2026-01-01_old\.tar\.gz\.senc/ })).toBeInTheDocument();
+    });
+
+    it('locks the picker with a working Retry when the stored configuration never answers', async () => {
+        const server = startServer({ provider: 'custom' });
+        server.hang.push('GET /cloud-backup/config');
+        await passDeadline(() => { render(<CloudBackupSection />); }, REQUEST_DEADLINE);
+
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60)));
+        expect(await screen.findByRole('combobox')).toBeDisabled();
+        const retry = screen.getByRole('button', { name: 'Retry' });
+        expect(retry).toBeEnabled();
+        fireEvent.click(retry);
+        await waitFor(() => expect(screen.getByRole('combobox')).toBeEnabled());
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+    });
+
+    it('keeps the deadline timer from disturbing a request that answers in time', async () => {
+        const server = startServer({ provider: 'custom' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        await passDeadline(() => fireEvent.click(screen.getAllByRole('button', { name: 'Test' })[0]), REQUEST_DEADLINE);
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Connection successful.'));
+        expect(toast.error).not.toHaveBeenCalled();
+        expect(server.log).toEqual(['test@custom:first-bucket']);
     });
 
     it('keeps a secret key typed while a Save is in flight', async () => {

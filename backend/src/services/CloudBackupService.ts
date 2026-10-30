@@ -35,6 +35,11 @@ import {
     type ArchiveEntryPlan,
 } from './cloudBackupArchive';
 
+// Bounds on every request to the S3 endpoint. The socket timeout is inactivity,
+// not total time, so a large archive that keeps moving is not cut off. Tests
+// shrink these to prove a silent endpoint fails fast.
+export const S3_TIMEOUTS = { connectionMs: 10_000, socketMs: 30_000 };
+
 // Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
 // in dozens of @smithy/* and @aws-sdk/middleware-* packages, so installs
 // without cloud backup configured pay a real boot-parse cost they never use.
@@ -266,7 +271,9 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) return { success: false, error: 'No cloud backup configuration is active.' };
         try {
-            const { client, sdk } = await this.buildS3Client(cfg);
+            // One attempt: the SDK retries a timeout, and a Test that fails
+            // should say so within one connection timeout, not three.
+            const { client, sdk } = await this.buildS3Client(cfg, 1);
             await client.send(new sdk.HeadBucketCommand({ Bucket: cfg.bucket }));
             return { success: true };
         } catch (err) {
@@ -502,13 +509,18 @@ export class CloudBackupService {
 
     // ─── Internals ─────────────────────────────────────────────────────────────
 
-    private async buildS3Client(cfg: ResolvedCloudConfig): Promise<{ client: S3Client; sdk: S3Sdk }> {
+    private async buildS3Client(cfg: ResolvedCloudConfig, maxAttempts?: number): Promise<{ client: S3Client; sdk: S3Sdk }> {
         const sdk = await loadS3Sdk();
         const client = new sdk.S3Client({
             endpoint: cfg.endpoint,
             region: cfg.region,
             credentials: { accessKeyId: cfg.accessKey, secretAccessKey: cfg.secretKey },
             forcePathStyle: true,
+            // Without these a blackholed or silent endpoint holds the request
+            // open indefinitely, and the Snapshot Vault panel keeps its
+            // destination controls disabled while a request is running.
+            requestHandler: { connectionTimeout: S3_TIMEOUTS.connectionMs, socketTimeout: S3_TIMEOUTS.socketMs },
+            ...(maxAttempts !== undefined ? { maxAttempts } : {}),
         });
         return { client, sdk };
     }
