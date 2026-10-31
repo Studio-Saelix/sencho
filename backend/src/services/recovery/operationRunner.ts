@@ -462,6 +462,11 @@ export class RecoveryEngineService {
       dependents: resolution.dependents,
     });
 
+    // The repository was read before the awaits above. A replace that finished
+    // meanwhile moved the active pointer, and a point taken now would land in the
+    // repository it replaced, where it can never be restored.
+    this.requireRepositoryStillActive(repository.id);
+
     // One step: the operation, both locks and the pending point exist together or
     // not at all, so a `409` leaves nothing behind and the same key can be retried.
     const started = this.operations.admit(
@@ -584,13 +589,7 @@ export class RecoveryEngineService {
     if (!storage) throw new RecoveryError('identity_unknown');
     const repository = this.repositories.get(point.repositoryId);
     if (!repository) throw new RecoveryError('repository_unavailable');
-    const active = this.repositories.getActive();
-    if (!active || active.id !== repository.id) {
-      throw new RecoveryError('repository_unavailable', {
-        reason: 'repository_replaced',
-        detail: 'This point is in a recovery repository that has been replaced, and it can no longer be restored here.',
-      });
-    }
+    this.requireRepositoryNotReplaced(repository.id);
 
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
     const knownStackNames = await knownStacksFor(this.nodeId);
@@ -626,6 +625,9 @@ export class RecoveryEngineService {
       if (!input.targetVolumeName.startsWith(`${prefix}_`)) continue;
       if (!input.authorizeCrossStack(stackName)) throw new RecoveryError('permission_denied');
     }
+
+    // The check at the top ran before the awaits; a replace may have finished since.
+    this.requireRepositoryNotReplaced(repository.id);
 
     // The operation, the repository lock and the intent exist together or not at
     // all: a refused restore (a held lock, a second restore into the same target)
@@ -676,19 +678,26 @@ export class RecoveryEngineService {
       0,
     );
     const generation = input.replace ? highestGeneration + 1 : Math.max(1, highestGeneration);
-    const started = this.operations.start({
-      idempotencyKey: input.idempotencyKey,
-      kind: 'repository_init',
-      actor: input.actor,
-      transport: input.transport,
-      requestDigest: sha256Digest(['repository_init', input.replace ? 'replace' : 'provision']),
-    });
+    // Already provisioned and working: a repeated request confirms it and
+    // changes nothing, including the password that opens the existing points.
+    const confirmsOnly = !input.replace && active !== null && active.repositoryFingerprint !== null;
+    // Work that builds or moves the repository holds the lock of the repository
+    // every capture, check and restore holds, taken with the admission, so none of
+    // them runs next to it and a second replace is refused too. The new
+    // repository's own lock is taken once its row exists, inside provisioning.
+    const started = this.operations.admit(
+      {
+        idempotencyKey: input.idempotencyKey,
+        kind: 'repository_init',
+        actor: input.actor,
+        transport: input.transport,
+        requestDigest: sha256Digest(['repository_init', input.replace ? 'replace' : 'provision']),
+      },
+      !confirmsOnly && active ? [{ scope: 'repository', resourceKey: active.id }] : [],
+    );
     if (started.replayed) return { operation: started.operation, replayed: true };
     const operationId = started.operation.id;
-    this.operations.markRunning(operationId);
-    if (!input.replace && active && active.repositoryFingerprint) {
-      // Already provisioned and working: a repeated request confirms it and
-      // changes nothing, including the password that opens the existing points.
+    if (confirmsOnly) {
       this.operations.finish(operationId, { state: 'succeeded' });
       return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
     }
@@ -1200,6 +1209,25 @@ export class RecoveryEngineService {
 
   private requireReady(): void {
     if (!this.boot.ready) throw new RecoveryError('capability_unavailable', { reason: 'engine_starting' });
+  }
+
+  /**
+   * Refuse an admission whose repository stopped being the active one while the
+   * request was being checked. It is the same refusal a held repository lock
+   * gives, because a replace is what moved it; sent again, the request is
+   * checked against the repository that is active now.
+   */
+  private requireRepositoryStillActive(repositoryId: string): void {
+    if (this.repositories.getActive()?.id !== repositoryId) throw new RecoveryError('lock_held');
+  }
+
+  /** A point in a repository that is no longer the active one cannot be restored. */
+  private requireRepositoryNotReplaced(repositoryId: string): void {
+    if (this.repositories.getActive()?.id === repositoryId) return;
+    throw new RecoveryError('repository_unavailable', {
+      reason: 'repository_replaced',
+      detail: 'This point is in a recovery repository that has been replaced, and it can no longer be restored here.',
+    });
   }
 
   private requireActiveRepository(): RepositoryDescriptor {

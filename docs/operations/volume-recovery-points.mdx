@@ -49,7 +49,7 @@ A named volume that Docker does not have yet is not storage, so a stack that dec
 
 Shared storage is one volume with several stacks behind it, not one volume per stack. Coverage and points follow the volume, and every stack that uses it is part of the access check. For a volume that no longer exists, the stacks Sencho recorded for it at its last capture stand in for the ones it can no longer see.
 
-Locks do not follow the volume. Every operation takes the node's repository lock, so one capture, verification, or restore runs at a time on a node, whichever volumes are involved. A second request answers `409 lock_held` ("Another recovery operation is running on this node") and is not recorded, so the same request with the same idempotency key can be sent again once the first one ends. A capture also takes a lock for its volume.
+Locks do not follow the volume. Every operation takes the node's repository lock, so one capture, verification, or restore runs at a time on a node, whichever volumes are involved. Replacing the repository takes the same lock for as long as it builds the new repository, so a replacement cannot start while a capture, verification, or restore runs, and none of them can start while it builds. A second request answers `409 lock_held` ("Another recovery operation is running on this node") and is not recorded, so the same request with the same idempotency key can be sent again once the first one ends. A capture also takes a lock for its volume.
 
 ## What "Protected" means
 
@@ -233,7 +233,7 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/repository \
   -d '{ "idempotencyKey": "replace-repository-2026-10-31", "replace": true }'
 ```
 
-A replacement creates a new repository volume and moves the active pointer to it. The previous repository and every point in it are kept, and its access key is not overwritten. Its points are no longer covered by new checks, and they stop counting when they age out of the 7-day window. A point in a repository that is no longer active cannot be restored through the API, so restore anything you still need before replacing.
+A replacement answers `409 lock_held` and is not recorded while a capture, verification, restore, or another replacement is running, so wait for it to end and send the same request again. A replacement creates a new repository volume and moves the active pointer to it. The previous repository and every point in it are kept, and its access key is not overwritten. Its points are no longer covered by new checks, and they stop counting when they age out of the 7-day window. A point in a repository that is no longer active cannot be restored through the API, so restore anything you still need before replacing.
 
 Read the repository's state:
 
@@ -299,7 +299,7 @@ Nothing removes points, and nothing prunes the repository. Every point you creat
 
 A recovery request for a remote node runs on that node. The control instance forwards the call, the owning node authorizes it and does its own work, and only metadata comes back; the volume's bytes never pass through the control instance. Target a node with the `x-node-id` header or the `?nodeId=` query parameter.
 
-A role assigned on the node itself covers every volume on that node, including a volume shared by several stacks. A role assigned on a single stack covers only a volume that stack alone uses, and only when the request runs on that node directly: a stack-scoped grant is refused over a relay, so give the operator a node-wide grant to use recovery on a remote node.
+A role assigned on the node itself covers every volume on that node, including a volume shared by several stacks and a volume no stack declares, whether the request runs on that node directly or is relayed by the control instance. A role assigned on a single stack covers only a volume that stack alone uses, and only when the request runs on that node directly: a stack-scoped grant is refused over a relay, so give the operator a node-wide grant to use recovery on a remote node.
 
 Reading points requires read access to the stacks that use the volume. Capturing and restoring require edit access to those stacks. Provisioning or replacing the repository, and releasing the repository lock, are administrator actions.
 

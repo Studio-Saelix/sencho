@@ -8,7 +8,7 @@
  * cancelled operation, and whether a restore only ever writes into the volume
  * this intent created.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -431,6 +431,195 @@ describe('repository provisioning', () => {
     expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
     const rows = recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_repositories').all();
     expect(rows).toHaveLength(1);
+  });
+
+  describe('provisioning is serialized with the work that uses the repository', () => {
+    const HELPER_ENV = 'SENCHO_RECOVERY_HELPER_IMAGE';
+    let previousHelperEnv: string | undefined;
+
+    beforeEach(() => {
+      previousHelperEnv = process.env[HELPER_ENV];
+      process.env[HELPER_ENV] = `sha256:${'b'.repeat(64)}`;
+    });
+
+    afterEach(() => {
+      if (previousHelperEnv === undefined) delete process.env[HELPER_ENV];
+      else process.env[HELPER_ENV] = previousHelperEnv;
+      vi.restoreAllMocks();
+    });
+
+    function holdActiveRepository(repositoryId: string, kind: 'create_point' | 'verify_point' | 'restore'): () => void {
+      const store = operations.RecoveryOperationStore.getInstance();
+      const holder = store.start({
+        idempotencyKey: `holder-${kind}`, kind, actor: 'alice', transport: 'local',
+        requestDigest: runner.sha256Digest(['holder', kind]),
+      }).operation;
+      store.markRunning(holder.id);
+      store.acquireLock('repository', repositoryId, holder.id);
+      return () => { store.finish(holder.id, { state: 'succeeded' }); };
+    }
+
+    async function stubProvisioner(gate: Promise<void>) {
+      const localRepository = await import('../services/recovery/localRepository');
+      const spy = vi.spyOn(localRepository.RepositoryProvisioner.prototype, 'provision')
+        .mockImplementation(async (deps) => {
+          await gate;
+          const registered = repositoryStore.RecoveryRepositoryStore.getInstance().register({
+            ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-test-g2',
+            failureDomain: 'same_failure_domain',
+          });
+          deps.acquireLock?.(registered.id);
+          repositoryStore.RecoveryRepositoryStore.getInstance().setFingerprint(registered.id, 'e'.repeat(32));
+          repositoryStore.RecoveryRepositoryStore.getInstance().setActive(registered.id);
+          return { repository: registered, created: true };
+        });
+      return spy;
+    }
+
+    for (const kind of ['create_point', 'verify_point', 'restore'] as const) {
+      it(`refuses a replace while a ${kind} holds the repository, records nothing, and runs the same key afterwards`, async () => {
+        stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+        const seeded = await seedProtectableVolume();
+        service().markReadyForTests();
+        const release = holdActiveRepository(seeded.repositoryId, kind);
+        // Provisioning is stubbed so a replace that is wrongly admitted ends, instead of building a volume.
+        await stubProvisioner(Promise.resolve());
+        const request = { actor: 'alice', idempotencyKey: `replace-during-${kind}`, replace: true, transport: 'local' as const };
+
+        await expect(service().admitRepositoryInit(request)).rejects.toMatchObject({ errorClass: 'lock_held' });
+        expect(recoveryDbModule.recoveryDb()
+          .prepare('SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key = ?')
+          .get(request.idempotencyKey)).toEqual({ n: 0 });
+        expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
+
+        release();
+        const retried = await service().admitRepositoryInit(request);
+        expect(retried.replayed).toBe(false);
+        await service().whenIdleForTests();
+        expect(operations.RecoveryOperationStore.getInstance().get(retried.operation.id)?.state).toBe('succeeded');
+      });
+    }
+
+    it('keeps the capture and a second replace out while a replace is running, then lets both in', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { open = resolve; });
+      await stubProvisioner(gate);
+
+      const replace = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'replace-1', replace: true, transport: 'local',
+      });
+      expect(replace.operation.state).toBe('running');
+      expect(operations.RecoveryOperationStore.getInstance().getLock('repository', seeded.repositoryId)?.ownerOperationId)
+        .toBe(replace.operation.id);
+
+      const captureRequest = {
+        nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'capture-during-replace',
+        requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local' as const, authorize: allowAll,
+      };
+      try {
+        await expect(service().admitCreatePoint(captureRequest)).rejects.toMatchObject({ errorClass: 'lock_held' });
+        await expect(service().admitRepositoryInit({
+          actor: 'alice', idempotencyKey: 'replace-2', replace: true, transport: 'local',
+        })).rejects.toMatchObject({ errorClass: 'lock_held' });
+        expect(recoveryDbModule.recoveryDb()
+          .prepare("SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key IN ('capture-during-replace', 'replace-2')")
+          .get()).toEqual({ n: 0 });
+        // The refused capture took no storage lock, so the volume is free for the retry.
+        expect(operations.RecoveryOperationStore.getInstance().getLock('storage', seeded.storage.storageKey)).toBeNull();
+      } finally {
+        open();
+      }
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(replace.operation.id)?.state).toBe('succeeded');
+
+      const retried = await service().admitCreatePoint(captureRequest);
+      expect(retried.replayed).toBe(false);
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(retried.operation.id)?.state).toBe('succeeded');
+      // The capture ran against the repository the replace made, not the one it replaced.
+      const newest = repositoryStore.RecoveryRepositoryStore.getInstance().getActive();
+      expect(newest?.id).not.toBe(seeded.repositoryId);
+      const point = recoveryDbModule.recoveryDb().prepare('SELECT repository_id FROM recovery_points').get() as { repository_id: string };
+      expect(point.repository_id).toBe(newest?.id);
+    });
+
+    it('refuses a capture whose repository was replaced while the request was being checked', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+      await stubProvisioner(Promise.resolve());
+
+      // The replace is admitted and finishes inside the capture's own authorization
+      // step, which runs between reading the repository and taking its lock.
+      const request = {
+        nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'capture-across-replace',
+        requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local' as const,
+        authorize: () => {
+          const store = operations.RecoveryOperationStore.getInstance();
+          const replaced = repositoryStore.RecoveryRepositoryStore.getInstance().register({
+            ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-test-g2',
+            failureDomain: 'same_failure_domain',
+          });
+          repositoryStore.RecoveryRepositoryStore.getInstance().setActive(replaced.id);
+          expect(store.getLock('repository', seeded.repositoryId)).toBeNull();
+          return true;
+        },
+      };
+      await expect(service().admitCreatePoint(request)).rejects.toMatchObject({ errorClass: 'lock_held' });
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_points').get()).toEqual({ n: 0 });
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations').get()).toEqual({ n: 0 });
+    });
+
+    it('answers repository_replaced to a restore whose repository was replaced while the request was being checked', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      const point = points.RecoveryPointStore.getInstance().begin({
+        kind: 'root', storageId: seeded.storage.id, expectedGenerationToken: 'token-1',
+        repositoryId: seeded.repositoryId, trigger: 'manual', actor: 'alice', sourceOperationId: 'op-x',
+        sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+      });
+      points.RecoveryPointStore.getInstance().finalize(point.id, {
+        status: 'succeeded',
+        evidence: { snapshotId: 'snap-x', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+      });
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+
+      const request = {
+        nodeId, pointId: point.id, targetVolumeName: 'across_replace', actor: 'alice', idempotencyKey: 'restore-across-replace',
+        requestDigest: runner.sha256Digest(['restore', point.id, 'across_replace', 'new_volume']),
+        transport: 'local' as const, authorizeCrossStack: allowAll,
+        authorize: () => {
+          const replaced = repositoryStore.RecoveryRepositoryStore.getInstance().register({
+            ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-test-g2',
+            failureDomain: 'same_failure_domain',
+          });
+          repositoryStore.RecoveryRepositoryStore.getInstance().setActive(replaced.id);
+          return true;
+        },
+      };
+      await expect(service().admitRestore(request)).rejects.toMatchObject({
+        errorClass: 'repository_unavailable', reason: 'repository_replaced',
+      });
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get()).toEqual({ n: 0 });
+    });
+
+    it('lets a repeated provision confirm the working repository while a capture holds it', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      service().markReadyForTests();
+      holdActiveRepository(seeded.repositoryId, 'create_point');
+
+      const again = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'provision-during-capture', replace: false, transport: 'local',
+      });
+      expect(operations.RecoveryOperationStore.getInstance().get(again.operation.id)?.state).toBe('succeeded');
+    });
   });
 
   it('names the generation it resumes, and only a replacement moves past it', async () => {

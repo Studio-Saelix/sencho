@@ -809,6 +809,23 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         req.proxyElevatedRole = 'node-admin';
       }
 
+      // Recovery node-grant elevation gate: the owning node authorizes a capture
+      // or restore against every stack that uses the volume, and for a volume no
+      // stack declares there is no stack to carry evidence for. It cannot see the
+      // signed-in user's assignment on this node (the hop arrives as user 0), so
+      // a role the user holds on the node itself, which covers every volume on it,
+      // is resolved here and forwarded as the role that grants the same edit
+      // access. Settings-level calls stay refused on the node: that role has no
+      // `system:settings`, which no node assignment carries on a direct request either.
+      if (
+        isRecoveryProxyPath(req.path)
+        && req.method !== 'GET' && req.method !== 'HEAD'
+        && req.user?.role !== 'admin' && req.user?.role !== 'node-admin'
+        && checkPermission(req, 'stack:edit', 'node', String(req.nodeId))
+      ) {
+        req.proxyElevatedRole = 'node-admin';
+      }
+
       // Target settings, security and the recheck-target alias stay on the target.
       // Exact image reads, previews and refreshes use the hub's authority.
       const overlayPreview = (req.method === 'GET' || req.method === 'POST')
