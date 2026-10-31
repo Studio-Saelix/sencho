@@ -145,6 +145,17 @@ interface UnresolvedDeclaration {
   protocol: string;
 }
 
+/**
+ * One binding a declared port needs on each running container, with the label
+ * a finding uses when no binding satisfies it.
+ */
+interface PortRequirement {
+  label: string;
+  /** The declaration's interface is still a template, so any binding matches. */
+  wildcard: boolean;
+  matches: (p: RuntimePort) => boolean;
+}
+
 /** The declared ports a service publishes, split by whether the host number is
  *  known, and whether an auto-assigned declaration names its container target. */
 interface DeclaredPorts {
@@ -177,9 +188,7 @@ function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
   // match the resolved ones first. Otherwise it could consume the binding a
   // resolved declaration needs and report drift where a valid assignment exists.
   // A declaration whose interface is still a template can take any binding, so
-  // match the resolved ones first. Otherwise it could consume the binding a
-  // resolved declaration needs and report drift where a valid assignment exists.
-  dynamic.sort((a, b) => Number(holdsTemplate(a.hostIp)) - Number(holdsTemplate(b.hostIp)));
+  // it is matched last (see the requirement order below).
   return { fixed, dynamic, unknownTargets };
 }
 
@@ -429,7 +438,13 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     // declarations first, so a binding a fixed declaration already explains can
     // never stand in for an auto-assigned declaration that Docker did not
     // publish. Two declarations therefore need two bindings, and a second
-    // declaration with no binding of its own reads as drift.
+    // declaration with no binding of its own reads as drift. A declaration
+    // whose interface is still a template can take any binding, so it is
+    // matched last: otherwise it could consume the binding a resolved
+    // declaration needs and report drift where a valid assignment exists.
+    // Resolved declarations with a known target come first, then resolved
+    // protocol-only ones, then the two wildcard forms; the stable sort keeps
+    // declaration order within each group.
     //
     // The list API reports the host number a container is bound to, not whether
     // the file asked for it. A fixed host number on a container port declared
@@ -440,6 +455,30 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     const declaredPorts = declaredPortsOf(svc);
     const runtimePorts = [...runtime.ports.values()];
     const fixedRunning = (p: RuntimePort): boolean => declaredPorts.fixed.has(portKey(p.publishedPort, p.protocol));
+    const requirements: PortRequirement[] = [
+      ...declaredPorts.dynamic.flatMap((d) => {
+        const out: PortRequirement[] = [];
+        for (let target = d.startPort; target <= d.endPort; target++) {
+          out.push({
+            label: `auto:${target}/${d.protocol}`,
+            wildcard: holdsTemplate(d.hostIp),
+            matches: (p) => p.privatePort === target
+              && p.protocol === d.protocol
+              && interfaceCompatible(d.hostIp, p.hostIp),
+          });
+        }
+        return out;
+      }),
+      // A declaration whose target never resolved is matched by protocol and
+      // interface, and still consumes its own binding so it cannot explain a
+      // second one.
+      ...declaredPorts.unknownTargets.map((unknown) => ({
+        label: `auto/${unknown.protocol}`,
+        wildcard: holdsTemplate(unknown.hostIp),
+        matches: (p: RuntimePort) => p.protocol === unknown.protocol
+          && interfaceCompatible(unknown.hostIp, p.hostIp),
+      })),
+    ].sort((a, b) => Number(a.wildcard) - Number(b.wildcard));
     const unexplained: RuntimePort[] = [];
     // A replica must publish the declared container port itself; a sibling's
     // picked number does not stand in for a replica that is missing it.
@@ -452,21 +491,8 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
         const index = open.findIndex(predicate);
         return index === -1 ? null : open.splice(index, 1)[0];
       };
-      for (const d of declaredPorts.dynamic) {
-        for (let target = d.startPort; target <= d.endPort; target++) {
-          const matched = take((p) => p.privatePort === target
-            && p.protocol === d.protocol
-            && interfaceCompatible(d.hostIp, p.hostIp));
-          if (!matched) missingDynamic.add(`auto:${target}/${d.protocol}`);
-        }
-      }
-      // A declaration whose target never resolved is matched by protocol and
-      // interface, and still consumes its own binding so it cannot explain a
-      // second one.
-      for (const unknown of declaredPorts.unknownTargets) {
-        const matched = take((p) => p.protocol === unknown.protocol
-          && interfaceCompatible(unknown.hostIp, p.hostIp));
-        if (!matched) missingDynamic.add(`auto/${unknown.protocol}`);
+      for (const requirement of requirements) {
+        if (!take(requirement.matches)) missingDynamic.add(requirement.label);
       }
       unexplained.push(...open);
     }

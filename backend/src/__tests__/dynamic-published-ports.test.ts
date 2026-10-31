@@ -552,6 +552,29 @@ describe('drift against a running service with an auto-assigned port', () => {
     expect(portMatches(withTarget, [one])).toEqual([]);
     expect(portMatches(withTarget, [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
     expect(portMatches(withTarget, [{ ...one, privatePort: 9001 }])).toHaveLength(1);
+    // A resolved protocol-only declaration is matched before a wildcard one,
+    // and before a wildcard declaration with a known target, whichever order
+    // they are declared in.
+    const loopback = { ...one, ip: '127.0.0.1', publishedPort: 32769 };
+    const wildcardOnly = { hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort;
+    const loopbackOnly = { hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort;
+    const pair = (wildcardFirst: boolean): DeclaredCompose => ({
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: wildcardFirst ? [wildcardOnly, loopbackOnly] : [loopbackOnly, wildcardOnly],
+      }],
+      networks: {}, volumes: {},
+    });
+    expect(portMatches(pair(true), [loopback, one])).toEqual([]);
+    expect(portMatches(pair(false), [loopback, one])).toEqual([]);
+    const crossPhase: DeclaredCompose = {
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: [wildcardTarget, loopbackOnly],
+      }],
+      networks: {}, volumes: {},
+    };
+    expect(portMatches(crossPhase, [loopback, one])).toEqual([]);
   });
 });
 
