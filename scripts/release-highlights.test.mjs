@@ -8,13 +8,20 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   applyToChangelog,
   cleanBullet,
   collectChanges,
   hashChanges,
+  generateHighlights,
   insertHighlights,
+  readBlockText,
   readStoredHash,
   removeHighlights,
   sanitizeHighlights,
@@ -103,17 +110,16 @@ describe('sanitizeHighlights', () => {
     )
   })
 
-  it('rejects empty and oversized output', () => {
+  it('rejects empty and non-string output', () => {
     assert.equal(sanitizeHighlights('   '), null)
     assert.equal(sanitizeHighlights(null), null)
-    assert.equal(sanitizeHighlights('x'.repeat(3000)), null)
   })
 })
 
 describe('applyToChangelog', () => {
   it('writes the block into the newest section only', async () => {
     const calls = []
-    const out = await applyToChangelog(CHANGELOG, 'key', okFetch('Cordon is here.', calls))
+    const out = await applyToChangelog(CHANGELOG, 'key', okFetch('Cordon is here.', calls), 0)
     assert.equal(calls.length, 1)
     assert.match(calls[0].init.body, /Version 0\.99\.0/)
     assert.ok(out.includes('### Highlights\n\n<!-- highlights-hash:'))
@@ -123,17 +129,17 @@ describe('applyToChangelog', () => {
   })
 
   it('does not call the model again when the change list is unchanged', async () => {
-    const first = await applyToChangelog(CHANGELOG, 'key', okFetch('Cordon is here.'))
+    const first = await applyToChangelog(CHANGELOG, 'key', okFetch('Cordon is here.'), 0)
     const calls = []
-    const second = await applyToChangelog(first, 'key', okFetch('Different.', calls))
+    const second = await applyToChangelog(first, 'key', okFetch('Different.', calls), 0)
     assert.equal(calls.length, 0)
     assert.equal(second, first)
   })
 
   it('regenerates when the change list moved', async () => {
-    const first = await applyToChangelog(CHANGELOG, 'key', okFetch('Old overview.'))
+    const first = await applyToChangelog(CHANGELOG, 'key', okFetch('Old overview.'), 0)
     const grown = first.replace('### Fixed', '### Fixed\n\n* another fix ([#12](https://x/issues/12))')
-    const second = await applyToChangelog(grown, 'key', okFetch('New overview.'))
+    const second = await applyToChangelog(grown, 'key', okFetch('New overview.'), 0)
     assert.ok(second.includes('New overview.'))
     assert.ok(!second.includes('Old overview.'))
   })
@@ -145,10 +151,45 @@ describe('applyToChangelog', () => {
     assert.equal(out, CHANGELOG)
   })
 
-  it('fails soft on an API error and on an unusable answer', async () => {
+  it('fails soft on an API error and on an unusable answer, removing a stale block', async () => {
+    const stale = insertHighlights(CHANGELOG, 'ffffffffffffffff', 'Stale.')
     const failing = async () => ({ ok: false, status: 503, json: async () => ({}) })
-    assert.equal(await applyToChangelog(CHANGELOG, 'key', failing), CHANGELOG)
-    assert.equal(await applyToChangelog(CHANGELOG, 'key', okFetch('')), CHANGELOG)
+    assert.equal(await applyToChangelog(CHANGELOG, 'key', failing, 0), CHANGELOG)
+    assert.equal(await applyToChangelog(stale, 'key', failing, 0), CHANGELOG)
+    assert.equal(await applyToChangelog(CHANGELOG, 'key', okFetch(''), 0), CHANGELOG)
+    assert.equal(await applyToChangelog(stale, 'key', okFetch(''), 0), CHANGELOG)
+  })
+
+  it('rejects a cut-off answer (finish_reason length) instead of publishing it', async () => {
+    const cutOff = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ finish_reason: 'length', message: { content: 'Half a sent' } }] }),
+    })
+    assert.equal(await applyToChangelog(CHANGELOG, 'key', cutOff, 0), CHANGELOG)
+  })
+
+  it('regenerates when the stored block is empty even though its hash matches', async () => {
+    const first = await applyToChangelog(CHANGELOG, 'key', okFetch('Cordon is here.'), 0)
+    const hollow = first.replace('Cordon is here.', '')
+    assert.equal(readBlockText(hollow), '')
+    const calls = []
+    const again = await applyToChangelog(hollow, 'key', okFetch('Filled in.', calls), 0)
+    assert.equal(calls.length, 1)
+    assert.ok(again.includes('Filled in.'))
+  })
+
+  it('warns instead of silently skipping a section with no bullets', async () => {
+    const empty = PREAMBLE + '## [0.99.0](https://x/compare/a...b) (2026-11-02)\n\n\n'
+    const lines = []
+    const original = console.log
+    console.log = (line) => lines.push(String(line))
+    try {
+      await applyToChangelog(empty, 'key', okFetch('x'), 0)
+    } finally {
+      console.log = original
+    }
+    assert.ok(lines.some((l) => l.startsWith('::warning')))
   })
 
   it('retries once before giving up', async () => {
@@ -158,7 +199,7 @@ describe('applyToChangelog', () => {
       if (n === 1) throw new Error('network')
       return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Second try.' } }] }) }
     }
-    const out = await applyToChangelog(CHANGELOG, 'key', flaky)
+    const out = await applyToChangelog(CHANGELOG, 'key', flaky, 0)
     assert.equal(n, 2)
     assert.ok(out.includes('Second try.'))
   })
@@ -166,7 +207,7 @@ describe('applyToChangelog', () => {
   it('leaves a section with no bullets alone', async () => {
     const empty = PREAMBLE + '## [0.99.0](https://x/compare/a...b) (2026-11-02)\n\n\n'
     const calls = []
-    assert.equal(await applyToChangelog(empty, 'key', okFetch('x', calls)), empty)
+    assert.equal(await applyToChangelog(empty, 'key', okFetch('x', calls), 0), empty)
     assert.equal(calls.length, 0)
   })
 })
@@ -175,5 +216,112 @@ describe('hashChanges', () => {
   it('is stable and sensitive to content', () => {
     assert.equal(hashChanges({ Added: ['a'] }), hashChanges({ Added: ['a'] }))
     assert.notEqual(hashChanges({ Added: ['a'] }), hashChanges({ Added: ['b'] }))
+  })
+})
+
+describe('request contract', () => {
+  it('sends the key, disables reasoning, includes the changes, and tries exactly twice', async () => {
+    const calls = []
+    const failing = async (url, init) => {
+      calls.push({ url, init })
+      return { ok: false, status: 429, json: async () => ({}) }
+    }
+    await assert.rejects(() => generateHighlights('0.99.0', { Added: ['fleet: add node cordon'] }, 'secret', failing, 0), /429; then .*429/)
+    assert.equal(calls.length, 2)
+    const body = JSON.parse(calls[0].init.body)
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer secret')
+    assert.deepEqual(body.thinking, { type: 'disabled' })
+    assert.ok(body.messages[1].content.includes('fleet: add node cordon'))
+    assert.ok(body.messages[1].content.includes('Version 0.99.0'))
+  })
+})
+
+describe('block layout contract', () => {
+  it('writes exactly the layout the app and the website extractors read', () => {
+    const out = insertHighlights(SECTION, '0123456789abcdef', 'One.\n\nTwo.')
+    assert.ok(
+      out.includes('### Highlights\n\n<!-- highlights-hash: 0123456789abcdef -->\n\nOne.\n\nTwo.\n\n### Added'),
+    )
+  })
+
+  it('ignores credit suffixes and the Thanks section when building the change list', () => {
+    const withThanks = SECTION + '\n### Thanks\n\n* @alice\n'
+    assert.deepEqual(collectChanges(withThanks), collectChanges(SECTION))
+  })
+})
+
+describe('sanitizeHighlights against hostile output', () => {
+  it('cannot leave a heading, fence, rule, link, mention or comment behind', () => {
+    const cases = [
+      ['- ### Fixes\nmore', '### '],
+      ['1. ## [9.9.9](u) (2026)', '## '],
+      ['# # Big', '# '],
+      ['> > quoted', '> '],
+      ['```\nsome code\n\nmore', '```'],
+      ['~~~\nx', '~~~'],
+      ['---', '---'],
+      ['Ping @octocat see https://evil.example/x and www.evil.example', '@'],
+      ['[x](javascript:alert(1)) done', '(1)'],
+      ['Text <!-- unclosed hash: aaaaaaaaaaaaaaaa', '<!--'],
+      ['<!-- highlights-hash: aaaaaaaaaaaaaaaa -->\n\nText', 'highlights-hash'],
+    ]
+    for (const [raw, forbidden] of cases) {
+      const out = sanitizeHighlights(raw)
+      assert.ok(out === null || !out.includes(forbidden), `${JSON.stringify(raw)} -> ${JSON.stringify(out)}`)
+      if (out) assert.ok(!/^\s*#/m.test(out), `heading survived in ${JSON.stringify(out)}`)
+    }
+    assert.equal(sanitizeHighlights('Ping @octocat'), 'Ping octocat')
+    assert.equal(sanitizeHighlights('See #12 and `code`'), 'See #12 and `code`')
+  })
+
+  it('accepts a long multi-paragraph overview but not a runaway one', () => {
+    const para = 'Sentence about the release that is a reasonable length. '.repeat(10).trim()
+    assert.ok(sanitizeHighlights([para, para, para, para, para].join('\n\n')))
+    assert.equal(sanitizeHighlights('x'.repeat(6001)), null)
+  })
+})
+
+describe('command line', () => {
+  const script = fileURLToPath(new URL('./release-highlights.mjs', import.meta.url))
+
+  function run(changelog, env = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'release-highlights-'))
+    try {
+      writeFileSync(join(dir, 'CHANGELOG.md'), changelog)
+      const summaryPath = join(dir, 'summary.md')
+      const result = spawnSync(process.execPath, [script], {
+        cwd: dir,
+        env: { PATH: process.env.PATH, GITHUB_STEP_SUMMARY: summaryPath, ...env },
+        encoding: 'utf-8',
+      })
+      let summary = ''
+      try {
+        summary = readFileSync(summaryPath, 'utf-8')
+      } catch {
+        // No summary file means nothing was written to it.
+      }
+      return { result, written: readFileSync(join(dir, 'CHANGELOG.md'), 'utf-8'), summary }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('without a key exits 0, warns, records it in the job summary, and strips a stale block', () => {
+    const stale = insertHighlights(CHANGELOG, 'ffffffffffffffff', 'Stale.')
+    const { result, written, summary } = run(stale)
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /::warning title=Release highlights::DEEPSEEK_API_KEY is not set/)
+    assert.match(summary, /DEEPSEEK_API_KEY is not set/)
+    assert.equal(written, CHANGELOG)
+  })
+
+  it('exits nonzero when CHANGELOG.md cannot be read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-highlights-'))
+    try {
+      const result = spawnSync(process.execPath, [script], { cwd: dir, encoding: 'utf-8' })
+      assert.equal(result.status, 1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -60,6 +60,19 @@ describe('useWhatsNewPreference', () => {
     expect(result.current.hasUnseen).toBe(true);
   });
 
+  it('running an older release than the one last seen does not light the dot', () => {
+    localStorage.setItem(LAST_SEEN, '0.99.0');
+    const { result } = renderHook(() => useWhatsNewPreference());
+    expect(result.current.hasUnseen).toBe(false);
+  });
+
+  it('removes the retired hand-written feed watermark when it stamps the new one', () => {
+    localStorage.setItem('sencho.whatsNew.lastSeenId', 'v0-98-0-old-entry');
+    renderHook(() => useWhatsNewPreference());
+    expect(localStorage.getItem('sencho.whatsNew.lastSeenId')).toBeNull();
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.98.1');
+  });
+
   it('markSeen clears hasUnseen and stores the running version', () => {
     localStorage.setItem(LAST_SEEN, '0.98.0');
     const { result } = renderHook(() => useWhatsNewPreference());

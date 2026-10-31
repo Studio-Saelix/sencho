@@ -190,9 +190,38 @@ describe('getReleaseByVersion', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  it('returns null without calling GitHub for an invalid version', async () => {
-    await expect(getReleaseByVersion('../latest')).resolves.toBeNull();
+  it('returns null without calling GitHub for a non-canonical version', async () => {
+    for (const version of ['../latest', 'v0.98.1', '=0.98.1', ' 0.98.1', '0.98.1 ', 'latest']) {
+      await expect(getReleaseByVersion(version)).resolves.toBeNull();
+    }
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps one cache entry per version', async () => {
+    mockFetch
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'one'))
+      .mockResolvedValueOnce(tagRelease('0.98.0', 'zero'));
+
+    await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'one' });
+    await expect(getReleaseByVersion('0.98.0')).resolves.toMatchObject({ body: 'zero' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('refetches after the short TTL so a body edited after publish is picked up', async () => {
+    vi.useFakeTimers();
+    try {
+      mockFetch
+        .mockResolvedValueOnce(tagRelease('0.98.1', 'before highlights'))
+        .mockResolvedValueOnce(tagRelease('0.98.1', 'after highlights'));
+
+      await getReleaseByVersion('0.98.1');
+      vi.advanceTimersByTime(4 * 60 * 1000);
+      await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'before highlights' });
+      vi.advanceTimersByTime(2 * 60 * 1000);
+      await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'after highlights' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('returns null and does not cache a failed lookup', async () => {

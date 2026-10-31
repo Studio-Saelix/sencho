@@ -105,6 +105,20 @@ describe('NodeUpdatesSheet', () => {
     expect(screen.getByText('Release v1.1.0')).toBeInTheDocument();
   });
 
+  it('does not show the generator\'s hash comment in the rendered release notes', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        version: '1.1.0',
+        releaseNotes: '### Highlights\n\n<!-- highlights-hash: 0123456789abcdef -->\n\nCordon is here.',
+        htmlUrl: null,
+      }),
+    });
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+    expect(screen.queryByText(/highlights-hash/)).not.toBeInTheDocument();
+  });
+
   it('refetches release notes when the advertised latest version changes', async () => {
     apiFetchMock.mockImplementation((url: string) =>
       String(url).includes('release-notes')

@@ -1492,14 +1492,21 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const forceRefresh = req.query.recheck === 'true';
-    const requested = typeof req.query.version === 'string' ? req.query.version : null;
-    if (requested !== null && !semver.valid(requested)) {
+    const rawVersion = req.query.version;
+    if (rawVersion !== undefined && (typeof rawVersion !== 'string' || semver.valid(rawVersion) !== rawVersion)) {
       res.status(400).json({ error: 'Invalid version' });
       return;
     }
+    const requested = typeof rawVersion === 'string' ? rawVersion : null;
     const release = requested
       ? await getReleaseByVersion(requested, forceRefresh)
       : await getLatestRelease(forceRefresh);
+    if (requested && !release) {
+      // A named release that cannot be loaded is a failed lookup, not an empty
+      // release; callers must be able to tell the two apart.
+      res.status(502).json({ error: 'Release notes unavailable' });
+      return;
+    }
     res.json({
       // Bind the notes to the release they belong to so the frontend can tell
       // when the advertised latest version has moved past the loaded notes.

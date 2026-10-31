@@ -160,7 +160,9 @@ export interface SenchoRelease {
   html_url: string;
 }
 
-async function fetchReleaseDetails(path: 'latest' | `tags/v${string}`): Promise<SenchoRelease> {
+/** Latest release when `version` is omitted, otherwise that exact tag. */
+async function fetchReleaseDetails(version?: string): Promise<SenchoRelease> {
+  const path = version === undefined ? 'latest' : `tags/v${version}`;
   const res = await fetch(`https://api.github.com/repos/studio-saelix/sencho/releases/${path}`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Sencho' },
     signal: AbortSignal.timeout(10000),
@@ -185,21 +187,24 @@ export async function getLatestRelease(forceRefresh = false): Promise<SenchoRele
     return await CacheService.getInstance().getOrFetch<SenchoRelease>(
       LATEST_RELEASE_CACHE_KEY,
       LATEST_VERSION_CACHE_TTL,
-      () => fetchReleaseDetails('latest'),
+      () => fetchReleaseDetails(),
     );
   } catch {
     return null;
   }
 }
 
+const RELEASE_BY_VERSION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 /**
- * Release notes for one published version, used by What's New for the version
- * this instance is running. A release body is edited for a short while after
- * publish (credits, highlights), so it shares the latest-release TTL instead of
- * being cached forever. Returns null for an invalid version or a failed lookup.
+ * Release notes for one published version. A release body is edited for a short
+ * while after publish (credits, highlights), so the cache is short rather than
+ * long-lived. Only a canonical semver string is accepted ("v1.2.3" or padding
+ * would address a different cache key and tag than the one meant). Returns null
+ * for a non-canonical version or a failed lookup; failures are not cached.
  */
 export async function getReleaseByVersion(version: string, forceRefresh = false): Promise<SenchoRelease | null> {
-  if (!semver.valid(version)) return null;
+  if (semver.valid(version) !== version) return null;
   const cacheKey = `release:${version}`;
   if (forceRefresh) {
     CacheService.getInstance().invalidate(cacheKey);
@@ -207,11 +212,11 @@ export async function getReleaseByVersion(version: string, forceRefresh = false)
   try {
     return await CacheService.getInstance().getOrFetch<SenchoRelease>(
       cacheKey,
-      LATEST_VERSION_CACHE_TTL,
-      () => fetchReleaseDetails(`tags/v${version}`),
+      RELEASE_BY_VERSION_CACHE_TTL,
+      () => fetchReleaseDetails(version),
     );
   } catch (err) {
-    console.warn('[VersionCheck] Release lookup failed:', sanitizeForLog((err as Error).message));
+    console.warn('[VersionCheck] Release lookup failed:', sanitizeForLog(err instanceof Error ? err.message : String(err)));
     return null;
   }
 }

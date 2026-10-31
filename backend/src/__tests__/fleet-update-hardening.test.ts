@@ -532,13 +532,24 @@ describe('GET /api/fleet/update-status/release-notes', () => {
     expect(String(fetchSpy.mock.calls[0][0])).toMatch(/\/releases\/tags\/v0\.92\.0$/);
   });
 
-  it('rejects a malformed ?version= without calling GitHub', async () => {
+  it('rejects a non-canonical or repeated ?version= without calling GitHub', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    const res = await request(app)
-      .get('/api/fleet/update-status/release-notes?version=latest')
-      .set('Authorization', adminAuth);
-    expect(res.status).toBe(400);
+    for (const query of ['version=latest', 'version=v0.92.0', 'version=0.92.0&version=0.91.0', 'version=']) {
+      const res = await request(app)
+        .get(`/api/fleet/update-status/release-notes?${query}`)
+        .set('Authorization', adminAuth);
+      expect(res.status, query).toBe(400);
+    }
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('answers 502, not an empty 200, when the named release cannot be loaded', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 404 }));
+    const res = await request(app)
+      .get('/api/fleet/update-status/release-notes?version=0.92.0&recheck=true')
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(502);
+    expect(res.body.releaseNotes).toBeUndefined();
   });
 });
 

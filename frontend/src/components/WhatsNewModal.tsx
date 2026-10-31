@@ -15,35 +15,48 @@ interface WhatsNewModalProps {
   onViewChangelog: () => void;
 }
 
-type ReleaseNotesResult =
-  | { version: string; failed: false; highlights: string | null; htmlUrl: string | null }
-  | { version: string; failed: true };
+type ReleaseNotesResult = { version: string } & (
+  | { failed: true }
+  | { failed: false; highlights: string | null; htmlUrl: string | null }
+);
 
 // font-sans/normal-case/tracking-normal reset ModalFooter's inherited kicker styling (font-mono uppercase tracking-[0.22em]) so the footer link reads as a link, not a label.
 const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:underline font-sans normal-case tracking-normal';
 
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
   const { version, markSeen, setEnabled } = useWhatsNewPreference();
-  // The last lookup, keyed by the version it answered. Anything that does not
-  // match the running version reads as loading, so reopening after a successful
-  // load shows the cached notes and a failed load is retried on the next open.
+  // The last lookup, keyed by the version it answered. A result for any other
+  // version reads as loading. A failed lookup, and a release that had no
+  // highlights yet (its body is edited shortly after publish), are fetched
+  // again the next time the modal opens; a loaded block is kept for the session.
   const [result, setResult] = useState<ReleaseNotesResult | null>(null);
 
-  useEffect(() => {
-    if (open) markSeen();
-  }, [open, markSeen]);
+  const current = result && result.version === version ? result : null;
+  const settled = current !== null && !current.failed && current.highlights !== null;
+  const needsFetch = open && version !== null && !settled;
 
-  const needsFetch = open && version !== null && !(result?.version === version && !result.failed);
+  // The release counts as seen once its notes actually loaded, so a failed
+  // lookup keeps the dot lit for the next try.
+  const loaded = current !== null && !current.failed;
+  useEffect(() => {
+    if (open && loaded) markSeen();
+  }, [open, loaded, markSeen]);
+
+  // After a failure needsFetch stays true, so this effect does not re-run until
+  // the modal is closed and reopened; do not add `result` to the dependencies.
   useEffect(() => {
     if (!needsFetch || version === null) return;
     let cancelled = false;
     (async () => {
       try {
+        // The notes describe the release this control instance runs, so they
+        // are always read from the local hub, whichever node is active.
         const res = await apiFetch(`/fleet/update-status/release-notes?version=${encodeURIComponent(version)}`, {
           localOnly: true,
         });
         if (!res.ok) throw new Error(`Release notes request failed (${res.status})`);
-        const data = (await res.json()) as { releaseNotes: string | null; htmlUrl: string | null };
+        const data = (await res.json()) as { version: string | null; releaseNotes: string | null; htmlUrl: string | null };
+        if (data.version !== version) throw new Error(`Release notes answered for ${data.version ?? 'no version'}`);
         if (!cancelled) {
           setResult({ version, failed: false, highlights: extractHighlights(data.releaseNotes), htmlUrl: data.htmlUrl });
         }
@@ -57,9 +70,10 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
     };
   }, [needsFetch, version]);
 
-  const current = result && result.version === version ? result : null;
-
   return (
+    // className bounds the dialog to 85dvh and makes it a flex column so
+    // ModalBody's `fill` (flex-1 min-h-0) can constrain the body to scroll while
+    // the header and footer stay pinned, matching ConfirmModal.
     <Modal open={open} onOpenChange={onOpenChange} className="max-h-[85dvh] flex flex-col">
       <ModalHeader kicker="Sencho" title="What's New" />
       <ModalBody fill className="space-y-4">

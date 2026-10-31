@@ -21,13 +21,20 @@
  *
  *   Second paragraph.
  *
- * The hash covers the cleaned change list. When it matches the stored one the
- * LLM is not called again, so the step is idempotent across the many runs a
- * Release PR sees while main keeps moving. release-please rewrites the whole
- * section on every run, which drops the block; the next run regenerates it.
+ * The hash covers the cleaned change list. When the stored block's hash matches
+ * and the block has text, the LLM is not called again, so a rerun against an
+ * untouched release branch (a retried workflow, a manual dispatch) is a no-op.
+ * When main moves, release-please rewrites the whole section, which drops the
+ * block, and the next run generates a new one for the new change list. Read the
+ * final text after the freeze; an earlier read can be replaced.
+ *
+ * The block is a contract shared with three readers that must stay in sync:
+ * frontend/src/lib/releaseHighlights.ts and the website Worker's
+ * extractHighlights (heading text, heading depth, comment form).
  *
  * Fail soft: a missing key, an API error, or an unusable answer never fails the
- * workflow. It prints a warning, removes a stale block (accuracy over
+ * workflow. It prints a warning (also written to the job summary, so a green run
+ * that shipped no block is visible), removes a stale block (accuracy over
  * presence), and leaves the rest of the changelog untouched.
  *
  * Inputs (env):
@@ -35,7 +42,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { parseVersionSection, splitLines } from './credit-changelog-contributors.mjs'
@@ -45,10 +52,11 @@ export const HIGHLIGHTS_HEADING = '### Highlights'
 const CATEGORY_HEADING_RE = /^###\s+(.+?)\s*$/
 const ANY_HEADING_RE = /^#{1,3}\s/
 const HASH_RE = /^<!--\s*highlights-hash:\s*([0-9a-f]{16})\s*-->$/
-const MAX_HIGHLIGHTS_CHARS = 2400
+const MAX_HIGHLIGHTS_CHARS = 6000
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
 const REQUEST_TIMEOUT_MS = 60_000
 const ATTEMPTS = 2
+const RETRY_DELAY_MS = 3000
 
 const SYSTEM_PROMPT = [
   'You are writing the release overview section for Sencho changelogs. Sencho is a self-hosted, multi-node Docker Compose management dashboard used by operators.',
@@ -149,6 +157,17 @@ export function readStoredHash(sectionText) {
   return null
 }
 
+/** The paragraphs of an existing block (hash comment excluded); '' when it has none. */
+export function readBlockText(sectionText) {
+  const block = findBlock(sectionText)
+  if (!block) return ''
+  return splitLines(sectionText.slice(block.start, block.end))
+    .map((line) => line.content)
+    .filter((line) => line.trim() !== HIGHLIGHTS_HEADING && !HASH_RE.test(line.trim()))
+    .join('\n')
+    .trim()
+}
+
 export function removeHighlights(sectionText) {
   const block = findBlock(sectionText)
   if (!block) return sectionText
@@ -176,23 +195,37 @@ export function insertHighlights(sectionText, hash, paragraphs) {
 
 /**
  * Reduce model output to plain paragraphs. Commit titles are untrusted input
- * that end up in a published release body, so anything that could render as
- * structure, a link, or markup is removed rather than trusted.
- * @returns {string | null} null when nothing usable remains
+ * that end up in a published release body, so structure and anything that
+ * GitHub or the in-app renderer would turn into a link, mention, fence or
+ * heading is removed rather than trusted: HTML and comments (including an
+ * unclosed one), inline links and images, bare URLs, @mentions, code fences,
+ * thematic breaks, and heading, list and quote prefixes (stripped repeatedly,
+ * so "- ### x" cannot leave a heading behind). Em dashes become commas.
+ * Inline code and #123 references are left alone.
+ * @returns {string | null} null when nothing usable remains or the answer is
+ *   longer than MAX_HIGHLIGHTS_CHARS
  */
 export function sanitizeHighlights(raw) {
   if (typeof raw !== 'string') return null
+  const PREFIX_RE = /^\s*(?:#{1,6}(?:\s+|$)|[*+-]\s+|\d+[.)]\s+|>\s*)/
   const paragraphs = raw
     .replace(/\r\n?/g, '\n')
     .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!--[\s\S]*$/, '')
     .replace(/<[^>]*>/g, '')
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/!?\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)/g, '$1')
+    .replace(/(?:https?:\/\/|www\.)[^\s)]+/gi, '')
+    .replace(/@(?=[A-Za-z0-9])/g, '')
     .split(/\n{2,}/)
     .map((p) =>
       p
         .split('\n')
-        .map((l) => l.replace(/^\s*(?:#{1,6}\s+|[*+-]\s+|\d+[.)]\s+|>\s*)/, '').trim())
-        .filter(Boolean)
+        .map((line) => {
+          let out = line
+          while (PREFIX_RE.test(out)) out = out.replace(PREFIX_RE, '')
+          return out.trim()
+        })
+        .filter((line) => line && !/^(?:`{3,}|~{3,})/.test(line) && !/^(?:[-*_=]\s*){3,}$/.test(line))
         .join(' '),
     )
     .map((p) => p.replace(/\s*\u2014\s*/g, ', ').replace(/\s+/g, ' ').trim())
@@ -202,9 +235,10 @@ export function sanitizeHighlights(raw) {
   return joined.length > MAX_HIGHLIGHTS_CHARS ? null : joined
 }
 
-export async function generateHighlights(version, grouped, apiKey, fetchImpl = fetch) {
-  let lastError = new Error('no attempt made')
+export async function generateHighlights(version, grouped, apiKey, fetchImpl = fetch, retryDelayMs = RETRY_DELAY_MS) {
+  const failures = []
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    if (attempt > 1 && retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
     try {
       const res = await fetchImpl(DEEPSEEK_URL, {
         method: 'POST',
@@ -212,10 +246,11 @@ export async function generateHighlights(version, grouped, apiKey, fetchImpl = f
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         body: JSON.stringify({
           model: 'deepseek-v4-flash',
-          // Reasoning tokens are billed against max_tokens before any content;
-          // leaving thinking on returns an empty answer with finish_reason "length".
+          // Observed on this model in the website Worker: with reasoning on, its
+          // tokens are billed against max_tokens first and the answer comes back
+          // empty with finish_reason "length".
           thinking: { type: 'disabled' },
-          temperature: 0.6,
+          temperature: 0.3,
           max_tokens: 1400,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -228,14 +263,17 @@ export async function generateHighlights(version, grouped, apiKey, fetchImpl = f
       })
       if (!res.ok) throw new Error(`DeepSeek returned ${res.status}`)
       const data = await res.json()
-      const text = sanitizeHighlights(data?.choices?.[0]?.message?.content)
+      const choice = data?.choices?.[0]
+      // A cut-off answer ends mid-sentence, which is worse than no overview.
+      if (choice?.finish_reason === 'length') throw new Error('DeepSeek answer was cut off')
+      const text = sanitizeHighlights(choice?.message?.content)
       if (!text) throw new Error('DeepSeek returned no usable overview')
       return text
     } catch (err) {
-      lastError = err
+      failures.push(err.message)
     }
   }
-  throw lastError
+  throw new Error(failures.join('; then '))
 }
 
 // ---------------------------------------------------------------------------
@@ -244,13 +282,15 @@ export async function generateHighlights(version, grouped, apiKey, fetchImpl = f
 
 function warn(message) {
   console.log(`::warning title=Release highlights::${message}`)
+  const summary = process.env.GITHUB_STEP_SUMMARY
+  if (summary) appendFileSync(summary, `Release highlights: ${message}\n\n`)
 }
 
 /**
  * Compute the new CHANGELOG text. Returns the input unchanged when nothing
  * needs doing. Never throws for generation problems.
  */
-export async function applyToChangelog(text, apiKey, fetchImpl = fetch) {
+export async function applyToChangelog(text, apiKey, fetchImpl = fetch, retryDelayMs = RETRY_DELAY_MS) {
   const section = parseVersionSection(text)
   if (!section) {
     warn('No version heading found in CHANGELOG.md; skipping.')
@@ -260,12 +300,12 @@ export async function applyToChangelog(text, apiKey, fetchImpl = fetch) {
   const version = sectionText.match(/^##\s+\[([\d.]+)]/)?.[1]
   const grouped = collectChanges(sectionText)
   if (!version || Object.keys(grouped).length === 0) {
-    console.log('No changes to summarize; leaving the section as is.')
+    warn('The newest changelog section has no change bullets to summarize; skipping.')
     return text
   }
 
   const hash = hashChanges(grouped)
-  if (readStoredHash(sectionText) === hash) {
+  if (readStoredHash(sectionText) === hash && readBlockText(sectionText)) {
     console.log(`Highlights for ${version} are up to date (${hash}).`)
     return text
   }
@@ -276,7 +316,7 @@ export async function applyToChangelog(text, apiKey, fetchImpl = fetch) {
     return withoutStale
   }
   try {
-    const paragraphs = await generateHighlights(version, grouped, apiKey, fetchImpl)
+    const paragraphs = await generateHighlights(version, grouped, apiKey, fetchImpl, retryDelayMs)
     const next = insertHighlights(sectionText, hash, paragraphs)
     console.log(`Wrote highlights for ${version} (${hash}).`)
     return text.slice(0, section.start) + next + text.slice(section.end)

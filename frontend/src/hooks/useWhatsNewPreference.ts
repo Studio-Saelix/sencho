@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useBuildInfo } from '@/hooks/useBuildInfo';
-import { stableReleaseVersion } from '@/lib/releaseHighlights';
+import { isNewerStableVersion, stableReleaseVersion } from '@/lib/releaseHighlights';
 
 const ENABLED_KEY = 'sencho.whatsNew.enabled';
 const LAST_SEEN_KEY = 'sencho.whatsNew.lastSeenVersion';
+// Watermark of the retired hand-written feed; removed when the new one is stamped.
+const LEGACY_LAST_SEEN_KEY = 'sencho.whatsNew.lastSeenId';
 const CHANGE_EVENT = 'sencho:whats-new-changed';
 
 function readEnabled(): boolean {
@@ -36,7 +38,7 @@ function writeSetting(key: string, value: string) {
 export interface UseWhatsNewPreferenceResult {
   enabled: boolean;
   setEnabled: (next: boolean) => void;
-  /** The stable release this instance runs, or null for dev/preview builds and while build info loads. */
+  /** The stable release this instance runs, or null for dev/preview builds, prerelease versions, and while build info loads. */
   version: string | null;
   hasUnseen: boolean;
   markSeen: () => void;
@@ -61,12 +63,17 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
     };
   }, []);
 
-  // A browser that has never recorded a version is a fresh install (or the
-  // first load after this watermark replaced the old one). Stamp it silently
+  // A browser that has never recorded a version is a fresh install, or an
+  // existing one meeting this watermark for the first time. Stamp it silently
   // with the running version so only a later upgrade lights the dot.
   useEffect(() => {
     if (version !== null && readLastSeenVersion() === null) {
       writeSetting(LAST_SEEN_KEY, version);
+      try {
+        localStorage.removeItem(LEGACY_LAST_SEEN_KEY);
+      } catch {
+        // Nothing to clean up when storage is unavailable.
+      }
     }
   }, [version]);
 
@@ -81,7 +88,8 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
     setLastSeenVersionState(version);
   }, [version]);
 
-  const hasUnseen = version !== null && lastSeenVersion !== null && lastSeenVersion !== version;
+  // Only an upgrade lights the dot; running an older release than the one last seen does not.
+  const hasUnseen = version !== null && lastSeenVersion !== null && isNewerStableVersion(version, lastSeenVersion);
 
   return { enabled, setEnabled, version, hasUnseen, markSeen };
 }
