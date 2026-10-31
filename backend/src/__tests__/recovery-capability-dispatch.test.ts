@@ -52,9 +52,12 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
-beforeEach(() => {
+beforeEach(async () => {
   mockRead.mockReset();
   capability.resetBackupEnginesForTests();
+  // The hub caches a node's support for 30 s, so each case starts cold.
+  const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
+  resetRemoteRecoverySupportCacheForTests();
   vi.restoreAllMocks();
 });
 
@@ -67,13 +70,13 @@ const descriptor = (state = 'unavailable', reason = 'engine_not_installed', cont
 });
 
 describe('advertising', () => {
-  it('does not advertise volume protection from any build without an engine', async () => {
+  it('advertises volume protection, because this build ships the engine', async () => {
     const { CAPABILITIES, getActiveCapabilities } = await import('../services/CapabilityRegistry');
-    expect(CAPABILITIES as readonly string[]).not.toContain('volume-protection-v1');
-    expect(getActiveCapabilities()).not.toContain('volume-protection-v1');
+    expect(CAPABILITIES as readonly string[]).toContain('volume-protection-v1');
+    expect(getActiveCapabilities()).toContain('volume-protection-v1');
     const meta = await request(app).get('/api/meta');
     expect(meta.status).toBe(200);
-    expect((meta.body.capabilities as string[]).some((c) => c.startsWith('volume-protection'))).toBe(false);
+    expect((meta.body.capabilities as string[])).toContain('volume-protection-v1');
   });
 
   it('reports this node as unavailable, not as update required, when it has no engine', () => {
@@ -188,21 +191,43 @@ describe('readRecoveryNodeStatus', () => {
       });
 
       it('rejects and logs an answer that belongs to another dispatch, or that lost the operation id', async () => {
+        const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         mockRead.mockResolvedValue({ kind: 'ok', data: { ...descriptor('available', 'engine_registered'), operationId: '00000000-0000-4000-8000-000000000000' } });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({
           transport, errorClass: 'internal', volumeProtection: { state: 'unknown', reason: 'descriptor_mismatch' },
         });
+        resetRemoteRecoverySupportCacheForTests();
         mockRead.mockResolvedValue({ kind: 'ok', data: descriptor('available', 'engine_registered') });
         expect((await dispatcher.readRecoveryNodeStatus(getId())).volumeProtection).toMatchObject({ state: 'unknown', reason: 'descriptor_mismatch' });
         expect(warn).toHaveBeenCalledTimes(2);
       });
 
       it('reports a node that refused or failed the read with its own class', async () => {
+        const { resetRemoteRecoverySupportCacheForTests } = await import('../services/recovery/remoteSupport');
         mockRead.mockResolvedValue({ kind: 'http', status: 401 });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_refused' });
+        resetRemoteRecoverySupportCacheForTests();
         mockRead.mockResolvedValue({ kind: 'http', status: 500 });
         expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({ transport, errorClass: 'node_error' });
+      });
+
+      it('reads a node with no engine as an older build, the same way the preflight will', async () => {
+        mockRead.mockImplementation(echoing(descriptor('unavailable', 'engine_not_installed')));
+        expect(await dispatcher.readRecoveryNodeStatus(getId())).toMatchObject({
+          transport, errorClass: 'update_required',
+          volumeProtection: { state: 'update_required', reason: 'node_contract_older' },
+        });
+      });
+
+      it('caches the answer for 30 s, so a poll does not read the descriptor every time', async () => {
+        const { resolveRemoteRecoverySupport } = await import('../services/recovery/remoteSupport');
+        mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+        await resolveRemoteRecoverySupport(getId());
+        await resolveRemoteRecoverySupport(getId());
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        await resolveRemoteRecoverySupport(getId(), () => Date.now() + 31_000);
+        expect(mockRead).toHaveBeenCalledTimes(2);
       });
 
       it('reports an old node as update required', async () => {
