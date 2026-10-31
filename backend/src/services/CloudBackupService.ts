@@ -384,7 +384,7 @@ export class CloudBackupService {
         if (!cfg) return { entries: [], truncated: false };
         const { client, sdk } = await this.buildS3Client(cfg);
         const { objects, truncated } = await this.runBounded(async signal => {
-            const found: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
+            const objects: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
             let continuationToken: string | undefined;
             let truncated = false;
             for (let page = 0; page < RECOVERY_LIST_PAGE_LIMIT; page += 1) {
@@ -394,7 +394,7 @@ export class CloudBackupService {
                     MaxKeys: 1000,
                     ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
                 }), { abortSignal: signal });
-                found.push(...(result.Contents || []));
+                objects.push(...(result.Contents || []));
                 if (!result.IsTruncated) break;
                 if (!result.NextContinuationToken) {
                     // A provider that truncates without a token cannot be followed;
@@ -405,7 +405,7 @@ export class CloudBackupService {
                 continuationToken = result.NextContinuationToken;
                 truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
             }
-            return { objects: found, truncated };
+            return { objects, truncated };
         });
         const current = this.getInstanceId();
         const entries: CloudSnapshotEntry[] = [];

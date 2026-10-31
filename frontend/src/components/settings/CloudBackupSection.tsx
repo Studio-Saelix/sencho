@@ -113,12 +113,12 @@ class RequestTimeoutError extends Error {
 
 // The hub keeps working after the panel stops waiting, so an import or a
 // recovery that timed out here may still have created the snapshot.
-function withTimeoutHint(err: unknown, hint: string): string {
+function withTimeoutHint(err: unknown): string {
     const message = (err as Error)?.message || 'Request failed.';
-    return err instanceof RequestTimeoutError ? `${message} ${hint}` : message;
+    return err instanceof RequestTimeoutError
+        ? `${message} It may still have finished, so check Fleet → Snapshots before trying again.`
+        : message;
 }
-
-const MAY_HAVE_FINISHED = 'It may still have finished, so check Fleet → Snapshots before trying again.';
 
 function cloudFetch(endpoint: string, options: ApiFetchOptions = {}, deadlineMs = REQUEST_DEADLINE_MS): Promise<Response> {
     const controller = new AbortController();
@@ -568,7 +568,7 @@ export function CloudBackupSection() {
             }
             throw new Error(err.error || (action === 'import' ? 'Import failed' : 'Download failed'));
         } catch (err) {
-            toast.error(action === 'import' ? withTimeoutHint(err, MAY_HAVE_FINISHED) : (err as Error)?.message || 'Request failed.');
+            toast.error(action === 'import' ? withTimeoutHint(err) : ((err as Error)?.message || 'Request failed.'));
         } finally {
             archiveBusyRef.current = false;
             setArchiveBusy(false);
@@ -632,7 +632,7 @@ export function CloudBackupSection() {
             setRecoveryOpen(false);
             loadSnapshots();
         } catch (err) {
-            setRecoveryError(withTimeoutHint(err, MAY_HAVE_FINISHED));
+            setRecoveryError(withTimeoutHint(err));
         } finally {
             recoveryBusyRef.current = false;
             setRecoveryBusy(false);
