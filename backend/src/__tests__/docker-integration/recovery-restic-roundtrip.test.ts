@@ -378,6 +378,64 @@ describeIf('recovery round trip against real Docker', () => {
     }
   }, 300_000);
 
+  it('captures and restores a gigabyte of incompressible data, which a 64 MiB scratch could not', async () => {
+    const source = volumeName('sencho-it-big');
+    const target = volumeName('sencho-it-big-dst');
+    const intentId = randomUUID();
+    try {
+      createVolume(source);
+      // Random bytes do not compress or deduplicate, so restic stages real packs.
+      runInVolume(source, 'dd if=/dev/urandom of=big.bin bs=1M count=1024 2>/dev/null && sync');
+      const before = runInVolume(source, 'sha256sum big.bin').trim();
+      const token = await tokenFor(source);
+      const repository = RecoveryRepositoryStore.getInstance().get(repositoryId) as never;
+      const request = {
+        storage: storageFor(source, token),
+        repository,
+        trigger: 'manual' as const,
+        actor: 'integration',
+        kind: 'root' as const,
+      };
+
+      // The negative control: a scratch smaller than one pack fails whatever the
+      // host's core count, and the failure is the node's scratch running out, not
+      // an unreachable repository.
+      const small = { ...HELPER_PROFILES, backup: { ...HELPER_PROFILES.backup, tmpfs: { '/tmp': 'size=8m,mode=1777' } } };
+      const starved = await engineFor(source, small).createPoint(request, context('integration-big-small'));
+      expect(starved.ok).toBe(false);
+      if (!starved.ok) expect(starved.errorClass).toBe('node_error');
+
+      const engine = engineFor(source);
+      const capture = await engine.createPoint(request, context('integration-big-capture'));
+      expect(capture.ok).toBe(true);
+      if (!capture.ok) return;
+      expect(capture.evidence.capture.skippedCount).toBe(0);
+      expect(capture.evidence.capture.byteCount).toBeGreaterThanOrEqual(1024 * 1024 * 1024);
+
+      createVolume(target, { 'dev.sencho.recovery.restore-intent': intentId });
+      const restore = await engine.restore(
+        {
+          id: intentId,
+          operationId: 'integration-big-restore',
+          pointId: 'integration-point',
+          repositoryId,
+          snapshotId: capture.evidence.snapshotId,
+          target: { mode: 'new_volume', volumeName: target },
+          pathScope: null,
+          phase: 'staging',
+          actor: 'integration',
+          createdAt: Date.now(),
+        },
+        context('integration-big-restore'),
+      );
+      expect(restore.ok).toBe(true);
+      expect(runInVolume(target, 'sha256sum big.bin').trim()).toBe(before);
+    } finally {
+      removeVolume(source);
+      removeVolume(target);
+    }
+  }, 600_000);
+
   it('never lets a target the intent did not create be restored into', async () => {
     const source = volumeName('sencho-it-src2');
     const target = volumeName('sencho-it-existing');

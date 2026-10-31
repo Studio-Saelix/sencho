@@ -186,9 +186,9 @@ export async function initRepository(ctx: RepositoryRunContext): Promise<Reposit
  * Clear restic's own locks. Runs while Sencho still holds the repository lock,
  * because Sencho's lock is the real mutual exclusion: a helper that died left
  * restic's lock behind, and waiting 30 minutes for it to expire would leave the
- * node unusable for no reason.
+ * node unusable for no reason. Answers whether restic reported the locks cleared.
  */
-export async function unlockRepository(ctx: RepositoryRunContext): Promise<void> {
+export async function unlockRepository(ctx: RepositoryRunContext): Promise<boolean> {
   try {
     const result = await ctx.runner.run({
       profile: 'unlock',
@@ -203,10 +203,12 @@ export async function unlockRepository(ctx: RepositoryRunContext): Promise<void>
         String(result.exitCode), ctx.operationId, stderrNote(result),
       );
     }
+    return result.exitCode === 0;
   } catch (err) {
     // An unlock that could not run is logged; the next capture's own result is
     // the authority on whether the repository is usable.
     console.warn('[Recovery] Repository unlock could not run:', errorMessageForLog(err));
+    return false;
   }
 }
 

@@ -2057,8 +2057,6 @@ class DockerController {
   }
 
   /**
-
-  /**
    * True for a volume carrying the recovery repository label. The label is the
    * durable proof: `SelfIdentityService` is populated at startup, and a downgraded
    * build skips that step, so a deletion guard that only asked the registry would

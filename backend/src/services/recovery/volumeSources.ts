@@ -6,7 +6,7 @@ import { parseEffectiveModel } from '../preflight/effectiveModel';
 import SelfIdentityService from '../SelfIdentityService';
 import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { RecoveryError } from './redaction';
-import { deriveStorageKey, StorageIdentityStore } from './storageIdentity';
+import { deriveStorageKey, isDockerVolumeName, StorageIdentityStore } from './storageIdentity';
 import { getRecoveryAuthorityId } from './recoveryDb';
 import { HELPER_LABEL_REPOSITORY, RecoveryHelperRunner } from './restic/helperRunner';
 import { RECOVERY_RESERVED_PREFIX } from './localRepository';
@@ -51,8 +51,6 @@ export interface VolumeSource {
 
 /** Docker names an anonymous volume with the container's 64-hex id. */
 const ANONYMOUS_VOLUME_NAME = /^[0-9a-f]{64}$/;
-/** Docker's volume-name grammar. */
-const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]+$/;
 
 export interface EligibilityInput {
   name: string;
@@ -63,14 +61,16 @@ export interface EligibilityInput {
 }
 
 /**
- * Why this volume cannot hold recovery points, in the order the reasons matter:
- * a name Sencho reserves is refused whatever else is true of it, so a repository
- * volume can never be offered as a source even if its label were missing.
+ * Why this volume cannot hold recovery points, in the order the reasons matter.
+ * The repository label comes first so the repository volume says what it is
+ * (its name carries the reserved prefix too), and a volume whose name Sencho
+ * reserves is refused whatever else is true of it, so a repository volume can
+ * never be offered as a source even if its label were missing.
  */
 export function classifyVolumeEligibility(input: EligibilityInput): IneligibleReason | null {
-  if (!VOLUME_NAME.test(input.name)) return 'reserved_name';
-  if (input.name.startsWith(RECOVERY_RESERVED_PREFIX)) return 'reserved_name';
   if (input.labels && input.labels[HELPER_LABEL_REPOSITORY]) return 'repository_volume';
+  if (!isDockerVolumeName(input.name)) return 'reserved_name';
+  if (input.name.startsWith(RECOVERY_RESERVED_PREFIX)) return 'reserved_name';
   if (input.isOwnVolume(input.name)) return 'sencho_volume';
   if (ANONYMOUS_VOLUME_NAME.test(input.name)) return 'anonymous_volume';
   if ((input.driver ?? 'local') !== 'local') return 'non_local_driver';
@@ -212,6 +212,18 @@ export async function probeGenerationToken(input: {
   const report = parseProbeReport(lines[0] ?? '');
   if (!report) throw new RecoveryError('identity_unknown');
   return `${input.createdAt ?? 'unknown'}|${report.dev}:${report.ino}`;
+}
+
+/**
+ * Whether Docker's creation time for a volume still matches the one a generation
+ * token was minted from. A token the adapter did not make (no `|`) is not
+ * evidence of a change, so it matches. Same-second recreation keeps the time and
+ * is only caught by the inode the next capture's probe reads.
+ */
+export function generationTokenMatchesVolume(token: string, createdAt: string | null): boolean {
+  const separator = token.lastIndexOf('|');
+  if (separator < 0) return true;
+  return token.slice(0, separator) === (createdAt ?? 'unknown');
 }
 
 // --- In-use observation ------------------------------------------------------
@@ -426,19 +438,24 @@ export interface VolumeLocatorDescription {
   labels: Record<string, string>;
   eligible: boolean;
   ineligibleReason: IneligibleReason | null;
+  /** False when Docker has no such volume now (only a stored locator can say so). */
+  present: boolean;
 }
 
 /**
  * Describe a volume by name without recording an observation: its storage key,
  * when Docker made it, and its labels. Used for the authorization check (which
  * needs the key before any row exists) and to fetch the creation time the
- * generation token includes.
+ * generation token includes. A volume Docker does not have is `invalid_request`:
+ * a capture has nothing to read. Work on a point that already exists uses
+ * `describeStoredLocator` instead.
  */
 export async function describeVolumeLocator(input: {
   docker: Pick<Docker, 'getVolume'>;
   ownerNodeKey: string;
   volumeName: string;
 }): Promise<VolumeLocatorDescription> {
+  if (!isDockerVolumeName(input.volumeName)) throw new RecoveryError('invalid_request');
   const source = await inspectVolumeSource(input.docker, input.volumeName);
   if (!source) throw new RecoveryError('invalid_request');
   return {
@@ -447,6 +464,41 @@ export async function describeVolumeLocator(input: {
     labels: source.labels,
     eligible: source.eligible,
     ineligibleReason: source.ineligibleReason,
+    present: true,
+  };
+}
+
+/**
+ * Describe the volume behind a stored storage identity. Listing, verifying and
+ * restoring a point, and releasing a lock, act on what was recorded, not on the
+ * live volume, and the volume is routinely gone by then (`docker compose down
+ * -v`, a prune, a rebuilt host): that is the case recovery exists for. A missing
+ * volume is therefore described as absent, with no labels, and the recorded
+ * dependents carry the authorization decision.
+ */
+export async function describeStoredLocator(input: {
+  docker: Pick<Docker, 'getVolume'>;
+  ownerNodeKey: string;
+  locator: string;
+}): Promise<VolumeLocatorDescription> {
+  const source = await inspectVolumeSource(input.docker, input.locator);
+  if (!source) {
+    return {
+      storageKey: deriveStorageKey(getRecoveryAuthorityId(), input.ownerNodeKey, 'named_volume', input.locator),
+      createdAt: null,
+      labels: {},
+      eligible: false,
+      ineligibleReason: 'volume_missing',
+      present: false,
+    };
+  }
+  return {
+    storageKey: deriveStorageKey(getRecoveryAuthorityId(), input.ownerNodeKey, 'named_volume', source.volumeName),
+    createdAt: source.createdAt,
+    labels: source.labels,
+    eligible: source.eligible,
+    ineligibleReason: source.ineligibleReason,
+    present: true,
   };
 }
 

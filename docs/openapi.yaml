@@ -1190,14 +1190,19 @@ components:
           description: Fixed, sanitized sentence for this class. Never raw engine output.
         errorClass:
           type: string
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, interrupted, transport_unreachable, node_refused, node_error, internal]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal]
         code:
           type: string
           description: The error class upper-cased, for a client to switch on.
           example: LOCK_HELD
         reason:
           type: string
-          description: Present on some `503` answers, for example `engine_starting` while the node is still starting.
+          description: |
+            A stable token for the specific cause, present on some answers:
+            `engine_starting` while the node is still starting, `repository_not_initialized`
+            when no repository has been provisioned (both `503 capability_unavailable`),
+            `repository_replaced` for a restore of a point in a replaced repository
+            (`503 repository_unavailable`), and `not_cancellable`.
 
     RecoveryOperation:
       type: object
@@ -1226,7 +1231,7 @@ components:
             success and is never retried silently.
         errorClass:
           type: ["string", "null"]
-          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, interrupted, transport_unreachable, node_refused, node_error, internal, null]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, null]
         errorDetail: { type: ["string", "null"] }
         processEpoch: { type: string }
         createdAt: { type: integer }
@@ -5166,13 +5171,17 @@ paths:
         it, considers every volume on the node. Each root carries its eligibility, its
         coverage reason, and the covering point when there is one. A root the caller may
         not read appears as `{"access": "inaccessible"}` with its name withheld, and it
-        still counts against the verdict.
+        still counts against the verdict. A volume recreated since its last capture reads
+        `older_generation` at once, from Docker's creation time, without waiting for a new capture.
       parameters:
         - $ref: "#/components/parameters/nodeId"
         - name: stack
           in: query
           required: false
-          description: Stack directory name. Omit to consider every volume on the node.
+          description: |
+            One stack directory name. Omit to consider every volume on the node. A stack that
+            does not exist lists nothing; a repeated parameter or a name that is not a valid
+            stack name answers `400`.
           schema:
             type: string
       responses:
@@ -5206,7 +5215,7 @@ paths:
       operationId: listRecoveryPoints
       tags: [Recovery]
       summary: List a volume's recovery points
-      description: Returns the storage identity with every point recorded against its key, newest first, each with its verifications. A caller who may not read the storage is refused.
+      description: Returns the storage identity with every point recorded against its key, newest first, each with its verifications. A caller who may not read the storage is refused. The volume itself need not exist any more.
       parameters:
         - name: storageId
           in: path
@@ -5270,8 +5279,12 @@ paths:
         Admits a root capture of one named volume. Eligibility, readiness, dependent
         stacks, the access check, a generation probe, the operation record, and the locks
         all happen before the answer, so a held or stale lock is a real `409` rather than
-        a background failure. The capture runs in the background and is followed by a
-        repository-wide metadata check before the operation ends.
+        a background failure. A refused request is not recorded, so the same idempotency
+        key can be sent again once the lock is gone. One repository lock covers the node:
+        only one capture, verification, or restore runs at a time on it. A node with no
+        repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
+        The capture runs in the background and is followed by a repository-wide metadata
+        check before the operation ends.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:
@@ -5284,8 +5297,10 @@ paths:
               properties:
                 volumeName:
                   type: string
-                  minLength: 1
+                  minLength: 2
                   maxLength: 255
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]+$'
+                  description: A name Docker accepts for a volume. Anything else answers `400`.
                 idempotencyKey:
                   type: string
                   minLength: 1
@@ -5325,7 +5340,8 @@ paths:
         Runs a restic check over the whole repository, so the result covers every point in
         it. `engine_check_metadata` is the default; `engine_check_read_data` also reads
         every pack file back. The result is appended as a verification on every point in
-        the repository and never rewrites an older one.
+        the repository and never rewrites an older one. A check that finds damage ends the
+        operation `failed` with `integrity_mismatch`. The source volume need not exist any more.
       parameters:
         - name: pointId
           in: path
@@ -5389,13 +5405,17 @@ paths:
       tags: [Recovery]
       summary: Restore a point into a new volume
       description: |
-        Restores a point into a volume Sencho creates. The target name must not exist,
+        Restores a point into a volume Sencho creates. The source volume need not exist any
+        more. The target name must be a name Docker accepts for a volume (anything else
+        answers `400` before an operation is recorded), must not exist,
         must not name one of Sencho's own volumes, must not start with `sencho-recovery-`,
         and needs the same access that changing a stack does when it starts with a known
         stack's name plus an underscore. Sencho records a restore intent, creates the
         target with that intent's label, proves it created it, restores with verification,
         and on failure removes only its own unused target. Extended-attribute-only
-        failures end `partial` with an `xattrWarnings` count and the volume is kept.
+        failures end `partial` with `errorClass: attributes_not_restored` and an
+        `xattrWarnings` count, and the volume is kept. A point in a replaced repository
+        answers `503 repository_unavailable` with reason `repository_replaced`.
       parameters:
         - name: pointId
           in: path
@@ -5413,8 +5433,9 @@ paths:
               properties:
                 targetVolumeName:
                   type: string
-                  minLength: 1
+                  minLength: 2
                   maxLength: 255
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]+$'
                 idempotencyKey:
                   type: string
                   minLength: 1
@@ -5549,7 +5570,10 @@ paths:
         Releases a lock whose owner ended `completion_unknown`, after review. A live lock
         is never released here; its owner releases it by finishing, and a request against
         a live lock answers `409` with `LOCK_HELD`. A repository lock requires permission
-        to change system settings; a storage lock requires the same access a restore does.
+        to change system settings; a storage lock requires the same access a restore does,
+        and the storage's volume need not exist any more. At startup, once restic's own locks
+        are cleared, Sencho releases the repository lock of interrupted captures, checks and
+        restores itself; an interrupted provisioning and every storage lock wait for this call.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:

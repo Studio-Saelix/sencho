@@ -24,7 +24,7 @@ Restoring compose files does not refill a database, and restoring a volume does 
   Recovery points live on this node, in a Docker volume on the same host as the data they protect. They are not an off-host copy: losing this host loses both.
 </Warning>
 
-The repository survives a container mistake, a bad deploy, and an accidental `docker compose down -v`, which is what it is for. Take a separate off-host copy as well; [Backup & Restore](/operations/backup) covers the files, including the key material described below.
+The repository survives a container mistake, a bad deploy, and an accidental `docker compose down -v`, which is what it is for: the volume is gone, but its points are still listed, verified, and restored, with no need to recreate the volume first. The volume listing only shows volumes Docker still has, so keep the `storageId` and `pointId` of the capture operation (or read them from `GET /api/recovery/operations/{id}`) to address a point after its volume is gone. Take a separate off-host copy as well; [Backup & Restore](/operations/backup) covers the files, including the key material described below.
 
 ## Which volumes can be protected
 
@@ -47,14 +47,16 @@ Within the set it considers (a stack's declared volumes, or every volume on the 
 
 A named volume that Docker does not have yet is not storage, so a stack that declares a volume before it exists is not listed until the volume exists.
 
-Shared storage is one volume with several stacks behind it, not one volume per stack. Coverage, points, and locks all follow the volume, and every stack that uses it is part of the access check.
+Shared storage is one volume with several stacks behind it, not one volume per stack. Coverage and points follow the volume, and every stack that uses it is part of the access check. For a volume that no longer exists, the stacks Sencho recorded for it at its last capture stand in for the ones it can no longer see.
+
+Locks do not follow the volume. Every operation takes the node's repository lock, so one capture, verification, or restore runs at a time on a node, whichever volumes are involved. A second request answers `409 lock_held` ("Another recovery operation is running on this node") and is not recorded, so the same request with the same idempotency key can be sent again once the first one ends. A capture also takes a lock for its volume.
 
 ## What "Protected" means
 
 A volume is Protected when one point satisfies all of the following:
 
 - It is a root point: a capture of the whole volume, not of a single path.
-- It belongs to the volume's current generation. A volume deleted and recreated under the same name is a new generation, and points of the old bytes stop counting.
+- It belongs to the volume's current generation. A volume deleted and recreated under the same name is a new generation, and points of the old bytes stop counting. Reading coverage compares Docker's creation time for the volume with the one the generation was recorded with, so a recreated volume stops reading Protected right away, with reason `older_generation`, and does not wait for the next capture. A volume recreated within the same second keeps its creation time; the next capture reads the volume's root inode and opens the new generation.
 - It completed. A point that skipped files or left files out is stored as `partial` and never counts.
 - Its most recent verification says verified. Verification is a repository-wide check, described below.
 - It finished within the last 7 days. Older points remain as evidence and are never deleted because they aged; they simply stop counting.
@@ -121,7 +123,7 @@ A new request answers `202` with the admitted operation. Repeating the same requ
 }
 ```
 
-The capture itself runs in the background, in a helper container with no network and a read-only root filesystem. After the bytes are read, Sencho reads the volume's generation again. If the volume was recreated during the capture, the point is refused as `identity_unknown` rather than labelled with bytes that no longer exist. A successful capture is followed by a repository-wide metadata check before the operation ends.
+The capture itself runs in the background, in a helper container with no network and a read-only root filesystem. restic stages temporary pack files in the helper's scratch space before it writes them to the repository, so a capture gets a 512 MiB scratch and 2 GiB of memory; the size of the volume does not change what it needs. If the helper still cannot finish, the operation ends `failed` with `node_error`, not `repository_unavailable`. After the bytes are read, Sencho reads the volume's generation again. If the volume was recreated during the capture, the point is refused as `identity_unknown` rather than labelled with bytes that no longer exist. A successful capture is followed by a repository-wide metadata check before the operation ends.
 
 Poll the operation to follow it:
 
@@ -153,6 +155,8 @@ curl https://your-sencho-instance:1852/api/recovery/operations/8f5f0a52-3a3e-4d7
 }
 ```
 
+A request refused at admission with `409` is not recorded as an operation. A node with no repository answers `503` with `errorClass: "capability_unavailable"` and `reason: "repository_not_initialized"`; provision one first.
+
 An operation ends in `succeeded`, `partial`, `failed`, `cancelled`, or `completion_unknown`. A `partial` capture still produced a point, and that point never counts toward Protected. `completion_unknown` means Sencho lost the process mid-run; it is neither success nor a silent retry. You can stop a running capture with `POST /api/recovery/operations/{id}/cancel`, which settles the point as failed before it settles the operation. A repository provisioning operation cannot be cancelled.
 
 ## Verify a point
@@ -169,7 +173,7 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/points/5b1c8b7e-2f60
   }'
 ```
 
-The request answers `202` with an operation. The result is appended as a verification record on every point in the repository, and a new check never rewrites an older one. A check that could not run is recorded as an error, which is not a pass.
+The request answers `202` with an operation. The result is appended as a verification record on every point in the repository, and a new check never rewrites an older one. A check that could not run is recorded as an error, which is not a pass. A check that finds damage ends the operation `failed` with `integrity_mismatch`: the check ran, and what it found is that the repository is not intact.
 
 ## Restore to a new volume
 
@@ -177,6 +181,7 @@ A restore always writes into a volume Sencho creates for the purpose. It never o
 
 The target name must satisfy all of these:
 
+- It is a name Docker accepts for a volume: at least two characters, starting with a letter or digit, then letters, digits, `_`, `.`, or `-`. Any other name answers `400 invalid_request` before anything is recorded.
 - The volume does not exist yet.
 - The name is not one of Sencho's own volumes.
 - The name does not start with `sencho-recovery-`.
@@ -198,9 +203,9 @@ Sencho records a restore intent before any byte moves, creates the target with t
 
 If the restore fails, Sencho removes only the volume it created, and only when it still carries the intent's label and no container mounts it. A volume that something started using is left in place and the operation ends `completion_unknown` rather than deleting data under a workload. The same reconciliation runs at startup, so a crash mid-restore is settled the same way.
 
-Some extended attributes cannot be applied: file capabilities (`security.capability`) and SELinux labels are the usual cases. When those are the only failures, the operation reports `partial`, the restore result carries an `xattrWarnings` count, and the volume is kept, because the files are there and only part of their metadata is not.
+Some extended attributes cannot be applied: file capabilities (`security.capability`) and SELinux labels are the usual cases. When those are the only failures, the operation reports `partial` with `errorClass: "attributes_not_restored"`, the restore result carries an `xattrWarnings` count, and the volume is kept, because the files are there and only part of their metadata is not.
 
-A restore only works against the active repository. If a point belongs to a repository that has been replaced, restore it before replacing, or take a new point.
+A restore only works against the active repository. A point in a repository that has been replaced answers `503` with `errorClass: "repository_unavailable"` and `reason: "repository_replaced"`. Restore it before replacing, or take a new point.
 
 ## The recovery repository
 
@@ -367,7 +372,7 @@ curl "https://your-sencho-instance:1852/api/recovery/storage?stack=web" \
 }
 ```
 
-Without `?stack=`, every volume on the node is considered. A root the caller may not read appears as `{ "access": "inaccessible" }` with no name, and it still counts against the verdict: an unreadable root must never make a partly protected stack read as protected. A root's `storageId` is null until the volume has been observed, which happens when its first point is captured.
+Without `?stack=`, every volume on the node is considered. `stack` is one stack name: a stack that does not exist lists nothing, and a repeated parameter or a name that is not a valid stack name answers `400 invalid_request`. A root the caller may not read appears as `{ "access": "inaccessible" }` with no name, and it still counts against the verdict: an unreadable root must never make a partly protected stack read as protected. A root's `storageId` is null until the volume has been observed, which happens when its first point is captured.
 
 ### List a volume's points
 
@@ -442,15 +447,17 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/locks/release \
 }
 ```
 
-Use `scope: "repository"` with the repository id to release the repository lock. Review the interrupted operation before releasing its lock: check the operation, its point, and any target volume it left behind. The route answers `lock_held` when the lock is still owned by a live operation.
+Use `scope: "repository"` with the repository id to release the repository lock. Review the interrupted operation before releasing its lock: check the operation, its point, and any target volume it left behind. The route answers `lock_held` when the lock is still owned by a live operation. A volume whose source no longer exists can still have its storage lock released.
+
+A restart does not leave the node closed. When Sencho starts it removes the helpers a previous process left, clears restic's own locks, and, once that has succeeded, releases the repository lock of any capture, verification, or restore that was interrupted, because none of them leaves anything in the repository to review. The volume that was being captured keeps its storage lock until you release it, and so does an interrupted repository provisioning. If restic's locks could not be cleared, the repository lock stays stale and an administrator releases it.
 
 ### Error responses
 
-Every error has the same shape. `code` is the upper-cased error class, so a client can switch on one field.
+Every error from these routes has the same shape. `code` is the upper-cased error class, so a client can switch on one field. A refusal can also carry a `reason`, a stable token for the specific cause: `engine_starting`, `repository_not_initialized`, `repository_replaced`, or `not_cancellable`.
 
 ```json
 {
-  "error": "Another recovery operation is running on this storage.",
+  "error": "Another recovery operation is running on this node.",
   "errorClass": "lock_held",
   "code": "LOCK_HELD"
 }
@@ -461,8 +468,11 @@ Every error has the same shape. `code` is the upper-cased error class, so a clie
 | `400` | `invalid_request` |
 | `403` | `permission_denied` |
 | `409` | `update_required`, `identity_unknown`, `lock_held`, `lock_stale`, `integrity_mismatch`, `interrupted` |
+| `422` | `source_unreadable`, `attributes_not_restored` (these end an operation; they are not request errors) |
 | `500` | `internal` |
-| `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable` |
+| `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error` |
+
+For a remote node, the control instance answers `503` with `errorClass: "transport_unreachable"` whenever it cannot reach the node: a stopped node, a disconnected Pilot tunnel, or a target it will not call. A per-user permission check the control instance makes itself, before the request reaches the node, answers with `error` and, usually, `code`, and no `errorClass`.
 
 While the node is still starting, a mutating request answers `503` with `errorClass: "capability_unavailable"` and `reason: "engine_starting"`. Wait for startup to finish and retry.
 

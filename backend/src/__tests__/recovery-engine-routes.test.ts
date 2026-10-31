@@ -592,6 +592,313 @@ describe('GET /api/recovery/storage', () => {
   });
 });
 
+describe('input the daemon would reject', () => {
+  async function operationRows(): Promise<number> {
+    return (recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations').get() as { n: number }).n;
+  }
+
+  const BAD_NAMES = ['a b;rm -rf', 'x/../y', '../../etc', 'with\u0000nul', 'café_data', '.hidden', 'a'];
+
+  it('answers 400 for a volume name Docker rejects, before an operation row exists', async () => {
+    seedRepository();
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    for (const volumeName of BAD_NAMES) {
+      const res = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
+        .send({ volumeName, idempotencyKey: randomUUID() });
+      expect(res.status, volumeName).toBe(400);
+      expect(res.body.errorClass, volumeName).toBe('invalid_request');
+    }
+    expect(await operationRows()).toBe(0);
+  });
+
+  it('answers 400 for a restore target Docker rejects, before an operation row exists', async () => {
+    const repositoryId = seedRepository();
+    service().markReadyForTests();
+    await stubDocker([]);
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:routes', kind: 'named_volume', locator: 'app_data',
+      generationToken: 't1', dependents: [],
+    });
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root', storageId: storage.id, expectedGenerationToken: 't1', repositoryId, trigger: 'manual',
+      actor: 'admin', sourceOperationId: 'op-names', sourceNodeKey: 'docker-engine:routes', engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    for (const targetVolumeName of BAD_NAMES) {
+      const res = await request(app).post(`/api/recovery/points/${point.id}/restore`).set('Cookie', adminCookie)
+        .send({ targetVolumeName, idempotencyKey: randomUUID() });
+      expect(res.status, targetVolumeName).toBe(400);
+      expect(res.body.errorClass, targetVolumeName).toBe('invalid_request');
+    }
+    expect(await operationRows()).toBe(0);
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get())
+      .toEqual({ n: 0 });
+  });
+
+  it('answers an unknown stack with an empty listing and a malformed one with 400', async () => {
+    service().markReadyForTests();
+    await registerEngine();
+    await stubDocker(['app_data']);
+    const unknown = await request(app).get('/api/recovery/storage?stack=nonexistent-stack').set('Cookie', adminCookie);
+    expect(unknown.status).toBe(200);
+    expect(unknown.body.roots).toEqual([]);
+    for (const query of ['stack=../x', 'stack=a&stack=b', 'stack=a%00b', 'stack=a%2Fb']) {
+      const res = await request(app).get(`/api/recovery/storage?${query}`).set('Cookie', adminCookie);
+      expect(res.status, query).toBe(400);
+      expect(res.body.errorClass, query).toBe('invalid_request');
+    }
+  });
+});
+
+describe('a point whose volume was removed', () => {
+  async function seedOrphan(): Promise<{ storageId: string; storageKey: string; pointId: string; repositoryId: string }> {
+    const repositoryId = seedRepository();
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:engine-routes', kind: 'named_volume', locator: 'gone_data',
+      generationToken: 'created|1:2', dependents: [],
+    });
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root', storageId: storage.id, expectedGenerationToken: 'created|1:2', repositoryId,
+      trigger: 'manual', actor: 'admin', sourceOperationId: 'op-gone',
+      sourceNodeKey: 'docker-engine:engine-routes', engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    return { storageId: storage.id, storageKey: storage.storageKey, pointId: point.id, repositoryId };
+  }
+
+  it('still lists its points', async () => {
+    const { storageId, pointId } = await seedOrphan();
+    service().markReadyForTests();
+    await stubDocker([]);
+    const res = await request(app).get(`/api/recovery/storage/${storageId}/points`).set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.storage.locator).toBe('gone_data');
+    expect(res.body.points.map((entry: { point: { id: string } }) => entry.point.id)).toEqual([pointId]);
+  });
+
+  it('still restores to a new name', async () => {
+    const { pointId } = await seedOrphan();
+    service().markReadyForTests();
+    await stubDocker([]);
+    await registerEngine();
+    engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake', contractVersion: 1, storageKinds: ['named_volume'],
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({ ok: false as const, errorClass: 'internal' }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: true as const, evidence: { filesRestored: 1, bytesRestored: 1, verified: true } }),
+    }) as never);
+    // The source volume is gone; the target is created by the background restore.
+    const DockerController = (await import('../services/DockerController')).default;
+    const createdAt = new Date().toISOString();
+    const volumes = new Map<string, Record<string, string>>();
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
+      info: async () => ({ ID: 'engine-routes' }),
+      listVolumes: async () => ({ Volumes: [] }),
+      listContainers: async () => [],
+      createVolume: async (spec: { Name: string; Labels?: Record<string, string> }) => {
+        volumes.set(spec.Name, spec.Labels ?? {});
+        return { Name: spec.Name };
+      },
+      getVolume: (name: string) => ({
+        inspect: async () => {
+          const labels = volumes.get(name);
+          if (!labels) throw Object.assign(new Error('no such volume'), { statusCode: 404 });
+          return { Name: name, Driver: 'local', Labels: labels, CreatedAt: createdAt };
+        },
+      }),
+    } as unknown as import('dockerode'));
+    const res = await request(app).post(`/api/recovery/points/${pointId}/restore`).set('Cookie', adminCookie)
+      .send({ targetVolumeName: 'rescued_data', idempotencyKey: randomUUID() });
+    expect(res.status).toBe(202);
+    await service().whenIdleForTests();
+    const polled = await request(app).get(`/api/recovery/operations/${res.body.operation.id}`).set('Cookie', adminCookie);
+    expect(polled.body.operation.state).toBe('succeeded');
+    expect(volumes.has('rescued_data')).toBe(true);
+  });
+
+  it('still verifies', async () => {
+    const { pointId } = await seedOrphan();
+    service().markReadyForTests();
+    await stubDocker([]);
+    await registerEngine();
+    engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake', contractVersion: 1, storageKinds: ['named_volume'],
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({ ok: false as const, errorClass: 'internal' }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: false as const, errorClass: 'internal' }),
+    }) as never);
+    const res = await request(app).post(`/api/recovery/points/${pointId}/verify`).set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID() });
+    expect(res.status).toBe(202);
+    await service().whenIdleForTests();
+  });
+
+  it('still releases its stale storage lock', async () => {
+    const { storageKey, repositoryId } = await seedOrphan();
+    service().markReadyForTests();
+    await stubDocker([]);
+    const store = operations.RecoveryOperationStore.getInstance();
+    const stuck = store.start({
+      idempotencyKey: randomUUID(), kind: 'create_point', actor: 'admin', transport: 'local',
+      requestDigest: engine.sha256Digest(['create_point', 'gone_data']),
+    }).operation;
+    store.markRunning(stuck.id);
+    store.acquireLock('storage', storageKey, stuck.id);
+    store.finish(stuck.id, { state: 'completion_unknown' });
+    const res = await request(app).post('/api/recovery/locks/release').set('Cookie', adminCookie)
+      .send({ scope: 'storage', resourceKey: storageKey });
+    expect(res.status).toBe(200);
+    expect(store.getLock('storage', storageKey)).toBeNull();
+    expect(repositoryId).toBeTruthy();
+  });
+});
+
+describe('coverage of a volume that was recreated', () => {
+  it('stops counting the old point as soon as Docker reports a new volume, without a capture', async () => {
+    const repositoryId = seedRepository();
+    service().markReadyForTests();
+    await registerEngine();
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:engine-routes', kind: 'named_volume', locator: 'app_data',
+      generationToken: '2026-10-31T10:00:00Z|63:42', dependents: [],
+    });
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root', storageId: storage.id, expectedGenerationToken: '2026-10-31T10:00:00Z|63:42',
+      repositoryId, trigger: 'manual', actor: 'admin', sourceOperationId: 'op-covered',
+      sourceNodeKey: 'docker-engine:engine-routes', engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    points.RecoveryPointStore.getInstance().recordVerificationForRepository(
+      repositoryId, 'engine_check_metadata', 'verified', null,
+    );
+
+    const DockerController = (await import('../services/DockerController')).default;
+    const dockerAt = (createdAt: string) => ({
+      info: async () => ({ ID: 'engine-routes' }),
+      listVolumes: async () => ({
+        Volumes: [{ Name: 'app_data', Driver: 'local', Labels: {}, CreatedAt: createdAt }],
+      }),
+      listContainers: async () => [],
+      getVolume: () => ({
+        inspect: async () => ({ Name: 'app_data', Driver: 'local', Labels: {}, CreatedAt: createdAt }),
+      }),
+    } as unknown as import('dockerode'));
+    const rootOf = async (url: string) => {
+      const res = await request(app).get(url).set('Cookie', adminCookie);
+      expect(res.status).toBe(200);
+      return (res.body.roots as Array<{ volumeName?: string; coverage?: string; coveringPointId?: string | null }>)
+        .find((root) => root.volumeName === 'app_data');
+    };
+
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(dockerAt('2026-10-31T10:00:00Z'));
+    expect((await rootOf('/api/recovery/storage'))?.coverage).toBe('covered');
+
+    // `down -v` then `up`: same name, new volume, new creation time.
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(dockerAt('2026-10-31T11:30:00Z'));
+    const recreated = await rootOf('/api/recovery/storage');
+    expect(recreated?.coverage).toBe('older_generation');
+    expect(recreated?.coveringPointId).toBeNull();
+    const verdict = await request(app).get('/api/recovery/storage').set('Cookie', adminCookie);
+    expect(verdict.body.verdict.state).toBe('unprotected');
+  });
+});
+
+describe('a refused request can be sent again', () => {
+  it('runs the same capture key after the lock that refused it is released', async () => {
+    const repositoryId = seedRepository();
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    await registerEngine();
+    service().setHelperRunnerForTests({
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        if (spec.profile === 'probe' && spec.onStdoutLine) {
+          spec.onStdoutLine(JSON.stringify({ dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877 }));
+        }
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+      removeForeignEpochHelpers: async () => 0,
+    } as never);
+    engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake', contractVersion: 1, storageKinds: ['named_volume'],
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({
+        ok: true as const,
+        evidence: { snapshotId: 'snap-retry', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'crash_consistent_stopped' },
+      }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: false as const, errorClass: 'internal' }),
+    }) as never);
+
+    const store = operations.RecoveryOperationStore.getInstance();
+    const holder = store.start({
+      idempotencyKey: randomUUID(), kind: 'verify_point', actor: 'admin', transport: 'local',
+      requestDigest: engine.sha256Digest(['holder']),
+    }).operation;
+    store.markRunning(holder.id);
+    store.acquireLock('repository', repositoryId, holder.id);
+
+    const key = randomUUID();
+    const refused = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
+      .send({ volumeName: 'app_data', idempotencyKey: key });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ errorClass: 'lock_held', code: 'LOCK_HELD' });
+    expect(refused.body.error).toContain('on this node');
+
+    store.finish(holder.id, { state: 'succeeded' });
+    const retried = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
+      .send({ volumeName: 'app_data', idempotencyKey: key });
+    // 202, not a 200 replay of a failed operation that never ran.
+    expect(retried.status).toBe(202);
+    await service().whenIdleForTests();
+    const polled = await request(app).get(`/api/recovery/operations/${retried.body.operation.id}`)
+      .set('Cookie', adminCookie);
+    expect(polled.body.operation.state).toBe('succeeded');
+  });
+});
+
+describe('one error shape', () => {
+  it('answers a refused permission with errorClass and code, on every route that checks one', async () => {
+    seedRepository();
+    service().markReadyForTests();
+    await stubDocker([]);
+    const refusals = [
+      await request(app).post('/api/recovery/repository').set('Cookie', viewerCookie).send({ idempotencyKey: randomUUID() }),
+      await request(app).post('/api/recovery/locks/release').set('Cookie', viewerCookie)
+        .send({ scope: 'repository', resourceKey: 'x' }),
+    ];
+    for (const res of refusals) {
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ errorClass: 'permission_denied', code: 'PERMISSION_DENIED' });
+      expect(typeof res.body.error).toBe('string');
+    }
+  });
+
+  it('answers a capture with no repository as not provisioned', async () => {
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    const res = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
+      .send({ volumeName: 'app_data', idempotencyKey: randomUUID() });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      errorClass: 'capability_unavailable',
+      reason: 'repository_not_initialized',
+    });
+    expect(res.body.error).toContain('no recovery repository');
+  });
+});
+
 describe('audit summaries', () => {
   it('names each recovery action without naming any captured data', async () => {
     const { getAuditSummary } = await import('../utils/audit-summaries');

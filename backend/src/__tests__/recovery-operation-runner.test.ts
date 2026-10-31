@@ -321,15 +321,62 @@ describe('create point', () => {
       requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local', authorize: allowAll,
     })).rejects.toMatchObject({ errorClass: 'lock_held' });
 
-    // The refused attempt is settled, not left running.
-    const refused = recoveryDbModule.recoveryDb()
-      .prepare("SELECT state, error_class FROM recovery_operations WHERE idempotency_key = 'key-6'")
-      .get() as { state: string; error_class: string };
-    expect(refused).toEqual({ state: 'failed', error_class: 'lock_held' });
+    // A refused request leaves nothing behind: no operation row, so its key is
+    // still free, and no lock the refused attempt took before the one that failed.
+    const refusedRows = recoveryDbModule.recoveryDb()
+      .prepare("SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key = 'key-6'")
+      .get() as { n: number };
+    expect(refusedRows.n).toBe(0);
+    const heldLocks = recoveryDbModule.recoveryDb()
+      .prepare('SELECT COUNT(*) AS n FROM recovery_locks WHERE owner_operation_id <> ?')
+      .get(first.operation.id) as { n: number };
+    expect(heldLocks.n).toBe(0);
     service().cancel(first.operation.id);
     release();
     await service().whenIdleForTests();
     expect(seeded.repositoryId).toBeTruthy();
+
+    // The same key, sent again once the lock is free, runs. It is not answered
+    // with a failure that never ran.
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    const retried = await service().admitCreatePoint({
+      nodeId, volumeName: VOLUME, actor: 'bob', idempotencyKey: 'key-6',
+      requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local', authorize: allowAll,
+    });
+    expect(retried.replayed).toBe(false);
+    await service().whenIdleForTests();
+    expect(operations.RecoveryOperationStore.getInstance().get(retried.operation.id)?.state).toBe('succeeded');
+  });
+
+  it('refuses a capture on a repository lock a verify holds, and the retry of the same key runs', async () => {
+    // The capture's storage lock is free, so the refusal comes from the second
+    // lock it asks for. The first lock it took must not survive the refusal.
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    const store = operations.RecoveryOperationStore.getInstance();
+    const holder = store.start({
+      idempotencyKey: 'holder', kind: 'verify_point', actor: 'alice', transport: 'local',
+      requestDigest: runner.sha256Digest(['holder']),
+    }).operation;
+    store.markRunning(holder.id);
+    store.acquireLock('repository', seeded.repositoryId, holder.id);
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+
+    const request = {
+      nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'key-two-locks',
+      requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local' as const, authorize: allowAll,
+    };
+    await expect(service().admitCreatePoint(request)).rejects.toMatchObject({ errorClass: 'lock_held' });
+    expect(store.getLock('storage', seeded.storage.storageKey)).toBeNull();
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_points').get())
+      .toEqual({ n: 0 });
+
+    store.finish(holder.id, { state: 'succeeded' });
+    const retried = await service().admitCreatePoint(request);
+    expect(retried.replayed).toBe(false);
+    await service().whenIdleForTests();
+    expect(store.get(retried.operation.id)?.state).toBe('succeeded');
   });
 
   it('treats a replay with the same digest as the same operation and a different one as invalid', async () => {
@@ -432,7 +479,9 @@ describe('verify', () => {
     });
     await service().whenIdleForTests();
 
-    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+    // The check ran; what it found is "not intact", and the operation says so.
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+      .toMatchObject({ state: 'failed', errorClass: 'integrity_mismatch' });
     // Both points carry the mismatch, not just the one the operation named.
     for (const point of store.listForStorage(seeded.storage.id)) {
       expect(store.listVerifications(point.id).map((v) => v.result)).toEqual(['mismatch']);
@@ -615,7 +664,249 @@ describe('restore', () => {
     expect(fake.volumes.has('partial_target')).toBe(true);
     expect(intents.RestoreIntentStore.getInstance().getByOperation(admitted.operation.id))
       .toMatchObject({ phase: 'committed', xattrWarnings: 3 });
-    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('partial');
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+      .toMatchObject({ state: 'partial', errorClass: 'attributes_not_restored' });
+  });
+});
+
+describe('a point whose volume no longer exists', () => {
+  // `docker compose down -v` and a prune remove the volume; the point is what is
+  // left, and every action on it has to work without the live volume.
+  async function seedOrphanPoint(): Promise<{ pointId: string; storage: import('../services/recovery/types').StorageIdentity; repositoryId: string }> {
+    const seeded = await seedProtectableVolume();
+    const store = points.RecoveryPointStore.getInstance();
+    const point = store.begin({
+      kind: 'root',
+      storageId: seeded.storage.id,
+      expectedGenerationToken: 'token-1',
+      repositoryId: seeded.repositoryId,
+      trigger: 'manual',
+      actor: 'alice',
+      sourceOperationId: 'op-orphan',
+      sourceNodeKey: ENGINE_KEY,
+      engineId: 'restic',
+    });
+    store.finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap-o', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    return { pointId: point.id, storage: seeded.storage, repositoryId: seeded.repositoryId };
+  }
+
+  it('restores to a new volume', async () => {
+    const fake = stubDocker(fakeDocker({ volumes: [] }));
+    const { pointId } = await seedOrphanPoint();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+
+    const admitted = await service().admitRestore({
+      nodeId, pointId, targetVolumeName: 'rescued_data', actor: 'alice', idempotencyKey: 'orphan-restore',
+      requestDigest: runner.sha256Digest(['restore', pointId, 'rescued_data', 'new_volume']),
+      transport: 'local', authorize: allowAll, authorizeCrossStack: allowAll,
+    });
+    await service().whenIdleForTests();
+
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+    expect(fake.volumes.has('rescued_data')).toBe(true);
+  });
+
+  it('verifies', async () => {
+    stubDocker(fakeDocker({ volumes: [] }));
+    const { pointId } = await seedOrphanPoint();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+
+    const admitted = await service().admitVerify({
+      nodeId, pointId, actor: 'alice', idempotencyKey: 'orphan-verify',
+      requestDigest: runner.sha256Digest(['verify_point', pointId, 'engine_check_metadata']),
+      transport: 'local', method: 'engine_check_metadata', authorize: allowAll,
+    });
+    await service().whenIdleForTests();
+
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+  });
+
+  it('still checks access against the stacks recorded for the volume', async () => {
+    stubDocker(fakeDocker({ volumes: [] }));
+    const { pointId, storage } = await seedOrphanPoint();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const seen: Array<{ storageKey: string | null; stacks: string[] }> = [];
+
+    await expect(service().admitRestore({
+      nodeId, pointId, targetVolumeName: 'rescued_data', actor: 'mallory', idempotencyKey: 'orphan-denied',
+      requestDigest: runner.sha256Digest(['restore', pointId, 'rescued_data', 'new_volume']),
+      transport: 'local',
+      authorize: (context) => {
+        seen.push({ storageKey: context.storageKey, stacks: context.dependents.map((d) => d.stackName) });
+        return false;
+      },
+      authorizeCrossStack: allowAll,
+    })).rejects.toMatchObject({ errorClass: 'permission_denied' });
+    // The recorded dependent is part of the decision even though no container or
+    // volume label names it any more.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].storageKey).toBe(storage.storageKey);
+    expect(seen[0].stacks).toContain('stack-dir');
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_operations').get())
+      .toEqual({ n: 0 });
+  });
+});
+
+describe('refused admissions can be retried with the same key', () => {
+  async function seedVerifiablePoint(): Promise<{ pointId: string; repositoryId: string }> {
+    const seeded = await seedProtectableVolume();
+    const store = points.RecoveryPointStore.getInstance();
+    const point = store.begin({
+      kind: 'root', storageId: seeded.storage.id, expectedGenerationToken: 'token-1',
+      repositoryId: seeded.repositoryId, trigger: 'manual', actor: 'alice', sourceOperationId: 'op-retry',
+      sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+    });
+    store.finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap-retry', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    return { pointId: point.id, repositoryId: seeded.repositoryId };
+  }
+
+  function holdRepository(repositoryId: string): () => void {
+    const store = operations.RecoveryOperationStore.getInstance();
+    const holder = store.start({
+      idempotencyKey: `holder-${repositoryId}`, kind: 'verify_point', actor: 'alice', transport: 'local',
+      requestDigest: runner.sha256Digest(['holder']),
+    }).operation;
+    store.markRunning(holder.id);
+    store.acquireLock('repository', repositoryId, holder.id);
+    return () => { store.finish(holder.id, { state: 'succeeded' }); };
+  }
+
+  it('for a verify', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const { pointId, repositoryId } = await seedVerifiablePoint();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const release = holdRepository(repositoryId);
+    const request = {
+      nodeId, pointId, actor: 'alice', idempotencyKey: 'verify-retry',
+      requestDigest: runner.sha256Digest(['verify_point', pointId, 'engine_check_metadata']),
+      transport: 'local' as const, method: 'engine_check_metadata' as const, authorize: allowAll,
+    };
+
+    await expect(service().admitVerify(request)).rejects.toMatchObject({ errorClass: 'lock_held' });
+    expect(operations.RecoveryOperationStore.getInstance().findReplay({
+      idempotencyKey: 'verify-retry', kind: 'verify_point', actor: 'alice', transport: 'local',
+      requestDigest: request.requestDigest, pointId,
+    })).toBeNull();
+
+    release();
+    const retried = await service().admitVerify(request);
+    expect(retried.replayed).toBe(false);
+    await service().whenIdleForTests();
+    expect(operations.RecoveryOperationStore.getInstance().get(retried.operation.id)?.state).toBe('succeeded');
+  });
+
+  it('for a restore', async () => {
+    const fake = stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const { pointId, repositoryId } = await seedVerifiablePoint();
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+    const release = holdRepository(repositoryId);
+    const request = {
+      nodeId, pointId, targetVolumeName: 'retry_target', actor: 'alice', idempotencyKey: 'restore-retry',
+      requestDigest: runner.sha256Digest(['restore', pointId, 'retry_target', 'new_volume']),
+      transport: 'local' as const, authorize: allowAll, authorizeCrossStack: allowAll,
+    };
+
+    await expect(service().admitRestore(request)).rejects.toMatchObject({ errorClass: 'lock_held' });
+    // No intent was left behind to block the retry as a second live restore into
+    // the same target, and no target volume was created.
+    expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get())
+      .toEqual({ n: 0 });
+    expect(fake.created).toEqual([]);
+
+    release();
+    const retried = await service().admitRestore(request);
+    expect(retried.replayed).toBe(false);
+    await service().whenIdleForTests();
+    expect(operations.RecoveryOperationStore.getInstance().get(retried.operation.id)?.state).toBe('succeeded');
+    expect(fake.volumes.has('retry_target')).toBe(true);
+  });
+});
+
+describe('restore target creation', () => {
+  it('reads a name the daemon rejects as the caller\'s mistake, not a missing capability', async () => {
+    const fake = stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    fake.docker.createVolume = (async () => {
+      throw Object.assign(new Error('invalid volume name'), { statusCode: 400 });
+    }) as never;
+    const seeded = await seedProtectableVolume();
+    const store = points.RecoveryPointStore.getInstance();
+    const point = store.begin({
+      kind: 'root', storageId: seeded.storage.id, expectedGenerationToken: 'token-1',
+      repositoryId: seeded.repositoryId, trigger: 'manual', actor: 'alice', sourceOperationId: 'op-name',
+      sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+    });
+    store.finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap-name', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+
+    const admitted = await service().admitRestore({
+      nodeId, pointId: point.id, targetVolumeName: 'name_the_daemon_rejects', actor: 'alice', idempotencyKey: 'restore-name',
+      requestDigest: runner.sha256Digest(['restore', point.id, 'name_the_daemon_rejects', 'new_volume']),
+      transport: 'local', authorize: allowAll, authorizeCrossStack: allowAll,
+    });
+    await service().whenIdleForTests();
+
+    expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+      .toMatchObject({ state: 'failed', errorClass: 'invalid_request' });
+  });
+});
+
+describe('admission refusals that say what is missing', () => {
+  it('answers a capture on a node with no repository as not provisioned, not unreachable', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    service().markReadyForTests();
+
+    await expect(service().admitCreatePoint({
+      nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'key-none',
+      requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local', authorize: allowAll,
+    })).rejects.toMatchObject({
+      errorClass: 'capability_unavailable',
+      reason: 'repository_not_initialized',
+    });
+  });
+
+  it('answers a restore of a point in a replaced repository as replaced, not unreachable', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    const store = points.RecoveryPointStore.getInstance();
+    const point = store.begin({
+      kind: 'root', storageId: seeded.storage.id, expectedGenerationToken: 'token-1',
+      repositoryId: seeded.repositoryId, trigger: 'manual', actor: 'alice', sourceOperationId: 'op-old',
+      sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+    });
+    store.finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap-old', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+    const repositories = repositoryStore.RecoveryRepositoryStore.getInstance();
+    const replacement = repositories.register({
+      ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-test-g2',
+      failureDomain: 'same_failure_domain',
+    });
+    repositories.storeSecret(replacement.id, 'password-2');
+    repositories.setFingerprint(replacement.id, 'e'.repeat(32));
+    repositories.setActive(replacement.id);
+    service().markReadyForTests();
+
+    await expect(service().admitRestore({
+      nodeId, pointId: point.id, targetVolumeName: 'from_old', actor: 'alice', idempotencyKey: 'restore-old',
+      requestDigest: runner.sha256Digest(['restore', point.id, 'from_old', 'new_volume']),
+      transport: 'local', authorize: allowAll, authorizeCrossStack: allowAll,
+    })).rejects.toMatchObject({ errorClass: 'repository_unavailable', reason: 'repository_replaced' });
   });
 });
 
@@ -625,6 +916,6 @@ describe('readiness', () => {
     await expect(service().admitCreatePoint({
       nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'key-boot',
       requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local', authorize: allowAll,
-    })).rejects.toMatchObject({ errorClass: 'capability_unavailable' });
+    })).rejects.toMatchObject({ errorClass: 'capability_unavailable', reason: 'engine_starting' });
   });
 });

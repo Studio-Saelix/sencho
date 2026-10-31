@@ -373,6 +373,21 @@ class SelfIdentityService {
     if (value !== '') this.recoveryImageIds.add(value);
   }
 
+  /** True for the recovery repository volume, as opposed to a volume mounted into Sencho. */
+  isRecoveryVolume(name: string): boolean {
+    return Boolean(name) && this.recoveryVolumeNames.has(name);
+  }
+
+  /** True for the recovery helper image, as opposed to Sencho's own image. */
+  isRecoveryImage(idOrTag: string): boolean {
+    if (!idOrTag) return false;
+    const target = SelfIdentityService.stripSha(idOrTag);
+    for (const recoveryId of this.recoveryImageIds) {
+      if (SelfIdentityService.matchesId(recoveryId, target)) return true;
+    }
+    return false;
+  }
+
   /** Test helper: every recovery volume name registered so far. */
   getRecoveryVolumeNames(): string[] {
     return [...this.recoveryVolumeNames];

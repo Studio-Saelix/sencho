@@ -204,10 +204,6 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (req.user?.username) {
         proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
       }
-      // Recovery operations record this actor on the node, so a point or a restore
-      // says who asked for it, not "node-proxy". It is set the same way for every
-      // proxied request: the client's value is stripped first, so a caller cannot
-      // choose the name an operation is attributed to.
       // Scoped stack evidence: always strip client-supplied values, then
       // attach hub-built evidence when the gate stashed elevation for this hop.
       proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
@@ -338,6 +334,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // drop (the socket will be destroyed).
       const res = proxyRes as { headersSent?: boolean; status?: (n: number) => { json: (b: unknown) => void } };
       if (typeof res?.headersSent === 'boolean' && !res.headersSent && typeof res.status === 'function') {
+        if (isRecoveryUrl(path)) {
+          sendRecoveryTransportRefusal(
+            res as unknown as Response,
+            'The node could not be reached. Check the API URL and ensure Sencho is running on that host.',
+          );
+          return;
+        }
         res.status(502).json({
           error: 'Remote node is unreachable. Check the API URL and ensure Sencho is running on that host.',
         });
@@ -478,14 +481,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     const target = NodeRegistry.getInstance().getProxyTarget(req.nodeId);
     if (!target) {
-      if (node.mode === 'pilot_agent') {
-        res.status(503).json({
-          error: `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`,
-        });
+      const message = node.mode === 'pilot_agent'
+        ? `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`
+        : `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`;
+      if (isRecoveryProxyPath(req.path)) {
+        sendRecoveryTransportRefusal(res, message);
       } else {
-        res.status(503).json({
-          error: `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`,
-        });
+        res.status(503).json({ error: message });
       }
       return;
     }
@@ -500,6 +502,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             ? 'Remote node target is not allowed.'
             : 'Remote node target host could not be resolved.';
           console.warn(`[Proxy] Refused remote target for node ${node.id}: ${error.reason}`);
+          if (isRecoveryProxyPath(req.path)) {
+            sendRecoveryTransportRefusal(res, message);
+            return;
+          }
           res.status(502).json({ error: message });
           return;
         }
@@ -953,10 +959,6 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
 
 /**
- * True when the request configures a remote node's own settings and must run
- * the node-admin elevation check on the hop (path is post-/api strip).
- */
-/**
  * A recovery request, as the proxy sees it: mounted at `/api/`, so `req.path`
  * has lost that prefix.
  */
@@ -969,6 +971,30 @@ function isRecoveryDescriptorPath(path: string): boolean {
   return /^\/recovery\/node\/?(?:\?|$)/i.test(path);
 }
 
+/** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */
+function isRecoveryUrl(url: string): boolean {
+  return /^\/api\/recovery(?:\/|\?|$)/i.test(url);
+}
+
+/**
+ * The refusal a recovery request gets when the hop to its node is not there: a
+ * dead Pilot tunnel, a node with no target, an unreachable URL. Recovery clients
+ * switch on `errorClass`, and the preflight already answers this way once the
+ * hub's 30-second view of the node has expired, so the same condition has the
+ * same answer inside that window and before it.
+ */
+function sendRecoveryTransportRefusal(res: Response, message: string): void {
+  res.status(503).json({
+    error: message,
+    errorClass: 'transport_unreachable',
+    code: 'TRANSPORT_UNREACHABLE',
+  });
+}
+
+/**
+ * True when the request configures a remote node's own settings and must run
+ * the node-admin elevation check on the hop (path is post-/api strip).
+ */
 function isSettingsWrite(req: Request): boolean {
   if (req.method !== 'POST' && req.method !== 'PATCH') return false;
   if (/^\/settings\/?$/.test(req.path)) return true;

@@ -24,6 +24,7 @@ import { RestoreIntentStore, reconcileRestoreIntentsAtStartup } from './restoreI
 import { StorageIdentityStore } from './storageIdentity';
 import SelfIdentityService from '../SelfIdentityService';
 import {
+  describeStoredLocator,
   describeVolumeLocator,
   knownStacksFor,
   observeVolumeInUse,
@@ -311,7 +312,15 @@ export class RecoveryEngineService {
         const runner = this.helperRunner();
         const removed = await runner.removeForeignEpochHelpers();
         if (removed > 0) console.log('[Recovery] Removed %d helper containers from a previous process', removed);
-        await this.unlockAfterRestart();
+        const unlocked = await this.unlockAfterRestart();
+        // With restic's own locks cleared and the helpers gone, an interrupted
+        // capture, check or restore leaves nothing in the repository to review,
+        // so its repository lock must not keep every other volume closed until an
+        // administrator releases it.
+        if (unlocked) {
+          const released = this.operations.releaseInterruptedRepositoryLocks();
+          if (released > 0) console.log('[Recovery] Released %d repository locks left by interrupted work', released);
+        }
       }
       const intents = await reconcileRestoreIntentsAtStartup(this.docker());
       if (intents.rolledBack > 0 || intents.unknown > 0) {
@@ -361,13 +370,16 @@ export class RecoveryEngineService {
     }
   }
 
-  /** Clear restic's own locks left by a dead process, under no Sencho operation. */
-  private async unlockAfterRestart(): Promise<void> {
+  /**
+   * Clear restic's own locks left by a dead process, under no Sencho operation.
+   * Answers whether they are known to be cleared.
+   */
+  private async unlockAfterRestart(): Promise<boolean> {
     const repository = this.repositories.getActive();
-    if (!repository) return;
+    if (!repository) return false;
     try {
       const secret = this.repositories.readSecret(repository.id);
-      await unlockRepository({
+      return await unlockRepository({
         runner: this.helperRunner(),
         repositoryVolume: repository.locator,
         secret,
@@ -377,6 +389,7 @@ export class RecoveryEngineService {
       // A repository whose key is unavailable cannot be unlocked, and that is
       // already reported as `repository_key_unavailable`.
       console.warn('[Recovery] Could not clear restic locks at boot:', errorMessageForLog(err));
+      return false;
     }
   }
 
@@ -438,39 +451,37 @@ export class RecoveryEngineService {
       dependents: resolution.dependents,
     });
 
-    const started = this.operations.start({
-      idempotencyKey: input.idempotencyKey,
-      kind: 'create_point',
-      storageId: observed.id,
-      actor: input.actor,
-      transport: input.transport,
-      requestDigest: input.requestDigest,
-    });
-    if (started.replayed) return { operation: started.operation, replayed: true };
+    // One step: the operation, both locks and the pending point exist together or
+    // not at all, so a `409` leaves nothing behind and the same key can be retried.
+    const started = this.operations.admit(
+      {
+        idempotencyKey: input.idempotencyKey,
+        kind: 'create_point',
+        storageId: observed.id,
+        actor: input.actor,
+        transport: input.transport,
+        requestDigest: input.requestDigest,
+      },
+      [
+        { scope: 'storage', resourceKey: observed.storageKey },
+        { scope: 'repository', resourceKey: repository.id },
+      ],
+      (operation) => this.points.begin({
+        kind: 'root',
+        storageId: observed.id,
+        expectedGenerationToken: generationToken,
+        repositoryId: repository.id,
+        trigger: 'manual',
+        actor: input.actor,
+        sourceOperationId: operation.id,
+        sourceNodeKey: ownerNodeKey,
+        engineId: RESTIC_ENGINE_ID,
+      }),
+    );
+    if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
 
     const operationId = started.operation.id;
-    this.operations.markRunning(operationId);
-    try {
-      this.operations.acquireLock('storage', observed.storageKey, operationId);
-      this.operations.acquireLock('repository', repository.id, operationId);
-    } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      this.operations.finish(operationId, { state: 'failed', errorClass });
-      throw err;
-    }
-
-    const point = this.points.begin({
-      kind: 'root',
-      storageId: observed.id,
-      expectedGenerationToken: generationToken,
-      repositoryId: repository.id,
-      trigger: 'manual',
-      actor: input.actor,
-      sourceOperationId: operationId,
-      sourceNodeKey: ownerNodeKey,
-      engineId: RESTIC_ENGINE_ID,
-    });
-
+    const point = started.setup;
     this.schedule(operationId, () => this.runCreatePoint(operationId, point.id, observed.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }
@@ -498,10 +509,12 @@ export class RecoveryEngineService {
 
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
     const knownStackNames = await knownStacksFor(this.nodeId);
-    const described = await describeVolumeLocator({
+    // The volume may be gone by now (that is when a point is needed), so the
+    // stored locator is described, not required.
+    const described = await describeStoredLocator({
       docker: this.docker(),
       ownerNodeKey,
-      volumeName: storage.locator,
+      locator: storage.locator,
     });
     const resolution = await resolveVolumeDependents({
       nodeId: this.nodeId,
@@ -519,26 +532,21 @@ export class RecoveryEngineService {
       throw new RecoveryError('permission_denied');
     }
 
-    const started = this.operations.start({
-      idempotencyKey: input.idempotencyKey,
-      kind: 'verify_point',
-      storageId: storage.id,
-      pointId: point.id,
-      actor: input.actor,
-      transport: input.transport,
-      requestDigest: input.requestDigest,
-    });
+    const started = this.operations.admit(
+      {
+        idempotencyKey: input.idempotencyKey,
+        kind: 'verify_point',
+        storageId: storage.id,
+        pointId: point.id,
+        actor: input.actor,
+        transport: input.transport,
+        requestDigest: input.requestDigest,
+      },
+      [{ scope: 'repository', resourceKey: repository.id }],
+    );
     if (started.replayed) return { operation: started.operation, replayed: true };
 
     const operationId = started.operation.id;
-    this.operations.markRunning(operationId);
-    try {
-      this.operations.acquireLock('repository', repository.id, operationId);
-    } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      this.operations.finish(operationId, { state: 'failed', errorClass });
-      throw err;
-    }
     this.schedule(operationId, () => this.runVerify(operationId, point.id, repository, input.method));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }
@@ -566,14 +574,19 @@ export class RecoveryEngineService {
     const repository = this.repositories.get(point.repositoryId);
     if (!repository) throw new RecoveryError('repository_unavailable');
     const active = this.repositories.getActive();
-    if (!active || active.id !== repository.id) throw new RecoveryError('repository_unavailable');
+    if (!active || active.id !== repository.id) {
+      throw new RecoveryError('repository_unavailable', {
+        reason: 'repository_replaced',
+        detail: 'This point is in a recovery repository that has been replaced, and it can no longer be restored here.',
+      });
+    }
 
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
     const knownStackNames = await knownStacksFor(this.nodeId);
-    const described = await describeVolumeLocator({
+    const described = await describeStoredLocator({
       docker: this.docker(),
       ownerNodeKey,
-      volumeName: storage.locator,
+      locator: storage.locator,
     });
     const resolution = await resolveVolumeDependents({
       nodeId: this.nodeId,
@@ -603,42 +616,32 @@ export class RecoveryEngineService {
       if (!input.authorizeCrossStack(stackName)) throw new RecoveryError('permission_denied');
     }
 
-    const started = this.operations.start({
-      idempotencyKey: input.idempotencyKey,
-      kind: 'restore',
-      storageId: storage.id,
-      pointId: point.id,
-      actor: input.actor,
-      transport: input.transport,
-      requestDigest: input.requestDigest,
-    });
-    if (started.replayed) return { operation: started.operation, replayed: true };
-
-    const operationId = started.operation.id;
-    this.operations.markRunning(operationId);
-    try {
-      this.operations.acquireLock('repository', repository.id, operationId);
-    } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      this.operations.finish(operationId, { state: 'failed', errorClass });
-      throw err;
-    }
-
-    let intent;
-    try {
-      intent = this.intents.record({
-        operationId,
+    // The operation, the repository lock and the intent exist together or not at
+    // all: a refused restore (a held lock, a second restore into the same target)
+    // leaves no row, so the same key can be sent again.
+    const started = this.operations.admit(
+      {
+        idempotencyKey: input.idempotencyKey,
+        kind: 'restore',
+        storageId: storage.id,
+        pointId: point.id,
+        actor: input.actor,
+        transport: input.transport,
+        requestDigest: input.requestDigest,
+      },
+      [{ scope: 'repository', resourceKey: repository.id }],
+      (operation) => this.intents.record({
+        operationId: operation.id,
         pointId: point.id,
         targetVolume: input.targetVolumeName,
         actor: input.actor,
         processEpoch: this.processEpoch,
-      });
-    } catch (err) {
-      const errorClass = classifyRecoveryError(err);
-      this.operations.finish(operationId, { state: 'failed', errorClass });
-      throw err;
-    }
+      }),
+    );
+    if (started.replayed || !started.setup) return { operation: started.operation, replayed: true };
 
+    const operationId = started.operation.id;
+    const intent = started.setup;
     this.schedule(operationId, () => this.runRestore(operationId, intent.id, point.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }
@@ -856,7 +859,15 @@ export class RecoveryEngineService {
       return;
     }
     recordRepositoryCheck(repository.id, method, result.evidence.result, operationId);
-    this.operations.finish(operationId, { state: 'succeeded' });
+    // A check that found damage ran fine and answered "not intact": ending that
+    // `succeeded` would read as a pass in every client that only looks at the
+    // operation state. The repository-wide record above is what coverage reads.
+    this.operations.finish(
+      operationId,
+      result.evidence.result === 'mismatch'
+        ? { state: 'failed', errorClass: 'integrity_mismatch' }
+        : { state: 'succeeded' },
+    );
     await this.refreshHealthDeep(operationId);
   }
 
@@ -944,7 +955,7 @@ export class RecoveryEngineService {
     this.operations.finish(
       operationId,
       partial
-        ? { state: 'partial', errorClass: 'internal' }
+        ? { state: 'partial', errorClass: 'attributes_not_restored' }
         : { state: 'succeeded' },
     );
     await this.refreshHealthDeep(operationId);
@@ -965,7 +976,11 @@ export class RecoveryEngineService {
       const status = (err as { statusCode?: number }).statusCode;
       if (status !== 409) {
         console.error('[Recovery] Restore target could not be created:', errorMessageForLog(err));
-        throw new RecoveryError('capability_unavailable');
+        // Only a refusal (a socket proxy forbidding volume creation) is a missing
+        // capability. A name the daemon rejects is the caller's, and anything
+        // else is the node failing.
+        if (status === 400) throw new RecoveryError('invalid_request');
+        throw new RecoveryError(status === 403 || status === 404 ? 'capability_unavailable' : 'node_error');
       }
     }
     const inspected = await docker.getVolume(volumeName).inspect() as {
@@ -1173,12 +1188,17 @@ export class RecoveryEngineService {
   }
 
   private requireReady(): void {
-    if (!this.boot.ready) throw new RecoveryError('capability_unavailable');
+    if (!this.boot.ready) throw new RecoveryError('capability_unavailable', { reason: 'engine_starting' });
   }
 
   private requireActiveRepository(): RepositoryDescriptor {
     const repository = this.repositories.getActive();
-    if (!repository) throw new RecoveryError('repository_unavailable');
+    if (!repository) {
+      throw new RecoveryError('capability_unavailable', {
+        reason: 'repository_not_initialized',
+        detail: 'This node has no recovery repository yet. Provision one before taking a point.',
+      });
+    }
     return repository;
   }
 }

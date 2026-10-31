@@ -49,8 +49,6 @@ export function transportOfRequest(req: Pick<Request, 'machineAuthScope'>): Reco
   return req.machineAuthScope ?? 'local';
 }
 
-/** The operation id a dispatch sent, when it is a well-formed one. */
-
 export interface RecoveryNodeStatusResult {
   operationId: string;
   nodeId: number;

@@ -182,6 +182,33 @@ export class RecoveryOperationStore {
   }
 
   /**
+   * Admit an operation: record it, mark it running and take every lock it needs,
+   * as one step. A refusal at any point (a held or stale lock, a second restore
+   * into the same target) rolls the whole step back, so a refused request leaves
+   * no operation behind. That matters for retries: the idempotency key of a
+   * request that was answered `409` is still free, and the same request can be
+   * sent again once the lock is gone instead of replaying a failure that never
+   * ran. `setup` runs inside the same step, after the locks, for rows that must
+   * exist if and only if the operation is admitted.
+   */
+  admit<T = void>(
+    input: StartOperationInput,
+    locks: ReadonlyArray<{ scope: RecoveryLockScope; resourceKey: string }>,
+    setup?: (operation: RecoveryOperation) => T,
+    now = Date.now(),
+  ): StartedOperation & { setup: T | undefined } {
+    return recoveryDb().transaction((): StartedOperation & { setup: T | undefined } => {
+      const started = this.start(input, now);
+      if (started.replayed) return { ...started, setup: undefined };
+      const operationId = started.operation.id;
+      this.markRunning(operationId, now);
+      for (const lock of locks) this.acquireLock(lock.scope, lock.resourceKey, operationId, now);
+      const prepared = setup ? setup(this.require(operationId)) : undefined;
+      return { operation: this.require(operationId), replayed: false, setup: prepared };
+    }).immediate();
+  }
+
+  /**
    * The operation an earlier request with this key created, or null when there is
    * none or it belongs to a different request. A route uses this before its own
    * validation, so a retry after a lost response returns the work that is already
@@ -374,6 +401,26 @@ export class RecoveryOperationStore {
       );
       return toLock(row);
     }).immediate();
+  }
+
+  /**
+   * Release the repository locks that interrupted captures, checks and restores
+   * left, once restic's own locks have been cleared under no operation. Those
+   * three only read or append to the repository: an interrupted one leaves its
+   * point or its target volume settled by their own records, and nothing in the
+   * repository that needs a person's review. A provisioning operation is
+   * different (a half-made repository volume), so its lock stays until it is
+   * released on purpose, as does every storage lock.
+   */
+  releaseInterruptedRepositoryLocks(): number {
+    return recoveryDb().prepare(`
+      DELETE FROM recovery_locks
+      WHERE scope = 'repository' AND stale_since IS NOT NULL
+        AND owner_operation_id IN (
+          SELECT id FROM recovery_operations
+          WHERE kind IN ('create_point','verify_point','restore')
+        )
+    `).run().changes;
   }
 
   /**

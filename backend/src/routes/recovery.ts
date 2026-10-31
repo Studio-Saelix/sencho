@@ -1,6 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { checkPermission, requirePermission } from '../middleware/permissions';
+import { checkPermission, type PermissionAction } from '../middleware/permissions';
+import type { ResourceType } from '../services/DatabaseService';
+import { isValidStackName } from '../utils/validation';
 import { buildLocalRecoveryNodeDescriptor, getLocalVolumeProtectionStatus } from '../services/recovery/capability';
 import { operationIdFromRequest } from '../services/recovery/dispatcher';
 import {
@@ -16,10 +18,11 @@ import { RecoveryOperationStore } from '../services/recovery/operations';
 import { RecoveryPointStore } from '../services/recovery/recoveryPoints';
 import { RecoveryRepositoryStore } from '../services/recovery/repositories';
 import { RestoreIntentStore } from '../services/recovery/restoreIntents';
-import { StorageIdentityStore, deriveStorageKey } from '../services/recovery/storageIdentity';
+import { StorageIdentityStore, deriveStorageKey, isDockerVolumeName } from '../services/recovery/storageIdentity';
 import {
   describeIneligible,
-  describeVolumeLocator,
+  describeStoredLocator,
+  generationTokenMatchesVolume,
   inspectVolumeSource,
   knownStacksFor,
   listVolumeSources,
@@ -74,10 +77,12 @@ const ERROR_STATUS: Readonly<Record<RecoveryErrorClass, number>> = {
   repository_key_unavailable: 503,
   source_unreadable: 422,
   integrity_mismatch: 409,
+  attributes_not_restored: 422,
   interrupted: 409,
   transport_unreachable: 503,
-  node_refused: 502,
-  node_error: 502,
+  // The hub preflight answers these two with 503; the table says the same.
+  node_refused: 503,
+  node_error: 503,
   internal: 500,
 };
 
@@ -86,13 +91,35 @@ export function codeFor(errorClass: RecoveryErrorClass): string {
   return errorClass.toUpperCase();
 }
 
-function sendRecoveryError(res: Response, errorClass: RecoveryErrorClass, extra: Record<string, unknown> = {}): void {
+function sendRecoveryError(
+  res: Response,
+  errorClass: RecoveryErrorClass,
+  extra: Record<string, unknown> = {},
+  detail?: string,
+): void {
   res.status(ERROR_STATUS[errorClass]).json({
-    error: errorDetailFor(errorClass),
+    error: detail ?? errorDetailFor(errorClass),
     errorClass,
     code: codeFor(errorClass),
     ...extra,
   });
+}
+
+/**
+ * `requirePermission`, answering in the recovery error shape. The shared guard
+ * sends `{ error, code }` only, and every other answer from these routes carries
+ * `errorClass`, so a client has one field to switch on.
+ */
+function requireRecoveryPermission(
+  req: Request,
+  res: Response,
+  action: PermissionAction,
+  resourceType?: ResourceType,
+  resourceId?: string,
+): boolean {
+  if (checkPermission(req, action, resourceType, resourceId)) return true;
+  sendRecoveryError(res, 'permission_denied');
+  return false;
 }
 
 /** Run a handler and turn every thrown recovery error into its documented answer. */
@@ -106,12 +133,8 @@ function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
         console.error('Recovery: %s %s failed:', req.method, req.path, errorMessageForLog(err));
       }
       const extra: Record<string, unknown> = {};
-      if (errorClass === 'capability_unavailable') {
-        extra.reason = RecoveryEngineService.getInstance(req.nodeId).getBootState().ready
-          ? undefined
-          : 'engine_starting';
-      }
-      sendRecoveryError(res, errorClass, extra);
+      if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;
+      sendRecoveryError(res, errorClass, extra, err instanceof RecoveryError ? err.detail : undefined);
     }
   };
 }
@@ -120,8 +143,14 @@ const idempotencyBody = z.object({
   idempotencyKey: z.string().trim().min(1).max(200),
 });
 
+/**
+ * A volume name Docker accepts. Anything else (a path, a NUL, a non-ASCII name)
+ * is refused here, before it can reach the daemon and come back as a `500`.
+ */
+const volumeNameField = z.string().trim().min(1).max(255).refine(isDockerVolumeName);
+
 const createPointBody = idempotencyBody.extend({
-  volumeName: z.string().trim().min(1).max(255),
+  volumeName: volumeNameField,
 });
 
 const verifyBody = idempotencyBody.extend({
@@ -129,7 +158,7 @@ const verifyBody = idempotencyBody.extend({
 });
 
 const restoreBody = idempotencyBody.extend({
-  targetVolumeName: z.string().trim().min(1).max(255),
+  targetVolumeName: volumeNameField,
   /**
    * Only `new_volume` is implemented in this release. The other two shapes are
    * named so a client asking for one is refused as `invalid_request` instead of
@@ -194,12 +223,12 @@ function actorOf(req: Request): string {
  * can tell this answer belongs to its request.
  */
 recoveryRouter.get('/node', (req: Request, res: Response): void => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requireRecoveryPermission(req, res, 'stack:read')) return;
   try {
     res.json({ ...buildLocalRecoveryNodeDescriptor(), operationId: operationIdFromRequest(req) });
   } catch (error) {
     console.error('Recovery: node descriptor failed:', errorMessageForLog(error));
-    res.status(500).json({ error: 'Could not read this node\'s recovery status' });
+    sendRecoveryError(res, 'internal', {}, 'Could not read this node\'s recovery status.');
   }
 });
 
@@ -215,7 +244,7 @@ recoveryRouter.get('/node', (req: Request, res: Response): void => {
  * by any shape.
  */
 recoveryRouter.get('/repository', handle(async (req, res) => {
-  if (!requirePermission(req, res, 'stack:read')) return;
+  if (!requireRecoveryPermission(req, res, 'stack:read')) return;
   const status = getLocalVolumeProtectionStatus();
   const active = RecoveryRepositoryStore.getInstance().getActive();
   const configured = authorizeStorageAccess(req, 'configure', null).allowed;
@@ -251,7 +280,7 @@ recoveryRouter.get('/repository', handle(async (req, res) => {
  * step and continues instead of starting over.
  */
 recoveryRouter.post('/repository', handle(async (req, res) => {
-  if (!requirePermission(req, res, 'system:settings')) return;
+  if (!requireRecoveryPermission(req, res, 'system:settings')) return;
   const body = parseBody(repositoryBody, req.body);
   const result = await engineService(req).admitRepositoryInit({
     actor: actorOf(req),
@@ -280,10 +309,17 @@ recoveryRouter.post('/repository', handle(async (req, res) => {
  * never make a partially protected stack read as protected.
  */
 recoveryRouter.get('/storage', handle(async (req, res) => {
-  const stackName = typeof req.query.stack === 'string' ? req.query.stack.trim() : '';
+  // `?stack=` is one stack name. A repeated parameter (an array), a non-string
+  // and a name that is not a stack directory name are refused instead of being
+  // ignored, which would list every volume, or sent on to Compose, which would
+  // fail with a `500`.
+  const rawStack: unknown = req.query.stack;
+  if (rawStack !== undefined && typeof rawStack !== 'string') throw new RecoveryError('invalid_request');
+  const stackName = typeof rawStack === 'string' ? rawStack.trim() : '';
+  if (stackName && !isValidStackName(stackName)) throw new RecoveryError('invalid_request');
   if (stackName) {
-    if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
-  } else if (!requirePermission(req, res, 'stack:read')) {
+    if (!requireRecoveryPermission(req, res, 'stack:read', 'stack', stackName)) return;
+  } else if (!requireRecoveryPermission(req, res, 'stack:read')) {
     return;
   }
 
@@ -293,8 +329,9 @@ recoveryRouter.get('/storage', handle(async (req, res) => {
   const knownStackNames = await knownStacksFor(nodeId);
   const status = getLocalVolumeProtectionStatus();
 
+  // A stack that does not exist declares nothing: an empty answer, not an error.
   const names = stackName
-    ? await declaredVolumeNames(nodeId, stackName)
+    ? (knownStackNames.includes(stackName) ? await declaredVolumeNames(nodeId, stackName) : [])
     : (await listVolumeSources(docker)).map((source) => source.volumeName);
 
   const roots: unknown[] = [];
@@ -347,7 +384,17 @@ recoveryRouter.get('/storage', handle(async (req, res) => {
         .filter((point) => activeRepositoryId !== null && point.repositoryId === activeRepositoryId)
       : [];
     const verifications = RecoveryPointStore.getInstance().verificationsForPoints(points.map((p) => p.id));
-    const input: RootCoverageInput = { storage: current, access: 'supported', points, verifications };
+    // The listing never starts a helper, so it cannot re-read the volume's inode;
+    // Docker's creation time is enough to see a volume that was deleted and
+    // recreated, and its old points stop covering it at once instead of at the
+    // next capture.
+    const input: RootCoverageInput = {
+      storage: current,
+      access: 'supported',
+      points,
+      verifications,
+      liveGenerationChanged: current !== null && !generationTokenMatchesVolume(current.generationToken, source.createdAt),
+    };
     const evaluated = evaluateRootCoverage(input, now, ROOT_COVERAGE_FRESHNESS_MS);
     coverageInputs.push(input);
     roots.push({
@@ -385,7 +432,8 @@ recoveryRouter.get('/storage/:storageId/points', handle(async (req, res) => {
   const docker = DockerController.getInstance(nodeId).getDocker();
   const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);
   const knownStackNames = await knownStacksFor(nodeId);
-  const described = await describeVolumeLocator({ docker, ownerNodeKey, volumeName: storage.locator });
+  // The volume may be gone (`down -v`, a prune): its points are still listable.
+  const described = await describeStoredLocator({ docker, ownerNodeKey, locator: storage.locator });
   const resolution = await resolveVolumeDependents({
     nodeId,
     ownerNodeKey,
@@ -621,7 +669,7 @@ function authorizeOperation(req: Request, operation: RecoveryOperation, access: 
 recoveryRouter.post('/locks/release', handle(async (req, res) => {
   const body = parseBody(lockReleaseBody, req.body);
   if (body.scope === 'repository') {
-    if (!requirePermission(req, res, 'system:settings')) return;
+    if (!requireRecoveryPermission(req, res, 'system:settings')) return;
   } else {
     const current = StorageIdentityStore.getInstance().getCurrent(body.resourceKey);
     if (!current) throw new RecoveryError('invalid_request');
@@ -629,7 +677,7 @@ recoveryRouter.post('/locks/release', handle(async (req, res) => {
     const docker = DockerController.getInstance(nodeId).getDocker();
     const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);
     const knownStackNames = await knownStacksFor(nodeId);
-    const described = await describeVolumeLocator({ docker, ownerNodeKey, volumeName: current.locator });
+    const described = await describeStoredLocator({ docker, ownerNodeKey, locator: current.locator });
     const resolution = await resolveVolumeDependents({
       nodeId,
       ownerNodeKey,

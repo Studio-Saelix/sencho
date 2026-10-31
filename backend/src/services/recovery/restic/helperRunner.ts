@@ -61,6 +61,18 @@ export interface HelperProfileSpec {
 const GIB = 1024 * 1024 * 1024;
 
 /**
+ * restic's scratch space for a capture. A capture stages temporary pack files in
+ * `/tmp` before it writes them to the repository, and how many it holds at once
+ * grows with the CPU count (each worker keeps a pack of about 16 MiB open), not
+ * with the size of the data: a 10-core host peaks near 100 MiB, and the same
+ * capture failed with `no space left on device` on the 64 MiB the other profiles
+ * get. The profile below gives a capture 512 MiB, five times that peak, and
+ * raises its memory limit by the same amount, because a tmpfs is charged to the
+ * container's memory.
+ */
+const BACKUP_SCRATCH = 'size=512m,mode=1777';
+
+/**
  * The fixed profile table. A test asserts the whole `createContainer` spec for
  * each entry, so any change here is a visible change to the privilege boundary.
  */
@@ -114,9 +126,9 @@ export const HELPER_PROFILES: Readonly<Record<HelperProfile, HelperProfileSpec>>
     needsRepository: true,
     source: 'read_only',
     target: null,
-    tmpfs: { '/tmp': 'size=64m,mode=1777' },
+    tmpfs: { '/tmp': BACKUP_SCRATCH },
     pidsLimit: 256,
-    memoryBytes: GIB,
+    memoryBytes: 2 * GIB,
     timeoutMs: null,
   },
   check: {

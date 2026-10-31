@@ -68,6 +68,21 @@ function num(value: unknown): number {
 }
 
 /**
+ * Whether a full disk is the helper's own scratch space (`/tmp`) rather than the
+ * repository volume. restic names the file it could not write: a temporary pack
+ * under `/tmp` means the helper ran out of room, which says nothing about the
+ * repository, and calling it unreachable would send an operator to the wrong fix.
+ */
+export function isScratchSpaceError(stderrTail: string): boolean {
+  return /no space left on device|enospc/i.test(stderrTail)
+    && /(?:^|[\s"'])\/tmp\/|restic-temp/i.test(stderrTail);
+}
+
+function isDiskFull(stderrTail: string): boolean {
+  return /no space left on device|enospc/i.test(stderrTail);
+}
+
+/**
  * Why restic could not read one path, in Sencho's terms. A permission refusal is
  * the operator's to fix; a file that went away during the capture is not an
  * error in the data that was read; anything else is unreadable.
@@ -171,7 +186,9 @@ export function classifyBackupRun(input: {
     case 12:
       return { status: 'failed', errorClass: 'repository_key_unavailable' };
     default:
-      if (/no space left on device|enospc/i.test(input.stderrTail)) {
+      // A full repository volume is the repository's problem; a full helper
+      // scratch is the node's, and is not a reachability failure.
+      if (isDiskFull(input.stderrTail) && !isScratchSpaceError(input.stderrTail)) {
         return { status: 'failed', errorClass: 'repository_unavailable' };
       }
       return { status: 'failed', errorClass: 'node_error' };
@@ -265,9 +282,6 @@ export function classifyRestoreRun(input: {
       return { status: 'failed', errorClass: 'repository_key_unavailable' };
     default:
       if (xattrOnly) return { status: 'partial', xattrWarnings: input.accumulator.xattrErrors };
-      if (/no space left on device|enospc/i.test(input.stderrTail)) {
-        return { status: 'failed', errorClass: 'node_error' };
-      }
       return { status: 'failed', errorClass: 'node_error' };
   }
 }
@@ -302,7 +316,7 @@ export function classifyCheckRun(input: {
     case 1:
       return { result: 'mismatch' };
     default:
-      if (/no space left on device|enospc/i.test(input.stderrTail)) {
+      if (isDiskFull(input.stderrTail) && !isScratchSpaceError(input.stderrTail)) {
         return { result: 'error', errorClass: 'repository_unavailable' };
       }
       return { result: 'error', errorClass: 'node_error' };

@@ -22,6 +22,7 @@ import {
   classifyBackupError,
   classifyCheckRun,
   classifyRestoreRun,
+  isScratchSpaceError,
   newBackupAccumulator,
   newRestoreAccumulator,
   parseRepositoryConfig,
@@ -165,6 +166,27 @@ describe('restic backup output', () => {
     expect(run(1, { stderrTail: 'write /repo: no space left on device' }))
       .toEqual({ status: 'failed', errorClass: 'repository_unavailable' });
     expect(run(null, { killed: true })).toEqual({ status: 'failed', errorClass: 'node_error' });
+  });
+
+  it('does not report a full helper scratch as an unreachable repository', () => {
+    // restic names the file it could not write; a temporary pack under /tmp is the
+    // helper's own scratch, which says nothing about the repository.
+    const scratchFull = 'Fatal: unable to save snapshot: Write: write /tmp/restic-temp-pack-1085925781: no space left on device';
+    expect(isScratchSpaceError(scratchFull)).toBe(true);
+    expect(isScratchSpaceError('{"message":"failed to save /data/a: Write: write /tmp/restic-temp-pack-1: no space left on device"}')).toBe(true);
+    expect(isScratchSpaceError('write /repo/data/ab/abcdef: no space left on device')).toBe(false);
+    // A source file whose own path contains /tmp is not the helper's scratch.
+    expect(isScratchSpaceError('write /repo/data/x: no space left on device (source /data/tmp/file)')).toBe(false);
+    expect(isScratchSpaceError('write /tmp/restic-temp-pack-1: permission denied')).toBe(false);
+
+    const clean = feed([JSON.stringify({ message_type: 'summary', snapshot_id: 's', total_files_processed: 1, total_bytes_processed: 1 })]);
+    expect(classifyBackupRun({ exitCode: 1, aborted: false, killed: false, accumulator: clean, stderrTail: scratchFull }))
+      .toEqual({ status: 'failed', errorClass: 'node_error' });
+    expect(classifyCheckRun({ exitCode: 2, aborted: false, killed: false, stderrTail: scratchFull }))
+      .toEqual({ result: 'error', errorClass: 'node_error' });
+    // The same disk-full text about the repository volume still reads as the repository.
+    expect(classifyCheckRun({ exitCode: 2, aborted: false, killed: false, stderrTail: 'write /repo/data/x: no space left on device' }))
+      .toEqual({ result: 'error', errorClass: 'repository_unavailable' });
   });
 });
 

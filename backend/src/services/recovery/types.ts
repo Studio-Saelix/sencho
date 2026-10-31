@@ -179,6 +179,7 @@ export type RecoveryErrorClass =
   | 'repository_key_unavailable'
   | 'source_unreadable'
   | 'integrity_mismatch'
+  | 'attributes_not_restored'
   | 'interrupted'
   | 'transport_unreachable'
   | 'node_refused'

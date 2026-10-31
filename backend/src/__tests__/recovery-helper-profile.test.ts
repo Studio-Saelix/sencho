@@ -59,8 +59,12 @@ describe('recovery helper profiles', () => {
       expect(hostConfig.SecurityOpt, profile).toEqual(['no-new-privileges:true']);
       expect(hostConfig.CapDrop, profile).toEqual(['ALL']);
       expect(hostConfig.PidsLimit, profile).toBe(256);
-      expect(hostConfig.Memory, profile).toBe(1024 * 1024 * 1024);
-      expect(hostConfig.Tmpfs, profile).toEqual({ '/tmp': 'size=64m,mode=1777' });
+      // Only a capture stages restic's temporary packs, so only it gets the larger
+      // scratch and the memory a tmpfs is charged to.
+      expect(hostConfig.Memory, profile).toBe(profile === 'backup' ? 2 * 1024 * 1024 * 1024 : 1024 * 1024 * 1024);
+      expect(hostConfig.Tmpfs, profile).toEqual({
+        '/tmp': profile === 'backup' ? 'size=512m,mode=1777' : 'size=64m,mode=1777',
+      });
       // No bind, no socket, no host path: only named volumes.
       expect(hostConfig.Binds, profile).toBeUndefined();
       for (const mount of hostConfig.Mounts as Array<Record<string, unknown>>) {
@@ -68,6 +72,16 @@ describe('recovery helper profiles', () => {
         expect(mount.VolumeOptions, profile).toEqual({ NoCopy: true });
       }
     }
+  });
+
+  it('gives a capture scratch space that is a multiple of what restic stages, within its memory limit', () => {
+    // A 10-core host peaks near 100 MiB of temporary packs for any source size;
+    // the 64 MiB the other profiles get failed a 400 MB capture.
+    const scratch = Number(/size=(\d+)m/.exec(HELPER_PROFILES.backup.tmpfs['/tmp'])?.[1]) * 1024 * 1024;
+    expect(scratch).toBeGreaterThanOrEqual(5 * 100 * 1024 * 1024);
+    // A tmpfs is charged to the container's memory, so the limit has to leave
+    // room for restic itself beside a full scratch.
+    expect(HELPER_PROFILES.backup.memoryBytes).toBeGreaterThanOrEqual(scratch + 1024 * 1024 * 1024);
   });
 
   it('adds exactly the capabilities each profile was justified for', () => {

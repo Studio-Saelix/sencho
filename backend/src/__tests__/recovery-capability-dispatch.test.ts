@@ -297,3 +297,51 @@ describe('GET /api/recovery/node', () => {
     expect(capability.resolveRemoteVolumeProtection({ kind: 'ok', data: res.body })).toMatchObject({ state: 'unavailable', reason: 'engine_not_installed' });
   });
 });
+
+describe('the hop to a node that is not there', () => {
+  // The preflight answers a node the hub already knows is down. These are the
+  // refusals that come before it (no tunnel, no target) and the ones inside the
+  // hub's 30-second view of a node that just went away: all of them are the same
+  // condition and carry the same recovery error shape.
+  it('answers a Pilot node with no tunnel in the recovery error shape', async () => {
+    const res = await request(app)
+      .get('/api/recovery/storage')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+    expect(res.body.error).toMatch(/Pilot tunnel/);
+  });
+
+  it('answers a Pilot node with no tunnel the same way for a write', async () => {
+    const res = await request(app)
+      .post('/api/recovery/storage/points')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId))
+      .send({ volumeName: 'data_volume', idempotencyKey: 'k1' });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+  });
+
+  it('answers a direct-proxy node whose target the hub refuses or cannot connect to in the recovery error shape', async () => {
+    const db = DatabaseService.getInstance();
+    const unreachableId = db.addNode({ name: 'recovery-dead-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
+    // The hub's own view says the node is fine, so the preflight lets the request through.
+    mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+    const res = await request(app)
+      .get('/api/recovery/storage')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(unreachableId));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+  });
+
+  it('leaves a request that is not a recovery request in the generic shape', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(pilotNodeId));
+    expect(res.status).toBe(503);
+    expect(res.body.errorClass).toBeUndefined();
+  });
+});

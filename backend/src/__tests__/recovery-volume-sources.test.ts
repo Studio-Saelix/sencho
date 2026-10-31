@@ -118,12 +118,27 @@ describe('volume eligibility', () => {
     isOwnVolume: () => false,
   };
 
+  it('reads a changed creation time as a recreated volume, and a foreign token as no evidence', () => {
+    const token = '2026-10-31T10:00:00Z|63:42';
+    expect(volumeSources.generationTokenMatchesVolume(token, '2026-10-31T10:00:00Z')).toBe(true);
+    expect(volumeSources.generationTokenMatchesVolume(token, '2026-10-31T11:30:00Z')).toBe(false);
+    expect(volumeSources.generationTokenMatchesVolume('unknown|63:42', null)).toBe(true);
+    expect(volumeSources.generationTokenMatchesVolume('unknown|63:42', '2026-10-31T11:30:00Z')).toBe(false);
+    // A token this adapter did not mint says nothing about the volume.
+    expect(volumeSources.generationTokenMatchesVolume('t1', '2026-10-31T11:30:00Z')).toBe(true);
+  });
+
   it('accepts a plain named volume with the local driver', () => {
     expect(volumeSources.classifyVolumeEligibility({ ...base, name: 'app_data' })).toBeNull();
   });
 
   it('refuses each ineligible kind with its own reason', () => {
     expect(volumeSources.classifyVolumeEligibility({ ...base, name: 'sencho-recovery-abc-g1' })).toBe('reserved_name');
+    // The repository volume carries both the label and the reserved prefix, and it
+    // says what it is rather than only that its name is reserved.
+    expect(volumeSources.classifyVolumeEligibility({
+      ...base, name: 'sencho-recovery-abc-g1', labels: { 'dev.sencho.recovery.repository': 'r1' },
+    })).toBe('repository_volume');
     expect(volumeSources.classifyVolumeEligibility({
       ...base, name: 'repo', labels: { 'dev.sencho.recovery.repository': 'r1' },
     })).toBe('repository_volume');

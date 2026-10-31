@@ -35,6 +35,12 @@ export interface RootCoverageInput {
   points: readonly RecoveryPoint[];
   /** Verifications by point id. A point missing here has never been verified. */
   verifications: ReadonlyMap<string, readonly IntegrityVerification[]>;
+  /**
+   * True when the live volume no longer matches the stored current generation:
+   * it was deleted and recreated since the last capture, so no stored point
+   * describes its bytes, whatever the stored identity still says.
+   */
+  liveGenerationChanged?: boolean;
 }
 
 export interface CoverageInput {
@@ -96,6 +102,9 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
   const storage = root.storage;
   // Points matched to a superseded identity describe bytes that were replaced.
   if (storage.state !== 'current') return result('older_generation');
+  if (root.liveGenerationChanged) {
+    return result(root.points.some((p) => p.kind === 'root') ? 'older_generation' : 'no_point');
+  }
 
   const roots = root.points.filter((p) => p.kind === 'root');
   const currentGen = roots.filter((p) => p.storageId === storage.id && p.storageGeneration === storage.generation);
