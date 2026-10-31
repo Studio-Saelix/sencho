@@ -56,17 +56,50 @@ export function splitShortPortSpec(raw: string): ShortPortSpec | null {
   return { hostIp, hostPart: fields[0], container: fields[1], protocol };
 }
 
+/** A decimal port number as Compose reads it: an optional `+`, then digits. */
+const PORT_NUMBER = /^\+?\d+$/;
+
+function portRangeParts(hostPart: string): [string, string | undefined] | null {
+  const parts = hostPart.split('-');
+  return parts.length <= 2 ? [parts[0], parts[1]] : null;
+}
+
+/** A published port number in Compose's accepted range, or null. */
+function parsePublishedPort(text: string): number | null {
+  if (!PORT_NUMBER.test(text)) return null;
+  const value = Number(text);
+  return value >= 1 && value <= 65535 ? value : null;
+}
+
 /** Whether a host-port text leaves the port to Docker: absent, blank, or a number (or range start) of 0. */
 export function isDynamicHostPort(hostPart: string | undefined): boolean {
-  return hostPart === undefined || /^\s*(?:0+(?:-\d+)?)?\s*$/.test(hostPart);
+  if (hostPart === undefined || hostPart === '') return true;
+  const parts = portRangeParts(hostPart);
+  if (!parts) return false;
+  const [start, end] = parts;
+  // Compose reads `+0` and `000` as 0, so they leave the port to Docker too.
+  if (!/^\+?0+$/.test(start)) return false;
+  if (end === undefined) return true;
+  if (!PORT_NUMBER.test(end)) return false;
+  const last = Number(end);
+  return last >= 0 && last <= 65535;
 }
 
-/** A host port Compose accepts as fixed: digits, or a `start-end` range of digits. */
+/** A host port Compose accepts as fixed: a number or an ascending `start-end`
+ *  range, in 1-65535, with an optional `+` and leading zeros. */
 export function isFixedHostPort(hostPart: string): boolean {
-  return /^\d+(?:-\d+)?$/.test(hostPart);
+  const parts = portRangeParts(hostPart);
+  if (!parts) return false;
+  const [start, end] = parts;
+  const first = parsePublishedPort(start);
+  if (first === null) return false;
+  if (end === undefined) return true;
+  const last = parsePublishedPort(end);
+  return last !== null && last >= first;
 }
 
-/** A container port text starts with a digit (a port or a `start-end` range); anything else is not a port entry. */
+/** A container port text starts with a digit (a port or a `start-end` range,
+ *  with Compose's optional `+`); anything else is not a port entry. */
 export function isContainerPort(container: string | undefined): boolean {
-  return container !== undefined && /^\d/.test(container.trim());
+  return container !== undefined && /^\+?\d/.test(container);
 }

@@ -262,6 +262,16 @@ describe('parseEffectiveModel', () => {
     expect(m.services[0].ports).toEqual([{ startPort: 51820, endPort: 51820, hostIp: '::1', protocol: 'udp' }]);
   });
 
+  it('reads the numeric spellings Compose accepts, and drops the ports it refuses', () => {
+    const m = parseEffectiveModel({ services: { s: { ports: ['+80:80', '00080-081:80', '+0:80', { target: '+80', published: '+8080' }, '65536:80', '80-65536:80', '8002-8000:80', ' 80:80'] } } }, 'p');
+    expect(m.services[0].ports).toEqual([
+      { startPort: 80, endPort: 80, hostIp: '', protocol: 'tcp' },
+      { startPort: 80, endPort: 81, hostIp: '', protocol: 'tcp' },
+      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true },
+      { startPort: 8080, endPort: 8080, hostIp: '', protocol: 'tcp' },
+    ]);
+  });
+
   it('treats a disabled healthcheck as none', () => {
     const m = parseEffectiveModel({ services: { web: { healthcheck: { disable: true } } } }, 'fallback');
     expect(m.services[0].hasHealthcheck).toBe(false);

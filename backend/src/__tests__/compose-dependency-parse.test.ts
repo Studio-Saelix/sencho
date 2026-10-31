@@ -119,7 +119,27 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports[0].dynamic).toBeUndefined();
   });
 
-  it.each(['"[::1]:80"', '"abc:80"', '"web"', '""'])('drops %s, which Compose refuses', (entry) => {
+  it.each<[string, string, { hostIp: string; publishedPort: number }]>([
+    ['a leading plus on the host port', '"+80:80"', { hostIp: '', publishedPort: 80 }],
+    ['leading zeros on the host port', '"00080:80"', { hostIp: '', publishedPort: 80 }],
+    ['leading zeros on a host port range', '"080-081:80"', { hostIp: '', publishedPort: 80 }],
+    ['a leading plus on both ends of a range', '"+80-+81:80"', { hostIp: '', publishedPort: 80 }],
+  ])('reads %s as the fixed host port Compose renders', (_label, entry, expected) => {
+    const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
+    expect(r.services[0].ports).toEqual([expect.objectContaining(expected)]);
+    expect(r.services[0].ports[0].dynamic).toBeUndefined();
+  });
+
+  it.each<[string, string, string]>([
+    ['a leading plus on a container-only port', '"+51820/udp"', 'udp'],
+    ['leading zeros on a container-only port', '"00051820/udp"', 'udp'],
+    ['a leading plus on host port zero', '"+0:80"', 'tcp'],
+  ])('keeps %s as a dynamic publication, as Compose renders it', (_label, entry, protocol) => {
+    const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
+    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol, dynamic: true }]);
+  });
+
+  it.each(['"[::1]:80"', '"abc:80"', '"web"', '""', '"65536:80"', '"80-65536:80"', '"8002-8000:80"', '" 80:80"'])('drops %s, which Compose refuses', (entry) => {
     const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
     expect(r.services[0].ports).toEqual([]);
   });
