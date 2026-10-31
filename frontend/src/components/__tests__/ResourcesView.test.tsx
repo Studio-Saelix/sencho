@@ -1104,6 +1104,40 @@ describe('ResourcesView', () => {
     expect(screen.queryByText('Could not load external containers.')).toBeNull();
   });
 
+  it('does not claim an empty host when a background refresh of the external read fails', async () => {
+    let orphansCalls = 0;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [image('still:here')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? jsonResponse({})
+          : jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh external containers'));
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.queryByText('No external containers')).toBeNull();
+  });
+
   it('aborts the previous node’s inventory reads on a node switch and ignores their results', async () => {
     const resourcesSignals: AbortSignal[] = [];
     const resourcesResolvers: Array<(r: Response) => void> = [];

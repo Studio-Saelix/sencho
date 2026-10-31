@@ -95,9 +95,11 @@ const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
 
 /**
  * Interactive reads that are slow by design and get the longer budget above.
- * Each one shells out to Docker or pulls a helper image before it can answer;
- * their own routes already cap that work, so the read bound only has to catch a
- * node that never answers at all.
+ * Each one shells out to Docker or pulls a helper image before it can answer,
+ * which can legitimately take tens of seconds on a large host. The longer
+ * budget still bounds a node that never answers; it does not replace the
+ * route's own work, so this list is about how long the page may wait, not about
+ * cancelling the operation.
  */
 const SLOW_READS: ReadonlyArray<RegExp> = [
   // `docker system df`, which takes tens of seconds on a large containerd store.
@@ -144,10 +146,10 @@ export function isStreamingOrDownloadResponse(headers: {
 }): boolean {
   const contentType = headers['content-type'];
   const type = Array.isArray(contentType) ? contentType[0] : contentType;
-  if (typeof type === 'string' && type.includes('text/event-stream')) return true;
+  if (typeof type === 'string' && type.toLowerCase().includes('text/event-stream')) return true;
   const disposition = headers['content-disposition'];
   const value = Array.isArray(disposition) ? disposition[0] : disposition;
-  return typeof value === 'string' && value.includes('attachment');
+  return typeof value === 'string' && value.toLowerCase().includes('attachment');
 }
 
 /**

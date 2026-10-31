@@ -39,6 +39,19 @@ describe('classifyRemoteReadFailure', () => {
     expect(classifyRemoteReadFailure(status(503))).toBe('unreachable');
   });
 
+  it('treats a forwarded 502 or 503 as the remote answering with an error', () => {
+    const proxied502 = new Response(JSON.stringify({ error: 'upstream' }), {
+      status: 502,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    const proxied503 = new Response(JSON.stringify({ error: 'busy' }), {
+      status: 503,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    expect(classifyRemoteReadFailure(proxied502)).toBe('http');
+    expect(classifyRemoteReadFailure(proxied503)).toBe('http');
+  });
+
   it('uses the cause the gateway marked when the status alone would mislead', () => {
     expect(classifyRemoteReadFailure(marked('unverified'))).toBe('unverified');
     expect(classifyRemoteReadFailure(marked('not-configured'))).toBe('not-configured');

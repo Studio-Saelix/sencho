@@ -423,9 +423,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // the error state so the tab can never keep its skeleton.
     const failOrphans = (background: boolean, failure: RemoteReadFailure, notify = true) => {
         setOrphansFailure(failure);
+        // A background refresh only keeps the tab populated when it had rows to
+        // keep. With none on screen, a failed refresh is not a confirmed empty
+        // host, so it must read as unavailable rather than "No external
+        // containers".
+        const hasRows = Object.values(orphans).some((containers) => containers.length > 0);
         if (background) {
             if (notify) toast.error('Failed to refresh external containers');
-            setOrphansState((state) => (state === 'loading' ? 'error' : state));
+            setOrphansState(hasRows ? 'ready' : 'error');
         } else {
             setOrphansState('error');
         }

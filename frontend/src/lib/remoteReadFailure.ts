@@ -63,6 +63,10 @@ export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | nu
   // A 401 forwarded from a remote carries the proxy sentinel: the remote
   // rejected the hub's stored node token, not the operator's own session.
   if (res.status === 401 && res.headers.get('x-sencho-proxy') === '1') return 'node-credential';
+  // A 502/503 that carries the sentinel came from the remote itself, so the
+  // node answered with an error; one without it is the hub failing to reach
+  // the node. Only the latter is unreachable.
+  if ((res.status === 502 || res.status === 503) && res.headers.get('x-sencho-proxy') === '1') return 'http';
   if (res.status === 502 || res.status === 503) return 'unreachable';
   if (res.status === 401 || res.status === 403) return 'unauthorized';
   if (res.status === 404) return 'unsupported';
@@ -125,6 +129,6 @@ export function remoteReadFailureMessage(
     case 'http':
       return `The node answered with ${options.status ?? 'an error'}.`;
     case 'error':
-      return 'The request failed before the node answered.';
+      return 'The request failed before it completed. Try again.';
   }
 }

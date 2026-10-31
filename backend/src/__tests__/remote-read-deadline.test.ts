@@ -145,9 +145,14 @@ describe('interactive remote read deadline', () => {
 
     it('recognizes a response that turned out to be a stream or a download', () => {
       expect(isStreamingOrDownloadResponse({ 'content-type': 'text/event-stream' })).toBe(true);
+      expect(isStreamingOrDownloadResponse({ 'content-type': 'Text/Event-Stream' })).toBe(true);
       expect(isStreamingOrDownloadResponse({
         'content-type': 'application/gzip',
         'content-disposition': 'attachment; filename="snapshot.tar.gz"',
+      })).toBe(true);
+      expect(isStreamingOrDownloadResponse({
+        'content-type': 'application/gzip',
+        'content-disposition': 'Attachment; filename="snapshot.tar.gz"',
       })).toBe(true);
       expect(isStreamingOrDownloadResponse({ 'content-type': 'application/json' })).toBe(false);
     });
@@ -291,20 +296,23 @@ describe('interactive remote read deadline', () => {
     }, 20_000);
 
     it('releases the deadline at the headers of an attachment and lets its body finish', async () => {
+      // `/api/stacks` is an ordinary read with no path exemption, so this
+      // exercises the header-based release itself.
       responder = (_req, res) => {
         res.statusCode = 200;
-        res.setHeader('content-type', 'application/gzip');
-        res.setHeader('content-disposition', 'attachment; filename="snapshot.tar.gz"');
+        res.setHeader('content-type', 'text/plain');
+        res.setHeader('content-disposition', 'Attachment; filename="snapshot.tar.gz"');
         res.flushHeaders();
         setTimeout(() => res.end('payload'), INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 1_500);
       };
 
       const res = await request(app)
-        .get('/api/stacks/web/files/download')
+        .get('/api/stacks')
         .set('Authorization', authHeader)
         .set('x-node-id', String(remoteNodeId));
 
       expect(res.status).toBe(200);
+      expect(res.text).toBe('payload');
       expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
     }, 20_000);
 
@@ -316,6 +324,7 @@ describe('interactive remote read deadline', () => {
         res.setHeader('content-type', 'application/json');
         res.flushHeaders();
       };
+      const socketsBefore = stubSockets.size;
       const startedAt = Date.now();
 
       const outcome = await request(app)
@@ -329,6 +338,9 @@ describe('interactive remote read deadline', () => {
       expect(elapsed).toBeGreaterThanOrEqual(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 1_000);
       expect(elapsed).toBeGreaterThanOrEqual(REMOTE_READ_BODY_IDLE_TIMEOUT_MS - 500);
       expect(elapsed).toBeLessThan(REMOTE_READ_BODY_IDLE_TIMEOUT_MS + 4_000);
+      // Ending the stalled transfer must close the upstream socket too, not
+      // leave the remote connection open after both callers are gone.
+      await expect.poll(() => stubSockets.size, { timeout: 3_000 }).toBeLessThanOrEqual(socketsBefore);
     }, 25_000);
 
     it('waits past the interactive budget for a known-slow read before calling it silent', async () => {
