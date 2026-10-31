@@ -38,7 +38,7 @@ const FLEET_CACHE_TTL = 120_000;
 // Interactive fleet reads run on the shared fleet-read budget
 // (helpers/fleetReadBudget.ts). This one is left for the remote refresh action
 // below, which starts a scan on the node rather than reading a result.
-const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
+const REMOTE_NODE_REFRESH_TIMEOUT_MS = 5000;
 
 export const imageUpdatesRouter = Router();
 
@@ -550,7 +550,7 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     remoteCandidates.map(async ({ node, proxyTarget }) => {
       const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_FETCH_TIMEOUT_MS);
+      const timeout = setTimeout(() => controller.abort(), REMOTE_NODE_REFRESH_TIMEOUT_MS);
       try {
         const capability = await probeRemoteCapability(node.id, 'remote-image-inspect-v1');
         if (capability.kind === 'supported') {

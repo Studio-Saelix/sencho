@@ -64,12 +64,12 @@ Automation tools such as Watchtower, Diun, and Traefik read Docker labels to dec
 
 ### Partial or unreachable nodes
 
-The tab reads each node on its own, a few at a time, and draws each answer as it lands, with `n of N nodes` beside **Refresh** while the rest are pending. One node that is offline or slow does not hold back the containers from the nodes that answered. A banner appears above the table whenever the fleet-wide read was incomplete:
+The tab reads each node on its own, a few at a time, and draws each answer as it lands, with a `Checking n of N nodes` line above the table while the rest are pending. One node that is offline or slow does not hold back the containers from the nodes that answered. A banner appears above the table whenever the fleet-wide read was incomplete:
 
-- **Could not reach *node*.** The node did not respond within the fleet read budget, whether because it is offline, the network call timed out, or (on a mixed-version fleet) the node does not implement the endpoint at all. That node contributes no rows to either layout.
+- **Could not read *node* (*reason*).** The node did not answer in time (for example *Timed out after 5s*), the network call failed, or (on a mixed-version fleet) the node does not implement the endpoint at all. A node that has never answered contributes no rows to either layout; a node that answered before and then failed keeps its last rows until it answers again, and the banner says so.
 - **Some containers or images could not be inspected on *node*.** The node responded, but `docker inspect` failed for one or more containers or their images on that node. The affected labels show the **Unknown** provenance badge instead of being silently dropped.
 
-Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing. Refreshing keeps the last inventory each node returned until its new answer replaces it, so a failed refresh does not blank the table.
+Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing, and **Retry** reloads only the nodes that failed. Refreshing keeps the last inventory each node returned until its new answer replaces it, so a failed refresh does not blank the table.
 
 Runtime labels are static until the container is recreated. Changes declared in Compose require save and redeploy before they appear on running containers.
 

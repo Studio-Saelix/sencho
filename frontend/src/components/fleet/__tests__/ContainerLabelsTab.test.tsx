@@ -171,7 +171,15 @@ describe('ContainerLabelsTab', () => {
       },
     });
     render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
-    expect(await screen.findByText(/Could not reach Edge/)).toBeInTheDocument();
+    expect(await screen.findByText(/Could not read Edge \(unreachable\)/)).toBeInTheDocument();
     expect(screen.getByText(/could not be inspected on Local/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('shows a loading state, not an empty audit, before the node list arrives', async () => {
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} />);
+    expect(await screen.findByText('Loading Docker label audit...')).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

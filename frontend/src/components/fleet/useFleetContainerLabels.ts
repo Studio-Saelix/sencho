@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
-import type { FleetLabelInventoryResponse, LabelIndexRow } from '@/lib/labelInventory';
+import { runPool } from '@/lib/runPool';
+import type { ContainerLabelRow, FleetLabelInventoryResponse, LabelIndexRow, LabelSource } from '@/lib/labelInventory';
 
 /** Requests in flight at once, so a large fleet does not exhaust the browser's connections. */
 const LABELS_CONCURRENCY = 4;
 
-/** A node that has not answered by now is reported as failed, so Refresh never stays locked behind it. */
+/** A node that has not answered by now is reported as failed, so Refresh is not held indefinitely behind it. */
 export const LABELS_NODE_TIMEOUT_MS = 20_000;
 
 export interface LabelsNodeRef {
@@ -18,23 +19,88 @@ export interface FleetContainerLabelsState {
   data: FleetLabelInventoryResponse | null;
   /** True while any node's request is in flight, including a background revalidation. */
   loading: boolean;
-  /** Nodes answered of nodes asked, only while loading. */
+  /** Nodes answered of nodes asked, only while a load is running over a known node set. */
   progress: { done: number; total: number } | null;
   /** Reload every node, keeping what is already shown until each node's new answer lands. */
   refresh: () => void;
+  /** Reload only the nodes that could not be read. */
+  retryFailed: () => void;
 }
 
 type NodeRow = FleetLabelInventoryResponse['nodes'][number];
 
+const LABEL_SOURCES: ReadonlySet<string> = new Set<LabelSource>([
+  'compose', 'runtime', 'image', 'compose-system', 'unknown',
+]);
+
 function labelRowKey(row: LabelIndexRow): string {
   return `${row.key}\0${row.value}\0${row.source}`;
+}
+
+function isLabelValue(v: unknown): v is ContainerLabelRow['labels'][number] {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string' && typeof o.value === 'string'
+    && typeof o.source === 'string' && LABEL_SOURCES.has(o.source);
+}
+
+function isContainerRow(v: unknown): v is ContainerLabelRow {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string' && typeof o.name === 'string' && typeof o.state === 'string'
+    && Array.isArray(o.labels) && o.labels.every(isLabelValue);
+}
+
+function isLabelIndexRow(v: unknown): v is LabelIndexRow {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string' && typeof o.value === 'string'
+    && typeof o.source === 'string' && LABEL_SOURCES.has(o.source)
+    && Array.isArray(o.containers)
+    && o.containers.every(c => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).id === 'string');
+}
+
+/**
+ * A node slice exactly as the hub sends it. Checked field by field so a body
+ * from another build (or a proxy's own error envelope) degrades to a per-node
+ * failure instead of reaching the table as data nobody validated.
+ */
+function parseLabelPiece(body: unknown): FleetLabelInventoryResponse | null {
+  if (!body || typeof body !== 'object') return null;
+  const o = body as Record<string, unknown>;
+  if (!Array.isArray(o.nodes) || !Array.isArray(o.aggregatedByLabel)) return null;
+  if (!o.nodeErrors || typeof o.nodeErrors !== 'object' || Array.isArray(o.nodeErrors)) return null;
+  if (typeof o.generatedAt !== 'number') return null;
+  const nodes: NodeRow[] = [];
+  for (const raw of o.nodes) {
+    if (!raw || typeof raw !== 'object') return null;
+    const n = raw as Record<string, unknown>;
+    const inventory = n.inventory;
+    if (typeof n.nodeId !== 'number' || typeof n.nodeName !== 'string') return null;
+    if (n.status !== 'ok' && n.status !== 'error') return null;
+    if (inventory !== null) {
+      if (!inventory || typeof inventory !== 'object') return null;
+      const inv = inventory as Record<string, unknown>;
+      if (!Array.isArray(inv.containers) || !inv.containers.every(isContainerRow)) return null;
+      if (!Array.isArray(inv.byLabel) || !inv.byLabel.every(isLabelIndexRow)) return null;
+      if (typeof inv.partial !== 'boolean' || typeof inv.generatedAt !== 'number') return null;
+    }
+    nodes.push(raw as NodeRow);
+  }
+  if (!o.aggregatedByLabel.every(isLabelIndexRow)) return null;
+  return {
+    nodes,
+    aggregatedByLabel: o.aggregatedByLabel,
+    nodeErrors: o.nodeErrors as Record<number, string>,
+    generatedAt: o.generatedAt,
+  };
 }
 
 /**
  * Concatenate each node's inventory in node order. A node that failed on the way
  * (the request itself, not the node's own report) keeps the inventory it had
  * before, so a failed refresh does not blank its part of the tab, and its error
- * is named beside it.
+ * is reported beside it.
  */
 export function mergeLabelPieces(
   order: readonly LabelsNodeRef[],
@@ -62,9 +128,10 @@ export function mergeLabelPieces(
     }
     // A fresh request failure replaces the error an older answer carried for the
     // same node, and a node that never answered is still listed as an error
-    // rather than disappearing from the tab.
+    // rather than disappearing from the tab. "Last result" is only claimed when
+    // the kept slice actually carried an inventory.
     if (failure !== undefined) {
-      const kept = (piece?.nodes.length ?? 0) > 0;
+      const kept = piece?.nodes.some(n => n.status === 'ok' && n.inventory !== null) ?? false;
       nodeErrors[node.id] = kept ? `${failure}, showing its last result` : failure;
       if (!kept) {
         nodes.push({ nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: failure });
@@ -79,25 +146,6 @@ export function mergeLabelPieces(
     nodeErrors,
     generatedAt,
   };
-}
-
-function isLabelPiece(value: unknown): value is FleetLabelInventoryResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return Array.isArray(v.nodes) && Array.isArray(v.aggregatedByLabel)
-    && typeof v.nodeErrors === 'object' && v.nodeErrors !== null
-    && typeof v.generatedAt === 'number';
-}
-
-async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const item = items[next++];
-      await worker(item);
-    }
-  });
-  await Promise.all(lanes);
 }
 
 function describeFailure(err: unknown): string {
@@ -118,31 +166,44 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
   const [pieces, setPieces] = useState<ReadonlyMap<number, FleetLabelInventoryResponse>>(new Map());
   const [failures, setFailures] = useState<ReadonlyMap<number, string>>(new Map());
   const [pending, setPending] = useState<ReadonlySet<number>>(new Set());
-  const [total, setTotal] = useState(0);
+  // Held only while a load over the whole node set runs; a retry of a few nodes
+  // does not reset it, because "n of N" means nodes of the fleet.
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const controllersRef = useRef(new Set<AbortController>());
+  // Nodes with a request in flight, so a retry never doubles one up.
+  const inFlightRef = useRef(new Set<number>());
   // A newer load owns the state, so a superseded answer never touches it.
   const generationRef = useRef(0);
   const nodesRef = useRef(nodes);
+  const piecesRef = useRef(pieces);
+  const failuresRef = useRef(failures);
   useEffect(() => {
     nodesRef.current = nodes;
+    piecesRef.current = pieces;
+    failuresRef.current = failures;
   });
   const nodeKey = useMemo(() => nodes.map(n => n.id).join(','), [nodes]);
 
-  const load = useCallback(async (requested: readonly LabelsNodeRef[]) => {
-    if (requested.length === 0) return;
-    generationRef.current += 1;
+  const load = useCallback(async (requested: readonly LabelsNodeRef[], full: boolean) => {
+    const targets = full ? requested : requested.filter(n => !inFlightRef.current.has(n.id));
+    if (targets.length === 0) return;
+    if (full) {
+      generationRef.current += 1;
+      controllersRef.current.forEach(c => c.abort());
+      controllersRef.current.clear();
+      inFlightRef.current.clear();
+    }
     const generation = generationRef.current;
-    controllersRef.current.forEach(c => c.abort());
-    controllersRef.current.clear();
     const controller = new AbortController();
     controllersRef.current.add(controller);
 
-    const ids = requested.map(n => n.id);
-    setPending(new Set(ids));
-    setTotal(ids.length);
+    const ids = targets.map(n => n.id);
+    ids.forEach(id => inFlightRef.current.add(id));
+    setPending(prev => (full ? new Set(ids) : new Set([...prev, ...ids])));
+    if (full) setProgress({ done: 0, total: ids.length });
 
-    await runPool(requested, LABELS_CONCURRENCY, async (node) => {
+    await runPool(targets, LABELS_CONCURRENCY, async (node) => {
       let piece: FleetLabelInventoryResponse | null = null;
       let failure: string | null = null;
       try {
@@ -151,8 +212,8 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
         const res = await apiFetch(`/fleet/container-labels?nodeId=${node.id}${revealQs}`, { localOnly: true, signal });
         if (res.ok) {
           const body: unknown = await res.json();
-          if (isLabelPiece(body)) piece = body;
-          else failure = 'Unexpected response from the hub';
+          piece = parseLabelPiece(body);
+          if (!piece) failure = 'Unexpected response from the hub';
         } else {
           const body = await res.json().catch(() => null) as { error?: string } | null;
           failure = body?.error ?? `Request failed (${res.status})`;
@@ -164,6 +225,8 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
         failure = describeFailure(err);
       }
       if (generation !== generationRef.current || controller.signal.aborted) return;
+      inFlightRef.current.delete(node.id);
+      if (full) setProgress(prev => (prev ? { ...prev, done: prev.done + 1 } : prev));
       if (piece) setPieces(prev => new Map(prev).set(node.id, piece));
       setFailures(prev => {
         const next = new Map(prev);
@@ -178,29 +241,43 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
     });
 
     controllersRef.current.delete(controller);
+    if (full && generation === generationRef.current) setProgress(null);
   }, [reveal]);
 
-  // Only a change of the node set or of the reveal mode starts a load; the live
-  // node list is read through a ref so it never has to sit in the dependency array.
+  // Only a change of the node set or of the reveal mode starts a full load; the
+  // live node list is read through a ref so it never has to sit in the effect's
+  // dependency array.
   useEffect(() => {
     if (nodesRef.current.length === 0) return;
-    void load(nodesRef.current);
+    void load(nodesRef.current, true);
   }, [load, nodeKey]);
 
   useEffect(() => () => { controllersRef.current.forEach(c => c.abort()); }, []);
 
-  const refresh = useCallback(() => { void load(nodesRef.current); }, [load]);
+  const failedNodes = useCallback((): LabelsNodeRef[] => {
+    return nodesRef.current.filter(n => failuresRef.current.has(n.id)
+      || (piecesRef.current.get(n.id)?.nodeErrors[n.id] !== undefined));
+  }, []);
+
+  const refresh = useCallback(() => { void load(nodesRef.current, true); }, [load]);
+  const retryFailed = useCallback(() => {
+    const failed = failedNodes();
+    if (failed.length > 0) void load(failed, false);
+  }, [load, failedNodes]);
 
   const data = useMemo(() => {
     if (pieces.size === 0 && failures.size === 0) return null;
     return mergeLabelPieces(nodes, pieces, failures);
   }, [nodes, pieces, failures]);
 
-  const loading = pending.size > 0;
+  // `data === null` covers the first paint and a node list that has not arrived
+  // yet, so the tab shows a loading state instead of an empty audit.
+  const loading = pending.size > 0 || data === null;
   return {
     data,
     loading,
-    progress: loading ? { done: total - pending.size, total } : null,
+    progress: loading ? progress : null,
     refresh,
+    retryFailed,
   };
 }
