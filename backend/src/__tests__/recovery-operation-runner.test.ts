@@ -500,7 +500,7 @@ describe('repository provisioning', () => {
       });
     }
 
-    it('keeps the capture and a second replace out while a replace is running, then lets both in', async () => {
+    it('keeps the capture and a second replace out while a replace is running, then lets the capture in', async () => {
       stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
       const seeded = await seedProtectableVolume();
       runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
@@ -552,10 +552,10 @@ describe('repository provisioning', () => {
       const seeded = await seedProtectableVolume();
       runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
       service().markReadyForTests();
-      await stubProvisioner(Promise.resolve());
 
-      // The replace is admitted and finishes inside the capture's own authorization
-      // step, which runs between reading the repository and taking its lock.
+      // A replace finishing is simulated inside the capture's own authorization
+      // step, which runs between reading the repository and taking its lock: the
+      // active pointer moves to a new repository.
       const request = {
         nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'capture-across-replace',
         requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local' as const,
@@ -607,6 +607,128 @@ describe('repository provisioning', () => {
         errorClass: 'repository_unavailable', reason: 'repository_replaced',
       });
       expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get()).toEqual({ n: 0 });
+    });
+
+    it('refuses a verify and a restore while a replace is running, and runs them once it ends', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      const point = points.RecoveryPointStore.getInstance().begin({
+        kind: 'root', storageId: seeded.storage.id, expectedGenerationToken: 'token-1',
+        repositoryId: seeded.repositoryId, trigger: 'manual', actor: 'alice', sourceOperationId: 'op-y',
+        sourceNodeKey: ENGINE_KEY, engineId: 'restic',
+      });
+      points.RecoveryPointStore.getInstance().finalize(point.id, {
+        status: 'succeeded',
+        evidence: { snapshotId: 'snap-y', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+      });
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+      let open: () => void = () => undefined;
+      await stubProvisioner(new Promise<void>((resolve) => { open = resolve; }));
+      const replace = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'replace-vs-verify', replace: true, transport: 'local',
+      });
+
+      const verifyRequest = {
+        nodeId, pointId: point.id, actor: 'alice', idempotencyKey: 'verify-during-replace',
+        requestDigest: runner.sha256Digest(['verify_point', point.id, 'engine_check_metadata']),
+        transport: 'local' as const, method: 'engine_check_metadata' as const, authorize: allowAll,
+      };
+      const restoreRequest = {
+        nodeId, pointId: point.id, targetVolumeName: 'during_replace', actor: 'alice', idempotencyKey: 'restore-during-replace',
+        requestDigest: runner.sha256Digest(['restore', point.id, 'during_replace', 'new_volume']),
+        transport: 'local' as const, authorize: allowAll, authorizeCrossStack: allowAll,
+      };
+      try {
+        await expect(service().admitVerify(verifyRequest)).rejects.toMatchObject({ errorClass: 'lock_held' });
+        await expect(service().admitRestore(restoreRequest)).rejects.toMatchObject({ errorClass: 'lock_held' });
+        expect(recoveryDbModule.recoveryDb()
+          .prepare("SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key IN ('verify-during-replace', 'restore-during-replace')")
+          .get()).toEqual({ n: 0 });
+        expect(recoveryDbModule.recoveryDb().prepare('SELECT COUNT(*) AS n FROM recovery_restore_intents').get()).toEqual({ n: 0 });
+      } finally {
+        open();
+      }
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(replace.operation.id)?.state).toBe('succeeded');
+
+      // The point is in the repository the replace moved past, so a restore of it
+      // is refused as replaced, and a verify of it runs against its own repository.
+      await expect(service().admitRestore(restoreRequest)).rejects.toMatchObject({ reason: 'repository_replaced' });
+      const verified = await service().admitVerify(verifyRequest);
+      expect(verified.replayed).toBe(false);
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(verified.operation.id)?.state).toBe('succeeded');
+    });
+
+    it('answers a repeated replace key with the replace that is running, not with lock_held', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      await seedProtectableVolume();
+      service().markReadyForTests();
+      let open: () => void = () => undefined;
+      await stubProvisioner(new Promise<void>((resolve) => { open = resolve; }));
+      const request = { actor: 'alice', idempotencyKey: 'replace-twice', replace: true, transport: 'local' as const };
+      const first = await service().admitRepositoryInit(request);
+      try {
+        const again = await service().admitRepositoryInit(request);
+        expect(again.replayed).toBe(true);
+        expect(again.operation.id).toBe(first.operation.id);
+        expect(recoveryDbModule.recoveryDb()
+          .prepare("SELECT COUNT(*) AS n FROM recovery_operations WHERE kind = 'repository_init'")
+          .get()).toEqual({ n: 1 });
+      } finally {
+        open();
+      }
+      await service().whenIdleForTests();
+    });
+
+    it('releases the active repository when a replace fails, so a capture is admitted afterwards', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+      service().markReadyForTests();
+      const localRepository = await import('../services/recovery/localRepository');
+      vi.spyOn(localRepository.RepositoryProvisioner.prototype, 'provision')
+        .mockRejectedValue(new Error('volume could not be created'));
+
+      const replace = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'replace-fails', replace: true, transport: 'local',
+      });
+      expect(operations.RecoveryOperationStore.getInstance().getLock('repository', seeded.repositoryId)?.ownerOperationId)
+        .toBe(replace.operation.id);
+      await service().whenIdleForTests();
+
+      expect(operations.RecoveryOperationStore.getInstance().get(replace.operation.id)?.state).toBe('failed');
+      expect(operations.RecoveryOperationStore.getInstance().getLock('repository', seeded.repositoryId)).toBeNull();
+      expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
+      const captured = await service().admitCreatePoint({
+        nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'capture-after-failed-replace',
+        requestDigest: runner.sha256Digest(['create_point', VOLUME]), transport: 'local', authorize: allowAll,
+      });
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(captured.operation.id)?.state).toBe('succeeded');
+    });
+
+    it('refuses a replace as stale while an interrupted operation still holds the active repository', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      service().markReadyForTests();
+      await stubProvisioner(Promise.resolve());
+      recoveryDbModule.recoveryDb().prepare(`
+        INSERT INTO recovery_operations (id, idempotency_key, kind, state, actor, transport, process_epoch, created_at, updated_at)
+        VALUES ('dead-op', 'dead-key', 'create_point', 'completion_unknown', 'alice', 'local', 'dead-epoch', 1, 1)
+      `).run();
+      recoveryDbModule.recoveryDb().prepare(`
+        INSERT INTO recovery_locks (scope, resource_key, owner_operation_id, process_epoch, acquired_at, stale_since)
+        VALUES ('repository', ?, 'dead-op', 'dead-epoch', 1, 2)
+      `).run(seeded.repositoryId);
+
+      await expect(service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'replace-vs-stale', replace: true, transport: 'local',
+      })).rejects.toMatchObject({ errorClass: 'lock_stale' });
+      expect(recoveryDbModule.recoveryDb()
+        .prepare("SELECT COUNT(*) AS n FROM recovery_operations WHERE idempotency_key = 'replace-vs-stale'")
+        .get()).toEqual({ n: 0 });
     });
 
     it('lets a repeated provision confirm the working repository while a capture holds it', async () => {

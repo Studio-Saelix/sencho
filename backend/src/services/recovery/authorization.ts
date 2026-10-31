@@ -26,7 +26,9 @@ import type { StorageDependent } from './types';
  * The check runs on the node that owns the storage, with the request as it
  * arrived there, so a request relayed by the hub (direct proxy or Pilot) is
  * held to the same rule: machine-auth stack evidence names one stack and can
- * never stand in for the others.
+ * never stand in for the others. The hop arrives as user 0, so a role the user
+ * holds on the node is resolved by the hub, which forwards the role that carries
+ * it (see the recovery node-grant gate in the remote node proxy).
  */
 export type RecoveryAccess = 'read' | 'protect' | 'restore' | 'configure';
 
@@ -47,11 +49,12 @@ export interface RecoveryAuthorization {
 }
 
 /**
- * The decision when no stack names the storage: the action globally, or through
- * a role assigned on this node. A node-wide role is the grant the page promises
- * covers every volume, and a stack check would honor it through the same node
- * assignment, so a volume no stack declares must not be the one place it is
- * ignored. Repository and key settings stay global: no node role carries them.
+ * The decision when no stack is known for the storage (none declares it, or the
+ * dependent set could not be resolved): the action globally, or through a role
+ * assigned on this node. A node role covers every volume on the node, and a
+ * stack check honors it through the same node assignment, so a volume no stack
+ * declares must not be the one place it is ignored. Repository and key settings
+ * are never checked through a node assignment.
  */
 function allowedWithoutStack(req: Request, access: RecoveryAccess, action: PermissionAction): boolean {
   if (checkPermission(req, action)) return true;

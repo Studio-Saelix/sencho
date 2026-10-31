@@ -441,7 +441,8 @@ export class RecoveryEngineService {
       docker,
     });
     // A stack whose model cannot be rendered may own this volume, so the check
-    // becomes a global one rather than a narrower set.
+    // runs without a stack (the action globally, or a role on the node) rather
+    // than against a narrower set.
     const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : described.storageKey;
     if (!input.authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
       throw new RecoveryError('permission_denied');
@@ -542,7 +543,7 @@ export class RecoveryEngineService {
       docker: this.docker(),
     });
     // An unrenderable model makes the full dependent set unknown; the check then
-    // has to be global, which the caller does for a null storage key.
+    // runs without a stack, which the caller does for a null storage key.
     const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
     if (!input.authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
       throw new RecoveryError('permission_denied');
@@ -681,9 +682,9 @@ export class RecoveryEngineService {
     // Already provisioned and working: a repeated request confirms it and
     // changes nothing, including the password that opens the existing points.
     const confirmsOnly = !input.replace && active !== null && active.repositoryFingerprint !== null;
-    // Work that builds or moves the repository holds the lock of the repository
-    // every capture, check and restore holds, taken with the admission, so none of
-    // them runs next to it and a second replace is refused too. The new
+    // Work that builds or replaces an existing repository holds the lock of the
+    // repository every capture, check and restore holds, taken with the admission,
+    // so none of them runs next to it and a second replace is refused too. The new
     // repository's own lock is taken once its row exists, inside provisioning.
     const started = this.operations.admit(
       {

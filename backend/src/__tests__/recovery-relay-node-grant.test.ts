@@ -161,6 +161,30 @@ describe('a node grant on a relayed recovery call', () => {
     });
   }
 
+  it('forwards a node-scoped Admin grant as node-admin, never as admin', async () => {
+    await grant('relay-viewer', 'admin', proxyNodeId);
+    const res = await request(app).post('/api/recovery/repository').set('Authorization', bearers.get('relay-viewer')!)
+      .set('x-node-id', String(proxyNodeId)).send({});
+    expect(res.status).toBe(202);
+    expect(hops.find((h) => h.url.startsWith('/api/recovery/repository'))?.role).toBe('node-admin');
+  });
+
+  it('forwards a hub admin and a global node-admin as themselves on the repository call', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    for (const role of ['admin', 'node-admin'] as const) {
+      const name = `relay-global-${role}`;
+      db.addUser({ username: name, password_hash: await bcrypt.hash('password123', 1), role });
+      const row = db.getUserByUsername(name)!;
+      const bearer = `Bearer ${jwt.sign({ username: name, role, tv: row.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' })}`;
+      hops = [];
+      const res = await request(app).post('/api/recovery/repository').set('Authorization', bearer)
+        .set('x-node-id', String(proxyNodeId)).send({});
+      expect(res.status, role).toBe(202);
+      expect(hops.find((h) => h.url.startsWith('/api/recovery/repository'))?.role, role).toBe(role);
+    }
+  });
+
   it('does not carry a grant on another node to this one', async () => {
     await grant('relay-viewer', 'node-admin', otherNodeId);
     const res = await request(app).post('/api/recovery/storage/points').set('Authorization', bearers.get('relay-viewer')!)

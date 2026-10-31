@@ -233,7 +233,7 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/repository \
   -d '{ "idempotencyKey": "replace-repository-2026-10-31", "replace": true }'
 ```
 
-A replacement answers `409 lock_held` and is not recorded while a capture, verification, restore, or another replacement is running, so wait for it to end and send the same request again. A replacement creates a new repository volume and moves the active pointer to it. The previous repository and every point in it are kept, and its access key is not overwritten. Its points are no longer covered by new checks, and they stop counting when they age out of the 7-day window. A point in a repository that is no longer active cannot be restored through the API, so restore anything you still need before replacing.
+A replacement answers `409 lock_held` and is not recorded while a capture, verification, restore, or another replacement is running, so wait for it to end and send the same request again. It answers `409 lock_stale` while an interrupted operation's repository lock is still held; release that lock first, as described under [Release a stale lock](#release-a-stale-lock). A replacement creates a new repository volume and moves the active pointer to it. The previous repository and every point in it are kept, and its access key is not overwritten. Its points are no longer covered by new checks, and they stop counting when they age out of the 7-day window. A point in a repository that is no longer active cannot be restored through the API, so restore anything you still need before replacing.
 
 Read the repository's state:
 

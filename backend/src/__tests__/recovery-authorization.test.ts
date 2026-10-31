@@ -19,6 +19,7 @@ let otherNodeId: number;
 let scopedUserId: number;
 let nodeOperatorId: number;
 let nodeDeployerId: number;
+let nodeAdminId: number;
 let sharedKey: string;
 let soloKey: string;
 let orphanKey: string;
@@ -59,6 +60,9 @@ beforeAll(async () => {
   db.addRoleAssignment({ user_id: nodeOperatorId, role: 'node-admin', resource_type: 'node', resource_id: String(nodeId) });
   nodeDeployerId = db.addUser({ username: 'node-deployer', password_hash: 'x', role: 'viewer' });
   db.addRoleAssignment({ user_id: nodeDeployerId, role: 'deployer', resource_type: 'node', resource_id: String(nodeId) });
+
+  nodeAdminId = db.addUser({ username: 'node-scoped-admin', password_hash: 'x', role: 'viewer' });
+  db.addRoleAssignment({ user_id: nodeAdminId, role: 'admin', resource_type: 'node', resource_id: String(nodeId) });
 
   const store = identities.StorageIdentityStore.getInstance();
   sharedKey = store.observe({
@@ -152,7 +156,7 @@ describe('authorizeStorageAccess', () => {
     const asNodeOperator = (access: RecoveryAccess, storage: ReturnType<typeof target> | null, node = nodeId, userId = nodeOperatorId) =>
       auth.authorizeStorageAccess(req({ role: 'viewer', userId, nodeId: node }), access, storage);
 
-    it('covers storage no stack uses, for protect and restore', () => {
+    it('covers storage no stack uses, for read, protect and restore', () => {
       expect(asNodeOperator('protect', target(orphanKey)).allowed).toBe(true);
       expect(asNodeOperator('restore', target(orphanKey)).allowed).toBe(true);
       expect(asNodeOperator('read', target(orphanKey)).allowed).toBe(true);
@@ -173,6 +177,13 @@ describe('authorizeStorageAccess', () => {
       expect(asNodeOperator('configure', null).allowed).toBe(false);
     });
 
+    it('does not satisfy repository and key settings even when the role carries system:settings', () => {
+      // A node-scoped Admin assignment carries system:settings in the role matrix;
+      // settings are still never checked through a node assignment.
+      expect(asNodeOperator('protect', target(orphanKey), nodeId, nodeAdminId).allowed).toBe(true);
+      expect(asNodeOperator('configure', null, nodeId, nodeAdminId).allowed).toBe(false);
+    });
+
     it('does not reach another node', () => {
       expect(asNodeOperator('protect', target(orphanKey), otherNodeId).allowed).toBe(false);
       expect(asNodeOperator('protect', target(sharedKey), otherNodeId).allowed).toBe(false);
@@ -186,7 +197,7 @@ describe('authorizeStorageAccess', () => {
 
     it('does not apply to a relayed hop, which carries no assignments of its own', () => {
       // The hub resolves the grant and forwards the role; a hop that arrives as a
-      // viewer with someone else's user id finds nothing on this node.
+      // viewer with user id 0 finds nothing on this node.
       const relayed = req({ role: 'viewer', userId: 0, machine: 'node_proxy' });
       expect(auth.authorizeStorageAccess(relayed, 'protect', target(orphanKey)).allowed).toBe(false);
       const elevated = req({ role: 'node-admin', userId: 0, machine: 'node_proxy' });

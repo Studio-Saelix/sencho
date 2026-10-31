@@ -5118,8 +5118,12 @@ paths:
         Provisions the repository, or continues a provisioning attempt a crash left half
         done. Idempotent: the same key answers the operation it already created. With
         `replace: true`, registers a new repository volume generation and moves the
-        active pointer to it; the previous repository and its points are kept.
-        Requires permission to change system settings.
+        active pointer to it; the previous repository and its points are kept. A request that
+        builds or replaces the repository takes the node's repository lock, the lock every
+        capture, verification, and restore holds, so it answers `409` and is not recorded
+        while one of them (or another replacement) runs, or while a stale repository lock
+        awaits a reviewed release. A repeated request on a working repository changes nothing
+        and takes no lock. Requires permission to change system settings.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:
@@ -5156,6 +5160,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
         "503":
           $ref: "#/components/responses/RecoveryUnavailable"
         "500":
@@ -5281,7 +5287,7 @@ paths:
         all happen before the answer, so a held or stale lock is a real `409` rather than
         a background failure. A refused request is not recorded, so the same idempotency
         key can be sent again once the lock is gone. One repository lock covers the node:
-        only one capture, verification, or restore runs at a time on it. A node with no
+        only one capture, verification, restore, or repository replacement runs at a time on it. A node with no
         repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
         The capture runs in the background and is followed by a repository-wide metadata
         check before the operation ends.
