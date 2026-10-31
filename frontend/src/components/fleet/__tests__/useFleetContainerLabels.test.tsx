@@ -70,6 +70,18 @@ describe('mergeLabelPieces', () => {
     expect(merged.nodeErrors[2]).toBe('network down, showing its last result');
   });
 
+  it('does not claim a last result when the kept slice carried no inventory', () => {
+    const errorOnly: FleetLabelInventoryResponse = {
+      nodes: [{ nodeId: 2, nodeName: 'node2', status: 'error', inventory: null, error: 'no inventory' }],
+      aggregatedByLabel: [],
+      nodeErrors: { 2: 'no inventory' },
+      generatedAt: 1,
+    };
+    const merged = mergeLabelPieces(NODES, new Map([[2, errorOnly]]), new Map([[2, 'network down']]));
+    expect(merged.nodeErrors[2]).toBe('network down');
+    expect(merged.nodes.filter(n => n.nodeId === 2)).toHaveLength(2);
+  });
+
   it('lists a node that never answered as an error row instead of dropping it', () => {
     const merged = mergeLabelPieces(NODES, new Map([[1, piece(1)]]), new Map([[3, 'Timed out after 20s']]));
     expect(merged.nodes.find(n => n.nodeId === 3)).toMatchObject({ status: 'error', inventory: null, error: 'Timed out after 20s' });
@@ -145,6 +157,25 @@ describe('useFleetContainerLabels', () => {
     act(() => { result.current.retryFailed(); });
     await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBeUndefined());
     expect(apiFetchMock.mock.calls.map(c => nodeIdOf(String(c[0])))).toEqual([2]);
+  });
+
+  it('reports a body the tab cannot trust as that node\'s failure', async () => {
+    answerBy({ 1: () => json({ nodes: [{ nodeId: 1 }], aggregatedByLabel: [], nodeErrors: {}, generatedAt: 1 }) });
+    const { result } = renderHook(() => useFleetContainerLabels([{ id: 1, name: 'Local' }], false));
+    await waitFor(() => expect(result.current.data?.nodeErrors[1]).toBe('Unexpected response from the hub'));
+    expect(result.current.data?.nodes.find(n => n.nodeId === 1)?.status).toBe('error');
+  });
+
+  it('aborts in-flight node reads when the tab unmounts', async () => {
+    let signal: AbortSignal | undefined;
+    apiFetchMock.mockImplementation((_path: string, init: { signal?: AbortSignal }) => {
+      signal = init.signal;
+      return new Promise<Response>(() => {});
+    });
+    const { unmount } = renderHook(() => useFleetContainerLabels([{ id: 1, name: 'Local' }], false));
+    await waitFor(() => expect(signal).toBeDefined());
+    unmount();
+    expect(signal?.aborted).toBe(true);
   });
 
   it('asks for unredacted values once reveal is on', async () => {

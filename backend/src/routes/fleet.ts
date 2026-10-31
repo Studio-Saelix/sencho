@@ -993,8 +993,17 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
           const errBody = await resp.json().catch(() => null) as { error?: string } | null;
           return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
         }
-        const inventory = await resp.json().catch(() => null);
+        let inventory: unknown;
+        try {
+          inventory = await resp.json();
+        } catch (readError) {
+          // A budget overrun mid-body is a timeout, not a malformed payload.
+          console.error(`[Fleet] Container labels: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
+          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeFleetReadFailure(readError);
+          return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: reason };
+        }
         if (!isNodeLabelInventory(inventory)) {
+          console.error(`[Fleet] Container labels: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
           return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: 'Remote returned an unexpected label-inventory payload' };
         }
         return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };

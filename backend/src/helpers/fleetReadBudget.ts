@@ -16,15 +16,17 @@ import { getErrorMessage } from '../utils/errors';
  * second or two on a busy host, so a ~3 s ceiling would drop truthful data from
  * healthy nodes to shave two seconds off the one bad node. 5 s also matches the
  * cap the fleet image-update reads already used, so one number replaces the
- * 8 s, 15 s and 30 s the tabs used to carry.
+ * 8 s the map and networking summary carried and the 30 s the Docker Labels
+ * inventory carried.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
  * different contract: the Overview card probe stays at 3 s (it reads three small
  * endpoints and must not hold the primary Fleet loading state), and the
  * Readiness aggregate keeps its evidence and summary budgets.
  *
- * Long-running fleet actions (deploy, prune, update, refresh) are not
- * interactive reads and keep their own, longer budgets.
+ * Long-running fleet actions are not interactive reads and keep their own
+ * budgets: the remote image-update refresh still starts its scan on a 5 s
+ * request, while deploys, prune and update run on much longer ones.
  */
 export const FLEET_READ_BUDGET_MS = 5_000;
 
