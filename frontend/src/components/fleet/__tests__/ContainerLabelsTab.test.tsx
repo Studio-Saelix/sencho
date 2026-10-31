@@ -14,6 +14,20 @@ vi.mock('@/context/AuthContext', () => ({
 
 import { apiFetch } from '@/lib/api';
 
+const NODE_LOCAL = [{ id: 1, name: 'Local' }];
+
+/** Answers `/fleet/container-labels?nodeId=N` from a per-node body, or a failed read for a node with none. */
+function answerWith(pieces: Record<number, unknown>): void {
+  vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+    const nodeId = Number(/nodeId=(\d+)/.exec(String(path))?.[1]);
+    const body = pieces[nodeId];
+    if (body === undefined) {
+      return { ok: false, status: 503, json: async () => ({ error: 'unreachable' }) } as Response;
+    }
+    return { ok: true, json: async () => body } as Response;
+  });
+}
+
 const mockFleet = {
   nodes: [
     {
@@ -64,15 +78,13 @@ const dupMock = {
 
 describe('ContainerLabelsTab', () => {
   beforeEach(() => {
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      json: async () => mockFleet,
-    } as Response);
+    vi.mocked(apiFetch).mockReset();
+    answerWith({ 1: mockFleet });
   });
 
   it('renders audit sections and toggles view mode', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     expect(await screen.findByText(LABEL_DISAMBIGUATION_COPY)).toBeInTheDocument();
     expect(screen.getByText('Docker label audit')).toBeInTheDocument();
     expect(await screen.findByText('web-1')).toBeInTheDocument();
@@ -83,8 +95,8 @@ describe('ContainerLabelsTab', () => {
 
   it('keeps the same key=value distinct per source with its own badge', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getAllByText('dup.label')).toHaveLength(2);
     // The misleading "External automation label" marker on non-Compose keys was removed.
@@ -93,7 +105,7 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-label list by search text', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getByText('traefik.enable')).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
@@ -103,7 +115,7 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-container list by search text', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     expect(await screen.findByText('web-1')).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
     expect(screen.queryByText('web-1')).toBeNull();
@@ -112,7 +124,7 @@ describe('ContainerLabelsTab', () => {
 
   it('exposes a facet in the Filters popover only for sources present, with exact labels', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     await user.click(screen.getByRole('button', { name: /Filters/ }));
     // mockFleet has only a runtime source.
@@ -122,8 +134,8 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-label list by source facet, hiding an unpressed source', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getAllByText('dup.label')).toHaveLength(2);
     await user.click(screen.getByRole('button', { name: /Filters/ }));
@@ -138,8 +150,8 @@ describe('ContainerLabelsTab', () => {
 
   it('shows the empty state when every source facet is turned off', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     await user.click(screen.getByRole('button', { name: /Filters/ }));
     await user.click(screen.getByRole('button', { name: 'Image' }));
@@ -148,19 +160,17 @@ describe('ContainerLabelsTab', () => {
   });
 
   it('names unreachable and partial nodes in the warning', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    answerWith({
+      1: {
         nodes: [
           { nodeId: 1, nodeName: 'Local', status: 'ok' as const, error: null, inventory: { nodeId: 1, partial: true, generatedAt: Date.now(), containers: [], byLabel: [] } },
-          { nodeId: 2, nodeName: 'Edge', status: 'error' as const, error: 'boom', inventory: null },
         ],
         aggregatedByLabel: [],
-        nodeErrors: { 2: 'boom' },
+        nodeErrors: {},
         generatedAt: Date.now(),
-      }),
-    } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+      },
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
     expect(await screen.findByText(/Could not reach Edge/)).toBeInTheDocument();
     expect(screen.getByText(/could not be inspected on Local/)).toBeInTheDocument();
   });

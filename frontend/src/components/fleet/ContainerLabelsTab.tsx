@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, Fragment } from 'react';
+import { useMemo, useState, Fragment } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Lock, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
-import { apiFetch } from '@/lib/api';
-import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/context/AuthContext';
+import { useFleetContainerLabels, type LabelsNodeRef } from './useFleetContainerLabels';
 import {
   LABEL_DISAMBIGUATION_COPY,
   SOURCE_LABELS,
@@ -17,7 +16,6 @@ import {
   matchesSearch,
   sourcesPresent,
   type ContainerLabelRow,
-  type FleetLabelInventoryResponse,
   type LabelIndexRow,
   type LabelSource,
   type LabelValue,
@@ -29,6 +27,8 @@ const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tr
 
 interface ContainerLabelsTabProps {
   onNavigateToNode: (nodeId: number, stackName: string) => void;
+  /** The fleet's nodes, read one at a time so each answer draws as it lands. */
+  nodes: readonly LabelsNodeRef[];
 }
 
 function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () => void }) {
@@ -50,35 +50,15 @@ function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () 
   );
 }
 
-export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps) {
+export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsTabProps) {
   const { isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>('container');
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
   const [revealSecrets, setRevealSecrets] = useState(false);
-  const [data, setData] = useState<FleetLabelInventoryResponse | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
 
-  const fetchInventory = useCallback(async (reveal = revealSecrets) => {
-    setLoading(true);
-    try {
-      const qs = reveal ? '?reveal=1' : '';
-      const res = await apiFetch(`/fleet/container-labels${qs}`, { localOnly: true });
-      if (!res.ok) throw new Error('Failed to load Docker label audit');
-      setData(await res.json() as FleetLabelInventoryResponse);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load Docker label audit';
-      toast.error(msg);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [revealSecrets]);
-
-  useEffect(() => {
-    void fetchInventory();
-  }, [fetchInventory]);
+  const { data, loading, progress, refresh } = useFleetContainerLabels(nodes, revealSecrets);
 
   const allContainers = useMemo(() => {
     if (!data) return [] as Array<ContainerLabelRow & { nodeId: number; nodeName: string }>;
@@ -151,7 +131,6 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
 
   const handleReveal = () => {
     setRevealSecrets(true);
-    void fetchInventory(true);
   };
 
   return (
@@ -218,11 +197,15 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
               </PopoverContent>
             </Popover>
           )}
-          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={() => void fetchInventory()} disabled={loading} aria-label="Refresh">
+          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={refresh} disabled={loading} aria-label="Refresh">
             <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
           </Button>
         </div>
       </div>
+
+      {loading && progress && (
+        <p className="text-xs text-stat-subtitle">Checking {progress.done} of {progress.total} nodes...</p>
+      )}
 
       {loading && !data && (
         <p className="text-sm text-stat-subtitle">Loading Docker label audit...</p>
