@@ -18,6 +18,9 @@ interface HealthStatusBarProps {
   /** True when the metrics stopped at a state where the node could not be read
    *  (a bounded timeout or an unreachable node), as opposed to stale meters. */
   metricsUnreadable?: boolean;
+  /** True until the first metrics read for the active node settles. The headline
+   *  must not claim the default (healthy) level while that read is still queued. */
+  metricsPending?: boolean;
 }
 
 const healthConfig: Record<HealthLevel, { label: string; textClass: string; railClass: string; tintClass: string }> = {
@@ -48,6 +51,17 @@ const healthConfig: Record<HealthLevel, { label: string; textClass: string; rail
  */
 const unavailableHealth = {
   label: 'Unknown',
+  textClass: 'text-muted-foreground',
+  railClass: 'bg-muted-foreground/40',
+  tintClass: 'from-muted-foreground/[0.04] via-transparent to-transparent',
+};
+
+/**
+ * Shown until the first metrics read settles. The default counters are zeros,
+ * which would derive "Healthy"; that is a claim about a node nobody has read yet.
+ */
+const pendingHealth = {
+  label: 'Checking',
   textClass: 'text-muted-foreground',
   railClass: 'bg-muted-foreground/40',
   tintClass: 'from-muted-foreground/[0.04] via-transparent to-transparent',
@@ -87,6 +101,7 @@ export function HealthStatusBar({
   lastSyncAt,
   metricsStale = false,
   metricsUnreadable = false,
+  metricsPending = false,
 }: HealthStatusBarProps) {
   const { level, reasons } = useMemo(
     () => deriveHealth(stats, systemStats, notifications),
@@ -95,7 +110,7 @@ export function HealthStatusBar({
   // "Unknown" is reserved for a node that did not answer. Stale meters with a
   // known local cause (the Docker socket, the metrics service) keep the derived
   // level and the stale chip, so the copy does not blame the network for them.
-  const config = metricsUnreadable ? unavailableHealth : healthConfig[level];
+  const config = metricsUnreadable ? unavailableHealth : metricsPending ? pendingHealth : healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
@@ -103,14 +118,19 @@ export function HealthStatusBar({
   const memLabel = systemStats ? formatGib(systemStats.memory.effectiveUsed ?? systemStats.memory.used) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
-  const reasonsLine = metricsUnreadable ? 'This node is not answering.' : reasons.join(' · ');
+  const reasonsLine = metricsUnreadable
+    ? 'This node is not answering.'
+    : metricsPending
+      ? 'Reading this node…'
+      : reasons.join(' · ');
+  const live = !metricsUnreadable && !metricsPending && level === 'healthy';
 
   return (
     <div
       className={`relative overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors`}
     >
       <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${config.tintClass}`} />
-      <MastheadRail variant={level === 'healthy' ? 'shimmer' : 'glow'} className={config.railClass} />
+      <MastheadRail variant={live ? 'shimmer' : 'glow'} className={config.railClass} />
       <div className="relative grid grid-cols-[auto_1fr_auto] items-center gap-6 py-5 pl-7 pr-6">
         {/* State column */}
         <div className="flex items-center gap-4">

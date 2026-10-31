@@ -395,6 +395,40 @@ describe('ResourcesView', () => {
     expect(await screen.findByText('Tidy')).toBeInTheDocument();
   });
 
+  it('recovers the half-failed page from the table Retry', async () => {
+    // The inventory and disk-usage reads fail together on a silent node. The
+    // Retry the operator reaches for (the table's) must restore both, not leave
+    // the header on "Disk usage unknown" beside a loaded inventory.
+    let resourcesCalls = 0;
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        return Promise.resolve(resourcesCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse({ images: [image('back:again')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('back:again')).toBeInTheDocument();
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+    expect(dfCalls).toBe(2);
+  });
+
   it('fetches a prune plan before enabling confirm, then sends the fingerprint', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {
@@ -1038,6 +1072,41 @@ describe('ResourcesView', () => {
     await user.click(await screen.findByRole('tab', { name: /external/i }));
     expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
     expect(screen.queryByText('No external containers')).toBeNull();
+  });
+
+  it('recovers the external read and the disk usage from the external Retry', async () => {
+    let orphansCalls = 0;
+    let dfCalls = 0;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        return Promise.resolve(orphansCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse({ 'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }] }));
+      }
+      if (url === '/system/docker-df') {
+        dfCalls += 1;
+        return Promise.resolve(dfCalls === 1
+          ? jsonResponse({ error: 'down' }, { ok: false, status: 504 })
+          : jsonResponse(reclaimableUsage(0, 0)));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('web')).toBeInTheDocument();
+    expect(await screen.findByText('Tidy')).toBeInTheDocument();
+    expect(dfCalls).toBe(2);
   });
 
   it('names the external read’s own failure, not the inventory read’s', async () => {

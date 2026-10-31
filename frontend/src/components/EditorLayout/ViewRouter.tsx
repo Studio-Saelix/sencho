@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode } from 'react';
-import { Unplug } from 'lucide-react';
+import { AlertCircle, RefreshCw, Unplug } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Button } from '@/components/ui/button';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
@@ -80,6 +81,39 @@ function LazyView({ children }: { children: ReactNode }) {
     );
 }
 
+/**
+ * A routed stack surface whose inventory read failed. Without this the route
+ * stays on the loading skeleton forever: the URL keeps asking for a stack the
+ * failed list cannot resolve, so `selectedFile` never arrives. Name the cause
+ * the read already classified and offer the same Retry the sidebar uses.
+ */
+function StackRouteUnavailable({
+    name,
+    message,
+    onRetry,
+}: {
+    name: string | null;
+    message: string;
+    onRetry: () => void;
+}) {
+    const stack = name?.replace(/\.(ya?ml)$/, '');
+    return (
+        <div className="flex h-full min-h-[320px] items-center justify-center p-6">
+            <div className="flex max-w-md flex-col items-center gap-3 text-center text-stat-subtitle">
+                <AlertCircle className="h-8 w-8 text-muted-foreground" aria-hidden />
+                <p className="font-heading text-xl text-stat-value">
+                    {stack ? `Could not open ${stack}` : 'Could not open this stack'}
+                </p>
+                <p className="text-sm">{message}</p>
+                <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+                    <RefreshCw className="w-4 h-4" />
+                    Retry
+                </Button>
+            </div>
+        </div>
+    );
+}
+
 export type { ActiveView };
 
 export interface ViewRouterProps {
@@ -122,6 +156,14 @@ export interface ViewRouterProps {
     stackUpdates: Record<string, StackUpdateInfo>;
     urlHydratingStack: string | null;
     isFileLoading: boolean;
+    /** Terminal outcome of the stack-list read the route is waiting on. */
+    stacksLoadStatus: 'idle' | 'loading' | 'success' | 'error';
+    stacksLoadError: string | null;
+    /** Node the last list attempt belongs to; an error for another node is not ours. */
+    stacksLoadNodeId: number | null;
+    /** A named stack whose file failed to load after the list resolved. */
+    routeDetailError: string | null;
+    retryFrozenRoute: () => void;
     quickLinkCandidates?: NavDestination[];
     defaultQuickLinkEligibility?: ActiveView[] | null;
 }
@@ -161,12 +203,24 @@ export function ViewRouter({
     stackUpdates,
     urlHydratingStack,
     isFileLoading,
+    stacksLoadStatus,
+    stacksLoadError,
+    stacksLoadNodeId,
+    routeDetailError,
+    retryFrozenRoute,
     quickLinkCandidates,
     defaultQuickLinkEligibility,
 }: ViewRouterProps): ReactNode {
     const { can, permissionsStatus } = useAuth();
     const { isPaid, licenseReady } = useLicense();
     const { activeNode, activeNodeMeta } = useNodes();
+    // A routed stack surface is waiting on the stack inventory: the URL names a
+    // stack, but `selectedFile` only arrives after the list resolves. When that
+    // read has terminally failed for this node the route must say so instead of
+    // keeping the skeleton, which is what made a deep link look hung.
+    const stackListFailed = stacksLoadStatus === 'error' && stacksLoadNodeId === (activeNode?.id ?? null);
+    const stackRouteError = routeDetailError
+        ?? (stackListFailed ? stacksLoadError ?? 'Could not load stacks for this node.' : null);
     if (activeView === 'settings') {
         return (
             <SettingsPage
@@ -210,6 +264,15 @@ export function ViewRouter({
         // wait so we never open a compose-root shell, then reconnect into the stack.
         if (permissionsStatus === 'loading') return <ViewSkeleton />;
         if (!can('system:console')) return null;
+        if ((urlHydratingStack != null || isHostConsoleStackDeepLink()) && stackRouteError) {
+            return (
+                <StackRouteUnavailable
+                    name={urlHydratingStack}
+                    message={stackRouteError}
+                    onRetry={retryFrozenRoute}
+                />
+            );
+        }
         if (urlHydratingStack != null || (isHostConsoleStackDeepLink() && !selectedFile)) {
             return <ViewSkeleton />;
         }
@@ -253,6 +316,15 @@ export function ViewRouter({
     if (activeView === 'editor') {
         if (selectedFile) {
             return renderEditor();
+        }
+        if (stackRouteError) {
+            return (
+                <StackRouteUnavailable
+                    name={urlHydratingStack}
+                    message={stackRouteError}
+                    onRetry={retryFrozenRoute}
+                />
+            );
         }
         const awaitingStack = urlHydratingStack != null || isFileLoading || isStackEditorDeepLink();
         if (awaitingStack || isLoading) {

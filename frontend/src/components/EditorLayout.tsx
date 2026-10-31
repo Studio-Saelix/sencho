@@ -1552,6 +1552,11 @@ export default function EditorLayout() {
             stackUpdates={stackUpdates}
             urlHydratingStack={urlHydratingStack}
             isFileLoading={isFileLoading}
+            stacksLoadStatus={stacksLoadStatus}
+            stacksLoadError={stacksLoadError}
+            stacksLoadNodeId={stacksLoadNodeId}
+            routeDetailError={routeDetailError}
+            retryFrozenRoute={() => { void retryFrozenRoute(); }}
             quickLinkCandidates={navModel.quickLinkCandidates}
             defaultQuickLinkEligibility={defaultQuickLinkEligibility}
           />

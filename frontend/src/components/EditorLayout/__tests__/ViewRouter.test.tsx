@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import * as AuthContext from '@/context/AuthContext';
 import * as LicenseContext from '@/context/LicenseContext';
@@ -61,6 +61,11 @@ const baseProps = {
   stackUpdates: {},
   urlHydratingStack: null as string | null,
   isFileLoading: false,
+  stacksLoadStatus: 'success' as const,
+  stacksLoadError: null as string | null,
+  stacksLoadNodeId: 1 as number | null,
+  routeDetailError: null as string | null,
+  retryFrozenRoute: vi.fn(),
   quickLinkCandidates: [],
 };
 
@@ -197,5 +202,100 @@ describe('ViewRouter host-console', () => {
     } as unknown as ReturnType<typeof NodeContext.useNodes>);
     render(<ViewRouter {...baseProps} />);
     expect(await screen.findByTestId('host-console')).toBeTruthy();
+  });
+});
+
+describe('ViewRouter stack deep links on a failed node read', () => {
+  const failedList = {
+    stacksLoadStatus: 'error' as const,
+    stacksLoadError: '"edge" did not answer in time. Try again in a moment.',
+    stacksLoadNodeId: 1,
+  };
+
+  beforeEach(() => {
+    vi.mocked(AuthContext.useAuth).mockReturnValue({
+      can: (p: string) => p === 'system:console',
+    } as unknown as ReturnType<typeof AuthContext.useAuth>);
+    vi.mocked(LicenseContext.useLicense).mockReturnValue({
+      isPaid: false,
+      licenseReady: true,
+    } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+    vi.mocked(NodeContext.useNodes).mockReturnValue({
+      activeNode: { id: 1, name: 'Local', type: 'local' },
+      activeNodeMeta: { version: '0.96.0', capabilities: ['host-console'], fetchedAt: 1 },
+    } as unknown as ReturnType<typeof NodeContext.useNodes>);
+  });
+
+  afterEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('leaves the skeleton and names the failed read when an editor deep link cannot resolve', () => {
+    window.history.replaceState({}, '', '/nodes/local/stacks/qa2217');
+    const onRetry = vi.fn();
+    render(
+      <ViewRouter
+        {...baseProps}
+        activeView="editor"
+        urlHydratingStack="qa2217"
+        retryFrozenRoute={onRetry}
+        {...failedList}
+      />,
+    );
+
+    expect(screen.getByText('Could not open qa2217')).toBeInTheDocument();
+    expect(screen.getByText(/"edge" did not answer in time/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Retry/ }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the skeleton for a stack-scoped Console deep link too', () => {
+    window.history.replaceState({}, '', '/nodes/local/host-console/qa2217');
+    const onRetry = vi.fn();
+    render(
+      <ViewRouter
+        {...baseProps}
+        activeView="host-console"
+        urlHydratingStack="qa2217"
+        retryFrozenRoute={onRetry}
+        {...failedList}
+      />,
+    );
+
+    expect(screen.queryByTestId('host-console')).toBeNull();
+    expect(screen.getByText('Could not open qa2217')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Retry/ }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('names a stack file that failed to load after the list resolved', () => {
+    window.history.replaceState({}, '', '/nodes/local/stacks/qa2217');
+    render(
+      <ViewRouter
+        {...baseProps}
+        activeView="editor"
+        urlHydratingStack="qa2217"
+        routeDetailError={'Could not open "qa2217". Check your connection and try again.'}
+      />,
+    );
+
+    expect(screen.getByText('Could not open qa2217')).toBeInTheDocument();
+    expect(screen.getByText(/Check your connection/)).toBeInTheDocument();
+  });
+
+  it('does not let a failed list from another node block this route', () => {
+    window.history.replaceState({}, '', '/nodes/local/stacks/qa2217');
+    render(
+      <ViewRouter
+        {...baseProps}
+        activeView="editor"
+        urlHydratingStack="qa2217"
+        stacksLoadStatus="error"
+        stacksLoadError="the other node failed"
+        stacksLoadNodeId={99}
+      />,
+    );
+
+    expect(screen.queryByText(/the other node failed/)).toBeNull();
   });
 });

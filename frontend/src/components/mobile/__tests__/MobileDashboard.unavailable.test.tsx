@@ -10,6 +10,7 @@ import { render, screen } from '@testing-library/react';
 const dataState = vi.hoisted(() => ({
   metricsStale: false,
   metricsUnreadable: false,
+  metricsSettled: true,
 }));
 
 const localNode = {
@@ -46,6 +47,7 @@ vi.mock('@/components/dashboard', () => ({
     lastSyncAt: null,
     metricsStale: dataState.metricsStale,
     metricsUnreadable: dataState.metricsUnreadable,
+    metricsSettled: dataState.metricsSettled,
     metrics: [],
     nodeCount: 1,
   }),
@@ -84,6 +86,7 @@ describe('MobileDashboard unavailable state', () => {
   beforeEach(() => {
     dataState.metricsStale = false;
     dataState.metricsUnreadable = false;
+    dataState.metricsSettled = true;
   });
 
   it('reads Unknown when the node did not answer, not a derived health level', () => {
@@ -93,6 +96,18 @@ describe('MobileDashboard unavailable state', () => {
 
     expect(screen.getByText('Unknown')).toBeInTheDocument();
     expect(screen.queryByText('Healthy')).toBeNull();
+    // The phone headline must carry the same sentence as the desktop bar for a
+    // silent node.
+    expect(screen.getByText('This node is not answering.')).toBeInTheDocument();
+  });
+
+  it('does not claim a health level before the first metrics read settles', () => {
+    dataState.metricsSettled = false;
+    renderDashboard();
+
+    expect(screen.getByText('Checking')).toBeInTheDocument();
+    expect(screen.getByText(/reading this node/)).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
   });
 
   it('keeps the derived level and the stale chip for stale meters with a local cause', () => {
@@ -101,6 +116,7 @@ describe('MobileDashboard unavailable state', () => {
 
     expect(screen.getByText('Healthy')).toBeInTheDocument();
     expect(screen.queryByText('Unknown')).toBeNull();
+    expect(screen.queryByText('This node is not answering.')).toBeNull();
     expect(screen.getByText('metrics stale')).toBeInTheDocument();
   });
 });

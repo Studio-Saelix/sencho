@@ -234,4 +234,89 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsStale).toBe(false);
     expect(result.current.metricsUnreadable).toBe(false);
   });
+
+  it('reads the node as unreadable from the first failed read while the metrics are still queued', async () => {
+    // The browser allows six connections per origin, so the metrics requests
+    // can be queued behind other node-scoped reads. The stack-statuses deadline
+    // has already proved the node is silent; waiting for the queued metrics
+    // would leave the headline on its healthy default for several more rounds.
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stacks/statuses') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_read_timeout' }),
+          { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+        ));
+      }
+      // The metrics endpoints have not answered yet (queued or slow).
+      return new Promise<Response>(() => {});
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsSettled).toBe(false);
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.metricsStale).toBe(true);
+  });
+
+  it('does not read an HTTP stack-statuses failure as a silent node', async () => {
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stacks/statuses') return Promise.resolve(failJson());
+      return new Promise<Response>(() => {});
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsUnreadable).toBe(false);
+  });
+
+  it('does not blame the node when a route fails after the metrics answered', async () => {
+    let releaseStatuses: (() => void) | null = null;
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => {
+          releaseStatuses = () => resolve(new Response(
+            JSON.stringify({ code: 'remote_read_timeout' }),
+            { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+          ));
+        });
+      }
+      if (requested === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (requested === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.metricsUnreadable).toBe(false);
+
+    await act(async () => {
+      releaseStatuses?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.metricsUnreadable).toBe(false);
+  });
+
+  it('aborts its in-flight reads when the dashboard goes away', async () => {
+    // A read for a surface the operator has left must release its connection
+    // slot, or the next page's reads queue behind it.
+    const ownReadSignals: AbortSignal[] = [];
+    apiFetchMock.mockImplementation((requested: string, options?: { signal?: AbortSignal }) => {
+      // The stack-statuses read is shared with the persistent sidebar, so its
+      // lifetime belongs to the shared coalescer, not this hook.
+      if (options?.signal && requested !== '/stacks/statuses') ownReadSignals.push(options.signal);
+      return new Promise<Response>(() => {});
+    });
+
+    const { unmount } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(ownReadSignals.length).toBeGreaterThanOrEqual(3);
+    expect(ownReadSignals.some((signal) => signal.aborted)).toBe(false);
+    unmount();
+    expect(ownReadSignals.every((signal) => signal.aborted)).toBe(true);
+  });
 });

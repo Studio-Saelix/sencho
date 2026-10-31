@@ -130,4 +130,6 @@ export interface DashboardData {
   metricsStale: boolean;
   /** True when a metrics read stopped at a state where the node could not be read (a bounded timeout or an unreachable node). */
   metricsUnreadable: boolean;
+  /** True once one of the two metrics reads has settled for the active node. */
+  metricsSettled: boolean;
 }

@@ -38,7 +38,7 @@ export function TableLoadError({ cols, noun, onRetry, reason }: {
                 <TableCell colSpan={cols} className="py-8 text-center">
                     <p className="text-sm text-muted-foreground">Could not load {noun}.</p>
                     {reason ? <p className="mt-1 mb-3 text-xs text-stat-subtitle">{reason}</p> : null}
-                    <Button variant="outline" size="sm" className={reason ? undefined : 'mt-3'} onClick={onRetry}>Retry</Button>
+                    <Button variant="outline" size="sm" className={reason ? 'text-stat-title' : 'mt-3 text-stat-title'} onClick={onRetry}>Retry</Button>
                 </TableCell>
             </TableRow>
         </TableBody>

@@ -117,6 +117,11 @@ export function useDashboardData(): DashboardData {
   // are stale for a known local reason (the Docker socket). Only the former
   // reads as "Unknown"/"not answering"; the latter keeps the derived level.
   const [metricsUnreadable, setMetricsUnreadable] = useState(false);
+  // The read the headline depends on may be queued behind other node reads in
+  // the browser's six-connection limit. Until one of the metrics endpoints has
+  // settled there is no reading to report, so the headline must not claim the
+  // default (healthy) level in the meantime.
+  const [metricsSettled, setMetricsSettled] = useState(false);
 
   // Keep a ref to the latest nodeId so async callbacks don't write stale data
   // after a node switch has already triggered a new effect cycle.
@@ -156,10 +161,46 @@ export function useDashboardData(): DashboardData {
     stats: null,
     sys: null,
   });
+  // A bounded read that is not one of the two metrics endpoints (the shared
+  // stack-statuses read) can prove the same thing: the node did not answer.
+  // Feeding it into the headline lets the first failed read name the outage
+  // instead of waiting for the metrics request that is queued behind it.
+  const nodeReadFailureRef = useRef<RemoteReadFailure | null>(null);
+  // True once a metrics endpoint answered for the current node. A route-level
+  // deadline (stack statuses) then says nothing about the node being silent.
+  const metricsAnsweredRef = useRef(false);
+
+  const publishNodeHealth = useCallback(() => {
+    const counts = failureCountsRef.current;
+    const nodeReadUnreadable = isUnreadableNode(nodeReadFailureRef.current);
+    setMetricsStale(
+      counts.stats >= METRICS_STALE_THRESHOLD
+      || counts.sys >= METRICS_STALE_THRESHOLD
+      || nodeReadUnreadable,
+    );
+    setMetricsUnreadable(
+      isUnreadableNode(lastFailureRef.current.stats)
+      || isUnreadableNode(lastFailureRef.current.sys)
+      || nodeReadUnreadable,
+    );
+  }, []);
+
+  const recordNodeReadFailure = useCallback((failure: RemoteReadFailure) => {
+    // Only a bounded deadline or an unreachable node means the node itself
+    // could not be read. An authorization or HTTP answer came from the node, so
+    // it proves nothing about silence and must not change the headline.
+    if (!isUnreadableNode(failure)) return;
+    // A metrics endpoint has already answered this node since the switch, so
+    // this is one route failing, not a silent node; the next metrics poll would
+    // otherwise clear the claim a moment after it was made.
+    if (metricsAnsweredRef.current) return;
+    nodeReadFailureRef.current = failure;
+    publishNodeHealth();
+  }, [publishNodeHealth]);
 
   const fetchJson = useCallback(async <T>(
     endpoint: string,
-    options?: { localOnly?: boolean },
+    options?: { localOnly?: boolean; signal?: AbortSignal },
   ): Promise<{ ok: true; data: T } | { ok: false; failure: RemoteReadFailure }> => {
     try {
       const res = await apiFetch(endpoint, options);
@@ -177,9 +218,14 @@ export function useDashboardData(): DashboardData {
     outcome: { ok: true } | { ok: false; failure: RemoteReadFailure },
   ) => {
     const counts = failureCountsRef.current;
+    setMetricsSettled(true);
     if (outcome.ok) {
       counts[endpoint] = 0;
       lastFailureRef.current[endpoint] = null;
+      metricsAnsweredRef.current = true;
+      // A metrics answer proves the node is reachable, so a deadline from the
+      // stack-statuses read was about that route, not a silent node.
+      nodeReadFailureRef.current = null;
     } else if (isUnreadableNode(outcome.failure)) {
       // A node that did not answer is not a transient hiccup: mark the numbers
       // stale on the first bounded failure instead of waiting out three polls,
@@ -190,26 +236,26 @@ export function useDashboardData(): DashboardData {
       counts[endpoint] += 1;
       lastFailureRef.current[endpoint] = outcome.failure;
     }
-    const stale = counts.stats >= METRICS_STALE_THRESHOLD || counts.sys >= METRICS_STALE_THRESHOLD;
-    setMetricsStale(stale);
-    setMetricsUnreadable(
-      isUnreadableNode(lastFailureRef.current.stats) || isUnreadableNode(lastFailureRef.current.sys),
-    );
-  }, []);
+    publishNodeHealth();
+  }, [publishNodeHealth]);
 
   // Container stats: 5s polling, resets on node change
   useEffect(() => {
     setStats(DEFAULT_STATS); // eslint-disable-line react-hooks/set-state-in-effect
     setLastSyncAt(null);
+    setMetricsSettled(false);
+    nodeReadFailureRef.current = null;
+    metricsAnsweredRef.current = false;
     failureCountsRef.current.stats = 0;
     lastFailureRef.current.stats = null;
     setMetricsStale(failureCountsRef.current.sys >= METRICS_STALE_THRESHOLD);
     setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.sys));
     const currentNodeId = nodeId;
+    const controller = new AbortController();
     const fetchStats = async () => {
       if (nodeIdRef.current !== currentNodeId) return; // Stale effect
-      const outcome = await fetchJson<Stats>('/stats');
-      if (nodeIdRef.current !== currentNodeId) return;
+      const outcome = await fetchJson<Stats>('/stats', { signal: controller.signal });
+      if (controller.signal.aborted || nodeIdRef.current !== currentNodeId) return;
       if (outcome.ok) {
         setStats(outcome.data);
         setLastSyncAt(Date.now());
@@ -217,8 +263,13 @@ export function useDashboardData(): DashboardData {
       recordOutcome('stats', outcome);
     };
     fetchStats();
-    const cleanup = visibilityInterval(fetchStats, 5000);
-    return cleanup;
+    const stopPolling = visibilityInterval(fetchStats, 5000);
+    // A read for a node the operator has left must not keep a browser
+    // connection busy ahead of the next surface's reads.
+    return () => {
+      controller.abort();
+      stopPolling();
+    };
   }, [nodeId, fetchJson, recordOutcome]);
 
   // System stats: 5s polling, resets on node change
@@ -229,30 +280,39 @@ export function useDashboardData(): DashboardData {
     setMetricsStale(failureCountsRef.current.stats >= METRICS_STALE_THRESHOLD);
     setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.stats));
     const currentNodeId = nodeId;
+    const controller = new AbortController();
     const fetchSys = async () => {
       if (nodeIdRef.current !== currentNodeId) return;
-      const outcome = await fetchJson<SystemStats>('/system/stats');
-      if (nodeIdRef.current !== currentNodeId) return;
+      const outcome = await fetchJson<SystemStats>('/system/stats', { signal: controller.signal });
+      if (controller.signal.aborted || nodeIdRef.current !== currentNodeId) return;
       if (outcome.ok) setSystemStats(outcome.data);
       recordOutcome('sys', outcome);
     };
     fetchSys();
-    const cleanup = visibilityInterval(fetchSys, 5000);
-    return cleanup;
+    const stopPolling = visibilityInterval(fetchSys, 5000);
+    return () => {
+      controller.abort();
+      stopPolling();
+    };
   }, [nodeId, fetchJson, recordOutcome]);
 
   // Historical metrics: 60s polling, resets on node change
   useEffect(() => {
     setMetrics([]); // eslint-disable-line react-hooks/set-state-in-effect
     const currentNodeId = nodeId;
+    const controller = new AbortController();
     const fetchMetrics = async () => {
       if (nodeIdRef.current !== currentNodeId) return;
-      const outcome = await fetchJson<MetricPoint[]>('/metrics/historical');
+      const outcome = await fetchJson<MetricPoint[]>('/metrics/historical', { signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (outcome.ok && nodeIdRef.current === currentNodeId) setMetrics(outcome.data);
     };
     fetchMetrics();
-    const cleanup = visibilityInterval(fetchMetrics, 60000);
-    return cleanup;
+    const stopPolling = visibilityInterval(fetchMetrics, 60000);
+    return () => {
+      controller.abort();
+      stopPolling();
+    };
   }, [nodeId, fetchJson]);
 
   // Stack statuses: 10s polling, resets on node change. Foreground / retry
@@ -328,6 +388,13 @@ export function useDashboardData(): DashboardData {
         return;
       }
       if (!result.ok) {
+        if (result.failure === 'timeout' || result.failure === 'unreachable') {
+          // The earliest node-scoped read to fail is often this one, because
+          // the metrics endpoints are queued behind the same browser
+          // connection limit. Let it name the outage now instead of leaving
+          // the headline on a healthy default until the metrics answer.
+          recordNodeReadFailure(result.failure);
+        }
         const timeoutMsg = result.failure === 'timeout'
           ? 'Stack health request timed out.'
           : result.failure === 'unreachable'
@@ -367,7 +434,7 @@ export function useDashboardData(): DashboardData {
         stackStatusesInFlightRef.current = false;
       }
     }
-  }, [commitStackStatusesSuccess, commitStackStatusesFailure, isCurrentStatusesFetch]);
+  }, [commitStackStatusesSuccess, commitStackStatusesFailure, isCurrentStatusesFetch, recordNodeReadFailure]);
 
   const retryStackStatuses = useCallback(() => {
     void fetchStackStatuses(nodeIdRef.current, 'foreground');
@@ -403,12 +470,14 @@ export function useDashboardData(): DashboardData {
     if (currentNodeId === undefined) return;
     let active = true;
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
     const refresh = async () => {
       if (!active || nodeIdRef.current !== currentNodeId) return;
       const [statsOutcome, sysOutcome] = await Promise.all([
-        fetchJson<Stats>('/stats'),
-        fetchJson<SystemStats>('/system/stats'),
+        fetchJson<Stats>('/stats', { signal: controller.signal }),
+        fetchJson<SystemStats>('/system/stats', { signal: controller.signal }),
       ]);
+      if (controller.signal.aborted) return;
       // Re-check after the await: an unmount or node switch may have
       // happened while the fetches were in flight, in which case the
       // resulting setState calls would land on a stale render tree.
@@ -435,6 +504,7 @@ export function useDashboardData(): DashboardData {
     window.addEventListener('sencho:state-invalidate', onInvalidate);
     return () => {
       active = false;
+      controller.abort();
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (invalidateTimer) clearTimeout(invalidateTimer);
     };
@@ -538,5 +608,6 @@ export function useDashboardData(): DashboardData {
     historyEndAt,
     metricsStale,
     metricsUnreadable,
+    metricsSettled,
   };
 }

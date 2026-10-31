@@ -536,6 +536,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         await loadInventory({ background: true });
     };
 
+    /**
+     * The recovery action behind a table's Retry. The inventory and disk usage
+     * are independent reads, but they failed together on the same node, so one
+     * Retry must recover the whole page: retrying only the inventory left the
+     * header on "Disk usage unknown" beside a loaded table.
+     */
+    const retryInventory = () => {
+        void loadInventory();
+        if (usageLoad.status === 'error') void loadUsage();
+    };
+
     useEffect(() => {
         // Nothing from the previous node may show under the new one while its
         // data loads, including when that load fails.
@@ -936,7 +947,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={retryInventory} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1097,7 +1108,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={retryInventory} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1201,7 +1212,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 {orphansFailureReason ? (
                                     <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
                                 ) : null}
-                                <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
+                                <Button variant="outline" size="sm" className="text-stat-title" onClick={retryInventory}>Retry</Button>
                             </div>
                         ) : totalOrphansCount === 0 && orphansState === 'ready' ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">

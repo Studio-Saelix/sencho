@@ -15,7 +15,7 @@ import type { Stats } from '../types';
 
 const EMPTY_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
 
-function renderBar(metricsStale: boolean, metricsUnreadable = false) {
+function renderBar(metricsStale: boolean, metricsUnreadable = false, metricsPending = false) {
   return render(
     <HealthStatusBar
       stats={EMPTY_STATS}
@@ -26,11 +26,19 @@ function renderBar(metricsStale: boolean, metricsUnreadable = false) {
       lastSyncAt={null}
       metricsStale={metricsStale}
       metricsUnreadable={metricsUnreadable}
+      metricsPending={metricsPending}
     />,
   );
 }
 
 describe('HealthStatusBar unavailable state', () => {
+  it('does not claim a health level while the first metrics read is still queued', () => {
+    renderBar(false, false, true);
+    expect(screen.getByText('Checking')).toBeInTheDocument();
+    expect(screen.getByText('Reading this node…')).toBeInTheDocument();
+    expect(screen.queryByText('Healthy')).toBeNull();
+  });
+
   it('reports an unknown node rather than a healthy one when the node does not answer', () => {
     renderBar(true, true);
     expect(screen.getByText('Unknown')).toBeInTheDocument();

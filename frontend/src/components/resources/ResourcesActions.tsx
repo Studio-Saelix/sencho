@@ -31,7 +31,7 @@ export function ResourcesActions({
     return (
         <div className="flex items-center gap-2">
             {usageFailed && (
-                <Button variant="outline" size="sm" className="max-md:min-h-11" onClick={onRetryUsage}>Retry disk usage</Button>
+                <Button variant="outline" size="sm" className="text-stat-title max-md:min-h-11" onClick={onRetryUsage}>Retry disk usage</Button>
             )}
             {isAdmin && canReclaim && (
                 <Button size="sm" className="gap-1.5 max-md:min-h-11" onClick={onReclaim} disabled={reclaimDisabled}>
