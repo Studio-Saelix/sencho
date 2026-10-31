@@ -419,6 +419,10 @@ beforeEach(() => {
   mockPromisesWriteFile.mockResolvedValue(undefined);
   mockPromisesRm.mockResolvedValue(undefined);
   delete process.env.SENCHO_MODE;
+  // The Compose version notice probes the running version before `up`. Reads as
+  // unavailable by default so no test spawns an extra `compose version`; the
+  // notice tests below set the version explicitly.
+  vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue(null);
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -596,6 +600,7 @@ describe('ComposeService - Docker endpoint guard', () => {
   });
 
   it('hands the guard the Compose version that would run the deploy, so a container from another version is not called unchanged', async () => {
+    vi.mocked(ComposeService.prototype.composeVersion).mockRestore();
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);
     let version: string | null = null;
@@ -615,6 +620,7 @@ describe('ComposeService - Docker endpoint guard', () => {
   });
 
   it('reports an unreadable Compose version as null rather than throwing', async () => {
+    vi.mocked(ComposeService.prototype.composeVersion).mockRestore();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const proc = createMockProcess();
     mockSpawn.mockReturnValue(proc);
@@ -634,6 +640,7 @@ describe('ComposeService - Docker endpoint guard', () => {
   });
 
   it('gives up on a hung Compose version probe instead of blocking the deploy', async () => {
+    vi.mocked(ComposeService.prototype.composeVersion).mockRestore();
     vi.useFakeTimers();
     try {
       vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -3443,5 +3450,154 @@ describe('ComposeService - updateStack safe ordering', () => {
       expect(error!.message).toContain(`The rollback did not run: ${refusalMessage}`);
       expect(getComposeRollbackInfo(error)).toEqual({ attempted: true, rolledBack: false });
     });
+  });
+});
+
+describe('ComposeService - Compose version notice', () => {
+  const wsWithLog = () => {
+    const log: string[] = [];
+    const ws = Object.assign(new EventEmitter(), {
+      readyState: 1,
+      OPEN: 1,
+      send: vi.fn((data: string) => { log.push(data); }),
+      close: vi.fn(),
+    });
+    return { ws, log };
+  };
+  const mismatched = (service: string) => ({
+    Id: `${service}-1`,
+    Names: [`/my-stack-${service}-1`],
+    State: 'running',
+    Labels: {
+      'com.docker.compose.project': 'my-stack',
+      'com.docker.compose.service': service,
+      'com.docker.compose.version': '2.38.1',
+    },
+  });
+  const matching = (service: string) => ({
+    ...mismatched(service),
+    Labels: { ...mismatched(service).Labels, 'com.docker.compose.version': '5.6.0' },
+  });
+
+  it('writes one explanation line before the up when a container was created by another version', async () => {
+    const { ws, log } = wsWithLog();
+    // Record how long the sent-output log is when `execute` spawns the up, so
+    // "before the up" is asserted against the spawn itself.
+    const logLengthAtSpawn: number[] = [];
+    mockSpawn.mockImplementation(() => {
+      logLengthAtSpawn.push(log.length);
+      const proc = createMockProcess();
+      Promise.resolve().then(() => proc.emit('close', 0));
+      return proc;
+    });
+    mockListContainers.mockResolvedValue([mismatched('web')]);
+    vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue('5.6.0');
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await deploy;
+
+    const notice = log.find(line => line.includes('runs this deploy'));
+    expect(notice).toContain('=== Docker Compose 5.6.0 runs this deploy; web was created by Docker Compose 2.38.1');
+    expect(notice).toContain('can be recreated even if its configuration is unchanged');
+    expect(log.indexOf(notice as string)).toBeGreaterThanOrEqual(0);
+    // The notice was already in the log when the up (the last spawn) started.
+    expect(logLengthAtSpawn[logLengthAtSpawn.length - 1]).toBeGreaterThan(log.indexOf(notice as string));
+  });
+
+  it('names every affected service and pluralizes', async () => {
+    const { ws, log } = wsWithLog();
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([mismatched('web'), mismatched('db')]);
+    vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue('5.6.0');
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await deploy;
+
+    const notice = log.find(line => line.includes('runs this deploy'));
+    expect(notice).toContain('db and web were created by Docker Compose 2.38.1');
+    expect(notice).toContain('even if their configuration is unchanged');
+  });
+
+  it('writes nothing when every container matches the running version', async () => {
+    const { ws, log } = wsWithLog();
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([matching('web')]);
+    vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue('5.6.0');
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await deploy;
+
+    expect(log.some(line => line.includes('runs this deploy'))).toBe(false);
+  });
+
+  it('composeVersion logs and returns null when the CLI cannot be spawned', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorProc = createMockProcess();
+    mockSpawn.mockImplementationOnce(() => {
+      Promise.resolve().then(() => errorProc.emit('error', Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' })));
+      return errorProc;
+    });
+    // Exercise the real probe rather than the beforeEach stub.
+    vi.mocked(ComposeService.prototype.composeVersion).mockRestore();
+
+    await expect(ComposeService.getInstance(1).composeVersion()).resolves.toBeNull();
+    expect(warn.mock.calls.some(call => String(call[0]).includes('compose version unavailable'))).toBe(true);
+  });
+
+  it('writes nothing when the running version cannot be read, and still deploys', async () => {
+    const { ws, log } = wsWithLog();
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([mismatched('web')]);
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(deploy).resolves.toEqual({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+
+    expect(log.some(line => line.includes('runs this deploy'))).toBe(false);
+  });
+
+  it('writes nothing when the container list fails, logs, and still deploys', async () => {
+    const { ws, log } = wsWithLog();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setupAutoCloseSpawn();
+    mockListContainers.mockRejectedValueOnce(new Error('docker gone'));
+    mockListContainers.mockResolvedValue([]);
+
+    const deploy = ComposeService.getInstance(1).deployStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(deploy).resolves.toEqual({ recoveryId: null, deployedGenerationId: null, gitopsOperationId: null });
+
+    expect(log.some(line => line.includes('runs this deploy'))).toBe(false);
+    expect(warn.mock.calls.some(call => String(call[0]).includes('Compose version notice unavailable'))).toBe(true);
+  });
+
+  it('writes the update notice on updateStack, before Compose runs', async () => {
+    const { ws, log } = wsWithLog();
+    const logLengthAtSpawn: number[] = [];
+    mockSpawn.mockImplementation(() => {
+      logLengthAtSpawn.push(log.length);
+      const proc = createMockProcess();
+      Promise.resolve().then(() => proc.emit('close', 0));
+      return proc;
+    });
+    mockListContainers.mockResolvedValue([mismatched('web')]);
+    mockClassifyLegacyOrphansForUpdate.mockResolvedValue({ status: 'none' });
+    vi.spyOn(ComposeService.prototype, 'composeVersion').mockResolvedValue('5.6.0');
+
+    const update = ComposeService.getInstance(1).updateStack('my-stack', ws as unknown as WebSocket);
+    await vi.advanceTimersByTimeAsync(3100);
+    await update;
+
+    const notice = log.find(line => line.includes('runs this update'));
+    expect(notice).toContain('=== Docker Compose 5.6.0 runs this update; web was created by Docker Compose 2.38.1');
+    const noticeIndex = log.indexOf(notice as string);
+    const recreating = log.findIndex(line => line.includes('Recreating containers'));
+    expect(recreating).toBeGreaterThanOrEqual(0);
+    expect(noticeIndex).toBeGreaterThan(recreating);
+    // The notice was already in the log when the up (the last spawn) started.
+    expect(logLengthAtSpawn[logLengthAtSpawn.length - 1]).toBeGreaterThan(noticeIndex);
   });
 });

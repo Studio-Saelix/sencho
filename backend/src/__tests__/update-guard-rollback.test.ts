@@ -39,6 +39,7 @@ const baseInputs = (over: Partial<RollbackInputs> = {}): RollbackInputs => ({
   containers: [{
     name: 'app-web-1', state: 'running', health: 'healthy', exitCode: null,
     hasHealthcheck: true, restartPolicy: 'unless-stopped', mounts: ['volume app_data'],
+    service: 'web', composeVersion: '5.6.0', oneOff: false,
   }],
   recoveryGeneration: { exists: false },
   policyEligibility: null,
@@ -368,6 +369,7 @@ describe('buildRollbackItems', () => {
     const none: ContainerProbe[] = [{
       name: 'a', state: 'running', health: null, exitCode: null,
       hasHealthcheck: false, restartPolicy: null, mounts: [],
+      service: 'a', composeVersion: '5.6.0', oneOff: false,
     }];
     expect(itemById(baseInputs({ containers: none }), 'healthchecks').state).toBe('missing');
   });
