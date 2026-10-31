@@ -77,6 +77,7 @@ import {
 } from '../helpers/fleetPrune';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
+import { describeFleetReadFailure, fleetReadSignal, withinFleetReadBudget } from '../helpers/fleetReadBudget';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
@@ -386,24 +387,25 @@ function offlineRemoteOverview(node: Node, status: 'online' | 'offline'): FleetN
 // GET /api/fleet/overview (and the Fleet, Heartbeat, and Mobile loading states).
 const FLEET_OVERVIEW_PROBE_TIMEOUT_MS = 3000;
 
-// Per-remote budget for the Fleet fan-outs that fetch a node's own data (the
-// dependency map and the networking summary). A healthy node answers well
-// inside it, but the remote builds a full container, network and volume
-// snapshot, so it is looser than the 3s overview probe. A Pilot whose tunnel is
-// half-open (agent frozen, tunnel not yet reaped, up to ~90s) or a dead proxy
-// host must still degrade inside this window instead of holding the Fleet tab.
-const FLEET_NODE_READ_TIMEOUT_MS = 8000;
-
 /**
- * The reason a per-node Fleet read failed, as shown beside the node. A budget
- * overrun says so (a Retry may succeed) instead of surfacing the runtime's
- * "operation was aborted due to timeout".
+ * Narrow a fleet fan-out to one node when `?nodeId=` is present, so a client can
+ * read nodes one at a time and draw each as it answers. Returns null when the
+ * response has already been written (malformed or unknown id).
  */
-function describeNodeReadError(error: unknown): string {
-  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-    return `Timed out after ${FLEET_NODE_READ_TIMEOUT_MS / 1000}s`;
+function selectFanOutNodes(req: Request, res: Response): Node[] | null {
+  const nodes = DatabaseService.getInstance().getNodes();
+  const nodeIdParam = req.query.nodeId;
+  if (nodeIdParam === undefined) return nodes;
+  if (typeof nodeIdParam !== 'string' || !/^[1-9]\d*$/.test(nodeIdParam)) {
+    res.status(400).json({ error: 'nodeId must be a positive node id' });
+    return null;
   }
-  return getErrorMessage(error, 'Failed to reach node');
+  const only = nodes.find(n => n.id === Number(nodeIdParam));
+  if (!only) {
+    res.status(404).json({ error: 'Node not found' });
+    return null;
+  }
+  return [only];
 }
 
 // A Pilot with no tunnel still reads as online for this long after its tunnel
@@ -788,11 +790,11 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 /**
  * One node's dependency graph as a merge-ready result. The hub builds its own
  * in-process; a remote is read through its auth-only per-node route within the
- * per-remote budget. Every failure degrades to an error result for that node.
+ * shared fleet-read budget. Every failure degrades to an error result for that node.
  */
 async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
   if (node.type === 'local') {
-    const graph = await buildLocalGraph(node.id, node.name);
+    const graph = await withinFleetReadBudget(buildLocalGraph(node.id, node.name), 'dependency graph');
     return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
   }
 
@@ -805,7 +807,7 @@ async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
     `${target.apiUrl.replace(/\/$/, '')}/api/dependency-map/node-graph`,
     {
       headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
-      signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS),
+      signal: fleetReadSignal(),
     },
     target.trustedLoopback,
   );
@@ -819,7 +821,7 @@ async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
   } catch (readError) {
     // A budget overrun mid-body is a timeout, not a malformed payload.
     console.error(`[Fleet] Dependency map: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
-    const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+    const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeFleetReadFailure(readError);
     return { nodeId: node.id, nodeName: node.name, status: 'error', graph: null, error: reason };
   }
   // Shape-guard a reachable-but-malformed payload (proxy HTML, version
@@ -841,30 +843,17 @@ async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
 fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
-    let nodes = DatabaseService.getInstance().getNodes();
-
     // `nodeId` narrows the answer to one node (same response shape), so a caller
     // can draw each node as it answers instead of waiting on the slowest one.
-    const nodeIdParam = req.query.nodeId;
-    if (nodeIdParam !== undefined) {
-      if (typeof nodeIdParam !== 'string' || !/^[1-9]\d*$/.test(nodeIdParam)) {
-        res.status(400).json({ error: 'nodeId must be a positive node id' });
-        return;
-      }
-      const only = nodes.find(n => n.id === Number(nodeIdParam));
-      if (!only) {
-        res.status(404).json({ error: 'Node not found' });
-        return;
-      }
-      nodes = [only];
-    }
+    const nodes = selectFanOutNodes(req, res);
+    if (nodes === null) return;
 
     const results = await Promise.allSettled(nodes.map(readNodeGraph));
 
     const perNode: FleetNodeGraphResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Dependency map fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: describeNodeReadError(result.reason) };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', graph: null, error: describeFleetReadFailure(result.reason) };
     });
 
     res.json(mergeFleetGraph(perNode));
@@ -945,21 +934,23 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
 }
 
 /**
- * Fleet-wide Docker label inventory. Auth + node:read (Community). Fans out to
- * each node's /api/system/container-labels; unreachable nodes degrade gracefully.
+ * Fleet-wide Docker label inventory, or one node's slice of it with `?nodeId=`
+ * so the tab can draw each node as it answers. Auth + node:read (Community).
+ * Fans out to each node's /api/system/container-labels within the shared
+ * fleet-read budget; unreachable nodes degrade to a per-node error.
  */
 fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   if (!requireRevealAdmin(req, res)) return;
   const options = labelInventoryOptionsFromRequest(req);
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
+    const nodes = selectFanOutNodes(req, res);
+    if (nodes === null) return;
 
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNodeLabelInventoryResult> => {
         if (node.type === 'local') {
-          const inventory = await buildNodeLabelInventory(node.id, options);
+          const inventory = await withinFleetReadBudget(buildNodeLabelInventory(node.id, options), 'container labels');
           return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
         }
 
@@ -973,7 +964,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
           `${target.apiUrl.replace(/\/$/, '')}/api/system/container-labels${revealQs}`,
           {
             headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
-            signal: AbortSignal.timeout(30000),
+            signal: fleetReadSignal(),
           },
           target.trustedLoopback,
         );
@@ -992,7 +983,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
     const perNode: FleetNodeLabelInventoryResult[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Container labels fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', inventory: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', inventory: null, error: describeFleetReadFailure(result.reason) };
     });
 
     const aggregatedByLabel = new Map<string, import('../services/LabelInventoryService').LabelIndexRow>();
@@ -1066,13 +1057,12 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
 fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
-    const db = DatabaseService.getInstance();
-    const nodes = db.getNodes();
+    const nodes = DatabaseService.getInstance().getNodes();
 
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNetworkingSummaryNode> => {
         if (node.type === 'local') {
-          const summary = await computeNodeNetworkingSummary(node.id);
+          const summary = await withinFleetReadBudget(computeNodeNetworkingSummary(node.id), 'networking summary');
           return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
         }
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);
@@ -1081,7 +1071,7 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         }
         const resp = await safeRemoteFetch(
           `${target.apiUrl.replace(/\/$/, '')}/api/networking/summary`,
-          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: AbortSignal.timeout(FLEET_NODE_READ_TIMEOUT_MS) },
+          { headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) }, signal: fleetReadSignal() },
           target.trustedLoopback,
         );
         if (!resp.ok) {
@@ -1092,7 +1082,7 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
           summary = await resp.json();
         } catch (readError) {
           console.error(`[Fleet] Networking summary: node ${sanitizeForLog(node.name)} body read failed:`, errorMessageForLog(readError));
-          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeNodeReadError(readError);
+          const reason = readError instanceof SyntaxError ? 'Remote returned invalid JSON' : describeFleetReadFailure(readError);
           return { nodeId: node.id, nodeName: node.name, status: 'error', summary: null, error: reason };
         }
         if (!isNodeNetworkingSummary(summary)) {
@@ -1106,7 +1096,7 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
     const perNode: FleetNetworkingSummaryNode[] = results.map((result, i) => {
       if (result.status === 'fulfilled') return result.value;
       console.error(`[Fleet] Networking summary fetch failed for node ${nodes[i].name}:`, result.reason);
-      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: describeNodeReadError(result.reason) };
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', summary: null, error: describeFleetReadFailure(result.reason) };
     });
 
     res.json({ nodes: perNode });

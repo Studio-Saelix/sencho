@@ -52,7 +52,9 @@ beforeAll(async () => {
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  // Long enough for the whole file: several cases wait out the 5s read budget,
+  // and a token that expires mid-run turns later assertions into 401s.
+  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1h' });
   authHeader = `Bearer ${token}`;
 });
 
@@ -340,10 +342,10 @@ describe('GET /api/fleet/overview remote probe budget', () => {
   });
 });
 
-describe('node-data fan-outs share the per-remote read budget', () => {
-  // Above the 8s read budget, well under the old 15s ceiling.
-  const READ_BUDGET_FLOOR_MS = 7_000;
-  const READ_BUDGET_CEILING_MS = 12_000;
+describe('node-data fan-outs share the fleet-read budget', () => {
+  // Above the 5s read budget, well under the old 15s and 30s ceilings.
+  const READ_BUDGET_FLOOR_MS = 4_000;
+  const READ_BUDGET_CEILING_MS = 8_000;
 
   function stubLocalDocker(): void {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
@@ -373,7 +375,7 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(res.status).toBe(200);
     const errors = res.body.nodeErrors as { nodeId: number; error: string }[];
     const hungError = errors.find(e => e.nodeId === nodeId);
-    expect(hungError?.error).toBe('Timed out after 8s');
+    expect(hungError?.error).toBe('Timed out after 5s');
     // The healthy neighbour is not held back by the hung one.
     expect(errors.map(e => e.nodeId)).not.toContain(healthyId);
     expect((res.body.nodes as { nodeId: number }[]).some(n => n.nodeId === healthyId)).toBe(true);
@@ -394,7 +396,7 @@ describe('node-data fan-outs share the per-remote read budget', () => {
     expect(res.status).toBe(200);
     const row = (res.body.nodes as { nodeId: number; status: string; error?: string }[]).find(n => n.nodeId === nodeId);
     expect(row?.status).toBe('error');
-    expect(row?.error).toBe('Timed out after 8s');
+    expect(row?.error).toBe('Timed out after 5s');
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 20_000);
@@ -456,6 +458,115 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       const res = await getMap('');
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toContain(addedId);
+    });
+  });
+
+  describe('GET /api/fleet/container-labels', () => {
+    function stubLocalLabelDocker(): void {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        listContainersForLabelInventory: vi.fn().mockResolvedValue([]),
+        inspectImageLabels: vi.fn(),
+      } as unknown as DockerController);
+    }
+
+    function inventory(nodeId: number): Record<string, unknown> {
+      return { nodeId, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] };
+    }
+
+    function labelsHandler(healthyId: number) {
+      return (url: string, init?: RequestInit) => {
+        if (originOf(url) === HEALTHY_BASE && String(url).startsWith(`${HEALTHY_BASE}/api/system/container-labels`)) {
+          return jsonResponse(inventory(healthyId));
+        }
+        return hungUntilAbort(init);
+      };
+    }
+
+    async function getLabels(query = '') {
+      return request(app).get(`/api/fleet/container-labels${query}`).set('Authorization', authHeader);
+    }
+
+    it('merges an all-healthy fleet', async () => {
+      stubLocalLabelDocker();
+      const healthyId = addProxyNode('healthy-labels', HEALTHY_BASE);
+      mockTargets({ [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+      mockFetch(labelsHandler(healthyId));
+
+      const started = Date.now();
+      const res = await getLabels();
+      expect(res.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      const rows = res.body.nodes as { nodeId: number; status: string }[];
+      expect(rows.every(r => r.status === 'ok')).toBe(true);
+      expect(rows.map(r => r.nodeId)).toContain(healthyId);
+      expect(res.body.nodeErrors).toEqual({});
+    });
+
+    it('degrades a hung proxy remote inside the budget while the healthy nodes still answer', async () => {
+      stubLocalLabelDocker();
+      const hungId = addProxyNode('hung-labels', PROXY_BASE);
+      const healthyId = addProxyNode('healthy-labels', HEALTHY_BASE);
+      mockTargets({
+        [hungId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+        [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      });
+      mockFetch(labelsHandler(healthyId));
+
+      const started = Date.now();
+      const res = await getLabels();
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      const rows = res.body.nodes as { nodeId: number; status: string; error: string | null }[];
+      expect(rows.find(r => r.nodeId === hungId)).toMatchObject({ status: 'error', error: 'Timed out after 5s' });
+      expect(rows.find(r => r.nodeId === healthyId)).toMatchObject({ status: 'ok', error: null });
+      expect(rows.find(r => r.nodeId !== hungId && r.nodeId !== healthyId)?.status).toBe('ok');
+      expect((res.body.nodeErrors as Record<string, string>)[String(hungId)]).toBe('Timed out after 5s');
+      expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+      expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+    }, 20_000);
+
+    it('reports a disconnected Pilot without a 30-second wait and without issuing HTTP', async () => {
+      stubLocalLabelDocker();
+      const goneId = addPilotNode('gone-labels');
+      mockTargets({ [goneId]: null });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const started = Date.now();
+      const res = await getLabels();
+      expect(res.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const row = (res.body.nodes as { nodeId: number; status: string; error: string | null }[]).find(r => r.nodeId === goneId);
+      expect(row?.status).toBe('error');
+      expect(row?.error).toContain('Pilot tunnel');
+    });
+
+    it('answers for one node with ?nodeId= and keeps the aggregate shape', async () => {
+      stubLocalLabelDocker();
+      const healthyId = addProxyNode('slice-labels', HEALTHY_BASE);
+      const otherId = addProxyNode('other-labels', PROXY_BASE);
+      mockTargets({
+        [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false },
+        [otherId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false },
+      });
+      const fetchSpy = mockFetch(labelsHandler(healthyId));
+
+      const res = await getLabels(`?nodeId=${healthyId}`);
+      expect(res.status).toBe(200);
+      expect((res.body.nodes as { nodeId: number }[]).map(r => r.nodeId)).toEqual([healthyId]);
+      const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
+    });
+
+    it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
+      const res = await getLabels(`?nodeId=${encodeURIComponent(bad)}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('answers 404 for a node that does not exist', async () => {
+      const res = await getLabels('?nodeId=99999');
+      expect(res.status).toBe(404);
     });
   });
 });

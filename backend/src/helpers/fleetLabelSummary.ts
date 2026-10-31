@@ -2,6 +2,7 @@ import { DatabaseService, type Node } from '../services/DatabaseService';
 import { FileSystemService } from '../services/FileSystemService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { safeRemoteFetch } from '../utils/outboundTarget';
+import { FLEET_READ_BUDGET_MS } from './fleetReadBudget';
 import { formatNoTargetError } from '../utils/remoteTarget';
 import { getErrorMessage } from '../utils/errors';
 
@@ -22,7 +23,7 @@ export interface NodeLabelSummary {
 // Per-node fetch budget. Suggestions load on card mount and match-preview runs
 // on a 500ms debounce, so keep this short: a wedged or slow remote should fall
 // to "unreachable" fast rather than stall the whole fleet readout.
-const SUMMARY_FETCH_TIMEOUT_MS = 5000;
+const SUMMARY_FETCH_TIMEOUT_MS = FLEET_READ_BUDGET_MS;
 
 /**
  * Authoritative stack-label summary for one node's own labels.
