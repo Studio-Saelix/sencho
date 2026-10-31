@@ -15,7 +15,7 @@ import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/t
 // backend).
 
 interface NetworkFactNetwork { key: string; name: string; external: boolean; internal: boolean; createdByStack: boolean }
-interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; dynamic?: boolean; allInterfaces: boolean; loopbackOnly: boolean }
+interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; dynamic?: true; allInterfaces: boolean; loopbackOnly: boolean }
 interface NetworkFactService {
   name: string;
   networks: { key: string; aliases: string[] }[];

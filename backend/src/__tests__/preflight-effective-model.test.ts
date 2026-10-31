@@ -258,8 +258,13 @@ describe('parseEffectiveModel', () => {
   });
 
   it('keeps a bracketed IPv6 short entry with a fixed host port, and drops entries with no target or a bad port', () => {
-    const m = parseEffectiveModel({ services: { s: { ports: ['[::1]:51820:51820/udp', { published: '' }, { target: 'x', published: 0 }, { target: 80, published: 'abc' }, '[::1]:80'] } } }, 'p');
+    const m = parseEffectiveModel({ services: { s: { ports: ['[::1]:51820:51820/udp', { published: '' }, { target: 'x', published: 0 }, { target: 80, published: 'abc' }, '[::1]:80', '8080x', { target: '80-', published: 0 }, { target: 0 }, '8080:8080x', '8080:0', { target: 'x', published: 8080 }] } } }, 'p');
     expect(m.services[0].ports).toEqual([{ startPort: 51820, endPort: 51820, hostIp: '::1', protocol: 'udp' }]);
+  });
+
+  it('keeps a range whose host port starts at 0 as dynamic, as Compose does', () => {
+    const m = parseEffectiveModel({ services: { s: { ports: ['0-80:80'] } } }, 'p');
+    expect(m.services[0].ports).toEqual([{ startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true }]);
   });
 
   it('reads the numeric spellings Compose accepts, and drops the ports it refuses', () => {

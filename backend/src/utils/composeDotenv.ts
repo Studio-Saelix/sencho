@@ -484,9 +484,10 @@ export class ComposeEnvFiles {
     // line with no `=` inherit the name's value. "Space" at the start of a line
     // is Go's unicode.IsSpace, so a leading U+0085 (NEL), which JavaScript's
     // `trimStart` leaves in place, is trimmed. It drops a BOM at the start of
-    // the file, as it does for a dotenv file; anywhere else the BOM stays in
-    // the name (a rendered ` \ufeffSP=1` names `\ufeffSP`). That file is
-    // refused rather than read, so a name carrying a BOM is never guessed at.
+    // the file, as it does for a dotenv file; a BOM later in the file is kept as
+    // an ordinary character, and one in a name (` \ufeffSP=1` names `\ufeffSP`).
+    // Such a file is refused rather than read, so a name carrying a BOM is never
+    // guessed at.
     const text = content.startsWith(UTF8_BOM) ? content.slice(1) : content;
     if (text.includes(UTF8_BOM)) throw new ComposeEnvFileError('a raw env file has a byte order mark past its start');
     for (const line of text.split('\n')) {

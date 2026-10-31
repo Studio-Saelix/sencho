@@ -23,7 +23,9 @@ interface FindingFacts {
 }
 
 function portTargets(ports: readonly NetworkFactPort[]): string[] {
-  return ports.map(port => `${port.hostIp}:${port.dynamic ? 'auto' : `${port.startPort}-${port.endPort}`}/${port.protocol}`);
+  // Several auto-assigned ports of one protocol read the same, so a finding's
+  // targets (and so its fingerprint) must not move when one is added.
+  return [...new Set(ports.map(port => `${port.hostIp}:${port.dynamic ? 'auto' : `${port.startPort}-${port.endPort}`}/${port.protocol}`))];
 }
 
 function finding(

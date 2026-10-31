@@ -17,8 +17,8 @@ export interface DeclaredPort {
   protocol: string;
   /** Docker assigns the host port at start, so no number is known. The entry
    *  still publishes the container; port-conflict and drift consumers skip it
-   *  (see `fixedPorts` in composePortSpec). Drift compares
-   *  only the fixed ports, and the ledger hash records it as `auto`.. */
+   *  (see `fixedPorts` in composePortSpec). Drift compares only the fixed ports,
+   *  and the ledger hash records it as `auto`. */
   dynamic?: true;
 }
 
@@ -380,7 +380,7 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
         ? { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true }
         : null;
     }
-    if (!isFixedHostPort(spec.hostPart)) return null;
+    if (!isFixedHostPort(spec.hostPart) || !isContainerPort(spec.container)) return null;
     return { hostIp: spec.hostIp, publishedPort: parseInt(spec.hostPart.split('-')[0], 10), protocol: spec.protocol };
   }
   if (entry && typeof entry === 'object') {
@@ -388,10 +388,10 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const publishedRaw = interpolateString(asString(obj.published), lookup);
     const hostIp = interpolateString(asString(obj.host_ip), lookup) ?? '';
     const protocol = interpolateString(asString(obj.protocol), lookup) || 'tcp';
+    const target = interpolateString(asString(obj.target), lookup);
+    if (!isContainerPort(target)) return null;
     if (isDynamicHostPort(publishedRaw)) {
-      return isContainerPort(interpolateString(asString(obj.target), lookup))
-        ? { hostIp, publishedPort: 0, protocol, dynamic: true }
-        : null;
+      return { hostIp, publishedPort: 0, protocol, dynamic: true };
     }
     if (!isFixedHostPort(publishedRaw as string)) return null;
     return { hostIp, publishedPort: parseInt((publishedRaw as string).split('-')[0], 10), protocol };

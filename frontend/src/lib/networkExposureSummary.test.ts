@@ -1,6 +1,6 @@
 /**
  * The redacted networking + exposure summary for the dossier export: it carries
- * only names, intents, port numbers, and binding scope, never env or label
+ * only names, intents, port labels, and binding scope, never env or label
  * values, and renders nothing when there is nothing to document.
  */
 import { describe, it, expect } from 'vitest';
@@ -44,6 +44,7 @@ describe('buildNetworkExposureSummary', () => {
       ] }],
     }, []);
     expect(s?.services[0].ports).toEqual(['auto-assigned/udp (all interfaces)', 'auto-assigned/tcp (loopback)']);
+    expect(networkExposureSection(s)).toContain('ports auto-assigned/udp (all interfaces), auto-assigned/tcp (loopback)');
   });
   it('flags a host-network service as host-exposed even with no published ports', () => {
     const s = buildNetworkExposureSummary({ renderable: true, networks: [], services: [{ name: 'app', publishedPorts: [], networkMode: 'host' }] }, []);

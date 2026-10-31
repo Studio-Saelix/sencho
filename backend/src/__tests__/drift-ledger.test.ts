@@ -91,9 +91,11 @@ describe('computeStackHashes', () => {
   });
 
   it('keeps the rendered hash of a stack with only fixed ports as it was', () => {
-    // A recorded baseline must not read as changed after an upgrade.
+    // Pin the value an earlier release stored: a recorded baseline must not read
+    // as changed after an upgrade. Recomputing both sides here would let a change
+    // to the fixed-port serialization pass unnoticed.
     expect(computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n').renderedHash)
-      .toBe(computeStackHashes('# note\nservices:\n  web:\n    ports: ["8080:80"]\n    image: nginx:1.27\n').renderedHash);
+      .toBe('8d199bc2b032b553204e48bb8fe1bfb4ae2947e54c37461afa1fa4ffcc96aa7a');
   });
 
   it('returns a null rendered hash when the model cannot be parsed', () => {

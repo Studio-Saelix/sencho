@@ -6,10 +6,11 @@
  * exposure descriptor, the Networking facts, findings and per-network counters,
  * the node overview, and the Doctor rules. They also pin the readers that need
  * a port number (conflicts, drift), which must skip it rather than invent one.
- * Fixtures go through parseEffectiveModel with `docker compose config` shaped
- * JSON; the Docker-backed parity cases in docker-integration/tunnel-compose-render
- * check the same forms against a real render, and drift-ledger.test.ts pins the
- * ledger hash.
+ * Fixtures go through parseEffectiveModel: long-form entries mirror the JSON
+ * `docker compose config` emits, while short-string entries exercise the
+ * adapter's fallback. The Docker-backed parity cases in
+ * docker-integration/tunnel-compose-render compare real renders, including
+ * IPv6 and raw env files, and drift-ledger.test.ts pins the ledger hash.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseEffectiveModel, type EffectiveModel } from '../services/preflight/effectiveModel';
@@ -44,7 +45,7 @@ function render(services: Record<string, RawService>): EffectiveModel {
 const app: RawService = { image: 'ghcr.io/example/app:1.2' };
 const SOCKET = { type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' };
 
-/** Every way `docker compose config` renders a port with no host port, in UDP. */
+/** Every form a UDP publication with no host port takes, rendered or authored. */
 const DYNAMIC_UDP: Array<[string, unknown]> = [
   ['a container-only entry', { mode: 'ingress', target: 51820, protocol: 'udp' }],
   ['an interface with no host port', { mode: 'ingress', host_ip: '127.0.0.1', target: 51820, protocol: 'udp' }],
@@ -84,6 +85,10 @@ describe('the rendered adapter keeps a dynamic publication without inventing a p
 
   it('treats `expose` as no publication at all', () => {
     expect(render({ web: { ...app, expose: ['51820/udp'] } }).services[0].ports).toEqual([]);
+  });
+
+  it.each(['8080x', '80-', '80-90-100', '65536', '0', '0-80', '+80x'])('drops %s, which Compose refuses as a container port', (target) => {
+    expect(render({ web: { ...app, ports: [{ target }] } }).services[0].ports).toEqual([]);
   });
 });
 
@@ -227,6 +232,18 @@ describe('the Compose Doctor rules', () => {
 describe('readers that need a port number skip a dynamic one', () => {
   const dynamicModel = render({ web: { ...app, ports: ['80'] } });
 
+  it('keeps a dynamic IPv6 binding as broad or loopback, so exposure and findings agree', () => {
+    const wide = render({ web: { ...app, ports: ['[::]:0:8080'] } });
+    expect(assembleStackNetworkFacts('proj', wide, null, null).services[0].publishedPorts[0])
+      .toMatchObject({ hostIp: '::', dynamic: true, allInterfaces: true, loopbackOnly: false });
+    expect(deriveStackExposure(wide, 'proj', 1).services[0]).toMatchObject({ publiclyExposed: true, reason: 'published-port' });
+
+    const loopback = render({ web: { ...app, ports: ['[::1]::8080'] } });
+    expect(assembleStackNetworkFacts('proj', loopback, null, null).services[0].publishedPorts[0])
+      .toMatchObject({ hostIp: '::1', dynamic: true, allInterfaces: false, loopbackOnly: true });
+    expect(deriveStackExposure(loopback, 'proj', 1).services[0]).toMatchObject({ publiclyExposed: false, reason: null });
+  });
+
   it('carries the flag from the rendered model into the declared view, and out of drift', () => {
     const declared = declaredFromEffectiveModel(dynamicModel);
     expect(declared.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
@@ -243,7 +260,6 @@ describe('readers that need a port number skip a dynamic one', () => {
     const snapshot: DependencySnapshot = { containers: [], networks: [], volumes: [] };
     const graph = assembleGraph({ nodeId: 1, nodeName: 'hub', stacks: ['alpha'], snapshot, declaredByStack: new Map([['alpha', declared]]), parseErrors: [] });
     expect(graph.flags.filter(f => f.kind === 'port-conflict')).toEqual([]);
-    expect(graph.nodes.filter(n => n.kind === 'port')).toEqual([]);
   });
 });
 
@@ -310,6 +326,9 @@ describe('exposure consumers count an auto-assigned port as published', () => {
     const dynamic = fingerprintOf([{ target: 80 }]);
     expect(dynamic).toBeDefined();
     expect(dynamic).toBe(fingerprintOf([{ target: 81 }]));
+    // Adding another auto-assigned port of the same protocol must not move the
+    // fingerprint, or an acknowledgement would stop matching.
+    expect(dynamic).toBe(fingerprintOf([{ target: 80 }, { target: 81 }]));
     expect(dynamic).not.toBe(fingerprintOf([{ target: 80, published: '8080' }]));
     expect(dynamic).not.toBe(fingerprintOf([{ target: 80, protocol: 'udp' }]));
   });

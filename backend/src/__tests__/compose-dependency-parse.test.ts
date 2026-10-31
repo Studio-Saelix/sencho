@@ -104,6 +104,7 @@ describe('parseComposeDependencies - ports', () => {
     ['a long entry with no published port', '{ target: 51820, protocol: udp }', { hostIp: '', protocol: 'udp' }],
     ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp, host_ip: 127.0.0.1 }', { hostIp: '127.0.0.1', protocol: 'udp' }],
     ['a long entry published as an empty string', '{ target: 80, published: "" }', { hostIp: '', protocol: 'tcp' }],
+    ['a range that starts at 0', '"0-80:80"', { hostIp: '', protocol: 'tcp' }],
   ])('keeps %s as a dynamic publication with no invented port number', (_label, entry, expected) => {
     const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
     expect(r.services[0].ports).toEqual([{ ...expected, publishedPort: 0, dynamic: true }]);
@@ -139,7 +140,13 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol, dynamic: true }]);
   });
 
-  it.each(['"[::1]:80"', '"abc:80"', '"web"', '""', '"65536:80"', '"80-65536:80"', '"8002-8000:80"', '" 80:80"'])('drops %s, which Compose refuses', (entry) => {
+  it.each([
+    '"[::1]:80"', '"abc:80"', '"web"', '""', '"65536:80"', '"80-65536:80"', '"8002-8000:80"', '" 80:80"',
+    '"8080x"', '"80-"', '"80-90-100"', '"65536"', '"0"', '"0-80"',
+    '"8080:8080x"', '"8080:0"', '"8080:0-80"',
+    '{ target: "8080x", published: 0 }', '{ target: "80-", protocol: udp }', '{ target: 0 }',
+    '{ target: "x", published: 8080 }', '{ target: "80-", published: 8080 }',
+  ])('drops %s, which Compose refuses', (entry) => {
     const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
     expect(r.services[0].ports).toEqual([]);
   });

@@ -80,7 +80,9 @@ const GIT_MANAGED_PATH_KIND = 'managed-path-conflict';
 /**
  * Order-independent serialization of the parsed model so two compose files that
  * differ only in comments, whitespace, or key order hash equal, while a real
- * change to images/ports/services/networks/volumes changes the hash. Returns null
+ * change to images, services, networks, volumes, or a fixed published port
+ * changes the hash. A port Docker assigns records its interface and protocol,
+ * not a number. Returns null
  * when the local parser cannot produce a model (for example a file over the parse
  * size cap), so the caller stores no rendered baseline rather than a sentinel that
  * would make a later real change read as unchanged.

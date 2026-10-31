@@ -1,8 +1,9 @@
 /**
  * Redacted networking + exposure summary for the Stack Dossier export, derived
  * from the /networking facts and /exposure intents. It carries only network
- * names, exposure intents, published port numbers, binding scope, and the
- * tunnel connector (provider and service name) that reaches a service; never an
+ * names, exposure intents, published port labels (a number, a range, or
+ * auto-assigned), binding scope, and the tunnel connector (provider and service
+ * name) that reaches a service; never an
  * env value or a label value, so nothing sensitive reaches the exported text.
  * Pure and side-effect free.
  */
@@ -17,7 +18,7 @@ export interface NetworkExposureSummary {
 
 // Loose input shapes: the builder reads the raw parsed /networking and
 // /exposure JSON, so it stays decoupled from the panel's local interfaces.
-interface FactsPort { startPort: number; endPort: number; protocol: string; dynamic?: boolean; allInterfaces: boolean; loopbackOnly: boolean }
+interface FactsPort { startPort: number; endPort: number; protocol: string; dynamic?: true; allInterfaces: boolean; loopbackOnly: boolean }
 interface FactsService { name: string; publishedPorts?: FactsPort[]; networkMode?: string; tunnel?: ServiceTunnelExposure }
 interface FactsNetwork { name: string; external: boolean; internal: boolean }
 export interface NetworkFactsInput { renderable?: boolean; networks?: FactsNetwork[]; services?: FactsService[] }

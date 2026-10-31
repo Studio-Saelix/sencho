@@ -27,9 +27,9 @@ export interface EffPortSpec {
   hostIp: string;
   protocol: string;
   /** Docker assigns the host port at start (container-only entry, empty or `0`
-   *  host port), so no number is known. The container is still published;
-   *  conflict, drift, and documented-port checks skip it (see `fixedPorts` in composePortSpec). Drift compares
-   *  only the fixed ports, and exposure checks count it as published.. */
+   *  host port), so no number is known. The container is still published and
+   *  exposure counts it; conflict, drift, and documented-port checks skip it
+   *  (`fixedPorts` in composePortSpec and `portsOf` in rules). */
   dynamic?: true;
 }
 
@@ -175,7 +175,7 @@ function str(v: unknown): string | undefined {
   return undefined;
 }
 
-/** Parse a `start[-end]` published-port string into a clamped range, or null if invalid. */
+/** Parse a `start[-end]` published-port string into a range, or null if invalid. */
 function parsePortRange(raw: string): { startPort: number; endPort: number } | null {
   if (!isFixedHostPort(raw)) return null;
   const [a, b] = raw.split('-');
@@ -193,11 +193,12 @@ function parsePortRange(raw: string): { startPort: number; endPort: number } | n
 function parsePortSpec(entry: unknown): EffPortSpec | null {
   if (entry && typeof entry === 'object') {
     const o = entry as Record<string, unknown>;
+    if (!isContainerPort(str(o.target))) return null;
     const hostIp = str(o.host_ip) ?? '';
     const protocol = str(o.protocol) ?? 'tcp';
     const publishedRaw = str(o.published);
     if (isDynamicHostPort(publishedRaw)) {
-      return isContainerPort(str(o.target)) ? { startPort: 0, endPort: 0, hostIp, protocol, dynamic: true } : null;
+      return { startPort: 0, endPort: 0, hostIp, protocol, dynamic: true };
     }
     const range = parsePortRange(publishedRaw as string);
     return range ? { ...range, hostIp, protocol } : null;
@@ -205,11 +206,9 @@ function parsePortSpec(entry: unknown): EffPortSpec | null {
   const short = str(entry);
   if (short === undefined) return null;
   const spec = splitShortPortSpec(short);
-  if (!spec) return null;
+  if (!spec || !isContainerPort(spec.container)) return null;
   if (isDynamicHostPort(spec.hostPart)) {
-    return isContainerPort(spec.container)
-      ? { startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true }
-      : null;
+    return { startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true };
   }
   const range = parsePortRange(spec.hostPart);
   return range ? { ...range, hostIp: spec.hostIp, protocol: spec.protocol } : null;

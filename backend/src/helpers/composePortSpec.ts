@@ -98,8 +98,9 @@ export function isFixedHostPort(hostPart: string): boolean {
   return last !== null && last >= first;
 }
 
-/** A container port text starts with a digit (a port or a `start-end` range,
- *  with Compose's optional `+`); anything else is not a port entry. */
+/** Whether a container port text is a port or an ascending `start-end` range.
+ *  Compose reads it with the same numeric grammar as a fixed host port, except
+ *  that port 0 is not a target: `8080`, `+8080`, `00080`, and `8000-8002`. */
 export function isContainerPort(container: string | undefined): boolean {
-  return container !== undefined && /^\+?\d/.test(container);
+  return container !== undefined && isFixedHostPort(container);
 }
