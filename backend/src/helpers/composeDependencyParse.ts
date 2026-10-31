@@ -19,7 +19,8 @@ export interface DeclaredPort {
    *  still publishes the container; port-conflict and documented-URL consumers
    *  skip it (see `fixedPorts` in composePortSpec). Drift matches it to the
    *  runtime container port and interface by `targetStartPort`/`targetEndPort`
-   *  and `hostIp`, and the ledger hash records it as `auto`. */
+   *  and `hostIp`, using whichever of those the entry resolved, and the ledger
+   *  hash records it as `auto`. */
   dynamic?: true;
   /** Container port range an auto-assigned publication targets, when known.
    *  Both readers set it on a dynamic port whose container side is a literal
@@ -414,10 +415,11 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
       // A whole entry that is still a template ("${PORTS}") writes no host
       // side at all: it may resolve to a fixed or an auto-assigned
       // publication, so there is no shape to record. Leave it out rather than
-      // invent one, as well as when the interface is templated and the target
-      // is unknown. A literal interface keeps the shape even when the container
-      // side is a template ("127.0.0.1::${APP_PORT}"), and an empty host part
-      // with a known container port is an ordinary auto-assigned publication.
+      // invent one, as well as a short entry with an empty host part, a
+      // templated interface, and an unknown target. A literal interface keeps
+      // the shape even when the container side is a template
+      // ("127.0.0.1::${APP_PORT}"), and an empty host part with a known
+      // container port is an ordinary auto-assigned publication.
       if (target === 'unknown' && spec.hostPart === ''
         && (spec.hostIp === '' || holdsTemplate(spec.hostIp))) return null;
       return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };

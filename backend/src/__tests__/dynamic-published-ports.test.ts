@@ -498,6 +498,8 @@ describe('drift against a running service with an auto-assigned port', () => {
     const declared = declaredFromEffectiveModel(render({
       web: { ...app, network_mode: 'host', ports: ['8080:80', '9000'] },
     }));
+    expect(declared.services[0].networkMode).toBe('host');
+    expect(declared.services[0].ports).toHaveLength(2);
     expect(assembleStackDrift({ stack: 'proj', declared, containers: [running([])] }).findings
       .filter(f => f.kind === 'ports-mismatch')).toEqual([]);
   });
@@ -537,6 +539,19 @@ describe('drift against a running service with an auto-assigned port', () => {
     // constrains nothing: either binding satisfies it.
     expect(portMatches(unresolved(1, '${HOST_IP}'), [one])).toEqual([]);
     expect(portMatches(unresolved(1, '${HOST_IP}'), [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
+    // A templated interface with a known target reaches the resolved-target
+    // branch and matches either interface, but still needs its target.
+    const wildcardTarget: DeclaredPort = {
+      hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const withTarget: DeclaredCompose = {
+      services: [{ name: 'web', dependsOn: [], networks: [], volumes: [], ports: [wildcardTarget] }],
+      networks: {}, volumes: {},
+    };
+    expect(portMatches(withTarget, [one])).toEqual([]);
+    expect(portMatches(withTarget, [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
+    expect(portMatches(withTarget, [{ ...one, privatePort: 9001 }])).toHaveLength(1);
   });
 });
 
@@ -555,6 +570,24 @@ describe('authored port forms beyond the audit matrix', () => {
   it('keeps a TCP and a UDP auto-assigned port as two entries', () => {
     const r = parseComposeDependencies('services:\n  web:\n    ports:\n      - "80"\n      - "51820/udp"\n');
     expect(r.services[0].ports.map(p => p.protocol)).toEqual(['tcp', 'udp']);
+  });
+
+  it('does not let an unresolved interface take the binding a resolved declaration needs', () => {
+    const declared = parseComposeDependencies('services:\n  web:\n    ports:\n      - "${HOST_IP}::80"\n      - "127.0.0.1::80"\n');
+    expect(declared.services[0].ports.map(p => p.hostIp)).toEqual(['${HOST_IP}', '127.0.0.1']);
+    const loopback = { ip: '127.0.0.1', publishedPort: 32768, privatePort: 80, protocol: 'tcp' };
+    const allInterfaces = { ip: '0.0.0.0', publishedPort: 32769, privatePort: 80, protocol: 'tcp' };
+    const container = (ports: DependencyContainer['ports']): DependencyContainer => ({
+      id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports,
+    });
+    const portFindings = (ports: DependencyContainer['ports']) => assembleStackDrift({
+      stack: 'proj', declared, containers: [container(ports)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    // The loopback declaration must get the loopback binding, whichever order
+    // the runtime lists the two in; the wildcard declaration takes the other.
+    expect(portFindings([loopback, allInterfaces])).toEqual([]);
+    expect(portFindings([allInterfaces, loopback])).toEqual([]);
   });
 
   it('keeps a dynamic declaration with a written interface and an unresolved target, and matches it by interface', () => {

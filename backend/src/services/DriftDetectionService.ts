@@ -2,6 +2,7 @@ import DockerController from './DockerController';
 import type { DependencyContainer, DependencyNetwork } from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
+import { holdsTemplate } from '../helpers/composeDependencyParse';
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { parseEffectiveModel } from './preflight/effectiveModel';
@@ -134,10 +135,10 @@ interface DynamicDeclaration {
 }
 
 /**
- * A dynamic declaration whose container side is still a template, so only its
- * protocol and interface are known. Compose resolves the target when it
- * interpolates the entry, which a caller with no lookup cannot see, so it is
- * matched by protocol and interface alone, once per running binding.
+ * A dynamic declaration whose container side is still a template, so its
+ * target is unknown. The protocol is always known, and the interface is known
+ * unless it too is a template. It is matched by whichever of those the
+ * declaration has, once per running binding.
  */
 interface UnresolvedDeclaration {
   hostIp: string;
@@ -172,6 +173,13 @@ function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
       protocol: p.protocol,
     });
   }
+  // A declaration whose interface is still a template can take any binding, so
+  // match the resolved ones first. Otherwise it could consume the binding a
+  // resolved declaration needs and report drift where a valid assignment exists.
+  // A declaration whose interface is still a template can take any binding, so
+  // match the resolved ones first. Otherwise it could consume the binding a
+  // resolved declaration needs and report drift where a valid assignment exists.
+  dynamic.sort((a, b) => Number(holdsTemplate(a.hostIp)) - Number(holdsTemplate(b.hostIp)));
   return { fixed, dynamic, unknownTargets };
 }
 
@@ -190,8 +198,8 @@ function interfaceKey(ip: string): string {
  * was never resolved, so it constrains nothing and any binding satisfies it.
  */
 function interfaceCompatible(declaredHostIp: string, runtimeHostIp: string): boolean {
-  const declared = interfaceKey(declaredHostIp);
-  return declared.includes('$') || declared === interfaceKey(runtimeHostIp);
+  if (holdsTemplate(declaredHostIp)) return true;
+  return interfaceKey(declaredHostIp) === interfaceKey(runtimeHostIp);
 }
 
 /** A declared port as it reads in a finding, with no invented host number. */

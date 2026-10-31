@@ -103,7 +103,9 @@ If the Compose file declares a tag (`:latest`, `:1.25`) and the running containe
 
 A Compose port range such as `8000-8002:8000-8002` is compared conservatively. Because the runtime expands ranges into individual ports, the comparison can read as a difference even when the deployment is correct. Sencho errs toward surfacing the possible difference rather than hiding it.
 
-A service declared with `network_mode: host` is not port-compared: Docker discards its `ports:` bindings, and every container port is reachable on the host directly, so there is no published set to compare.
+### Host network mode
+
+A service declared with `network_mode: host` is not port-compared. Docker discards its `ports:` bindings, and every container port is reachable on the host directly, so the runtime has no published ports to compare with the declaration.
 
 ### Network findings and the Networking tab
 
