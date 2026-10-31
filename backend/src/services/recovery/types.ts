@@ -123,6 +123,13 @@ export type RecoveryPointStatus = 'pending' | 'succeeded' | 'partial' | 'failed'
 /**
  * Consistency labels this contract version supports. Nothing stronger
  * (application, database, transaction) exists until an adapter proves it.
+ *
+ * `crash_consistent_live` means a container was observed using the storage
+ * while the capture ran, so its files may be mid-write.
+ * `crash_consistent_stopped` means no container using the storage was running
+ * at either check; Sencho stopped nothing, and an application that was simply
+ * idle may still have had unflushed state. It is a statement about what was
+ * observed, never a claim about the application's own consistency.
  */
 export type ConsistencyClass = 'crash_consistent_live' | 'crash_consistent_stopped' | 'unknown';
 
@@ -276,7 +283,21 @@ export type VolumeProtectionStatus = {
   version: number;
 } & (
   | { state: 'available'; reason: 'engine_registered' }
-  | { state: 'unavailable'; reason: 'engine_not_installed' | 'schema_newer_than_build' | 'recovery_store_unavailable' }
+  | {
+      state: 'unavailable';
+      reason:
+        | 'engine_not_installed'
+        | 'schema_newer_than_build'
+        | 'recovery_store_unavailable'
+        // Added with the first engine: this build can protect volumes, and one
+        // of the things it needs is not ready. Additive to the contract, so an
+        // older hub reads the pair as an invalid descriptor, i.e. Unknown.
+        | 'engine_starting'
+        | 'helper_unavailable'
+        | 'repository_not_initialized'
+        | 'repository_unavailable'
+        | 'repository_key_unavailable';
+    }
   | { state: 'update_required'; reason: 'node_contract_older' | 'hub_contract_older' }
   | {
     state: 'unknown';
@@ -362,6 +383,12 @@ export interface RecoveryProgress {
 /** What the engine needs to run one operation on the owning node. */
 export interface EngineExecutionContext {
   operationId: string;
+  /**
+   * The point this run is for: the point being captured, or the point being
+   * verified or restored. The engine uses it as the capture's own tag, so a
+   * snapshot in the repository can always be traced back to the record of it.
+   */
+  pointId?: string | null;
   /** The lock the operation holds; an engine never runs without one. */
   lock: RecoveryLock;
   signal: AbortSignal;
@@ -395,13 +422,16 @@ export type RestoreIntentPhase =
 /**
  * The shape of a restore's durable record. The slice that implements restore
  * must persist it before any byte moves and reconcile it at boot, so a restart
- * never starts workloads against half-written data. This build defines the
- * shape only.
+ * never starts workloads against half-written data.
  */
 export interface RestoreIntent {
   id: string;
   operationId: string;
   pointId: string;
+  /** The repository that holds the point, resolved once at admission. */
+  repositoryId: string;
+  /** The snapshot to restore, copied from the point so a later edit cannot move it. */
+  snapshotId: string | null;
   target: RestoreTarget;
   /** Path inside the point to restore; null restores the whole point. */
   pathScope: string | null;
@@ -430,6 +460,13 @@ export interface RestoreEvidence {
   filesRestored: number;
   bytesRestored: number;
   verified: boolean;
+  /**
+   * Extended-attribute sets restic could not apply (file capabilities, SELinux
+   * labels). Non-zero with `verified: false` means the files are there and a
+   * piece of their metadata is not: the operation reports `partial`, never
+   * success, and never pretends the volume is a clean restore.
+   */
+  xattrWarnings?: number;
 }
 
 /** What an engine reports about itself on this node. */

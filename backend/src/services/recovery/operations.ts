@@ -50,6 +50,7 @@ interface OperationRow {
   transport: RecoveryTransport;
   state: RecoveryOperationState;
   error_class: RecoveryErrorClass | null;
+  request_digest: string | null;
   process_epoch: string;
   created_at: number;
   updated_at: number;
@@ -104,6 +105,14 @@ export interface StartOperationInput {
   pointId?: string | null;
   actor: string;
   transport: RecoveryTransport;
+  /**
+   * sha256 of the canonical request this operation is for (the storage, the
+   * method, the target name). A replay with the same key but a different request
+   * is a different operation and is refused, so one key can never answer for two
+   * requests. Required for a new row; an operation created before schema v2 has
+   * no digest and only matches a replay that carries none.
+   */
+  requestDigest?: string | null;
 }
 
 export interface StartedOperation {
@@ -137,13 +146,16 @@ export class RecoveryOperationStore {
     if (key === '' || key.length > 200) throw new RecoveryError('invalid_request');
     const storageId = input.storageId ?? null;
     const pointId = input.pointId ?? null;
+    const requestDigest = input.requestDigest ?? null;
+    if (requestDigest !== null && !/^[0-9a-f]{64}$/.test(requestDigest)) throw new RecoveryError('invalid_request');
     const db = recoveryDb();
     return db.transaction((): StartedOperation => {
       const existing = db.prepare('SELECT * FROM recovery_operations WHERE idempotency_key = ?').get(key) as OperationRow | undefined;
       if (existing) {
         // The same key for a different request, actor or transport is not a replay.
         if (existing.kind !== input.kind || existing.storage_id !== storageId || existing.point_id !== pointId
-          || existing.actor !== input.actor || existing.transport !== input.transport) {
+          || existing.actor !== input.actor || existing.transport !== input.transport
+          || (existing.request_digest ?? null) !== requestDigest) {
           throw new RecoveryError('invalid_request');
         }
         return { operation: toOperation(existing), replayed: true };
@@ -151,9 +163,10 @@ export class RecoveryOperationStore {
       const id = randomUUID();
       db.prepare(`
         INSERT INTO recovery_operations
-          (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-      `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, this.processEpoch, now, now);
+          (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, request_digest,
+           process_epoch, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+      `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, requestDigest, this.processEpoch, now, now);
       return { operation: this.require(id), replayed: false };
     }).immediate();
   }

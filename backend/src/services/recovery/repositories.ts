@@ -3,6 +3,7 @@ import { CryptoService } from '../CryptoService';
 import { errorMessageForLog } from '../../utils/safeLog';
 import { getRecoveryAuthorityId, recoveryDb } from './recoveryDb';
 import { RecoveryError } from './redaction';
+import { RECOVERY_ACTIVE_REPOSITORY_STATE_KEY } from './schema';
 import { canonicalizeLocator } from './storageIdentity';
 import type { FailureDomainRelation, RepositoryDescriptor, RepositoryKind } from './types';
 
@@ -112,6 +113,55 @@ export class RecoveryRepositoryStore {
       'UPDATE recovery_repositories SET encrypted_secret = ? WHERE id = ?',
     ).run(encrypted, id);
     if (result.changes === 0) throw new RecoveryError('repository_unavailable');
+  }
+
+  /**
+   * Store a password only when the repository has none. Provisioning calls this
+   * on every attempt, and a second attempt must never overwrite the password
+   * that already opened a repository: the old points would become unreadable.
+   * Returns true when this call wrote the secret.
+   */
+  storeSecretIfAbsent(id: string, createSecret: () => string): boolean {
+    const db = recoveryDb();
+    return db.transaction((): boolean => {
+      const row = db.prepare('SELECT encrypted_secret FROM recovery_repositories WHERE id = ?')
+        .get(id) as { encrypted_secret: string | null } | undefined;
+      if (!row) throw new RecoveryError('repository_unavailable');
+      if (row.encrypted_secret) return false;
+      const plaintext = createSecret();
+      if (typeof plaintext !== 'string' || plaintext.length === 0) throw new RecoveryError('invalid_request');
+      const encrypted = CryptoService.getInstance().encrypt(plaintext);
+      db.prepare('UPDATE recovery_repositories SET encrypted_secret = ? WHERE id = ? AND encrypted_secret IS NULL')
+        .run(encrypted, id);
+      return true;
+    }).immediate();
+  }
+
+  /** Every repository this authority has registered, newest last. */
+  listForAuthority(authorityId: string): RepositoryDescriptor[] {
+    const rows = recoveryDb().prepare(
+      'SELECT * FROM recovery_repositories WHERE authority_id = ? ORDER BY created_at, id',
+    ).all(authorityId) as RepositoryRow[];
+    return rows.map(toDescriptor);
+  }
+
+  /** The repository Sencho is currently writing points to, or null before provisioning. */
+  getActive(): RepositoryDescriptor | null {
+    const row = recoveryDb().prepare('SELECT value FROM system_state WHERE key = ?')
+      .get(RECOVERY_ACTIVE_REPOSITORY_STATE_KEY) as { value: string } | undefined;
+    if (!row?.value) return null;
+    return this.get(row.value);
+  }
+
+  /**
+   * Point this node at a repository. Replace moves the pointer and keeps the row
+   * it moved from, so the old points keep their evidence and simply stop being
+   * counted.
+   */
+  setActive(id: string): void {
+    if (!this.get(id)) throw new RecoveryError('repository_unavailable');
+    recoveryDb().prepare('INSERT OR REPLACE INTO system_state (key, value) VALUES (?, ?)')
+      .run(RECOVERY_ACTIVE_REPOSITORY_STATE_KEY, id);
   }
 
   /** The plaintext secret, for the node-local engine call only. */

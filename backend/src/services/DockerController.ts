@@ -594,6 +594,11 @@ class DockerController {
     } else if (target === 'volumes') {
       const filters: Record<string, string[]> = { all: ['true'] };
       if (labelFilter) filters.label = [labelFilter];
+      // The recovery repository is Sencho's own infrastructure: it holds every
+      // volume point this node has taken, and no prune may remove it. The daemon
+      // filter is a second line of defense beside `isOwnVolume` in the plan and
+      // managed paths, which cannot see a volume that no container mounts.
+      filters['label!'] = [`dev.sencho.recovery.repository`];
       const r = await this.docker.pruneVolumes({ filters });
       spaceReclaimed = r.SpaceReclaimed || 0;
     }
@@ -2043,6 +2048,12 @@ class DockerController {
   }
 
   public async removeVolume(name: string) {
+    // Sencho's own volumes (including its recovery repository) are never removed
+    // through this path. The routes refuse them first; this guard is what keeps a
+    // future caller from doing it by accident.
+    if (SelfIdentityService.getInstance().isOwnVolume(name)) {
+      throw new Error('Cannot remove a volume that belongs to Sencho');
+    }
     const volume = this.docker.getVolume(name);
     await volume.remove({ force: true });
   }
@@ -2560,8 +2571,12 @@ class DockerController {
   /**
    * Builds (or returns cached) mapping from Docker project name to Sencho stack directory name.
    * Compose files with a top-level `name:` field override the default project name.
+   *
+   * Public because recovery authorization resolves a volume's Compose project
+   * label through it: a project name can differ from the stack directory, and a
+   * check against the wrong one would either over- or under-authorize.
    */
-  private static async resolveProjectNameMap(stackNames: string[]): Promise<Map<string, string>> {
+  static async resolveProjectNameMap(stackNames: string[]): Promise<Map<string, string>> {
     return CacheService.getInstance().getOrFetch(
       PROJECT_NAME_CACHE_KEY,
       PROJECT_NAME_CACHE_TTL_MS,

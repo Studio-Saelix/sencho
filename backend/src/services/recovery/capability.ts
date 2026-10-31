@@ -23,9 +23,31 @@ import type {
  */
 
 const registeredEngines: BackupEngine[] = [];
+let localHealthProvider: (() => LocalVolumeProtectionHealth) | null = null;
+
+/**
+ * Whether this node can protect volumes right now, as the engine's cached health
+ * snapshot reports it. Never awaited by a read path: the provider answers from
+ * its cache and may schedule a background refresh.
+ */
+export type LocalVolumeProtectionHealth =
+  | { state: 'available' }
+  | {
+      state: 'unavailable';
+      reason:
+        | 'engine_starting'
+        | 'helper_unavailable'
+        | 'repository_not_initialized'
+        | 'repository_unavailable'
+        | 'repository_key_unavailable';
+    };
 
 /** Called at startup by the change that ships an engine (which also adds the capability key). */
-export function registerBackupEngine(engine: BackupEngine): void {
+export function registerBackupEngine(
+  engine: BackupEngine,
+  health?: () => LocalVolumeProtectionHealth,
+): void {
+  if (health) localHealthProvider = health;
   if (registeredEngines.some((e) => e.engineId === engine.engineId)) return;
   registeredEngines.push(engine);
 }
@@ -34,9 +56,10 @@ export function getRegisteredEngines(): readonly BackupEngine[] {
   return registeredEngines;
 }
 
-/** Test seam: forget registered engines. */
+/** Test seam: forget registered engines and their health provider. */
 export function resetBackupEnginesForTests(): void {
   registeredEngines.length = 0;
+  localHealthProvider = null;
 }
 
 const KEY = { capability: VOLUME_PROTECTION_CAPABILITY, version: VOLUME_PROTECTION_CAPABILITY_VERSION } as const;
@@ -46,12 +69,31 @@ export function getLocalVolumeProtectionStatus(): VolumeProtectionStatus {
   if (schema.kind === 'newer') return { ...KEY, state: 'unavailable', reason: 'schema_newer_than_build' };
   if (schema.kind !== 'current') return { ...KEY, state: 'unavailable', reason: 'recovery_store_unavailable' };
   if (registeredEngines.length === 0) return { ...KEY, state: 'unavailable', reason: 'engine_not_installed' };
+  // The engine is registered, so this build can protect volumes. Whether it can
+  // do so right now is the cached health snapshot: the helper digest is pinned
+  // and present, the repository is provisioned and opens with the stored key,
+  // and boot finished. A read never waits on a container.
+  const health = localHealthProvider?.();
+  if (health && health.state === 'unavailable') {
+    return { ...KEY, state: 'unavailable', reason: health.reason };
+  }
   return { ...KEY, state: 'available', reason: 'engine_registered' };
 }
 
 export function buildLocalRecoveryNodeDescriptor(): RecoveryNodeDescriptor {
   return { contractVersion: RECOVERY_CONTRACT_VERSION, volumeProtection: getLocalVolumeProtectionStatus() };
 }
+
+const NODE_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+  'engine_not_installed',
+  'schema_newer_than_build',
+  'recovery_store_unavailable',
+  'engine_starting',
+  'helper_unavailable',
+  'repository_not_initialized',
+  'repository_unavailable',
+  'repository_key_unavailable',
+]);
 
 /**
  * The state and reason a node may report about itself. `update_required` and
@@ -62,9 +104,13 @@ function nodeReportedStatus(version: number, state: unknown, reason: unknown): V
   if (state === 'available' && reason === 'engine_registered') {
     return { capability: VOLUME_PROTECTION_CAPABILITY, version, state, reason };
   }
-  if (state === 'unavailable'
-    && (reason === 'engine_not_installed' || reason === 'schema_newer_than_build' || reason === 'recovery_store_unavailable')) {
-    return { capability: VOLUME_PROTECTION_CAPABILITY, version, state, reason };
+  if (state === 'unavailable' && typeof reason === 'string' && NODE_UNAVAILABLE_REASONS.has(reason)) {
+    return {
+      capability: VOLUME_PROTECTION_CAPABILITY,
+      version,
+      state,
+      reason: reason as Extract<VolumeProtectionStatus, { state: 'unavailable' }>['reason'],
+    };
   }
   return null;
 }

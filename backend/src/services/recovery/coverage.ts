@@ -85,7 +85,14 @@ export function evaluateRootCoverage(root: RootCoverageInput, now: number, fresh
 
   if (root.access === 'unsupported') return result('unsupported');
   if (root.access === 'inaccessible') return result('inaccessible');
-  if (root.access !== 'supported' || !root.storage) return result('identity_unknown');
+  if (root.access !== 'supported') return result('identity_unknown');
+  if (!root.storage) {
+    // No identity and no evidence: the root has never been observed, which is
+    // "not protected yet", not an identity Sencho failed to establish. An
+    // identity that cannot be established while points exist is a real
+    // inconsistency and keeps the unknown reason.
+    return result(root.points.length > 0 ? 'identity_unknown' : 'no_point');
+  }
   const storage = root.storage;
   // Points matched to a superseded identity describe bytes that were replaced.
   if (storage.state !== 'current') return result('older_generation');
