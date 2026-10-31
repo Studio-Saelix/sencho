@@ -11,7 +11,7 @@ const SCOPE_MESSAGE = 'API tokens cannot manage cloud backup configuration.';
 const SECRET_REDACTED = '***';
 const VALID_PROVIDERS = new Set(['disabled', 'sencho', 'custom']);
 
-// Provider-aware tier gates. The managed Sencho Cloud Backup target requires
+// Provider-aware tier gates. The managed Sencho Snapshot Vault target requires
 // a paid license; the bring-your-own-bucket Custom S3 target is available on
 // every tier. These wrappers short-circuit to requirePaid only when the
 // operation actually touches the 'sencho' provider.
@@ -238,7 +238,7 @@ cloudBackupRouter.post('/provision', async (req: Request, res: Response): Promis
         res.json({ success: true, quota_bytes: result.quotaBytes });
     } catch (error) {
         console.error('[CloudBackup] provision error:', error);
-        res.status(500).json({ error: 'Failed to provision Recovery Vault' });
+        res.status(500).json({ error: 'Failed to provision Sencho Snapshot Vault' });
     }
 });
 
@@ -248,7 +248,7 @@ cloudBackupRouter.get('/usage', async (req: Request, res: Response): Promise<voi
     try {
         const svc = CloudBackupService.getInstance();
         if (svc.getProvider() !== 'sencho') {
-            res.status(400).json({ error: 'Usage is only available for Recovery Vault' });
+            res.status(400).json({ error: 'Usage is only available for Sencho Snapshot Vault' });
             return;
         }
         const usage = await svc.getSenchoCloudBackupUsage();

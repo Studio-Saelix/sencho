@@ -87,6 +87,14 @@ describe('settings registry', () => {
         expect(byId.get('notification-suppression')?.label).toBe('Mute Rules');
     });
 
+    it('names the off-site mirror Snapshot Vault and keeps it searchable by vault, not by recovery', () => {
+        const vault = SETTINGS_ITEMS.find(i => i.id === 'cloud-backup');
+        expect(vault?.label).toBe('Snapshot Vault');
+        expect(vault?.description).toBe('Mirror fleet snapshots to any S3-compatible storage.');
+        expect(vault?.keywords).toContain('vault');
+        expect(vault?.keywords).not.toContain('recovery');
+    });
+
     it('no longer registers the standalone Vulnerability Scanning section (moved to the Security page)', () => {
         expect(SETTINGS_ITEMS.some(i => (i.id as string) === 'security')).toBe(false);
     });

@@ -48,10 +48,10 @@ This is off by default. Turn it on in **Settings → Infrastructure → Fleet** 
 The snapshot list shows each snapshot in a table with the following columns:
 
 - **Date** - when the snapshot was taken
-- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Recovery Vault (or a custom off-site target) is configured, an upload icon in this column marks snapshots that have been mirrored off-site. An **Imported** badge marks a snapshot that came from an off-site archive (imported or recovered) rather than a fresh capture on this instance; an archive from another instance also needs its archived nodes mapped before restoring.
+- **Description** - your optional label, or a prefix like "Scheduled snapshot" for automated ones. If Snapshot Vault is configured, an upload icon in this column marks snapshots that have been mirrored off-site. An **Imported** badge marks a snapshot that came from an off-site archive (imported or recovered) rather than a fresh capture on this instance; an archive from another instance also needs its archived nodes mapped before restoring.
 - **Scope** - how many nodes and stacks were captured (e.g. "3 nodes, 21 stacks")
 - **Warnings** - a warning icon with a count if any nodes or stacks were skipped, "Unknown" when no warnings were recorded and the archive does not record whether anything was skipped, or "None"
-- **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Recovery Vault or custom off-site target, and a delete button for admins
+- **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Snapshot Vault, and a delete button for admins
 
 The list paginates at 10 snapshots per page; use the arrows next to **Create Snapshot** to page through history.
 
@@ -105,23 +105,9 @@ Each stack is restored independently: if one stack cannot be restored (for examp
 
 Admins can delete snapshots from the list view by clicking the trash icon on the right side of each row. A confirmation dialog asks you to confirm before the snapshot is permanently removed. Deleting a snapshot removes all captured file data from the database. This action cannot be undone.
 
-## Recovery Vault
+## Snapshot Vault
 
-<Note>
-  Custom S3-compatible storage is available on every tier. Recovery Vault is an Admiral feature. Configure either in **Settings → Infrastructure → Recovery Vault**.
-</Note>
-
-Recovery Vault mirrors every fleet snapshot to off-site storage so your snapshots survive local disk failure. The Recovery Vault settings page (reached via **Settings → Infrastructure → Recovery Vault**) shows a header with your current scope, provider, storage used, and total snapshot count in the cloud. Two storage modes are supported.
-
-### Recovery Vault (included)
-
-A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral subscription. Open **Settings → Infrastructure → Recovery Vault**, choose **Recovery Vault (included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
-
-Once active, the settings page shows a storage gauge (used / 500 MB and object count), a status message confirming auto-upload is on, and a **Reprovision** button to refresh credentials if needed. You can verify connectivity at any time with the **Test** button.
-
-<Frame>
-  <img src="/images/cloud-backup/cloud-backup-active.png" alt="Recovery Vault settings page with Storage Mode set to Recovery Vault (included), Test and Reprovision buttons, a storage-used gauge reading 0 Bytes of 500 MB, the auto-upload confirmation message, and an empty Cloud Snapshots panel" />
-</Frame>
+Snapshot Vault mirrors every fleet snapshot to an S3-compatible bucket you control so your snapshots survive local disk failure. Configure it in **Settings → Infrastructure → Snapshot Vault**. The masthead shows the current provider and, once snapshots exist, how many are in the cloud.
 
 ### Custom S3 (BYOB)
 
@@ -134,10 +120,10 @@ Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own
 - **Access Key ID** and **Secret Access Key**
 - **Auto-upload** toggle
 
-Click **Test** to verify connectivity, then **Save**. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
+Click **Save**, then **Test** to verify connectivity. **Test**, the Cloud Snapshots list, and every archive action work on the saved configuration, so they stay out of reach while the form has unsaved edits and while a Custom S3 selection has not been saved yet. Toggling **Auto-upload** saves the visible form the same way **Save** does. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
 
 <Frame>
-  <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Custom S3 Configuration form with Storage Mode set to Custom S3 (BYOB) and empty fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, and Secret Access Key, plus an Auto-upload toggle set to off" />
+  <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Snapshot Vault settings with Storage Mode set to Custom S3 (BYOB), empty fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, and Secret Access Key, and Auto-upload and Encrypt archives toggles set to off" />
 </Frame>
 
 ### Manual upload vs auto-upload
@@ -148,15 +134,15 @@ To upload a single snapshot on demand, open the **Snapshots** tab in the Fleet v
 
 ### Browsing and downloading cloud snapshots
 
-The **Cloud Snapshots** panel in **Settings → Infrastructure → Recovery Vault** lists every archive currently in your bucket, paginated at 10 per page, with size and last-modified timestamp. **Download** saves a `.tar.gz` archive. **Import** reads that archive and creates a new local snapshot. It does not change live stack files, and importing the same archive again adds another copy. **Delete** removes the archive from the bucket. The local snapshot list is unchanged by a delete. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack. When the snapshot preserved Dossier notes, the archive also includes a `documentation.json` with those notes.
+The **Cloud Snapshots** panel in **Settings → Infrastructure → Snapshot Vault** lists every archive currently in your bucket, paginated at 10 per page, with size and last-modified timestamp. **Download** saves a `.tar.gz` archive. **Import** reads that archive and creates a new local snapshot. It does not change live stack files, and importing the same archive again adds another copy. **Delete** removes the archive from the bucket. The local snapshot list is unchanged by a delete. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack. When the snapshot preserved Dossier notes, the archive also includes a `documentation.json` with those notes.
 
 **Recover archive** handles the case where the instance that made the archive no longer exists. It lists archives that belong to other instances in the same bucket, and only a sealed archive can be recovered, using the passphrase that sealed it. Recovery imports the archive as a new local snapshot with that instance's node identities recorded; it does not write live stack files, and delete and raw download stay limited to this instance's own archives. A plaintext archive from another instance is refused here because only the passphrase proves who made it. Import a plaintext archive from this instance's own list instead.
 
-**Encrypt archives** is off by default for both Recovery Vault and Custom S3. Turn it on and save a passphrase of at least 12 characters. Uploads made while it is on are sealed before they leave this instance, and the provider stores ciphertext. Download and import use the saved passphrase. If that passphrase is gone, or it is not the one that sealed the archive, Sencho asks for it in the same panel. A lost passphrase cannot be recovered. Turning encryption off leaves archives that are already uploaded sealed. A new passphrase applies only to later uploads. Saving the passphrase or the toggle writes only those settings; unsaved destination or credential edits in the Custom S3 form are not submitted with them.
+**Encrypt archives** is off by default. Turn it on and save a passphrase of at least 12 characters. Uploads made while it is on are sealed before they leave this instance, and the provider stores ciphertext. Download and import use the saved passphrase. If that passphrase is gone, or it is not the one that sealed the archive, Sencho asks for it in the same panel. A lost passphrase cannot be recovered. Turning encryption off leaves archives that are already uploaded sealed. A new passphrase applies only to later uploads. Saving the passphrase or the toggle writes only those settings; unsaved destination or credential edits in the Custom S3 form are not submitted with them.
 
 ### Restoring from a cloud snapshot
 
-For in-place rollback, use the **Restore** action on the snapshot detail view as described above. The local copy is the source of truth for live restore. To bring a cloud archive back onto this instance, use **Import** in **Settings → Infrastructure → Recovery Vault**, or **Recover archive** when the archive came from a different instance. Either way, the archive becomes a local snapshot without needing the instance key that wrapped the original database rows, and it does not change live stack files. Apply those files with **Restore** after import. A restore creates the stack on the target node when it does not exist there, so an imported snapshot can be restored on a fresh instance without creating the stacks first. A stack that is missing on the target is only restored when the snapshot holds its `compose.yaml`; otherwise the restore is refused and no directory is created. You can also download the `.tar.gz` and unpack it yourself.
+For in-place rollback, use the **Restore** action on the snapshot detail view as described above. The local copy is the source of truth for live restore. To bring a cloud archive back onto this instance, use **Import** in **Settings → Infrastructure → Snapshot Vault**, or **Recover archive** when the archive came from a different instance. Either way, the archive becomes a local snapshot without needing the instance key that wrapped the original database rows, and it does not change live stack files. Apply those files with **Restore** after import. A restore creates the stack on the target node when it does not exist there, so an imported snapshot can be restored on a fresh instance without creating the stacks first. A stack that is missing on the target is only restored when the snapshot holds its `compose.yaml`; otherwise the restore is refused and no directory is created. You can also download the `.tar.gz` and unpack it yourself.
 
 An imported snapshot keeps the node identities of the instance that captured it. When that instance is this one, its node numbers still name this fleet and restore works as usual. When the archive came from another instance, those numbers mean nothing here, so the snapshot detail view asks you to choose a destination node for each archived node before restoring. Restore and Restore all stay blocked for any archived node without a mapping, and each destination node can receive at most one archived node. The mapping is saved with the snapshot and stays until you change it. A restore is confirmed against the mapping that was on screen: if another session changes it before the restore reaches the server, the request is refused instead of being sent to a destination you did not pick, and the detail view reloads with the current mapping so you can confirm again.
 
@@ -164,9 +150,9 @@ An imported snapshot keeps the node identities of the instance that captured it.
 
 Every fleet snapshot action requires the **admin** role: viewing the snapshot list, browsing snapshot contents, creating, restoring, deleting, and uploading to the cloud. Because a snapshot captures the `.env` file of every stack, the snapshot list and detail views are restricted to administrators rather than read-only roles. The **Snapshots** tab itself does not appear in the Fleet view for non-admin roles, so there is no read-only path into a stack's `.env` contents.
 
-Recovery Vault configuration is also admin-only. Mirroring to Recovery Vault additionally requires an Admiral subscription; a Custom S3-compatible target works on every tier.
+Snapshot Vault configuration is also admin-only.
 
-Fleet Snapshots and Recovery Vault settings are both hub-only: the **Snapshots** tab lives inside the **Fleet** view and Recovery Vault lives in **Settings → Infrastructure**, neither of which appears when a remote node is the active selection. See [Multi-Node Management](/features/multi-node) for the full list of hub-only views.
+Fleet Snapshots and Snapshot Vault settings are both hub-only: the **Snapshots** tab lives inside the **Fleet** view and Snapshot Vault lives in **Settings → Infrastructure**, neither of which appears when a remote node is the active selection. See [Multi-Node Management](/features/multi-node) for the full list of hub-only views.
 
 ## Storage
 
@@ -174,13 +160,13 @@ Snapshots are stored in Sencho's SQLite database. Captured file contents, includ
 
 Off-site archives also have recovery limits: 5,000 entries, 1 MB per compose or environment file, 8 MB of aggregate Dossier documentation, 64 MB of captured content (tar framing may add up to 8 MB on top), and 32 MB as the uploaded object. Upload measures the archive it actually packed, including that framing, before it publishes anything, and refuses an archive whose entry paths the import path cannot store or read back, so an archive that succeeds is one the import path accepts. A snapshot that exceeds a limit fails the upload with the limit it crossed, and one whose node or stack name cannot be stored fails with an error naming the entry, instead of leaving an unrecoverable object in the bucket.
 
-If a stored encrypted file cannot be decrypted (for example after on-disk corruption, including damaged ciphertext that still looks encryption-shaped), the snapshot detail view marks that file unavailable and lists it in a warning. Restore for that stack is blocked so live compose and environment files are never overwritten with that damaged data. Configured off-site upload (Recovery Vault or Custom S3) also refuses to publish an archive that would omit or fabricate those files. Intact stacks in the same snapshot remain readable and restorable. Only short, clearly non-ciphertext values that happen to start with `enc:` (for example `enc:hello`, `enc:hello-world`, or `enc:FOO_BAR=baz`) stay readable as legacy plaintext. Encryption-shaped damage remains unavailable.
+If a stored encrypted file cannot be decrypted (for example after on-disk corruption, including damaged ciphertext that still looks encryption-shaped), the snapshot detail view marks that file unavailable and lists it in a warning. Restore for that stack is blocked so live compose and environment files are never overwritten with that damaged data. Configured off-site upload also refuses to publish an archive that would omit or fabricate those files. Intact stacks in the same snapshot remain readable and restorable. Only short, clearly non-ciphertext values that happen to start with `enc:` (for example `enc:hello`, `enc:hello-world`, or `enc:FOO_BAR=baz`) stay readable as legacy plaintext. Encryption-shaped damage remains unavailable.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="A snapshot file shows as Unavailable">
-    The stored ciphertext for that file could not be decrypted. Sencho keeps the rest of the snapshot readable and blocks restore for the affected stack so live compose and `.env` files are not overwritten. Configured off-site upload (Recovery Vault or Custom S3) also refuses that snapshot. Create a fresh snapshot from healthy nodes if you need a complete archive again.
+    The stored ciphertext for that file could not be decrypted. Sencho keeps the rest of the snapshot readable and blocks restore for the affected stack so live compose and `.env` files are not overwritten. Configured off-site upload also refuses that snapshot. Create a fresh snapshot from healthy nodes if you need a complete archive again.
   </Accordion>
   <Accordion title="A snapshot shows skipped nodes">
     If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The list shows a warning icon with a count of skipped nodes, and the snapshot's detail view names each one along with the reason. Common causes are the remote Sencho instance being stopped or restarting, the node's API URL or token having been changed after it was added, or a firewall or network issue blocking the connection. Verify the remote is running and reachable, update the node's API URL and token in **Settings → Infrastructure → Nodes** if needed, then create a new snapshot.
@@ -197,11 +183,11 @@ If a stored encrypted file cannot be decrypted (for example after on-disk corrup
   <Accordion title="Restore all reports that some stacks failed">
     Restore all applies each stack independently, so a failure on one stack does not stop the others. A stack is reported as failed when its node has been removed from the fleet since the snapshot was taken, when a remote node is offline or unreachable, when a snapshot file for that stack could not be decrypted, or when its existing files cannot be written. The successful stacks are fully restored regardless. Resolve the underlying cause (re-add a removed node, bring an offline node back online, or pick a healthy snapshot) and run Restore all again, or restore the remaining stacks individually from the same snapshot.
   </Accordion>
-  <Accordion title="Recovery Vault Test reports an authentication error">
-    Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Test** again before saving.
+  <Accordion title="Snapshot Vault Test reports an authentication error">
+    Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Save**, then **Test** again.
   </Accordion>
-  <Accordion title="Cloud uploads fail after hitting the 500 MB quota">
-    Recovery Vault carries a 500 MB allowance per subscription. Once you hit the cap, new uploads fail with a quota error and the storage gauge in the settings page reads at or near 500 MB. Free space by deleting older archives from the **Cloud Snapshots** panel in **Settings → Infrastructure → Recovery Vault**. Local snapshots are unaffected by cloud deletions, so the in-place restore path stays intact. To raise the ceiling, switch the storage mode to **Custom S3 (BYOB)** and point at a bucket you control.
+  <Accordion title="Snapshot Vault reports that the storage endpoint did not answer">
+    Sencho gives up on an unreachable endpoint and says so: **Test**, listing archives, and deleting an archive each report a failure within 45 seconds (30 seconds when the endpoint goes completely silent). A download that stops sending data for 30 seconds is cut. The panel itself stops waiting on any request after 60 seconds (180 seconds for importing, downloading, or recovering an archive). A timed-out import or recovery may still have finished on the Sencho side, so check **Fleet → Snapshots** before trying again. While **Test**, a delete, an archive action, or a save is running, **Save**, the storage picker, and **Auto-upload** are held, and they come back when it ends or times out. Correct the endpoint (a host that is not reachable from the Sencho container is the usual cause), click **Save**, then **Test** again.
   </Accordion>
   <Accordion title="Cloud upload returns a network timeout or 5xx error">
     Transient errors surface as a notification and leave the local snapshot in place. Retry by clicking the cloud-upload action on the snapshot row, or wait for the next scheduled snapshot which retries on its own. Persistent failures usually indicate an endpoint outage; verify the storage provider is reachable from your Sencho host (custom S3 endpoints often sit behind a different DNS or firewall path than the rest of your traffic).
@@ -225,5 +211,4 @@ Fleet snapshots show up in several other views. Each adjacent surface answers a 
 | [Scheduled Operations](/features/scheduled-operations) | Recurring or one-shot scheduled stack operations. | Scheduled Operations owns recurrence and dispatch; Fleet Backups defines what a snapshot captures and how to restore it. |
 | [Stack Dossier](/features/stack-dossier) | Operator-authored notes about a stack (purpose, owner, access, recovery). | Stack Dossier owns the notes; Fleet Backups only preserves a read-only copy of them inside a snapshot when documentation capture is on. |
 | [Atomic Deployments](/features/atomic-deployments) | The rollback-point mechanism created on every local deploy. | Atomic Deployments backs up automatically on every deploy; Fleet Backups is a separate, on-demand, fleet-wide capture you trigger yourself. |
-| [Multi-Node Management](/features/multi-node) | How nodes join the fleet and which top-level views are hub-only. | Multi-Node Management is why Snapshots and Recovery Vault are hub-only; Fleet Backups just inherits that rule. |
-| [Licensing](/features/licensing) | Community and Admiral plans. | Licensing covers plan coverage across the product; Fleet Backups only cites the Recovery Vault tier requirement above. |
+| [Multi-Node Management](/features/multi-node) | How nodes join the fleet and which top-level views are hub-only. | Multi-Node Management is why Snapshots and Snapshot Vault are hub-only; Fleet Backups just inherits that rule. |

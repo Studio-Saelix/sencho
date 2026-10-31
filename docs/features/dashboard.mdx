@@ -181,7 +181,7 @@ Every setting names its **scope**, because switching the active node changes som
 | | **SSO**: the active provider (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`) or `Off` | Instance | Settings · SSO |
 | | **Trivy**: whether a scanner is installed on this node | Node | Security · Scanner |
 | | **Scan policies**: enabled vulnerability scan policies | Instance | Security · Policies |
-| Recovery & alerts | **Backups**: `Recovery Vault`, `Custom S3` (with `(auto)` when auto-upload is on), or `Off` | Instance | Settings · Cloud Backup |
+| Recovery & alerts | **Backups**: `Custom S3` (with `(auto)` when auto-upload is on, and `(encrypted)` when archive encryption is on), or `Off` | Instance | Settings · Snapshot Vault |
 | | **Host thresholds**: `CPU x% · RAM y% · Disk z%`, or `Off` | Node | Settings · Host Alerts |
 | | **Crash detection**: global container-crash notifications | Node | Settings · Container Alerts |
 

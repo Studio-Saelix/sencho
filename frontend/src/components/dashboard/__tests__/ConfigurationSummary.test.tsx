@@ -289,8 +289,8 @@ describe('ConfigurationSummary labels', () => {
   it('distinguishes the backup providers', () => {
     for (const [backup, expected] of [
       [{ provider: 'disabled', autoUpload: false, encryptArchives: false, locked: false }, 'Off'],
-      [{ provider: 'sencho', autoUpload: false, encryptArchives: false, locked: false }, 'Recovery Vault'],
-      [{ provider: 'sencho', autoUpload: false, encryptArchives: true, locked: false }, 'Recovery Vault (encrypted)'],
+      [{ provider: 'sencho', autoUpload: false, encryptArchives: false, locked: false }, 'Sencho Snapshot Vault'],
+      [{ provider: 'sencho', autoUpload: false, encryptArchives: true, locked: false }, 'Sencho Snapshot Vault (encrypted)'],
       [{ provider: 'custom', autoUpload: true, encryptArchives: false, locked: false }, 'Custom S3 (auto)'],
       [{ provider: 'custom', autoUpload: true, encryptArchives: true, locked: false }, 'Custom S3 (auto) (encrypted)'],
     ] as const) {

@@ -159,10 +159,12 @@ async function buildLocalConfigurationStatus(
       hostAlertsEnabled,
     },
     backup: {
-      // Cloud Backup has a per-provider tier: Custom S3 is open to every
-      // tier; Sencho Cloud Backup requires a paid license. The row is rendered
-      // for every tier because Custom S3 is universally configurable, so no
-      // dashboard-level lock is meaningful.
+      // Snapshot Vault has a per-provider tier: Custom S3 is open to every
+      // tier; Sencho Snapshot Vault requires a paid license and is hidden from
+      // discovery unless the experimental flag is on (an instance already
+      // configured for it keeps it). The row is rendered for every tier
+      // because Custom S3 is universally configurable, so no dashboard-level
+      // lock is meaningful.
       provider: cloudProvider,
       autoUpload: cloudAutoUpload,
       encryptArchives: cloudSvc.archivesAreEncrypted(),
