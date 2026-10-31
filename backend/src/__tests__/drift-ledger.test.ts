@@ -107,6 +107,17 @@ describe('computeStackHashes', () => {
       .toBe('8d199bc2b032b553204e48bb8fe1bfb4ae2947e54c37461afa1fa4ffcc96aa7a');
   });
 
+  it('leaves a whole-entry port template out of the model, so its hash is the port-less one', () => {
+    // A whole entry such as "${PORTS}" may render to a fixed or an auto-assigned
+    // publication; without the environment there is no shape to record, so the
+    // model keeps no port and its hash must not move.
+    const portless = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n').renderedHash;
+    for (const entry of ['${PORTS}', '$PORT', '${PORTS}/udp']) {
+      expect(computeStackHashes(`services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "${entry}"\n`).renderedHash)
+        .toBe(portless);
+    }
+  });
+
   it('returns a null rendered hash when the model cannot be parsed', () => {
     // No services => the local parser reports a parse error and cannot model it.
     const h = computeStackHashes('not_a_compose_key: true\n');

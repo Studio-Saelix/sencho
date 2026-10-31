@@ -21,9 +21,10 @@ export interface DeclaredPort {
    *  runtime container port by `targetStartPort`/`targetEndPort`, and the
    *  ledger hash records it as `auto`. */
   dynamic?: true;
-  /** Container port range the publication targets, when known. The rendered
-   *  adapter sets it so drift can match an auto-assigned host port to the
-   *  runtime `privatePort`; a template that never interpolated leaves it off. */
+  /** Container port range the publication targets, when known. Both readers
+   *  set it when the container side is a literal number, so drift can match an
+   *  auto-assigned host port to the runtime `privatePort`; a container side that
+   *  is still a template Compose would resolve leaves it off. */
   targetStartPort?: number;
   targetEndPort?: number;
 }
@@ -381,10 +382,17 @@ function declaredContainerTarget(text: string | undefined): DeclaredContainerTar
   const range = containerPortRange(text);
   if (range) return range;
   // Without the environment a caller cannot know a template's value. Compose
-  // accepts the entry once it resolves, so keep the publication rather than
-  // dropping it from that caller's model.
+  // accepts the entry once it resolves, so a caller keeps a publication whose
+  // shape it can still read (see declaredPort).
   if (text !== undefined && holdsTemplate(text)) return 'unknown';
   return null;
+}
+
+/** The target fields a dynamic declaration carries, or none when it is unresolved. */
+function dynamicTarget(target: DeclaredContainerTarget): Pick<DeclaredPort, 'targetStartPort' | 'targetEndPort'> {
+  return target === null || target === 'unknown'
+    ? {}
+    : { targetStartPort: target.start, targetEndPort: target.end };
 }
 
 /**
@@ -398,9 +406,16 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
   if (short !== undefined) {
     const spec = splitShortPortSpec(short);
     if (!spec) return null;
-    if (declaredContainerTarget(spec.container) === null) return null;
+    const target = declaredContainerTarget(spec.container);
+    if (target === null) return null;
     if (isDynamicHostPort(spec.hostPart)) {
-      return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true };
+      // A whole entry that is still a template ("${PORTS}") has no host side
+      // written at all: it may resolve to a fixed or an auto-assigned
+      // publication, so there is no shape to record. Leave it out rather than
+      // invent one. An empty host part with a known container port is an
+      // ordinary auto-assigned publication.
+      if (target === 'unknown' && spec.hostPart === '') return null;
+      return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };
     }
     if (!isFixedHostPort(spec.hostPart)) return null;
     return { hostIp: spec.hostIp, publishedPort: parseInt(spec.hostPart.split('-')[0], 10), protocol: spec.protocol };
@@ -410,10 +425,10 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const publishedRaw = interpolateString(asString(obj.published), lookup);
     const hostIp = interpolateString(asString(obj.host_ip), lookup) ?? '';
     const protocol = interpolateString(asString(obj.protocol), lookup) || 'tcp';
-    const target = interpolateString(asString(obj.target), lookup);
-    if (declaredContainerTarget(target) === null) return null;
+    const target = declaredContainerTarget(interpolateString(asString(obj.target), lookup));
+    if (target === null) return null;
     if (isDynamicHostPort(publishedRaw)) {
-      return { hostIp, publishedPort: 0, protocol, dynamic: true };
+      return { hostIp, publishedPort: 0, protocol, dynamic: true, ...dynamicTarget(target) };
     }
     if (!isFixedHostPort(publishedRaw as string)) return null;
     return { hostIp, publishedPort: parseInt((publishedRaw as string).split('-')[0], 10), protocol };

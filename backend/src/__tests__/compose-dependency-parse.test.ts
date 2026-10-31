@@ -89,25 +89,30 @@ describe('parseComposeDependencies - ports', () => {
 
   it('keeps a container-only port as a dynamic publication, and `expose` as none', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "80"'));
-    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+    expect(r.services[0].ports).toEqual([
+      { hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true, targetStartPort: 80, targetEndPort: 80 },
+    ]);
     expect(parseComposeDependencies(svc('web', 'expose:\n  - "80"')).services[0].ports).toEqual([]);
   });
 
-  it.each<[string, string, { hostIp: string; protocol: string }]>([
-    ['a container-only UDP port', '"51820/udp"', { hostIp: '', protocol: 'udp' }],
-    ['an empty host port after an interface', '"127.0.0.1::51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp' }],
-    ['host port 0 after an interface', '"127.0.0.1:0:51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp' }],
-    ['host port 0', '"0:80"', { hostIp: '', protocol: 'tcp' }],
-    ['an empty host port', '":80"', { hostIp: '', protocol: 'tcp' }],
-    ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"', { hostIp: '::1', protocol: 'udp' }],
-    ['a container port range', '"9000-9002"', { hostIp: '', protocol: 'tcp' }],
-    ['a long entry with no published port', '{ target: 51820, protocol: udp }', { hostIp: '', protocol: 'udp' }],
-    ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp, host_ip: 127.0.0.1 }', { hostIp: '127.0.0.1', protocol: 'udp' }],
-    ['a long entry published as an empty string', '{ target: 80, published: "" }', { hostIp: '', protocol: 'tcp' }],
-    ['a range that starts at 0', '"0-80:80"', { hostIp: '', protocol: 'tcp' }],
+  it.each<[string, string, { hostIp: string; protocol: string; target: [number, number] }]>([
+    ['a container-only UDP port', '"51820/udp"', { hostIp: '', protocol: 'udp', target: [51820, 51820] }],
+    ['an empty host port after an interface', '"127.0.0.1::51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp', target: [51820, 51820] }],
+    ['host port 0 after an interface', '"127.0.0.1:0:51820/udp"', { hostIp: '127.0.0.1', protocol: 'udp', target: [51820, 51820] }],
+    ['host port 0', '"0:80"', { hostIp: '', protocol: 'tcp', target: [80, 80] }],
+    ['an empty host port', '":80"', { hostIp: '', protocol: 'tcp', target: [80, 80] }],
+    ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"', { hostIp: '::1', protocol: 'udp', target: [51820, 51820] }],
+    ['a container port range', '"9000-9002"', { hostIp: '', protocol: 'tcp', target: [9000, 9002] }],
+    ['a long entry with no published port', '{ target: 51820, protocol: udp }', { hostIp: '', protocol: 'udp', target: [51820, 51820] }],
+    ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp, host_ip: 127.0.0.1 }', { hostIp: '127.0.0.1', protocol: 'udp', target: [51820, 51820] }],
+    ['a long entry published as an empty string', '{ target: 80, published: "" }', { hostIp: '', protocol: 'tcp', target: [80, 80] }],
+    ['a range that starts at 0', '"0-80:80"', { hostIp: '', protocol: 'tcp', target: [80, 80] }],
   ])('keeps %s as a dynamic publication with no invented port number', (_label, entry, expected) => {
     const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
-    expect(r.services[0].ports).toEqual([{ ...expected, publishedPort: 0, dynamic: true }]);
+    const { target, ...rest } = expected;
+    expect(r.services[0].ports).toEqual([
+      { ...rest, publishedPort: 0, dynamic: true, targetStartPort: target[0], targetEndPort: target[1] },
+    ]);
   });
 
   it.each<[string, string, { hostIp: string; publishedPort: number }]>([
@@ -131,13 +136,15 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports[0].dynamic).toBeUndefined();
   });
 
-  it.each<[string, string, string]>([
-    ['a leading plus on a container-only port', '"+51820/udp"', 'udp'],
-    ['leading zeros on a container-only port', '"00051820/udp"', 'udp'],
-    ['a leading plus on host port zero', '"+0:80"', 'tcp'],
-  ])('keeps %s as a dynamic publication, as Compose renders it', (_label, entry, protocol) => {
+  it.each<[string, string, string, number]>([
+    ['a leading plus on a container-only port', '"+51820/udp"', 'udp', 51820],
+    ['leading zeros on a container-only port', '"00051820/udp"', 'udp', 51820],
+    ['a leading plus on host port zero', '"+0:80"', 'tcp', 80],
+  ])('keeps %s as a dynamic publication, as Compose renders it', (_label, entry, protocol, target) => {
     const r = parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`);
-    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol, dynamic: true }]);
+    expect(r.services[0].ports).toEqual([
+      { hostIp: '', publishedPort: 0, protocol, dynamic: true, targetStartPort: target, targetEndPort: target },
+    ]);
   });
 
   it.each([
@@ -153,7 +160,23 @@ describe('parseComposeDependencies - ports', () => {
 
   it('expands a template that leaves the host port empty into a dynamic publication', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_PORT}:51820/udp"'), { lookup: () => undefined });
-    expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'udp', dynamic: true }]);
+    expect(r.services[0].ports).toEqual([
+      { hostIp: '', publishedPort: 0, protocol: 'udp', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
+    ]);
+  });
+
+  it('drops a whole-entry port template, whose shape Compose decides only after interpolation', () => {
+    // Without the environment the entry may be a fixed "8080:80" or an
+    // auto-assigned "51820/udp", so there is no publication shape to record.
+    for (const entry of ['"${PORTS}"', '"$PORT"', '"${PORTS}/udp"']) {
+      expect(parseComposeDependencies(svc('web', `ports:\n  - ${entry}`)).services[0].ports).toEqual([]);
+    }
+  });
+
+  it('reads a whole-entry port template once the lookup answers it', () => {
+    const lookup = (name: string) => ({ PORTS: '8080:80' } as Record<string, string>)[name];
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${PORTS}"'), { lookup }).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 8080, protocol: 'tcp' }]);
   });
 
   it('keeps a fixed publication whose container port is a template when no lookup can resolve it', () => {

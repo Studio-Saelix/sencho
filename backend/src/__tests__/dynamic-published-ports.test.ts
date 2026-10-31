@@ -28,6 +28,7 @@ import { assembleGraph } from '../services/DependencyGraphService';
 import { enrichNetworkRows } from '../services/network/networkingInventory';
 import { buildOverview } from '../services/network/networkingAggregate';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
+import type { DeclaredCompose, DeclaredPort } from '../helpers/composeDependencyParse';
 import { fixedPorts } from '../helpers/composePortSpec';
 import type { DependencyContainer, DependencySnapshot } from '../services/DockerController';
 import type { NetworkingNetworkBase } from '../services/network/networkingTypes';
@@ -442,14 +443,91 @@ describe('drift against a running service with an auto-assigned port', () => {
       { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9001, protocol: 'tcp' },
     ])).toHaveLength(1);
   });
+
+  it('does not let a fixed binding stand in for an auto-assigned declaration', () => {
+    const fixedOnly = [{ ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }];
+    // The container predates the "80" declaration, so its only 80/tcp binding
+    // is the one "8080:80" asked for.
+    expect(drift(['8080:80', '80'], fixedOnly)).toMatchObject([
+      { expected: '8080/tcp, auto:80/tcp', actual: '8080/tcp' },
+    ]);
+    expect(drift(['8080:80', '80'], [
+      ...fixedOnly,
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+    ])).toEqual([]);
+  });
+
+  it('needs a separate binding for each auto-assigned declaration', () => {
+    const declarations = [{ target: 80 }, { target: 80, host_ip: '127.0.0.1' }];
+    expect(drift(declarations, [
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+    ])).toHaveLength(1);
+    expect(drift(declarations, [
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+      { ip: '127.0.0.1', publishedPort: 32769, privatePort: 80, protocol: 'tcp' },
+    ])).toEqual([]);
+  });
+
+  it('reports an auto-assigned port published wider than the interface it declares', () => {
+    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+    ])).toHaveLength(1);
+    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [
+      { ip: '127.0.0.1', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+    ])).toEqual([]);
+    // '' and the all-interface forms Docker reports are the same interface.
+    expect(drift([{ target: 80 }], [
+      { ip: '::', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
+    ])).toEqual([]);
+  });
+
+  it('treats a fixed host number on an auto-assigned container port as the picked one', () => {
+    // The container list reports the binding, not whether the file asked for
+    // that number, so dropping "8080:80" in favour of "80" reads as in sync
+    // until the container is recreated. compose-networking.mdx states this.
+    expect(drift(['80'], [
+      { ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' },
+    ])).toEqual([]);
+  });
+
+  it('matches a declaration whose container target is unresolved by protocol only, once', () => {
+    const unresolved = (count: number): DeclaredCompose => ({
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: Array.from({ length: count }, () => (
+          { hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort
+        )),
+      }],
+      networks: {}, volumes: {},
+    });
+    const portMatches = (declared: DeclaredCompose, ports: DependencyContainer['ports']) =>
+      assembleStackDrift({ stack: 'proj', declared, containers: [running(ports)] })
+        .findings.filter(f => f.kind === 'ports-mismatch');
+    const one = { ip: '0.0.0.0', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' };
+    const two = { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9001, protocol: 'tcp' };
+    // One binding satisfies one unresolved declaration, and only of its protocol.
+    expect(portMatches(unresolved(1), [one])).toEqual([]);
+    expect(portMatches(unresolved(1), [one, two])).toHaveLength(1);
+    expect(portMatches(unresolved(1), [{ ...one, protocol: 'udp' }])).toMatchObject([
+      { expected: 'auto/tcp', actual: '32768/udp' },
+    ]);
+    // Two unresolved declarations need two bindings; the label cannot tell them
+    // apart, so one is still one label.
+    expect(portMatches(unresolved(2), [one])).toMatchObject([{ expected: 'auto/tcp' }]);
+    expect(portMatches(unresolved(2), [one, two])).toEqual([]);
+  });
 });
 
 describe('authored port forms beyond the audit matrix', () => {
   const ports = (entry: string) => parseComposeDependencies(`services:\n  web:\n    ports:\n      - ${entry}\n`).services[0].ports;
 
   it('reads an unbracketed IPv6 interface with an empty host port, and keeps the protocol case as written', () => {
-    expect(ports('"::1::51820/udp"')).toEqual([{ hostIp: '::1', publishedPort: 0, protocol: 'udp', dynamic: true }]);
-    expect(ports('"51820/UDP"')).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'UDP', dynamic: true }]);
+    expect(ports('"::1::51820/udp"')).toEqual([
+      { hostIp: '::1', publishedPort: 0, protocol: 'udp', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
+    ]);
+    expect(ports('"51820/UDP"')).toEqual([
+      { hostIp: '', publishedPort: 0, protocol: 'UDP', dynamic: true, targetStartPort: 51820, targetEndPort: 51820 },
+    ]);
   });
 
   it('keeps a TCP and a UDP auto-assigned port as two entries', () => {
