@@ -124,6 +124,8 @@ describe('volume eligibility', () => {
     expect(volumeSources.generationTokenMatchesVolume(token, '2026-10-31T11:30:00Z')).toBe(false);
     expect(volumeSources.generationTokenMatchesVolume('unknown|63:42', null)).toBe(true);
     expect(volumeSources.generationTokenMatchesVolume('unknown|63:42', '2026-10-31T11:30:00Z')).toBe(false);
+    // The same instant printed in another zone is the same volume.
+    expect(volumeSources.generationTokenMatchesVolume(token, '2026-10-31T06:00:00-04:00')).toBe(true);
     // A token this adapter did not mint says nothing about the volume.
     expect(volumeSources.generationTokenMatchesVolume('t1', '2026-10-31T11:30:00Z')).toBe(true);
   });

@@ -404,23 +404,34 @@ export class RecoveryOperationStore {
   }
 
   /**
-   * Release the repository locks that interrupted captures, checks and restores
-   * left, once restic's own locks have been cleared under no operation. Those
-   * three only read or append to the repository: an interrupted one leaves its
-   * point or its target volume settled by their own records, and nothing in the
-   * repository that needs a person's review. A provisioning operation is
-   * different (a half-made repository volume), so its lock stays until it is
-   * released on purpose, as does every storage lock.
+   * Release the repository locks that interrupted work left, once the helpers of
+   * the dead process are gone. Captures, checks and restores only read or append
+   * to the active repository: once restic's own locks are cleared (`activeId` is
+   * set) an interrupted one leaves its point or its target volume settled by their
+   * own records, and nothing in the repository that needs a person's review. A
+   * provisioning operation is released on any repository, because the next
+   * provision request continues a half-made repository and takes the lock itself;
+   * with no active repository to unlock there is nothing else to wait for. Every
+   * storage lock stays until it is released on purpose.
    */
-  releaseInterruptedRepositoryLocks(): number {
+  releaseInterruptedRepositoryLocks(activeId: string | null): number {
     return recoveryDb().prepare(`
       DELETE FROM recovery_locks
       WHERE scope = 'repository' AND stale_since IS NOT NULL
         AND owner_operation_id IN (
           SELECT id FROM recovery_operations
-          WHERE kind IN ('create_point','verify_point','restore')
+          WHERE kind = 'repository_init'
+             OR (? IS NOT NULL AND recovery_locks.resource_key = ?
+                 AND kind IN ('create_point','verify_point','restore'))
         )
-    `).run().changes;
+    `).run(activeId, activeId).changes;
+  }
+
+  /** Whether any repository lock is stale, for the log line boot writes when it releases none. */
+  hasStaleRepositoryLock(): boolean {
+    return recoveryDb().prepare(
+      `SELECT 1 FROM recovery_locks WHERE scope = 'repository' AND stale_since IS NOT NULL LIMIT 1`,
+    ).get() !== undefined;
   }
 
   /**

@@ -323,17 +323,43 @@ describe('the hop to a node that is not there', () => {
     expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
   });
 
-  it('answers a direct-proxy node whose target the hub refuses or cannot connect to in the recovery error shape', async () => {
-    const db = DatabaseService.getInstance();
-    const unreachableId = db.addNode({ name: 'recovery-dead-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
-    // The hub's own view says the node is fine, so the preflight lets the request through.
-    mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+  const upToDate = () => mockRead.mockImplementation(echoing(descriptor('available', 'engine_registered')));
+  const expectTransportRefusal = async (nodeId: number) => {
     const res = await request(app)
       .get('/api/recovery/storage')
       .set('Authorization', authHeader)
-      .set('x-node-id', String(unreachableId));
+      .set('x-node-id', String(nodeId));
     expect(res.status).toBe(503);
     expect(res.body).toMatchObject({ errorClass: 'transport_unreachable', code: 'TRANSPORT_UNREACHABLE' });
+    return res;
+  };
+
+  it('answers a direct-proxy node whose target the hub will not call', async () => {
+    // Loopback is not a target the hub calls (outside the end-to-end allowance).
+    const id = DatabaseService.getInstance().addNode({ name: 'recovery-blocked-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
+    upToDate();
+    await expectTransportRefusal(id);
+  });
+
+  it('answers a direct-proxy node that refuses the connection, inside the hub\'s view of it', async () => {
+    const previous = process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND;
+    process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND = 'true';
+    try {
+      const id = DatabaseService.getInstance().addNode({ name: 'recovery-dead-proxy', type: 'remote', api_url: 'http://127.0.0.1:9', api_token: 't', compose_dir: '/srv', is_default: false });
+      upToDate();
+      const res = await expectTransportRefusal(id);
+      expect(res.body.error).toMatch(/could not be reached/);
+    } finally {
+      if (previous === undefined) delete process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND;
+      else process.env.SENCHO_E2E_ALLOW_LOOPBACK_OUTBOUND = previous;
+    }
+  });
+
+  it('answers a direct-proxy node with no API URL or token', async () => {
+    const id = DatabaseService.getInstance().addNode({ name: 'recovery-no-target', type: 'remote', api_url: '', api_token: '', compose_dir: '/srv', is_default: false });
+    upToDate();
+    const res = await expectTransportRefusal(id);
+    expect(res.body.error).toMatch(/no API URL or token/);
   });
 
   it('leaves a request that is not a recovery request in the generic shape', async () => {

@@ -5571,9 +5571,10 @@ paths:
         is never released here; its owner releases it by finishing, and a request against
         a live lock answers `409` with `LOCK_HELD`. A repository lock requires permission
         to change system settings; a storage lock requires the same access a restore does,
-        and the storage's volume need not exist any more. At startup, once restic's own locks
-        are cleared, Sencho releases the repository lock of interrupted captures, checks and
-        restores itself; an interrupted provisioning and every storage lock wait for this call.
+        and the storage's volume need not exist any more. At startup, once no helper of the
+        previous process remains, Sencho releases the repository lock of an interrupted provisioning,
+        and, when restic's own locks are cleared, of interrupted captures, checks and restores
+        itself; every storage lock waits for this call.
       parameters:
         - $ref: "#/components/parameters/nodeId"
       requestBody:

@@ -313,13 +313,24 @@ export class RecoveryEngineService {
         const removed = await runner.removeForeignEpochHelpers();
         if (removed > 0) console.log('[Recovery] Removed %d helper containers from a previous process', removed);
         const unlocked = await this.unlockAfterRestart();
-        // With restic's own locks cleared and the helpers gone, an interrupted
-        // capture, check or restore leaves nothing in the repository to review,
-        // so its repository lock must not keep every other volume closed until an
-        // administrator releases it.
-        if (unlocked) {
-          const released = this.operations.releaseInterruptedRepositoryLocks();
+        // With the previous helpers gone and restic's own locks cleared, an
+        // interrupted capture, check or restore leaves nothing in the repository
+        // to review, and an interrupted provisioning is continued by the next
+        // provision request, so none of their repository locks may keep every
+        // volume closed until an administrator releases it. A helper that could
+        // not be removed may still be writing, so nothing is released while one
+        // remains.
+        const remaining = await runner.countForeignEpochHelpers();
+        if (remaining === 0) {
+          const active = this.repositories.getActive();
+          const released = this.operations.releaseInterruptedRepositoryLocks(unlocked && active ? active.id : null);
           if (released > 0) console.log('[Recovery] Released %d repository locks left by interrupted work', released);
+        }
+        if (this.operations.hasStaleRepositoryLock()) {
+          console.warn(
+            '[Recovery] Repository locks left by interrupted work stay held: restic locks cleared=%s, previous helpers remaining=%d',
+            String(unlocked), remaining,
+          );
         }
       }
       const intents = await reconcileRestoreIntentsAtStartup(this.docker());

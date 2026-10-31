@@ -52,6 +52,7 @@ function scriptedRunner(script: ScriptedResult[]) {
         return result;
       },
       removeForeignEpochHelpers: async () => 0,
+      countForeignEpochHelpers: async () => 0,
     },
   };
 }

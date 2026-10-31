@@ -246,6 +246,7 @@ describe('POST /api/recovery/storage/points', () => {
         return { exitCode: 1, stderrTail: '', aborted: false, killed: false };
       },
       removeForeignEpochHelpers: async () => 0,
+      countForeignEpochHelpers: async () => 0,
     } as never);
     engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
       engineId: 'fake',
@@ -366,6 +367,7 @@ describe('restore replay', () => {
         return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
       },
       removeForeignEpochHelpers: async () => 0,
+      countForeignEpochHelpers: async () => 0,
     } as never);
     engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
       engineId: 'fake',
@@ -603,12 +605,30 @@ describe('input the daemon would reject', () => {
     seedRepository();
     service().markReadyForTests();
     await stubDocker(['app_data']);
+    // The daemon answers 500 to a name it cannot parse, so only a name refused
+    // before the daemon is asked gives a 400: a stub that said "no such volume"
+    // would pass without any validation.
+    const DockerController = (await import('../services/DockerController')).default;
+    const asked: string[] = [];
+    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
+      info: async () => ({ ID: 'engine-routes' }),
+      listVolumes: async () => ({ Volumes: [] }),
+      listContainers: async () => [],
+      getVolume: (name: string) => ({
+        inspect: async () => {
+          asked.push(name);
+          throw Object.assign(new Error('Request path contains unescaped characters'), { statusCode: 500 });
+        },
+      }),
+      getImage: () => ({ inspect: async () => ({ Id: 'sha256:helper' }) }),
+    } as unknown as import('dockerode'));
     for (const volumeName of BAD_NAMES) {
       const res = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
         .send({ volumeName, idempotencyKey: randomUUID() });
       expect(res.status, volumeName).toBe(400);
       expect(res.body.errorClass, volumeName).toBe('invalid_request');
     }
+    expect(asked).toEqual([]);
     expect(await operationRows()).toBe(0);
   });
 
@@ -829,6 +849,7 @@ describe('a refused request can be sent again', () => {
         return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
       },
       removeForeignEpochHelpers: async () => 0,
+      countForeignEpochHelpers: async () => 0,
     } as never);
     engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
       engineId: 'fake', contractVersion: 1, storageKinds: ['named_volume'],
@@ -882,6 +903,24 @@ describe('one error shape', () => {
       expect(res.status).toBe(403);
       expect(res.body).toMatchObject({ errorClass: 'permission_denied', code: 'PERMISSION_DENIED' });
       expect(typeof res.body.error).toBe('string');
+    }
+  });
+
+  it('answers a refused read with the same shape on /node, /repository and both /storage forms', async () => {
+    seedRepository();
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    const { ROLE_PERMISSIONS } = await import('../middleware/permissions');
+    const original = [...ROLE_PERMISSIONS.viewer];
+    ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original.filter((a) => a !== 'stack:read'));
+    try {
+      for (const path of ['/api/recovery/node', '/api/recovery/repository', '/api/recovery/storage', '/api/recovery/storage?stack=app']) {
+        const res = await request(app).get(path).set('Cookie', viewerCookie);
+        expect(res.status, path).toBe(403);
+        expect(res.body, path).toMatchObject({ errorClass: 'permission_denied', code: 'PERMISSION_DENIED' });
+      }
+    } finally {
+      ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original);
     }
   });
 

@@ -183,8 +183,9 @@ export async function initRepository(ctx: RepositoryRunContext): Promise<Reposit
 }
 
 /**
- * Clear restic's own locks. Runs while Sencho still holds the repository lock,
- * because Sencho's lock is the real mutual exclusion: a helper that died left
+ * Clear restic's own locks. Runs while Sencho still holds the repository lock
+ * (or at boot, before any operation can exist), because Sencho's lock is the real
+ * mutual exclusion: a helper that died left
  * restic's lock behind, and waiting 30 minutes for it to expire would leave the
  * node unusable for no reason. Answers whether restic reported the locks cleared.
  */
@@ -243,8 +244,6 @@ export async function checkRepository(
   }
   return outcome;
 }
-
-/** Record a repository-wide check against every point it covers. */
 
 export interface ProvisionDeps {
   nodeId: number;

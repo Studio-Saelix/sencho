@@ -422,7 +422,7 @@ curl https://your-sencho-instance:1852/api/recovery/storage/d0b4e4c2-6a2e-4d31-9
 
 ### Release a stale lock
 
-A stale lock means an interrupted operation may have left a restore half written. Releasing it is a reviewed act, so it is never automatic. A live lock belongs to its owner and cannot be released here.
+A stale lock means an interrupted operation may have left a restore half written. Releasing a storage lock is a reviewed act, so it is never automatic. Startup releases the repository lock of interrupted work, as described below. A live lock belongs to its owner and cannot be released here.
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/recovery/locks/release \
@@ -449,7 +449,7 @@ curl -X POST https://your-sencho-instance:1852/api/recovery/locks/release \
 
 Use `scope: "repository"` with the repository id to release the repository lock. Review the interrupted operation before releasing its lock: check the operation, its point, and any target volume it left behind. The route answers `lock_held` when the lock is still owned by a live operation. A volume whose source no longer exists can still have its storage lock released.
 
-A restart does not leave the node closed. When Sencho starts it removes the helpers a previous process left, clears restic's own locks, and, once that has succeeded, releases the repository lock of any capture, verification, or restore that was interrupted, because none of them leaves anything in the repository to review. The volume that was being captured keeps its storage lock until you release it, and so does an interrupted repository provisioning. If restic's locks could not be cleared, the repository lock stays stale and an administrator releases it.
+A restart does not leave the node closed. When Sencho starts it removes the helpers a previous process left and clears restic's own locks. Once no helper of the previous process remains, it releases the repository lock of an interrupted provisioning, because the next provision request continues it, and, if restic's locks were cleared, the repository lock of any capture, verification, or restore that was interrupted, because none of them leaves anything in the repository to review. The volume that was being captured keeps its storage lock until you release it. If a helper could not be removed, or restic's locks could not be cleared, the repository lock stays stale and an administrator releases it.
 
 ### Error responses
 
@@ -472,7 +472,7 @@ Every error from these routes has the same shape. `code` is the upper-cased erro
 | `500` | `internal` |
 | `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error` |
 
-For a remote node, the control instance answers `503` with `errorClass: "transport_unreachable"` whenever it cannot reach the node: a stopped node, a disconnected Pilot tunnel, or a target it will not call. A per-user permission check the control instance makes itself, before the request reaches the node, answers with `error` and, usually, `code`, and no `errorClass`.
+A remote node whose status answer the control instance cannot read answers `503` with `errorClass: "internal"` and `code: "NODE_DESCRIPTOR_INVALID"`. For a remote node, the control instance answers `503` with `errorClass: "transport_unreachable"` whenever it cannot reach the node when the request arrives: a stopped node, a disconnected Pilot tunnel, or a target it will not call. A Pilot tunnel that drops while a request is in flight answers a plain `502`; if that request started something, send it again with the same idempotency key to find out what happened. A per-user permission check the control instance makes itself, before the request reaches the node, answers with `error` and, usually, `code`, and no `errorClass`.
 
 While the node is still starting, a mutating request answers `503` with `errorClass: "capability_unavailable"` and `reason: "engine_starting"`. Wait for startup to finish and retry.
 

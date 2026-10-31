@@ -62,13 +62,12 @@ const GIB = 1024 * 1024 * 1024;
 
 /**
  * restic's scratch space for a capture. A capture stages temporary pack files in
- * `/tmp` before it writes them to the repository, and how many it holds at once
- * grows with the CPU count (each worker keeps a pack of about 16 MiB open), not
- * with the size of the data: a 10-core host peaks near 100 MiB, and the same
- * capture failed with `no space left on device` on the 64 MiB the other profiles
- * get. The profile below gives a capture 512 MiB, five times that peak, and
- * raises its memory limit by the same amount, because a tmpfs is charged to the
- * container's memory.
+ * `/tmp` before it writes them to the repository, and what it holds at once does
+ * not grow with the size of the data: measured at about 70 MiB for a 1.3 GiB
+ * source, on 2 and on 10 CPUs. The 64 MiB the other profiles get was not enough
+ * and failed with `no space left on device` after a few hundred MB. A capture
+ * gets 512 MiB, about seven times that peak, and its memory limit doubles to
+ * 2 GiB, because a tmpfs is charged to the container's memory.
  */
 const BACKUP_SCRATCH = 'size=512m,mode=1777';
 
@@ -530,12 +529,8 @@ export class RecoveryHelperRunner {
    * that is gone, and Docker will not reap it by itself.
    */
   async removeForeignEpochHelpers(): Promise<number> {
-    const filters = { label: [`${HELPER_LABEL_AUTHORITY}=${this.deps.authorityId}`] };
-    const listed = await this.deps.docker.listContainers({ all: true, filters });
     let removed = 0;
-    for (const summary of listed) {
-      const epoch = summary.Labels?.[HELPER_LABEL_EPOCH];
-      if (!epoch || epoch === this.deps.processEpoch) continue;
+    for (const summary of await this.listForeignEpochHelpers()) {
       try {
         await this.deps.docker.getContainer(summary.Id).remove({ force: true });
         removed += 1;
@@ -547,6 +542,24 @@ export class RecoveryHelperRunner {
       }
     }
     return removed;
+  }
+
+  /**
+   * How many helpers of a previous process still exist. Boot asks after removing
+   * them: a helper that could not be removed may still be writing, and nothing
+   * that assumes the repository is quiet may run while one is.
+   */
+  async countForeignEpochHelpers(): Promise<number> {
+    return (await this.listForeignEpochHelpers()).length;
+  }
+
+  private async listForeignEpochHelpers(): Promise<Array<{ Id: string }>> {
+    const filters = { label: [`${HELPER_LABEL_AUTHORITY}=${this.deps.authorityId}`] };
+    const listed = await this.deps.docker.listContainers({ all: true, filters });
+    return listed.filter((summary) => {
+      const epoch = summary.Labels?.[HELPER_LABEL_EPOCH];
+      return Boolean(epoch) && epoch !== this.deps.processEpoch;
+    });
   }
 }
 

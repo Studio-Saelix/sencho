@@ -45,7 +45,7 @@ function fakeDocker(volumes: string[]): Docker {
 }
 
 /** A helper runner whose unlock answers the given exit code and whose probe answers a report. */
-function helper(unlockExit: number) {
+function helper(unlockExit: number, remainingHelpers = 0) {
   const unlocks: string[] = [];
   const instance = {
     run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
@@ -60,6 +60,7 @@ function helper(unlockExit: number) {
       return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
     },
     removeForeignEpochHelpers: async () => 0,
+    countForeignEpochHelpers: async () => remainingHelpers,
   } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
   return { instance, unlocks };
 }
@@ -141,10 +142,10 @@ function seedInterrupted(kind: 'create_point' | 'verify_point' | 'restore' | 're
   return { repositoryId: repository.id, storageKey: storage.storageKey, operationId: operation.id };
 }
 
-async function boot(unlockExit: number): Promise<{ unlocks: string[] }> {
+async function boot(unlockExit: number, remainingHelpers = 0): Promise<{ unlocks: string[] }> {
   vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue(fakeDocker([OTHER_VOLUME, 'interrupted_data']));
   const service = runner.RecoveryEngineService.getInstance(nodeId);
-  const fake = helper(unlockExit);
+  const fake = helper(unlockExit, remainingHelpers);
   service.setHelperRunnerForTests(fake.instance);
   await service.runBootSequence();
   expect(service.isReady()).toBe(true);
@@ -196,6 +197,36 @@ describe('boot with an interrupted capture', () => {
     await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
   });
 
+  it('keeps the lock while a helper of the dead process is still there, because it may still be writing', async () => {
+    const { repositoryId } = seedInterrupted('create_point');
+    await boot(0, 1);
+
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince).not.toBeNull();
+    await expect(captureOtherVolume()).rejects.toMatchObject({ errorClass: 'lock_stale' });
+  });
+
+  it('releases only the active repository\'s lock, not the one of a replaced repository', async () => {
+    const { repositoryId } = seedInterrupted('create_point');
+    const store = operations.RecoveryOperationStore.getInstance();
+    const other = repositoryStore.RecoveryRepositoryStore.getInstance().register({
+      ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-boot-g0', failureDomain: 'same_failure_domain',
+    });
+    const operation = store.start({
+      idempotencyKey: 'old-repo-verify', kind: 'verify_point', storageId: null,
+      actor: 'admin', transport: 'local', requestDigest: 'b'.repeat(64),
+    }).operation;
+    store.markRunning(operation.id);
+    store.acquireLock('repository', other.id, operation.id);
+    const db = recoveryDbModule.recoveryDb();
+    db.prepare("UPDATE recovery_operations SET process_epoch = 'dead-epoch' WHERE id = ?").run(operation.id);
+    db.prepare("UPDATE recovery_locks SET process_epoch = 'dead-epoch' WHERE owner_operation_id = ?").run(operation.id);
+
+    await boot(0);
+
+    expect(store.getLock('repository', repositoryId)).toBeNull();
+    expect(store.getLock('repository', other.id)?.staleSince).not.toBeNull();
+  });
+
   it('keeps the storage lock of the interrupted volume closed to a new capture', async () => {
     seedInterrupted('create_point');
     await boot(0);
@@ -214,9 +245,23 @@ describe('which interrupted work releases its repository lock', () => {
     expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)).toBeNull();
   });
 
-  it('keeps the lock of an interrupted provisioning, which left a half-made repository', async () => {
+  it('releases the lock of an interrupted provisioning, which the next provision request continues', async () => {
     const { repositoryId } = seedInterrupted('repository_init');
     await boot(0);
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)).toBeNull();
+  });
+
+  it('releases an interrupted first provisioning even though there is no active repository to unlock', async () => {
+    const { repositoryId } = seedInterrupted('repository_init');
+    recoveryDbModule.recoveryDb().prepare("DELETE FROM system_state WHERE key = 'recovery_active_repository_id'").run();
+    const { unlocks } = await boot(0);
+    expect(unlocks).toHaveLength(0);
+    expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)).toBeNull();
+  });
+
+  it('keeps an interrupted provisioning locked while a helper of the dead process remains', async () => {
+    const { repositoryId } = seedInterrupted('repository_init');
+    await boot(0, 1);
     expect(operations.RecoveryOperationStore.getInstance().getLock('repository', repositoryId)?.staleSince)
       .not.toBeNull();
   });

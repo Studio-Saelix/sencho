@@ -223,7 +223,14 @@ export async function probeGenerationToken(input: {
 export function generationTokenMatchesVolume(token: string, createdAt: string | null): boolean {
   const separator = token.lastIndexOf('|');
   if (separator < 0) return true;
-  return token.slice(0, separator) === (createdAt ?? 'unknown');
+  const recorded = token.slice(0, separator);
+  const live = createdAt ?? 'unknown';
+  if (recorded === live) return true;
+  // Docker prints the time in the daemon's zone; the same instant in another
+  // zone is the same volume.
+  const recordedMs = Date.parse(recorded);
+  const liveMs = Date.parse(live);
+  return Number.isFinite(recordedMs) && Number.isFinite(liveMs) && recordedMs === liveMs;
 }
 
 // --- In-use observation ------------------------------------------------------
@@ -438,8 +445,6 @@ export interface VolumeLocatorDescription {
   labels: Record<string, string>;
   eligible: boolean;
   ineligibleReason: IneligibleReason | null;
-  /** False when Docker has no such volume now (only a stored locator can say so). */
-  present: boolean;
 }
 
 /**
@@ -464,7 +469,6 @@ export async function describeVolumeLocator(input: {
     labels: source.labels,
     eligible: source.eligible,
     ineligibleReason: source.ineligibleReason,
-    present: true,
   };
 }
 
@@ -489,7 +493,6 @@ export async function describeStoredLocator(input: {
       labels: {},
       eligible: false,
       ineligibleReason: 'volume_missing',
-      present: false,
     };
   }
   return {
@@ -498,7 +501,6 @@ export async function describeStoredLocator(input: {
     labels: source.labels,
     eligible: source.eligible,
     ineligibleReason: source.ineligibleReason,
-    present: true,
   };
 }
 

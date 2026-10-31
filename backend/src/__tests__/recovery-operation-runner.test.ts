@@ -57,6 +57,7 @@ function fakeDocker(options: {
   // on that stability, so the fake must not mint a new one per inspect.
   const createdAt = new Date().toISOString();
   const volumes = new Map((options.volumes ?? []).map((v) => [v.name, v]));
+  const createdAtOf = new Map<string, string>();
   const removed: string[] = [];
   const created: string[] = [];
   const docker = {
@@ -70,7 +71,7 @@ function fakeDocker(options: {
       inspect: async () => {
         const found = volumes.get(name);
         if (!found) throw Object.assign(new Error('no such volume'), { statusCode: 404 });
-        return { Name: found.name, Driver: 'local', Labels: found.labels, CreatedAt: createdAt };
+        return { Name: found.name, Driver: 'local', Labels: found.labels, CreatedAt: createdAtOf.get(name) ?? createdAt };
       },
       remove: async () => {
         if (!volumes.has(name)) throw Object.assign(new Error('no such volume'), { statusCode: 404 });
@@ -82,6 +83,9 @@ function fakeDocker(options: {
       if (!options.createNoop && !volumes.has(spec.Name)) {
         created.push(spec.Name);
         volumes.set(spec.Name, { name: spec.Name, labels: spec.Labels ?? {} });
+        // A volume made during the test is made now, however long the test has run:
+        // a restore refuses a target older than its own intent.
+        createdAtOf.set(spec.Name, new Date().toISOString());
       }
       return { Name: spec.Name };
     },
@@ -102,6 +106,7 @@ function probeRunner(dev = 63, ino = 42) {
       return { exitCode: 1, stderrTail: 'unexpected helper run', aborted: false, killed: false };
     },
     removeForeignEpochHelpers: async () => 0,
+    countForeignEpochHelpers: async () => 0,
   } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
 }
 
@@ -834,10 +839,18 @@ describe('refused admissions can be retried with the same key', () => {
 });
 
 describe('restore target creation', () => {
-  it('reads a name the daemon rejects as the caller\'s mistake, not a missing capability', async () => {
+  // A name the daemon rejects is the caller's; a socket proxy forbidding volume
+  // creation is a missing capability; anything else is the node failing.
+  it.each([
+    [400, 'invalid_request'],
+    [403, 'capability_unavailable'],
+    [404, 'capability_unavailable'],
+    [500, 'node_error'],
+    [undefined, 'node_error'],
+  ] as const)('reads a daemon answer of %s when creating the target as %s', async (statusCode, errorClass) => {
     const fake = stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
     fake.docker.createVolume = (async () => {
-      throw Object.assign(new Error('invalid volume name'), { statusCode: 400 });
+      throw Object.assign(new Error('create failed'), statusCode === undefined ? {} : { statusCode });
     }) as never;
     const seeded = await seedProtectableVolume();
     const store = points.RecoveryPointStore.getInstance();
@@ -861,7 +874,7 @@ describe('restore target creation', () => {
     await service().whenIdleForTests();
 
     expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
-      .toMatchObject({ state: 'failed', errorClass: 'invalid_request' });
+      .toMatchObject({ state: 'failed', errorClass });
   });
 });
 

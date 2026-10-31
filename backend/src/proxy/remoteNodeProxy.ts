@@ -337,7 +337,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (isRecoveryUrl(path)) {
           sendRecoveryTransportRefusal(
             res as unknown as Response,
-            'The node could not be reached. Check the API URL and ensure Sencho is running on that host.',
+            'The node could not be reached. Check the API URL and ensure Sencho is running on that host. A request that starts or changes something may already have reached it: send it again with the same idempotency key to see what happened.',
           );
           return;
         }

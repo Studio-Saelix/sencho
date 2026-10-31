@@ -178,6 +178,8 @@ describe('restic backup output', () => {
     // A source file whose own path contains /tmp is not the helper's scratch.
     expect(isScratchSpaceError('write /repo/data/x: no space left on device (source /data/tmp/file)')).toBe(false);
     expect(isScratchSpaceError('write /tmp/restic-temp-pack-1: permission denied')).toBe(false);
+    // The errno and an unrelated /tmp path on different lines are two facts, not one.
+    expect(isScratchSpaceError('write /repo/data/x: no space left on device\nreading /tmp/restic-note: ok')).toBe(false);
 
     const clean = feed([JSON.stringify({ message_type: 'summary', snapshot_id: 's', total_files_processed: 1, total_bytes_processed: 1 })]);
     expect(classifyBackupRun({ exitCode: 1, aborted: false, killed: false, accumulator: clean, stderrTail: scratchFull }))

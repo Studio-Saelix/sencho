@@ -74,8 +74,11 @@ function num(value: unknown): number {
  * repository, and calling it unreachable would send an operator to the wrong fix.
  */
 export function isScratchSpaceError(stderrTail: string): boolean {
-  return /no space left on device|enospc/i.test(stderrTail)
-    && /(?:^|[\s"'])\/tmp\/|restic-temp/i.test(stderrTail);
+  // Both facts have to be on one line: restic names the file it could not write
+  // in the same message as the errno, and a repository error that happens to sit
+  // near an unrelated `/tmp` path must not read as scratch.
+  return stderrTail.split('\n').some((line) =>
+    /no space left on device|enospc/i.test(line) && /(?:^|[\s"'])\/tmp\/|restic-temp/i.test(line));
 }
 
 function isDiskFull(stderrTail: string): boolean {

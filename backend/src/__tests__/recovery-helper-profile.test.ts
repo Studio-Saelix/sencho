@@ -75,8 +75,8 @@ describe('recovery helper profiles', () => {
   });
 
   it('gives a capture scratch space that is a multiple of what restic stages, within its memory limit', () => {
-    // A 10-core host peaks near 100 MiB of temporary packs for any source size;
-    // the 64 MiB the other profiles get failed a 400 MB capture.
+    // restic holds about 70 MiB of temporary packs for any source size (measured
+    // on 1.3 GiB); the 64 MiB the other profiles get failed a 400 MB capture.
     const scratch = Number(/size=(\d+)m/.exec(HELPER_PROFILES.backup.tmpfs['/tmp'])?.[1]) * 1024 * 1024;
     expect(scratch).toBeGreaterThanOrEqual(5 * 100 * 1024 * 1024);
     // A tmpfs is charged to the container's memory, so the limit has to leave
