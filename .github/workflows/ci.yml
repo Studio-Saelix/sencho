@@ -270,7 +270,7 @@ jobs:
         id: helper
         run: |
           set -euo pipefail
-          digest=$(docker image inspect --format '{{{{.Id}}}}' localhost/sencho-recovery-helper:pr-test)
+          digest=$(docker image inspect --format '{{.Id}}' localhost/sencho-recovery-helper:pr-test)
           echo "ref=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Build Docker image (validation only)
