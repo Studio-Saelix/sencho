@@ -468,13 +468,15 @@ describe('drift against a running service with an auto-assigned port', () => {
     ])).toEqual([]);
   });
 
-  it('reports an auto-assigned port published wider than the interface it declares', () => {
-    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [
-      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
-    ])).toHaveLength(1);
-    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [
-      { ip: '127.0.0.1', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },
-    ])).toEqual([]);
+  it('reports an auto-assigned port published on a different interface than it declares', () => {
+    const loopback = { ip: '127.0.0.1', publishedPort: 32768, privatePort: 80, protocol: 'tcp' };
+    const allInterfaces = { ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' };
+    // A specific address needs a binding on it, and all interfaces needs an
+    // all-interface binding: a wider or a narrower publish is both drift.
+    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [allInterfaces])).toHaveLength(1);
+    expect(drift([{ target: 80, host_ip: '127.0.0.1' }], [loopback])).toEqual([]);
+    expect(drift([{ target: 80 }], [loopback])).toHaveLength(1);
+    expect(drift([{ target: 80 }], [allInterfaces])).toEqual([]);
     // '' and the all-interface forms Docker reports are the same interface.
     expect(drift([{ target: 80 }], [
       { ip: '::', publishedPort: 32768, privatePort: 80, protocol: 'tcp' },

@@ -180,13 +180,13 @@ function interfaceKey(ip: string): string {
 
 /**
  * Whether a declared interface can be satisfied by a runtime binding. A
- * declaration with no interface asks for every interface, so any binding
- * satisfies it; a declaration naming one address needs a binding on that same
- * address, so a wider publish than the file asked for reads as drift.
+ * declaration with no interface asks for every interface, so only an
+ * all-interface binding satisfies it; a declaration naming one address needs a
+ * binding on that same address. Either way a binding on a different interface
+ * than the file asked for reads as drift.
  */
 function interfaceCompatible(declaredHostIp: string, runtimeHostIp: string): boolean {
-  const declared = interfaceKey(declaredHostIp);
-  return declared === '*' || declared === interfaceKey(runtimeHostIp);
+  return interfaceKey(declaredHostIp) === interfaceKey(runtimeHostIp);
 }
 
 /** A declared port as it reads in a finding, with no invented host number. */
