@@ -36,6 +36,15 @@ export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | nu
 }
 
 /**
+ * A failure that means the node itself could not be read: it missed the
+ * gateway deadline or could not be reached. These are the two causes a page
+ * names outright and retries, as opposed to an answer the node did give.
+ */
+export function isUnreadableNode(failure: RemoteReadFailure | 'auth-abort' | undefined | null): boolean {
+  return failure === 'timeout' || failure === 'unreachable';
+}
+
+/**
  * Classify a read that threw instead of returning. `apiFetch` throws on 401
  * before the caller sees the response, so the response it attached to the error
  * is the only way to keep an authorization failure distinct from a transport

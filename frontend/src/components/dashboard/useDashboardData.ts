@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
-import { classifyRemoteReadError, classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
+import {
+  classifyRemoteReadError,
+  classifyRemoteReadFailure,
+  isUnreadableNode,
+  type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { visibilityInterval } from '@/lib/utils';
 import type {
   Stats,
@@ -163,7 +168,7 @@ export function useDashboardData(): DashboardData {
     const counts = failureCountsRef.current;
     if (outcome.ok) {
       counts[endpoint] = 0;
-    } else if (outcome.failure === 'timeout' || outcome.failure === 'unreachable') {
+    } else if (isUnreadableNode(outcome.failure)) {
       // A node that did not answer is not a transient hiccup: mark the numbers
       // stale on the first bounded failure instead of waiting out three polls,
       // so the dashboard never keeps showing zeros as if they were readings.

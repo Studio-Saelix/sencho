@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { REMOTE_IMAGE_INSPECT_V1_CAPABILITY } from '@/lib/capabilities';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
-import { classifyRemoteReadFailure, remoteReadFailureMessage } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadFailure, isUnreadableNode, remoteReadFailureMessage } from '@/lib/remoteReadFailure';
 import {
   newAttemptId,
   abortAttempt,
@@ -506,7 +506,7 @@ export function useStackListState() {
         // so the sidebar's retry state says why instead of printing a status
         // code the operator cannot act on.
         const readFailure = classifyRemoteReadFailure(res);
-        if (readFailure === 'timeout' || readFailure === 'unreachable') {
+        if (readFailure !== null && isUnreadableNode(readFailure)) {
           return applyStacksFailure(remoteReadFailureMessage(readFailure, { status: res.status }));
         }
         return applyStacksFailure(`Could not load stacks (${res.status})`);
@@ -601,8 +601,9 @@ export function useStackListState() {
       if (statusOutcome.error) {
         return failHydration(statusOutcome.error.message);
       }
-      if (statusOutcome.failure === 'timeout' || statusOutcome.failure === 'unreachable') {
-        return failHydration(remoteReadFailureMessage(statusOutcome.failure, { status: statusOutcome.status }));
+      const statusReadFailure = statusOutcome.failure;
+      if (statusReadFailure === 'timeout' || statusReadFailure === 'unreachable') {
+        return failHydration(remoteReadFailureMessage(statusReadFailure, { status: statusOutcome.status }));
       }
       if (statusOutcome.ok && isValidBulkPayload(statusOutcome.body)) {
         // Decode already happened inside the shared helper; do not emit a fake

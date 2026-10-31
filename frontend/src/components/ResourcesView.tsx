@@ -30,7 +30,12 @@ import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
-import { classifyRemoteReadFailure, remoteReadFailureMessage, type RemoteReadFailure } from '@/lib/remoteReadFailure';
+import {
+    classifyRemoteReadFailure,
+    isUnreadableNode,
+    remoteReadFailureMessage,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
 import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
@@ -731,7 +736,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const mastheadModel = deriveResourcesMastheadState(usageLoad);
     // Only the failures whose cause the operator can act on are named; a plain
     // 4xx/5xx keeps the existing short copy.
-    const inventoryFailureReason = inventoryFailure === 'timeout' || inventoryFailure === 'unreachable'
+    const inventoryFailureReason = inventoryFailure !== null && isUnreadableNode(inventoryFailure)
         ? remoteReadFailureMessage(inventoryFailure, { nodeName: activeNode?.name })
         : null;
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
