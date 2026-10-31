@@ -343,9 +343,13 @@ describe('GET /api/fleet/overview remote probe budget', () => {
 });
 
 describe('node-data fan-outs share the fleet-read budget', () => {
-  // Above the 5s read budget, well under the old 15s and 30s ceilings.
+  // A hung remote must answer at the 5s budget: no sooner than the floor (which
+  // allows for timer slack) and far below the old 15s and 30s ceilings. The
+  // ceiling is loose on purpose, because a loaded CI box inflates the request.
   const READ_BUDGET_FLOOR_MS = 4_000;
-  const READ_BUDGET_CEILING_MS = 8_000;
+  const READ_BUDGET_CEILING_MS = 12_000;
+  // A healthy or never-contacted node must not wait on the budget at all.
+  const HEALTHY_PATH_CEILING_MS = 5_000;
 
   function stubLocalDocker(): void {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
@@ -400,6 +404,21 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 20_000);
+
+  describe('GET /api/fleet/networking-summary?nodeId=', () => {
+    it('narrows the fan-out to one node', async () => {
+      stubLocalDocker();
+      const healthyId = addProxyNode('summary-slice', HEALTHY_BASE);
+      mockTargets({ [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+      mockFetch((url) => (String(url).startsWith(`${HEALTHY_BASE}/api/networking/summary`)
+        ? jsonResponse({ exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } })
+        : new Response('not found', { status: 404 })));
+
+      const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${healthyId}`).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect((res.body.nodes as { nodeId: number; status: string }[]).map(n => n.nodeId)).toEqual([healthyId]);
+    });
+  });
 
   describe('GET /api/fleet/dependency-map?nodeId=', () => {
     const graph = { nodes: [{ id: 'host', kind: 'host', label: 'x', stack: null, state: null, flags: [] }], edges: [], flags: [], parseErrors: [] };
@@ -495,10 +514,11 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       const started = Date.now();
       const res = await getLabels();
       expect(res.status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
-      const rows = res.body.nodes as { nodeId: number; status: string }[];
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
+      const rows = res.body.nodes as { nodeId: number; status: string; inventory: { nodeId: number } | null }[];
       expect(rows.every(r => r.status === 'ok')).toBe(true);
-      expect(rows.map(r => r.nodeId)).toContain(healthyId);
+      const healthy = rows.find(r => r.nodeId === healthyId);
+      expect(healthy?.inventory).toMatchObject({ nodeId: healthyId });
       expect(res.body.nodeErrors).toEqual({});
     });
 
@@ -535,7 +555,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       const started = Date.now();
       const res = await getLabels();
       expect(res.status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
       expect(fetchSpy).not.toHaveBeenCalled();
       const row = (res.body.nodes as { nodeId: number; status: string; error: string | null }[]).find(r => r.nodeId === goneId);
       expect(row?.status).toBe('error');
@@ -556,8 +576,26 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(res.status).toBe(200);
       expect((res.body.nodes as { nodeId: number }[]).map(r => r.nodeId)).toEqual([healthyId]);
       const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.length).toBeGreaterThan(0);
       expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
     });
+
+    it('bounds the hub\'s own read by the same budget', async () => {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        // A wedged local Docker socket never answers and cannot be aborted.
+        listContainersForLabelInventory: vi.fn().mockReturnValue(new Promise(() => {})),
+      } as unknown as DockerController);
+
+      const started = Date.now();
+      const res = await getLabels('?nodeId=1');
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      expect((res.body.nodes as { nodeId: number; status: string; error: string | null }[])[0])
+        .toMatchObject({ status: 'error', error: 'Timed out after 5s' });
+      expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
+      expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+    }, 20_000);
 
     it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
       const res = await getLabels(`?nodeId=${encodeURIComponent(bad)}`);

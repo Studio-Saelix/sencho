@@ -58,7 +58,7 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
 
-  const { data, loading, progress, refresh } = useFleetContainerLabels(nodes, revealSecrets);
+  const { data, loading, progress, refresh, retryFailed } = useFleetContainerLabels(nodes, revealSecrets);
 
   const allContainers = useMemo(() => {
     if (!data) return [] as Array<ContainerLabelRow & { nodeId: number; nodeName: string }>;
@@ -103,21 +103,24 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
     });
   };
 
-  // Nodes that were unreachable (nodeErrors) or whose inventory came back partial (some
-  // containers or images could not be inspected). Named so the warning is truthful.
+  // Nodes whose read failed (with the hub's reason) or whose inventory came back
+  // partial (some containers or images could not be inspected). Named so the
+  // warning is truthful.
   const degradedNodes = useMemo(() => {
-    const unreachable: string[] = [];
+    const unread: Array<{ name: string; error: string }> = [];
     const partial: string[] = [];
+    let hasData = false;
     if (data) {
       const nameById = new Map(data.nodes.map(n => [n.nodeId, n.nodeName] as const));
-      for (const idStr of Object.keys(data.nodeErrors)) {
-        unreachable.push(nameById.get(Number(idStr)) ?? `node ${idStr}`);
+      for (const [idStr, error] of Object.entries(data.nodeErrors)) {
+        unread.push({ name: nameById.get(Number(idStr)) ?? `node ${idStr}`, error });
       }
       for (const n of data.nodes) {
+        if (n.status === 'ok' && n.inventory !== null) hasData = true;
         if (n.status === 'ok' && n.inventory?.partial) partial.push(n.nodeName);
       }
     }
-    return { unreachable, partial };
+    return { unread, partial, hasData };
   }, [data]);
 
   const toggleExpanded = (id: string) => {
@@ -211,12 +214,19 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
         <p className="text-sm text-stat-subtitle">Loading Docker label audit...</p>
       )}
 
-      {!loading && data && (degradedNodes.unreachable.length > 0 || degradedNodes.partial.length > 0) && (
-        <p className="text-xs text-warning">
-          {degradedNodes.unreachable.length > 0 && `Could not reach ${degradedNodes.unreachable.join(', ')}. `}
-          {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
-          Showing partial fleet data.
-        </p>
+      {data && (degradedNodes.unread.length > 0 || degradedNodes.partial.length > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs text-warning">
+            {degradedNodes.unread.length > 0 && `Could not read ${degradedNodes.unread.map(n => `${n.name} (${n.error})`).join(', ')}. `}
+            {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
+            {degradedNodes.hasData ? 'Showing partial fleet data.' : 'No fleet data could be read.'}
+          </p>
+          {degradedNodes.unread.length > 0 && (
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={retryFailed}>
+              Retry
+            </Button>
+          )}
+        </div>
       )}
 
       {viewMode === 'container' && (

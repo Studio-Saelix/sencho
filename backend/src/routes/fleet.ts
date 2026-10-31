@@ -1057,7 +1057,8 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
 fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
   try {
-    const nodes = DatabaseService.getInstance().getNodes();
+    const nodes = selectFanOutNodes(req, res);
+    if (nodes === null) return;
 
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNetworkingSummaryNode> => {

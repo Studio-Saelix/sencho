@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
@@ -122,6 +122,29 @@ describe('useFleetContainerLabels', () => {
     await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBe('Failed to fetch'));
     expect(result.current.data?.nodes.map(n => n.nodeId).sort()).toEqual([1, 2, 3]);
     expect(result.current.data?.nodes.find(n => n.nodeId === 2)?.status).toBe('error');
+  });
+
+  it('keeps a node\'s last inventory when a refresh fails, and retries only that node', async () => {
+    let failNodeTwo = false;
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const nodeId = nodeIdOf(path);
+      if (nodeId === 2 && failNodeTwo) throw new Error('network down');
+      return json(piece(nodeId));
+    });
+    const { result } = renderHook(() => useFleetContainerLabels(NODES, false));
+    await waitFor(() => expect(result.current.data?.nodes).toHaveLength(3));
+
+    failNodeTwo = true;
+    act(() => { result.current.refresh(); });
+    await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBe('network down, showing its last result'));
+    // The rows from its last answer stay on screen.
+    expect(result.current.data?.nodes.find(n => n.nodeId === 2)?.status).toBe('ok');
+
+    failNodeTwo = false;
+    apiFetchMock.mockClear();
+    act(() => { result.current.retryFailed(); });
+    await waitFor(() => expect(result.current.data?.nodeErrors[2]).toBeUndefined());
+    expect(apiFetchMock.mock.calls.map(c => nodeIdOf(String(c[0])))).toEqual([2]);
   });
 
   it('asks for unredacted values once reveal is on', async () => {
