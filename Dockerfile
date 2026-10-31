@@ -371,3 +371,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # the application command.
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]
+
+# The recovery helper built from this same commit, by digest. The runtime only
+ever starts a helper by digest, so a tag that could be repointed later is
+refused; the workflow asserts this is non-empty before the image is published.
+# These two instructions are last so the pin invalidates nothing above them.
+ARG SENCHO_RECOVERY_HELPER_IMAGE=""
+ENV SENCHO_RECOVERY_HELPER_IMAGE=$SENCHO_RECOVERY_HELPER_IMAGE
