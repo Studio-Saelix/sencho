@@ -1,15 +1,9 @@
 import { apiFetch } from '@/lib/api';
 import { STACK_STATUSES_OWNER_TIMEOUT_MS } from '@/lib/stackStatusesFetch';
-import { classifyRemoteReadError, classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadError, classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 
-export type RemoteFacetFailure =
-  | 'timeout'
-  | 'unreachable'
-  | 'unauthorized'
-  | 'unsupported'
-  | 'auth-abort'
-  | 'http'
-  | 'error';
+/** A read failure, plus the coalescer's own abort reason. */
+export type RemoteFacetFailure = RemoteReadFailure | 'auth-abort';
 
 export type RemoteFacetResult =
   | { ok: true; body: unknown }
