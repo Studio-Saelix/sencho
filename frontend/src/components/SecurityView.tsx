@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard, Boxes, FileWarning, KeyRound, BookCheck, EyeOff, History as HistoryIcon, Wrench, Info,
 } from 'lucide-react';
@@ -8,12 +8,14 @@ import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useImageScan } from '@/hooks/useImageScan';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { useRegionData } from '@/hooks/useRegionData';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import { SENCHO_SETTINGS_CHANGED, type SecurityTab, type SenchoSettingsChangedDetail } from '@/lib/events';
@@ -22,7 +24,7 @@ import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoi
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
-import { OverviewTab } from './security/OverviewTab';
+import { OverviewTab, type ChartLoadState } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
 import {
   type ImagesTargetingInput,
@@ -46,6 +48,16 @@ function isScanSummaryMap(v: unknown): v is Record<string, ScanSummary> {
       && typeof (s as ScanSummary).scan_id === 'number',
   );
 }
+
+/**
+ * What the overview read settled on. A 404 is a benign older node without the
+ * endpoint; anything else is a real failure. Both are outcomes of a completed
+ * read, not of a load still in flight, so neither may read as a clean posture.
+ */
+type OverviewOutcome =
+  | { kind: 'overview'; overview: SecurityOverview }
+  | { kind: 'unsupported' }
+  | { kind: 'failed' };
 
 interface SecurityViewProps {
   activeTab: SecurityTab;
@@ -72,23 +84,105 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const isMobile = useIsMobile();
   const isRemote = activeNode?.type === 'remote';
 
-  const [overview, setOverview] = useState<SecurityOverview | null>(null);
-  // The node the overview was read for. Verbs and dismissals act on a node, so they never see another node's overview.
-  const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
-  // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
-  // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
-  const [overviewLoadError, setOverviewLoadError] = useState<'unsupported' | 'failed' | null>(null);
-  const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
-  const [summariesLoading, setSummariesLoading] = useState(true);
-  const [summariesError, setSummariesError] = useState(false);
-  const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
-  const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
-  // True when the exploit-intel query hit its row cap: the list shows the
-  // highest-risk findings but not every one, so the UI discloses it.
-  const [exploitTruncated, setExploitTruncated] = useState(false);
   const [isReplica, setIsReplica] = useState(false);
-  // Bumped after a node-wide scan completes to refetch the active node's posture.
+  // Bumped after a node-wide scan completes, or when image-update checks are
+  // toggled, to refetch the active node's posture.
   const [reloadToken, setReloadToken] = useState(0);
+
+  // Active-node scoped data. The overview rollup, image summaries, risk trend,
+  // and exploit intel each hydrate from their own request, so a slow or failed
+  // image-summary inventory never holds the overview, and a degraded read stays
+  // confined to the region it feeds. Every region is bound to the active node,
+  // so a response for a node the operator has left is dropped.
+  const nodeScope = activeNode?.id;
+
+  // One warning covers a failed background refresh of the regions that report
+  // here: image summaries, the risk trend, and exploit intel. A region that
+  // already had data keeps showing it, so the refresh failure is reported once
+  // instead of blanking the surface or stacking a toast per region. A first read
+  // that fails is reported by the region's own surface (the Images tab or a
+  // chart placeholder) and does not also toast, and an overview failure has its
+  // own masthead state.
+  const refreshWarnedRef = useRef(false);
+  const notifyRefreshFailed = (_error: unknown, hadData: boolean) => {
+    if (!hadData || refreshWarnedRef.current) return;
+    refreshWarnedRef.current = true;
+    toast.error('Could not refresh security data');
+  };
+
+  const overviewRegion = useRegionData<OverviewOutcome>(nodeScope, async (signal) => {
+    try {
+      const res = await apiFetch('/security/overview', { cache: 'no-store', signal });
+      if (res.ok) {
+        const body = await res.json() as SecurityOverview;
+        return { kind: 'overview', overview: body };
+      }
+      if (res.status !== 404) console.warn('[Security] overview request failed:', res.status);
+      return { kind: res.status === 404 ? 'unsupported' : 'failed' };
+    } catch (error) {
+      console.warn('[Security] failed to load the overview:', error);
+      return { kind: 'failed' };
+    }
+  }, reloadToken);
+
+  const summariesRegion = useRegionData(nodeScope, async (signal) => {
+    const res = await apiFetch('/security/image-summaries', { cache: 'no-store', signal });
+    if (!res.ok) throw new Error(`/security/image-summaries responded ${res.status}`);
+    const body: unknown = await res.json();
+    // A 200 with an unexpected shape must not read as "no findings".
+    if (!isScanSummaryMap(body)) throw new Error('/security/image-summaries returned an unexpected shape');
+    return body;
+  }, reloadToken, { onError: notifyRefreshFailed });
+
+  const trendRegion = useRegionData(nodeScope, async (signal) => {
+    const res = await apiFetch('/security/overview/trend', { signal });
+    if (!res.ok) throw new Error(`/security/overview/trend responded ${res.status}`);
+    const body: unknown = await res.json();
+    if (!Array.isArray(body)) throw new Error('/security/overview/trend returned a malformed body');
+    return body as SecurityRiskTrendPoint[];
+  }, reloadToken, { onError: notifyRefreshFailed });
+
+  const intelRegion = useRegionData(nodeScope, async (signal) => {
+    const res = await apiFetch('/security/overview/exploit-intel', { signal });
+    if (!res.ok) throw new Error(`/security/overview/exploit-intel responded ${res.status}`);
+    const body = await res.json() as { items?: unknown; truncated?: unknown } | null;
+    // A body without an items array is a malformed read, not an empty finding set.
+    if (!body || !Array.isArray(body.items)) {
+      throw new Error('/security/overview/exploit-intel returned a malformed body');
+    }
+    return {
+      items: body.items as ExploitIntelFinding[],
+      // True when the query hit its row cap: the list shows the highest-risk
+      // findings but not every one, so the UI discloses it.
+      truncated: body.truncated === true,
+    };
+  }, reloadToken, { onError: notifyRefreshFailed });
+
+  // A new refresh cycle gets its own warning, so a later failed refresh is
+  // reported too instead of staying silent because an earlier one warned.
+  useEffect(() => {
+    refreshWarnedRef.current = false;
+  }, [reloadToken]);
+
+  const overviewOutcome = overviewRegion.data;
+  const overview = overviewOutcome?.kind === 'overview' ? overviewOutcome.overview : null;
+  const overviewLoadError = overviewOutcome?.kind === 'unsupported'
+    ? 'unsupported'
+    : overviewOutcome?.kind === 'failed' ? 'failed' : null;
+  const summaries = summariesRegion.data ?? {};
+  // A region with data keeps rendering it through a refresh; only a scope with
+  // no successful read yet is loading, and only a failed first read is an error.
+  const summariesLoading = summariesRegion.data === null && summariesRegion.status === 'loading';
+  const summariesError = summariesRegion.data === null && summariesRegion.status === 'failed';
+  const trend = trendRegion.data ?? [];
+  const trendState: ChartLoadState = trendRegion.data !== null
+    ? 'ready'
+    : trendRegion.status === 'failed' ? 'unavailable' : 'loading';
+  const exploitIntel = intelRegion.data?.items ?? [];
+  const exploitTruncated = intelRegion.data?.truncated ?? false;
+  const intelState: ChartLoadState = intelRegion.data !== null
+    ? 'ready'
+    : intelRegion.status === 'failed' ? 'unavailable' : 'loading';
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
@@ -156,7 +250,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     setInspectScanId(scanId);
   }, []);
 
-  const nodeOverview = overviewNodeId === activeNode?.id ? overview : null;
+  const nodeOverview = overview;
   const reloadOverview = useCallback(() => setReloadToken((t) => t + 1), []);
   const reasons = useSecurityReasons({
     overview: nodeOverview,
@@ -173,90 +267,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const canEditSecurityPolicy = can('stack:edit');
   const { scanningRef, scanImage } = useImageScan({
     onComplete: (scanId) => onInspect(scanId, 'vulns'),
-    onSummaries: setSummaries,
+    onSummaries: summariesRegion.apply,
   });
 
-  // Active-node scoped data: overview rollup + image summaries follow x-node-id.
-  // A failed fetch (5xx, network, malformed body) must surface as an error, never
-  // as a benign "clean / no findings" view, which for a security surface is the
-  // most dangerous misread. A 404 on /overview is the one benign case (an older
-  // remote node that lacks the endpoint).
-  useEffect(() => {
-    let cancelled = false;
-    const fetchedNodeId = activeNode?.id;
-    (async () => {
-      setSummariesLoading(true);
-      setOverviewLoadError(null);
-      setSummariesError(false);
-      // The trend chart is non-critical: isolate its fetch entirely (transport
-      // failure included, not just a non-OK/malformed body) so it can never
-      // poison the overview/summaries error state. It degrades to an empty chart
-      // with its own "no history" message.
-      const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
-        .then((r) => (r.ok ? r.json() : []))
-        .then((t) => (Array.isArray(t) ? t : []))
-        .catch(() => []);
-      // Exploit-intel powers two overview charts; isolate it like the trend so a
-      // failure (or an older node without the endpoint) degrades to empty panels.
-      const exploitIntelPromise: Promise<{ items: ExploitIntelFinding[]; truncated: boolean }> = apiFetch('/security/overview/exploit-intel')
-        .then((r) => (r.ok ? r.json() : { items: [], truncated: false }))
-        .then((b) => ({
-          items: b && Array.isArray(b.items) ? b.items : [],
-          truncated: b?.truncated === true,
-        }))
-        .catch(() => ({ items: [], truncated: false }));
-      try {
-        const [overviewRes, summariesRes] = await Promise.all([
-          apiFetch('/security/overview', { cache: 'no-store' }),
-          apiFetch('/security/image-summaries', { cache: 'no-store' }),
-        ]);
-        if (cancelled) return;
-        if (overviewRes.ok) {
-          const body = await overviewRes.json();
-          if (cancelled) return;
-          setOverview(body);
-          setOverviewNodeId(fetchedNodeId);
-        } else {
-          setOverview(null);
-          setOverviewLoadError(overviewRes.status === 404 ? 'unsupported' : 'failed');
-          if (overviewRes.status !== 404) {
-            console.warn('[Security] overview request failed:', overviewRes.status);
-          }
-        }
-        if (summariesRes.ok) {
-          const body = await summariesRes.json();
-          if (isScanSummaryMap(body)) {
-            setSummaries(body);
-          } else {
-            // A 200 with an unexpected shape must not read as "no findings".
-            setSummaries({});
-            setSummariesError(true);
-            console.warn('[Security] image-summaries returned an unexpected shape');
-          }
-        } else {
-          setSummaries({});
-          setSummariesError(true);
-          console.warn('[Security] image-summaries request failed:', summariesRes.status);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        console.warn('[Security] failed to load security data:', err);
-        setOverview(null);
-        setOverviewLoadError('failed');
-        setSummaries({});
-        setSummariesError(true);
-      } finally {
-        if (!cancelled) setSummariesLoading(false);
-      }
-      const [trendData, intelData] = await Promise.all([trendPromise, exploitIntelPromise]);
-      if (!cancelled) {
-        setTrend(trendData);
-        setExploitIntel(intelData.items);
-        setExploitTruncated(intelData.truncated);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [activeNode?.id, reloadToken]);
 
   // Toggling image-update checks flips overview.updateChecksDisabled, which
   // gates Check again and the uncertain-row description. Refetch so Overview
@@ -355,7 +368,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             overview={nodeOverview}
             loadError={overviewLoadError}
             trend={trend}
+            trendState={trendState}
             exploitIntel={exploitIntel}
+            exploitIntelState={intelState}
             exploitTruncated={exploitTruncated}
             onNavigate={handleNavigate}
             onInspect={onInspect}

@@ -12,7 +12,7 @@ import { Info, Search, Unlock } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
-import { TableSkeleton } from './TableSkeleton';
+import { TableSkeleton, TableLoadError } from './TableSkeleton';
 
 export type RollbackOperationKind =
     | 'update'
@@ -39,6 +39,9 @@ export interface RollbackGeneration {
 interface RollbackGenerationsTabProps {
     generations: RollbackGeneration[];
     isLoading: boolean;
+    /** The read failed and there is nothing to show; distinct from a confirmed empty list. */
+    loadError?: boolean;
+    onRetry?: () => void;
     isAdmin: boolean;
     nodeId?: number;
     /** Refetches the Resources page's data after a successful release. */
@@ -169,7 +172,15 @@ function FilterToggle({
  * generic Images list: this is durable recovery state with its own lifecycle
  * (stack, generation, retention, release), not ordinary Docker image inventory.
  */
-export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId, onReleased }: RollbackGenerationsTabProps) {
+export function RollbackGenerationsTab({
+    generations,
+    isLoading,
+    loadError = false,
+    onRetry,
+    isAdmin,
+    nodeId,
+    onReleased,
+}: RollbackGenerationsTabProps) {
     const [confirmRelease, setConfirmRelease] = useState<RollbackGeneration | null>(null);
     const [isReleasing, setIsReleasing] = useState(false);
     const [search, setSearch] = useState('');
@@ -295,7 +306,9 @@ export function RollbackGenerationsTab({ generations, isLoading, isAdmin, nodeId
                             <TableHead className="text-right">Actions</TableHead>
                         </TableRow>
                     </TableHeader>
-                    {isLoading ? <TableSkeleton cols={6} /> : (
+                    {isLoading ? <TableSkeleton cols={6} /> : loadError ? (
+                    <TableLoadError cols={6} noun="rollback generations" onRetry={() => onRetry?.()} />
+                    ) : (
                     <TableBody>
                         {generations.length === 0 ? (
                             <TableRow>

@@ -282,6 +282,8 @@ describe('ResourcesView', () => {
 
     expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
     expect(screen.queryByText('No images found.')).not.toBeInTheDocument();
+    // A first read that fails has no rows to keep: its own Retry row reports it.
+    expect(toast.error).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('back:again')).toBeInTheDocument();
@@ -341,6 +343,46 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
     expect(screen.getByText('still:here')).toBeInTheDocument();
     expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+  });
+
+  it('reports one warning when several regions fail in the same refresh', async () => {
+    let refreshStarted = false;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        refreshStarted = true;
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(refreshStarted
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ images: [image('still:here')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve(refreshStarted
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ 'project': [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    // Both the inventory and the external-container refresh fail; the operator
+    // gets one notice, not one per region.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    await waitFor(() => expect(mockedFetch.mock.calls.filter(([u]) => u === '/system/orphans').length).toBeGreaterThan(1));
+    const refreshWarnings = (toast.error as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([message]) => message === 'Failed to refresh resources');
+    expect(refreshWarnings).toHaveLength(1);
+    expect(screen.getByText('still:here')).toBeInTheDocument();
   });
 
   it('drops the previous node usage when a node switch loads, and ignores its late usage response', async () => {
@@ -410,7 +452,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
@@ -457,7 +499,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
 
     const extraRef = await screen.findByText('ghcr.io/example/very-long-app-name:latest');
@@ -482,7 +524,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(screen.getByText(/old:v1/)).toBeInTheDocument());
@@ -973,6 +1015,129 @@ describe('ResourcesView', () => {
         await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Service "socket-proxy" carries the Docker connection.'));
         expect(toast.success).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('progressive hydration', () => {
+    it('renders the images and their count while rollback, usage, and scan summaries are still pending', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('fast:latest')], volumes: [], networks: [] }));
+        }
+        if (url === '/system/docker-df' || url === '/system/rollback/generations' || url === '/security/image-summaries') {
+          // Never settles during this test: these regions are still reading.
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      render(<ResourcesView />);
+
+      expect(await screen.findByText('fast:latest')).toBeInTheDocument();
+      // The Images count is known; Rollback's source has not answered, so its
+      // tab shows no number at all rather than an implied zero.
+      expect(screen.getByRole('tab', { name: 'Images1' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Rollback' })).toBeInTheDocument();
+      expect(screen.getByText('Measuring disk')).toBeInTheDocument();
+    });
+
+    it('shows rollback generations as soon as they arrive, without waiting on usage or scan summaries', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/rollback/generations') {
+          return Promise.resolve(jsonResponse([{
+            id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active',
+            isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: false,
+          }]));
+        }
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        }
+        if (url === '/system/docker-df' || url === '/security/image-summaries') {
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+      expect(await screen.findByText('seerr')).toBeInTheDocument();
+      // The Rollback count appears with its data, not before it.
+      expect(screen.getByRole('tab', { name: 'Rollback1' })).toBeInTheDocument();
+    });
+
+    it('keeps the image table usable when the scan-summary read fails', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('keep:latest')], volumes: [], networks: [] }));
+        }
+        if (url === '/security/image-summaries') {
+          return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      render(<ResourcesView />);
+
+      expect(await screen.findByText('keep:latest')).toBeInTheDocument();
+      expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+    });
+
+    it('gives a failed external-container read its own Retry, not a confirmed-empty state', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('images:fine')], volumes: [], networks: [] }));
+        }
+        if (url === '/system/orphans') {
+          return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      expect(await screen.findByText('images:fine')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('tab', { name: /external/i }));
+
+      expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+      expect(screen.queryByText('No external containers')).not.toBeInTheDocument();
+    });
+
+    it('drops a late rollback response from the node the operator left', async () => {
+      const rollbackResolvers: Array<(r: Response) => void> = [];
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/rollback/generations') {
+          return new Promise<Response>((resolve) => rollbackResolvers.push(resolve));
+        }
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const { rerender } = render(<ResourcesView />);
+      await waitFor(() => expect(rollbackResolvers).toHaveLength(1));
+
+      nodesState.activeNode = { id: 2 };
+      rerender(<ResourcesView />);
+      await waitFor(() => expect(rollbackResolvers).toHaveLength(2));
+
+      const generation = (stackName: string) => jsonResponse([{
+        id: `gen-${stackName}`, shortId: 'abc123456789', stackName, status: 'active',
+        isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: false,
+      }]);
+
+      rollbackResolvers[1](generation('node-2-stack'));
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+      expect(await screen.findByText('node-2-stack')).toBeInTheDocument();
+
+      // Node 1's read answers after the switch; it must not appear under node 2.
+      rollbackResolvers[0](generation('ghost-stack'));
+      await waitFor(() => expect(screen.getByText('node-2-stack')).toBeInTheDocument());
+      expect(screen.queryByText('ghost-stack')).not.toBeInTheDocument();
     });
   });
 });

@@ -29,13 +29,14 @@ import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
-import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
+import { deriveResourcesMastheadState, type UsageLoad } from './resources/resourcesMasthead';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
 import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
+import { useRegionData } from '@/hooks/useRegionData';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
@@ -329,17 +330,69 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const canDeployResources = can('stack:deploy');
     const canEditSecurityPolicy = can('stack:edit');
     const { activeNode } = useNodes();
-    const [images, setImages] = useState<DockerImage[]>([]);
-    const [volumes, setVolumes] = useState<DockerVolume[]>([]);
-    const [networks, setNetworks] = useState<DockerNetwork[]>([]);
-    const [orphans, setOrphans] = useState<Record<string, UnmanagedContainer[]>>({});
-    const [rollbackGenerations, setRollbackGenerations] = useState<RollbackGeneration[]>([]);
 
-    // Inventory (tables) and disk usage load as separate requests on separate
-    // clocks, so the tables never wait on the usage figures.
-    const [inventoryState, setInventoryState] = useState<LoadState>('loading');
-    const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
-    const isLoading = inventoryState === 'loading';
+    // Loading ownership follows data ownership. The inventory tables, the
+    // external-container list, rollback generations, and scan summaries each
+    // hydrate from their own request, so a slow or failed read in one region
+    // cannot hold, or fail, the others. Disk usage keeps its own loader below
+    // because its figures are deliberately dropped when a read fails.
+    const nodeScope = activeNode?.id;
+
+    // One warning covers a failed background refresh, whichever region failed:
+    // the rows stay on screen, so the failure is reported once here instead of
+    // replacing trusted data with an error surface or stacking one toast per
+    // region. A first read that fails has no rows to keep and shows its own
+    // Retry row instead, so it does not also toast.
+    const refreshWarnedRef = useRef(false);
+    const notifyRefreshFailed = (_error: unknown, hadData: boolean) => {
+        if (!hadData || refreshWarnedRef.current) return;
+        refreshWarnedRef.current = true;
+        toast.error('Failed to refresh resources');
+    };
+
+    const inventoryRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/resources', { signal });
+        if (!res.ok) throw new Error(`/system/resources responded ${res.status}`);
+        const body = await res.json() as {
+            images?: DockerImage[];
+            volumes?: DockerVolume[];
+            networks?: DockerNetwork[];
+        };
+        return {
+            images: body.images ?? [],
+            volumes: body.volumes ?? [],
+            networks: body.networks ?? [],
+        };
+    }, 0, { onError: notifyRefreshFailed });
+
+    const orphansRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/orphans', { signal });
+        if (!res.ok) throw new Error(`/system/orphans responded ${res.status}`);
+        return await res.json() as Record<string, UnmanagedContainer[]>;
+    }, 0, { onError: notifyRefreshFailed });
+
+    const rollbackRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/rollback/generations', { signal });
+        if (!res.ok) throw new Error(`/system/rollback/generations responded ${res.status}`);
+        const body: unknown = await res.json();
+        if (!Array.isArray(body)) throw new Error('/system/rollback/generations returned a malformed body');
+        return body as RollbackGeneration[];
+    }, 0, { onError: notifyRefreshFailed });
+
+    const scanSummariesRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/security/image-summaries', { signal });
+        if (!res.ok) throw new Error(`/security/image-summaries responded ${res.status}`);
+        const body: unknown = await res.json();
+        return (body ?? {}) as Record<string, ScanSummary>;
+    }, 0, { onError: notifyRefreshFailed });
+
+    const images = inventoryRegion.data?.images ?? [];
+    const volumes = inventoryRegion.data?.volumes ?? [];
+    const networks = inventoryRegion.data?.networks ?? [];
+    const orphans = orphansRegion.data ?? {};
+    const rollbackGenerations = rollbackRegion.data ?? [];
+    const scanSummaries = scanSummariesRegion.data ?? {};
+
     const [isActioning, setIsActioning] = useState(false);
 
     // Filter state
@@ -370,74 +423,18 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Vulnerability scanning state
     const { status: trivy } = useTrivyStatus();
-    const [scanSummaries, setScanSummaries] = useState<Record<string, ScanSummary>>({});
     const [inspectScanId, setInspectScanId] = useState<number | null>(null);
     const { scanningRef: scanningImageRef, scanImage, cancelScan } = useImageScan({
         onComplete: setInspectScanId,
-        onSummaries: setScanSummaries,
+        onSummaries: scanSummariesRegion.apply,
     });
 
-    // Generation counters so a slow fetch for a previously-active node cannot
-    // stomp the visible resources after the user switches nodes. Each call
-    // claims a generation; only the latest call is allowed to write state.
-    const inventoryGenerationRef = useRef(0);
+    // Disk usage loads on its own clock, separate from the tables, so the
+    // inventory never waits on `docker system df`.
+    const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
+    // Generation counter so a slow fetch for a previously-active node cannot
+    // stomp the visible figures after the user switches nodes.
     const usageGenerationRef = useRef(0);
-
-    // `background` refreshes keep the current rows on screen (after a prune or
-    // delete); a foreground load (mount, node switch, Retry) shows skeletons.
-    // A background failure still ends a superseded foreground load, so the
-    // tables can never stay on skeletons.
-    const failInventory = (background: boolean) => {
-        if (background) {
-            toast.error('Failed to refresh resources');
-            setInventoryState((state) => (state === 'loading' ? 'error' : state));
-        } else {
-            setInventoryState('error');
-        }
-    };
-
-    const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
-        const generation = ++inventoryGenerationRef.current;
-        if (!background) setInventoryState('loading');
-        try {
-            const [resourcesRes, orphansRes, summariesRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/resources'),
-                apiFetch('/system/orphans'),
-                apiFetch('/security/image-summaries').catch(() => null),
-                apiFetch('/system/rollback/generations').catch(() => null),
-            ]);
-
-            // Resolve every body before the staleness check so a stale
-            // generation cannot write any subset of the resource slices.
-            const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
-            const orphansData = orphansRes.ok ? await orphansRes.json() : null;
-            const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
-            const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
-
-            if (inventoryGenerationRef.current !== generation) return;
-
-            if (resourcesData) {
-                setImages(resourcesData.images ?? []);
-                setVolumes(resourcesData.volumes ?? []);
-                setNetworks(resourcesData.networks ?? []);
-                setInventoryState('ready');
-            } else {
-                console.error('Failed to fetch resources', resourcesRes.status);
-                failInventory(background);
-            }
-            if (orphansData) {
-                setOrphans(orphansData);
-                setSelectedOrphans([]);
-            }
-            if (summariesData) setScanSummaries(summariesData);
-            setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
-        } catch (err) {
-            if (inventoryGenerationRef.current !== generation) return;
-            console.error('Failed to fetch data', err);
-            if (!background) toast.error('Failed to load resources data');
-            failInventory(background);
-        }
-    };
 
     // A failed usage load drops the figures rather than keeping stale ones: the
     // masthead then reads "Disk usage unknown" with a Retry instead of a number
@@ -465,25 +462,33 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
-    /** After a mutation: refresh the tables (awaited) and the usage figures (not awaited; the tables should not wait on them). */
-    const refreshAll = async () => {
+    /** After a mutation: refresh every region. The tables keep their current rows
+     *  until each response lands, so the page never drops back to a cold skeleton;
+     *  disk usage is not awaited, because the tables must not wait on it. The
+     *  warning flag resets so each refresh reports at most one failure. */
+    const refreshAll = () => {
+        refreshWarnedRef.current = false;
         void loadUsage({ background: true });
-        await loadInventory({ background: true });
+        inventoryRegion.refresh();
+        orphansRegion.refresh();
+        rollbackRegion.refresh();
+        scanSummariesRegion.refresh();
     };
 
     useEffect(() => {
         // Nothing from the previous node may show under the new one while its
-        // data loads, including when that load fails.
+        // data loads, including when that load fails. The inventory, external,
+        // rollback, and scan-summary regions are scope-bound and reset
+        // themselves; disk usage owns its own figures.
         setUsageLoad({ status: 'loading' });
-        setImages([]);
-        setVolumes([]);
-        setNetworks([]);
-        setOrphans({});
-        setSelectedOrphans([]);
-        setRollbackGenerations([]);
-        void loadInventory();
         void loadUsage();
     }, [activeNode]);
+
+    // A fresh external-container read invalidates any selection made against the
+    // previous list.
+    useEffect(() => {
+        setSelectedOrphans([]);
+    }, [orphansRegion.data]);
 
     // A selected image belongs to the node it was listed on.
     useEffect(() => {
@@ -494,10 +499,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // the node it started on (the hook also stops it on unmount).
     useEffect(() => cancelScan, [activeNode?.id, cancelScan]);
 
-    // Bump the fetch generations on unmount so a fetch that resolves after the
-    // view is gone cannot run state setters or surface a load-error toast.
+    // Bump the usage generation on unmount so a fetch that resolves after the
+    // view is gone cannot run state setters.
     useEffect(() => () => {
-        inventoryGenerationRef.current += 1;
         usageGenerationRef.current += 1;
     }, []);
 
@@ -593,7 +597,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Pruned ${scopeLabel} ${confirmPrune.target}.${reclaimedLabel}`);
             }
-            await refreshAll();
+            refreshAll();
             setConfirmPrune(null);
         } catch (error) {
             console.error('Failed to prune', error);
@@ -620,7 +624,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || `Failed to delete ${confirmDelete.type.slice(0, -1)}`);
             }
             toast.success(`Deleted ${confirmDelete.type.slice(0, -1)}`);
-            await refreshAll();
+            refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || `Failed to delete ${confirmDelete.type.slice(0, -1)}`));
@@ -656,7 +660,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (!data?.results) {
                 // Nothing says which containers were removed, so success is not claimed.
                 toast.warning('The purge finished but its result could not be read. Check the list below.');
-                await refreshAll();
+                refreshAll();
                 return;
             }
             const failed = data.results.filter(r => !r.success);
@@ -667,7 +671,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.warning(`Purged ${selectedOrphans.length - failed.length} of ${selectedOrphans.length} external containers. ${failed[0].error ?? 'Some could not be removed.'}`);
             }
-            await refreshAll();
+            refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || 'Failed to purge selected containers.'));
@@ -694,6 +698,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const mastheadModel = deriveResourcesMastheadState(usageLoad);
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
+
+    // The phone masthead restates the inventory; an unread inventory says so
+    // rather than reporting zero images, volumes, and networks.
+    const inventoryMeta = inventoryRegion.data !== null
+        ? `${images.length} images · ${volumes.length} volumes · ${networks.length} networks`
+        : inventoryRegion.status === 'failed'
+            ? 'Resource inventory unavailable'
+            : 'Reading resource inventory';
 
     // Reclaim frees everything the masthead advertises. Order matters:
     // volumes first, while stopped containers still hold a reference to their
@@ -726,7 +738,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
             }
-            await refreshAll();
+            refreshAll();
             setConfirmReclaim(false);
         } catch (error) {
             console.error('Failed to reclaim', error);
@@ -743,7 +755,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         <ResourcesActions
             isAdmin={isAdmin}
             canReclaim={mastheadModel.reclaimableItems > 0}
-            reclaimDisabled={isLoading}
+            reclaimDisabled={usageLoad.status === 'loading'}
             usageFailed={usageLoad.status === 'error'}
             onRetryUsage={() => void loadUsage()}
             onReclaim={() => setConfirmReclaim(true)}
@@ -767,10 +779,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         active={resourceTab}
                         onSelect={setResourceTab}
                         tabs={[
-                            { value: 'images', label: 'Images', count: images.length },
-                            { value: 'volumes', label: 'Volumes', count: volumes.length },
-                            { value: 'unmanaged', label: 'External', count: totalOrphansCount },
-                            { value: 'rollback', label: 'Rollback', count: rollbackGenerations.length },
+                            { value: 'images', label: 'Images', count: inventoryRegion.data === null ? undefined : images.length },
+                            { value: 'volumes', label: 'Volumes', count: inventoryRegion.data === null ? undefined : volumes.length },
+                            { value: 'unmanaged', label: 'External', count: orphansRegion.data === null ? undefined : totalOrphansCount },
+                            { value: 'rollback', label: 'Rollback', count: rollbackRegion.data === null ? undefined : rollbackGenerations.length },
                         ]}
                     />
                     </>
@@ -782,22 +794,28 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 <TabsHighlightItem key={tab} value={tab}>
                                     <TabsTrigger value={tab}>
                                         {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
-                                            {tab === 'images' ? images.length : volumes.length}
-                                        </span>
+                                        {inventoryRegion.data !== null && (
+                                            <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
+                                                {tab === 'images' ? images.length : volumes.length}
+                                            </span>
+                                        )}
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             ))}
                             <TabsHighlightItem value="unmanaged">
                                 <TabsTrigger value="unmanaged" className="relative">
                                     External
-                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
+                                    {orphansRegion.data !== null && (
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
+                                    )}
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <TabsHighlightItem value="rollback">
                                 <TabsTrigger value="rollback" className="relative">
                                     Rollback
-                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{rollbackGenerations.length}</span>
+                                    {rollbackRegion.data !== null && (
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{rollbackGenerations.length}</span>
+                                    )}
                                 </TabsTrigger>
                             </TabsHighlightItem>
                         </TabsHighlight>
@@ -857,8 +875,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="images" onRetry={() => void loadInventory()} />
+                            {inventoryRegion.status === 'loading' ? <TableSkeleton cols={5} /> : inventoryRegion.status === 'failed' ? (
+                                <TableLoadError cols={5} noun="images" onRetry={inventoryRegion.refresh} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1018,8 +1036,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="volumes" onRetry={() => void loadInventory()} />
+                            {inventoryRegion.status === 'loading' ? <TableSkeleton cols={5} /> : inventoryRegion.status === 'failed' ? (
+                                <TableLoadError cols={5} noun="volumes" onRetry={inventoryRegion.refresh} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1115,13 +1133,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 && inventoryState === 'loading' ? (
-                            <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
-                        ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
-                            <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
-                                <span>Could not load external containers.</span>
-                                <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
-                            </div>
+                        {orphansRegion.data === null ? (
+                            orphansRegion.status === 'failed' ? (
+                                <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
+                                    <span>Could not load external containers.</span>
+                                    <Button variant="outline" size="sm" onClick={orphansRegion.refresh}>Retry</Button>
+                                </div>
+                            ) : (
+                                <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
+                            )
                         ) : totalOrphansCount === 0 ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
@@ -1183,7 +1203,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     <TabsContent value="rollback" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <RollbackGenerationsTab
                             generations={rollbackGenerations}
-                            isLoading={isLoading}
+                            isLoading={rollbackRegion.data === null && rollbackRegion.status !== 'failed'}
+                            loadError={rollbackRegion.data === null && rollbackRegion.status === 'failed'}
+                            onRetry={rollbackRegion.refresh}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
                             onReleased={refreshAll}
@@ -1349,7 +1371,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     state={mastheadModel.state}
                     stateTone={MOBILE_STATE_TONE[mastheadModel.tone]}
                     live={false}
-                    meta={`${images.length} images · ${volumes.length} volumes · ${networks.length} networks`}
+                    meta={inventoryMeta}
                     right={headerActions}
                 />
                 <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_[data-radix-scroll-area-viewport]>div]:!block [&_table]:min-w-[640px]">
