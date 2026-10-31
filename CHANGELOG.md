@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.98.2](https://github.com/Studio-Saelix/sencho/compare/v0.98.1...v0.98.2) (2026-10-31)
+
+
+### Added
+
+* encrypt off-site snapshot archives with a passphrase ([#2134](https://github.com/Studio-Saelix/sencho/issues/2134)) ([e80bd2c](https://github.com/Studio-Saelix/sencho/commit/e80bd2c2a86e211c6c56ece5bc517e93056fcb88))
+* **fleet:** redesign the Actions tab as a quiet list with task sheets ([#2197](https://github.com/Studio-Saelix/sencho/issues/2197)) ([64b4911](https://github.com/Studio-Saelix/sencho/commit/64b491163a3ddf9e739b0b2becbf4cdc1d8a3659))
+* **fleet:** refuse operations that would stop the container carrying Sencho's Docker connection ([#2195](https://github.com/Studio-Saelix/sencho/issues/2195)) ([9b56923](https://github.com/Studio-Saelix/sencho/commit/9b56923991f7434dc2e8c3c262c2d784629bc275)), thanks @Crosis47
+* **mesh:** honest membership confirmations, copyable addresses, readable failures ([#2015](https://github.com/Studio-Saelix/sencho/issues/2015)) ([e283ebd](https://github.com/Studio-Saelix/sencho/commit/e283ebdaaac7cf641d909ba4a45a7beaeee3169e))
+* **mesh:** proxy-mode dial headers and CA bundle, precise dial failure labels ([#2014](https://github.com/Studio-Saelix/sencho/issues/2014)) ([dc32080](https://github.com/Studio-Saelix/sencho/commit/dc32080a2d4cd8629686ad6312dbb374bab3d5aa))
+* **recovery:** add the data-recovery foundation contracts, with no backup or restore yet ([#2213](https://github.com/Studio-Saelix/sencho/issues/2213)) ([3d07549](https://github.com/Studio-Saelix/sencho/commit/3d075493c362a2211c817798d266b029db7b4929))
+* **security:** make evidence availability an explicit deploy-gate policy ([#2056](https://github.com/Studio-Saelix/sencho/issues/2056)) ([51bad98](https://github.com/Studio-Saelix/sencho/commit/51bad9827c0134d19897de6c1f3196b8d3a9e4eb))
+
+
+### Fixed
+
+* **deps:** bump follow-redirects to 1.16.2 ([#2214](https://github.com/Studio-Saelix/sencho/issues/2214)) ([0068be2](https://github.com/Studio-Saelix/sencho/commit/0068be23969755b973ac1aaf050e500700106d88))
+* **docker:** bump go-jose to v4.1.6 in the source-built Docker CLI ([#2207](https://github.com/Studio-Saelix/sencho/issues/2207)) ([027e2f0](https://github.com/Studio-Saelix/sencho/commit/027e2f098eb83c6a4a0e06200a30bd9e729b6d4e))
+* **fleet:** show the same connection pin on the phone card and the topology map ([#2198](https://github.com/Studio-Saelix/sencho/issues/2198)) ([a01bef7](https://github.com/Studio-Saelix/sencho/commit/a01bef7ffd117c18a052b14d56737ad43061f597))
+* **fleet:** stop showing "Update available" for unreachable nodes ([#2202](https://github.com/Studio-Saelix/sencho/issues/2202)) ([f8178ea](https://github.com/Studio-Saelix/sencho/commit/f8178ea935d899188c2a120c98aedd43bd3f38b4))
+* **mesh:** keep aliases and port reservations stable while a node is offline ([#2012](https://github.com/Studio-Saelix/sencho/issues/2012)) ([54c2e10](https://github.com/Studio-Saelix/sencho/commit/54c2e1098f6d99f60d0dba548acd67062509f62f))
+* **mesh:** remove the leftover paid-tier gate ([#2021](https://github.com/Studio-Saelix/sencho/issues/2021)) ([0dd0270](https://github.com/Studio-Saelix/sencho/commit/0dd02704a27a88ee0826982dd08b8a752d487abb))
+* **security:** log the real cause when a deploy block comes from failed evidence ([#2200](https://github.com/Studio-Saelix/sencho/issues/2200)) ([70289ff](https://github.com/Studio-Saelix/sencho/commit/70289ff8c51a5a780ffefadecb8ffa4483a41a96))
+* **settings:** rename Recovery Vault to Snapshot Vault and hold the managed vault behind the experimental flag ([#2196](https://github.com/Studio-Saelix/sencho/issues/2196)) ([34e6fd7](https://github.com/Studio-Saelix/sencho/commit/34e6fd7d0751db0983f77c919f0342a11912a45a))
+
 ## [0.98.1](https://github.com/Studio-Saelix/sencho/compare/v0.98.0...v0.98.1) (2026-10-25)
 
 
