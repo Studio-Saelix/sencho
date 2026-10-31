@@ -766,6 +766,7 @@ export function CloudBackupSection() {
                                 size="sm"
                                 className="self-start"
                                 pending={savingEncryption}
+                                disabled={saving}
                                 busyLabel="Saving"
                                 onClick={handleSavePassphrase}
                             >
@@ -881,7 +882,7 @@ export function CloudBackupSection() {
                                 {testing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} /> : null}
                                 Test
                             </Button>
-                            <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving || operationBusy}>
+                            <SettingsPrimaryButton size="sm" onClick={handleSaveCustom} disabled={saving || savingEncryption || operationBusy}>
                                 {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : null}
                                 Save
                             </SettingsPrimaryButton>
@@ -945,7 +946,7 @@ export function CloudBackupSection() {
                             <Label className="text-sm">Auto-upload</Label>
                             <p className="text-xs text-muted-foreground">Automatically upload every fleet snapshot to this bucket.</p>
                         </div>
-                        <TogglePill checked={custom.auto_upload} disabled={saving || operationBusy} onChange={handleAutoUploadToggle} />
+                        <TogglePill checked={custom.auto_upload} disabled={saving || savingEncryption || operationBusy} onChange={handleAutoUploadToggle} />
                     </div>
                     {encryptionFields}
                 </div>

@@ -447,6 +447,45 @@ describe('CloudBackupSection managed vault discovery', () => {
         pending.resolve(json({}));
         await waitFor(() => expect(screen.getByRole('switch', { name: 'Encrypt archives' })).toBeEnabled());
     });
+
+    it('holds Save and Auto-upload while an encryption write is in flight', async () => {
+        // A destination write that times out rereads the encryption setting, so
+        // it must not overlap an encryption write that has not answered yet.
+        const pending = deferredResponse();
+        mockProvider('custom', 200, FILLED_CUSTOM);
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && options?.method === 'PUT' ? pending.promise : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('switch', { name: 'Encrypt archives' }));
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled());
+        expect(screen.getAllByRole('switch').find(el => el.getAttribute('aria-label') !== 'Encrypt archives')).toBeDisabled();
+
+        pending.resolve(json({}));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
+    });
+
+    it('holds Save passphrase while a destination write is in flight', async () => {
+        const pending = deferredResponse();
+        mockProvider('custom', 200, FILLED_CUSTOM);
+        const base = apiFetch.getMockImplementation()!;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string }) => (
+            path === '/cloud-backup/config' && options?.method === 'PUT' ? pending.promise : base(path, options)
+        ));
+        render(<CloudBackupSection />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole('switch', { name: 'Encrypt archives' }));
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save passphrase' })).toBeDisabled());
+
+        pending.resolve(json({}));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save passphrase' })).toBeEnabled());
+    });
 });
 
 const customConfig = {
