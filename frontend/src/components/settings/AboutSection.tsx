@@ -8,7 +8,6 @@ import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { useWhatsNewPreference } from '@/hooks/useWhatsNewPreference';
-import { whatsNewEntries } from '@/whats-new/entries';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import {
@@ -145,24 +144,20 @@ export function AboutSection() {
                 ) : null}
             </SettingsSection>
 
-            {/* Hidden until an entry exists, matching the nav trigger: the toggle
-                would otherwise control an icon that cannot appear. */}
-            {whatsNewEntries.length > 0 && (
-                <SettingsSection title="Preferences">
-                    <SettingsField
-                        label="Show What's New"
-                        helper="Highlight the sparkle icon in the top bar when a new feature ships."
-                    >
-                        <TogglePill
-                            id="whats-new-enabled"
-                            // Visible text is only ON/OFF, so the setting needs a name.
-                            aria-label="Show What's New"
-                            checked={whatsNewEnabled}
-                            onChange={setWhatsNewEnabled}
-                        />
-                    </SettingsField>
-                </SettingsSection>
-            )}
+            <SettingsSection title="Preferences">
+                <SettingsField
+                    label="Show What's New"
+                    helper="Show the sparkle icon in the top bar and highlight it after Sencho updates to a new release."
+                >
+                    <TogglePill
+                        id="whats-new-enabled"
+                        // Visible text is only ON/OFF, so the setting needs a name.
+                        aria-label="Show What's New"
+                        checked={whatsNewEnabled}
+                        onChange={setWhatsNewEnabled}
+                    />
+                </SettingsField>
+            </SettingsSection>
 
             <SettingsSection title="Links">
                 <SettingsField

@@ -29,7 +29,7 @@ import { parseRemotePolicyEvidence } from '../services/allowedPolicyEvidence';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions, policyEvidenceFor, type AllowedPolicyEvidence } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, FLEET_SNAPSHOT_APPLY_TIMEOUT_MS, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
-import { getLatestVersion, getLatestRelease } from '../utils/version-check';
+import { getLatestVersion, getLatestRelease, getReleaseByVersion } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { validateStackPatternForRedos } from '../helpers/stackPattern';
@@ -1487,11 +1487,26 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     res.status(500).json({ error: 'Failed to fetch update status' });
   }
 });
-// Release notes for the Changelog tab in the Node Updates sheet.
+// Release notes for the Changelog tab in the Node Updates sheet (latest release)
+// and for What's New (`?version=` selects the release this instance runs).
 fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
     const forceRefresh = req.query.recheck === 'true';
-    const release = await getLatestRelease(forceRefresh);
+    const rawVersion = req.query.version;
+    if (rawVersion !== undefined && (typeof rawVersion !== 'string' || semver.valid(rawVersion) !== rawVersion)) {
+      res.status(400).json({ error: 'Invalid version' });
+      return;
+    }
+    const requested = typeof rawVersion === 'string' ? rawVersion : null;
+    const release = requested
+      ? await getReleaseByVersion(requested, forceRefresh)
+      : await getLatestRelease(forceRefresh);
+    if (requested && !release) {
+      // A named release that cannot be loaded is a failed lookup, not an empty
+      // release; callers must be able to tell the two apart.
+      res.status(502).json({ error: 'Release notes unavailable' });
+      return;
+    }
     res.json({
       // Bind the notes to the release they belong to so the frontend can tell
       // when the advertised latest version has moved past the loaded notes.

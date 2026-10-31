@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { stripHtmlComments } from '@/lib/releaseHighlights';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
@@ -319,7 +320,7 @@ export function NodeUpdatesSheet({
                                     Release {formatVersion(releaseVersion)}
                                 </div>
                             )}
-                            <MarkdownContent>{releaseNotes}</MarkdownContent>
+                            <MarkdownContent>{stripHtmlComments(releaseNotes)}</MarkdownContent>
                             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-card-border/40 pt-3">
                                 {releaseHtmlUrl && (
                                     <a
