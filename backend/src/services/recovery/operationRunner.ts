@@ -700,9 +700,9 @@ export class RecoveryEngineService {
     const operationId = started.operation.id;
     if (confirmsOnly) {
       this.operations.finish(operationId, { state: 'succeeded' });
-      return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+    } else {
+      this.schedule(operationId, () => this.runRepositoryInit(operationId, input.replace, generation));
     }
-    this.schedule(operationId, () => this.runRepositoryInit(operationId, input.replace, generation));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }
 
