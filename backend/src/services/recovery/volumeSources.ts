@@ -177,6 +177,7 @@ export function parseProbeReport(line: string): ProbeReport | null {
       mode: record.mode as number,
     };
   } catch {
+    // Anything that is not one JSON object of integers is not a probe report.
     return null;
   }
 }

@@ -470,6 +470,34 @@ describe('restore', () => {
     expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
   });
 
+  it('requires the target stack\'s access for a name that matches its Compose project', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const { pointId } = await seedPoint();
+    // The stack directory is `stack-dir`, but Compose names its volumes after the
+    // project, so a target called `stack-dir_data` is still that stack's namespace.
+    const fs = await import('fs');
+    const path = await import('path');
+    fs.mkdirSync(path.join(process.env.COMPOSE_DIR as string, 'renamed'), { recursive: true });
+    fs.writeFileSync(
+      path.join(process.env.COMPOSE_DIR as string, 'renamed', 'docker-compose.yml'),
+      'name: stack-dir\nservices:\n  web:\n    image: nginx\n',
+    );
+    runner.RecoveryEngineService.setEngineFactoryForTests(() => engineReturning({}) as never);
+    service().markReadyForTests();
+
+    await expect(service().admitRestore({
+      nodeId,
+      pointId,
+      targetVolumeName: 'stack-dir_data',
+      actor: 'mallory',
+      idempotencyKey: 'restore-cross',
+      requestDigest: runner.sha256Digest(['restore', pointId, 'stack-dir_data', 'new_volume']),
+      transport: 'local',
+      authorize: allowAll,
+      authorizeCrossStack: () => false,
+    })).rejects.toMatchObject({ errorClass: 'permission_denied' });
+  });
+
   it('aborts without touching a target it did not create', async () => {
     // createVolume is a no-op, so the name belongs to a volume with no label.
     const fake = stubDocker(fakeDocker({

@@ -274,6 +274,8 @@ export class RecoveryEngineService {
     try {
       this.repositories.readSecret(repository.id);
     } catch {
+      // A key that no longer decrypts (the instance key was replaced) is a
+      // missing key, and it is the one thing that makes every point unreadable.
       return { state: 'unavailable', reason: 'repository_key_unavailable' };
     }
     if (!repository.repositoryFingerprint) return { state: 'unavailable', reason: 'repository_not_initialized' };
@@ -588,9 +590,15 @@ export class RecoveryEngineService {
 
     // A target named `<project>_...` for a known stack's Compose project would
     // plant data under a name that stack's own volumes use, so it needs the same
-    // access that changing that stack does.
-    for (const stackName of knownStackNames) {
-      if (!input.targetVolumeName.startsWith(`${stackName}_`)) continue;
+    // access that changing that stack does. The project name can differ from the
+    // stack directory (a `name:` key, or a case difference), and Compose names its
+    // volumes after the project, so both spellings have to be checked.
+    const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
+    const crossStackTargets = new Map<string, string>();
+    for (const stackName of knownStackNames) crossStackTargets.set(stackName, stackName);
+    for (const [projectName, stackName] of projectToStack) crossStackTargets.set(projectName, stackName);
+    for (const [prefix, stackName] of crossStackTargets) {
+      if (!input.targetVolumeName.startsWith(`${prefix}_`)) continue;
       if (!input.authorizeCrossStack(stackName)) throw new RecoveryError('permission_denied');
     }
 
