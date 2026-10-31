@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, Fragment } from 'react';
+import { useMemo, useState, Fragment } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink, Lock, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
-import { apiFetch } from '@/lib/api';
-import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/context/AuthContext';
+import { useFleetContainerLabels, type LabelsNodeRef } from './useFleetContainerLabels';
 import {
   LABEL_DISAMBIGUATION_COPY,
   SOURCE_LABELS,
@@ -17,7 +16,6 @@ import {
   matchesSearch,
   sourcesPresent,
   type ContainerLabelRow,
-  type FleetLabelInventoryResponse,
   type LabelIndexRow,
   type LabelSource,
   type LabelValue,
@@ -29,6 +27,10 @@ const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tr
 
 interface ContainerLabelsTabProps {
   onNavigateToNode: (nodeId: number, stackName: string) => void;
+  /** The fleet's nodes, read one at a time so each answer draws as it lands. */
+  nodes: readonly LabelsNodeRef[];
+  /** True while the node registry is still loading, so an empty list is not final. */
+  nodesLoading?: boolean;
 }
 
 function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () => void }) {
@@ -50,35 +52,18 @@ function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () 
   );
 }
 
-export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps) {
+export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = false }: ContainerLabelsTabProps) {
   const { isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>('container');
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
   const [revealSecrets, setRevealSecrets] = useState(false);
-  const [data, setData] = useState<FleetLabelInventoryResponse | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
 
-  const fetchInventory = useCallback(async (reveal = revealSecrets) => {
-    setLoading(true);
-    try {
-      const qs = reveal ? '?reveal=1' : '';
-      const res = await apiFetch(`/fleet/container-labels${qs}`, { localOnly: true });
-      if (!res.ok) throw new Error('Failed to load Docker label audit');
-      setData(await res.json() as FleetLabelInventoryResponse);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load Docker label audit';
-      toast.error(msg);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [revealSecrets]);
-
-  useEffect(() => {
-    void fetchInventory();
-  }, [fetchInventory]);
+  const { data, loading, progress, refresh, retryFailed } = useFleetContainerLabels(nodes, revealSecrets);
+  // The registry is the tab's own input, so its load counts as this tab's load.
+  const busy = loading || (nodes.length === 0 && nodesLoading);
+  const noNodes = nodes.length === 0 && !nodesLoading;
 
   const allContainers = useMemo(() => {
     if (!data) return [] as Array<ContainerLabelRow & { nodeId: number; nodeName: string }>;
@@ -123,21 +108,24 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
     });
   };
 
-  // Nodes that were unreachable (nodeErrors) or whose inventory came back partial (some
-  // containers or images could not be inspected). Named so the warning is truthful.
+  // Nodes whose read failed (with whatever reason the failure carried) or whose
+  // inventory came back partial (some containers or images could not be
+  // inspected). Named so the warning is truthful.
   const degradedNodes = useMemo(() => {
-    const unreachable: string[] = [];
+    const unread: Array<{ name: string; error: string }> = [];
     const partial: string[] = [];
+    let hasData = false;
     if (data) {
       const nameById = new Map(data.nodes.map(n => [n.nodeId, n.nodeName] as const));
-      for (const idStr of Object.keys(data.nodeErrors)) {
-        unreachable.push(nameById.get(Number(idStr)) ?? `node ${idStr}`);
+      for (const [idStr, error] of Object.entries(data.nodeErrors)) {
+        unread.push({ name: nameById.get(Number(idStr)) ?? `node ${idStr}`, error });
       }
       for (const n of data.nodes) {
+        if (n.status === 'ok' && n.inventory !== null) hasData = true;
         if (n.status === 'ok' && n.inventory?.partial) partial.push(n.nodeName);
       }
     }
-    return { unreachable, partial };
+    return { unread, partial, hasData };
   }, [data]);
 
   const toggleExpanded = (id: string) => {
@@ -151,8 +139,21 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
 
   const handleReveal = () => {
     setRevealSecrets(true);
-    void fetchInventory(true);
   };
+
+  if (noNodes) {
+    return (
+      <div className="space-y-4" data-testid="container-labels-tab">
+        <p className="text-xs text-stat-subtitle leading-relaxed max-w-3xl">{LABEL_DISAMBIGUATION_COPY}</p>
+        <p className="text-sm text-stat-subtitle">No nodes could be listed. Reload the page to try again.</p>
+      </div>
+    );
+  }
+
+  // No node answered and none of them has an inventory to fall back on: the
+  // banner owns that fact, and Retry sits in it, so the empty table below does
+  // not repeat either one.
+  const noFleetData = degradedNodes.unread.length > 0 && !degradedNodes.hasData;
 
   return (
     <div className="space-y-4" data-testid="container-labels-tab">
@@ -218,21 +219,36 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
               </PopoverContent>
             </Popover>
           )}
-          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={() => void fetchInventory()} disabled={loading} aria-label="Refresh">
-            <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={refresh} disabled={busy} aria-label="Refresh">
+            <RefreshCw className={cn('h-4 w-4', busy && 'animate-spin')} />
           </Button>
         </div>
       </div>
 
-      {loading && !data && (
+      {loading && progress && (
+        <p className="text-xs text-stat-subtitle">Checking {progress.done} of {progress.total} nodes...</p>
+      )}
+
+      {busy && !data && (
         <p className="text-sm text-stat-subtitle">Loading Docker label audit...</p>
       )}
 
-      {!loading && data && (degradedNodes.unreachable.length > 0 || degradedNodes.partial.length > 0) && (
+      {data && (degradedNodes.unread.length > 0 || degradedNodes.partial.length > 0) && (
         <p className="text-xs text-warning">
-          {degradedNodes.unreachable.length > 0 && `Could not reach ${degradedNodes.unreachable.join(', ')}. `}
+          {degradedNodes.unread.length > 0 && `Could not read ${degradedNodes.unread.map(n => `${n.name} (${n.error})`).join(', ')}. `}
           {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
-          Showing partial fleet data.
+          {degradedNodes.hasData ? 'Showing partial fleet data.' : 'No fleet data could be read.'}
+          {degradedNodes.unread.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-1 h-5 px-1.5 align-baseline text-xs"
+              onClick={retryFailed}
+              disabled={loading}
+            >
+              Retry
+            </Button>
+          )}
         </p>
       )}
 
@@ -302,9 +318,11 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
                   </Fragment>
                 );
               })}
-              {filteredContainers.length === 0 && !loading && (
+              {filteredContainers.length === 0 && !busy && !noFleetData && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-sm text-stat-subtitle py-6 text-center">No containers match this filter.</TableCell>
+                  <TableCell colSpan={7} className="text-sm text-stat-subtitle py-6 text-center">
+                    No containers match this filter.
+                  </TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -323,8 +341,10 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
           {filteredByLabel.map((row) => (
             <LabelGroupCard key={`${row.key}=${row.value}=${row.source}`} row={row} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} onNavigateToNode={onNavigateToNode} />
           ))}
-          {filteredByLabel.length === 0 && !loading && (
-            <p className="text-sm text-stat-subtitle py-4 text-center">No labels match this filter.</p>
+          {filteredByLabel.length === 0 && !busy && !noFleetData && (
+            <p className="text-sm text-stat-subtitle py-4 text-center">
+              No labels match this filter.
+            </p>
           )}
         </div>
       )}

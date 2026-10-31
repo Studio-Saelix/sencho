@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ContainerLabelsTab } from '../ContainerLabelsTab';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
@@ -13,6 +13,20 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+
+const NODE_LOCAL = [{ id: 1, name: 'Local' }];
+
+/** Answers `/fleet/container-labels?nodeId=N` from a per-node body, or a failed read for a node with none. */
+function answerWith(pieces: Record<number, unknown>): void {
+  vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+    const nodeId = Number(/nodeId=(\d+)/.exec(String(path))?.[1]);
+    const body = pieces[nodeId];
+    if (body === undefined) {
+      return { ok: false, status: 503, json: async () => ({ error: 'unreachable' }) } as Response;
+    }
+    return { ok: true, json: async () => body } as Response;
+  });
+}
 
 const mockFleet = {
   nodes: [
@@ -64,15 +78,13 @@ const dupMock = {
 
 describe('ContainerLabelsTab', () => {
   beforeEach(() => {
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      json: async () => mockFleet,
-    } as Response);
+    vi.mocked(apiFetch).mockReset();
+    answerWith({ 1: mockFleet });
   });
 
   it('renders audit sections and toggles view mode', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     expect(await screen.findByText(LABEL_DISAMBIGUATION_COPY)).toBeInTheDocument();
     expect(screen.getByText('Docker label audit')).toBeInTheDocument();
     expect(await screen.findByText('web-1')).toBeInTheDocument();
@@ -83,8 +95,8 @@ describe('ContainerLabelsTab', () => {
 
   it('keeps the same key=value distinct per source with its own badge', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getAllByText('dup.label')).toHaveLength(2);
     // The misleading "External automation label" marker on non-Compose keys was removed.
@@ -93,7 +105,7 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-label list by search text', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getByText('traefik.enable')).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
@@ -103,7 +115,7 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-container list by search text', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     expect(await screen.findByText('web-1')).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
     expect(screen.queryByText('web-1')).toBeNull();
@@ -112,7 +124,7 @@ describe('ContainerLabelsTab', () => {
 
   it('exposes a facet in the Filters popover only for sources present, with exact labels', async () => {
     const user = userEvent.setup();
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     await user.click(screen.getByRole('button', { name: /Filters/ }));
     // mockFleet has only a runtime source.
@@ -122,8 +134,8 @@ describe('ContainerLabelsTab', () => {
 
   it('filters the by-label list by source facet, hiding an unpressed source', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     expect(screen.getAllByText('dup.label')).toHaveLength(2);
     await user.click(screen.getByRole('button', { name: /Filters/ }));
@@ -138,8 +150,8 @@ describe('ContainerLabelsTab', () => {
 
   it('shows the empty state when every source facet is turned off', async () => {
     const user = userEvent.setup();
-    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    answerWith({ 1: dupMock });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={NODE_LOCAL} />);
     await user.click(await screen.findByText('By label'));
     await user.click(screen.getByRole('button', { name: /Filters/ }));
     await user.click(screen.getByRole('button', { name: 'Image' }));
@@ -148,20 +160,137 @@ describe('ContainerLabelsTab', () => {
   });
 
   it('names unreachable and partial nodes in the warning', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    answerWith({
+      1: {
         nodes: [
           { nodeId: 1, nodeName: 'Local', status: 'ok' as const, error: null, inventory: { nodeId: 1, partial: true, generatedAt: Date.now(), containers: [], byLabel: [] } },
-          { nodeId: 2, nodeName: 'Edge', status: 'error' as const, error: 'boom', inventory: null },
         ],
         aggregatedByLabel: [],
-        nodeErrors: { 2: 'boom' },
+        nodeErrors: {},
         generatedAt: Date.now(),
-      }),
-    } as Response);
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
-    expect(await screen.findByText(/Could not reach Edge/)).toBeInTheDocument();
+      },
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText(/Could not read Edge \(unreachable\)/)).toBeInTheDocument();
     expect(screen.getByText(/could not be inspected on Local/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('keeps a node\'s rows when the hub reports it unreachable after a good answer', async () => {
+    const user = userEvent.setup();
+    let edgeDown = false;
+    const edgePiece = {
+      nodes: [{
+        nodeId: 2,
+        nodeName: 'Edge',
+        status: 'ok' as const,
+        error: null,
+        inventory: {
+          nodeId: 2,
+          partial: false,
+          generatedAt: Date.now(),
+          containers: [{
+            id: 'e1',
+            name: 'edge-web',
+            stack: 'demo',
+            service: 'web',
+            state: 'running',
+            labels: [{ key: 'traefik.enable', value: 'true', source: 'runtime' as const }],
+          }],
+          byLabel: [],
+        },
+      }],
+      aggregatedByLabel: [],
+      nodeErrors: {},
+      generatedAt: Date.now(),
+    };
+    const edgeError = {
+      nodes: [{ nodeId: 2, nodeName: 'Edge', status: 'error' as const, inventory: null, error: 'Timed out after 5s' }],
+      aggregatedByLabel: [],
+      nodeErrors: { 2: 'Timed out after 5s' },
+      generatedAt: Date.now(),
+    };
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('nodeId=2')) {
+        return { ok: true, json: async () => (edgeDown ? edgeError : edgePiece) } as Response;
+      }
+      return { ok: true, json: async () => mockFleet } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText('edge-web')).toBeInTheDocument();
+
+    edgeDown = true;
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(/Could not read Edge \(Timed out after 5s, showing its last result\)/)).toBeInTheDocument();
+    expect(screen.getByText('edge-web')).toBeInTheDocument();
+    expect(screen.getByText(/Showing partial fleet data\./)).toBeInTheDocument();
+
+    edgeDown = false;
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Could not read Edge/)).toBeNull());
+    expect(screen.getByText('edge-web')).toBeInTheDocument();
+  });
+
+  it('says no fleet data could be read when the hub reports every node unreachable', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      const nodeId = Number(/nodeId=(\d+)/.exec(String(path))?.[1]);
+      return {
+        ok: true,
+        json: async () => ({
+          nodes: [{ nodeId, nodeName: nodeId === 1 ? 'Local' : 'Edge', status: 'error', inventory: null, error: 'Timed out after 5s' }],
+          aggregatedByLabel: [],
+          nodeErrors: { [nodeId]: 'Timed out after 5s' },
+          generatedAt: Date.now(),
+        }),
+      } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText(/Could not read Local \(Timed out after 5s\)/)).toBeInTheDocument();
+    // One fact, one place: the banner names every node and says there is no
+    // fleet data, and Retry sits on the same line instead of below it.
+    const banner = screen.getByText(/No fleet data could be read\./, { selector: 'p' });
+    expect(banner).toHaveTextContent('Could not read Local (Timed out after 5s)');
+    expect(banner).toHaveTextContent('Edge (Timed out after 5s)');
+    expect(banner.querySelector('button')).toBe(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.getAllByText(/No fleet data could be read\./)).toHaveLength(1);
+    expect(screen.queryByText('No fleet data could be read.', { selector: 'td' })).toBeNull();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
+  });
+
+  it('shows a loading state, not an empty audit, before the node list arrives', async () => {
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} nodesLoading />);
+    expect(await screen.findByText('Loading Docker label audit...')).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('says no nodes could be listed when the registry is empty and settled', async () => {
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} />);
+    expect(await screen.findByText('No nodes could be listed. Reload the page to try again.')).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('shows progress while one node is still pending', async () => {
+    let releaseEdge: (r: Response) => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('nodeId=2')) {
+        return new Promise<Response>((resolve) => { releaseEdge = resolve; });
+      }
+      return { ok: true, json: async () => mockFleet } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText('Checking 1 of 2 nodes...')).toBeInTheDocument();
+    releaseEdge({ ok: true, json: async () => ({ nodes: [{ nodeId: 2, nodeName: 'Edge', status: 'ok', error: null, inventory: { nodeId: 2, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] } }], aggregatedByLabel: [], nodeErrors: {}, generatedAt: Date.now() }) } as Response);
+    await screen.findByText('web-1');
+  });
+
+  it('says no fleet data could be read when every node failed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: 'unreachable' }) } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }]} />);
+    expect(await screen.findByText(/Could not read Local \(unreachable\)/)).toBeInTheDocument();
+    expect(screen.getAllByText(/No fleet data could be read\./)).toHaveLength(1);
+    expect(screen.queryByText('No fleet data could be read.', { selector: 'td' })).toBeNull();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
   });
 });

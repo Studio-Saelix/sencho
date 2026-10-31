@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { runPool } from '@/lib/runPool';
 import type { FleetDependencyMap } from '@/lib/dependency-map-layout';
 
 /** A map older than this is re-fetched when the Map tab is reopened. */
@@ -64,17 +65,6 @@ function isMapPiece(value: unknown): value is FleetDependencyMap {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   return ['nodes', 'edges', 'flags', 'nodeErrors', 'parseErrors'].every(key => Array.isArray(v[key]));
-}
-
-async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const item = items[next++];
-      await worker(item);
-    }
-  });
-  await Promise.all(lanes);
 }
 
 /**
