@@ -395,6 +395,7 @@ describe('assembleStackDrift - findings', () => {
   });
 
   it('still reports an image mismatch for a host-network service', () => {
+    // The port skip must not hide the image finding.
     const report = assembleStackDrift({
       stack: 'app',
       declared: declared([service({ name: 'web', image: 'nginx:1.25', networkMode: 'host', ports: [port(8080)] })]),

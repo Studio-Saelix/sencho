@@ -18,14 +18,15 @@ export interface DeclaredPort {
   /** Docker assigns the host port at start, so no number is known. The entry
    *  still publishes the container; port-conflict and documented-URL consumers
    *  skip it (see `fixedPorts` in composePortSpec). Drift matches it to the
-   *  runtime container port by `targetStartPort`/`targetEndPort`, and the
-   *  ledger hash records it as `auto`. */
+   *  runtime container port and interface by `targetStartPort`/`targetEndPort`
+   *  and `hostIp`, and the ledger hash records it as `auto`. */
   dynamic?: true;
-  /** Container port range the publication targets, when known. Both readers
-   *  set it for a literal container port, so drift can match an auto-assigned
-   *  host port to the runtime `privatePort`. Only a template on the container
-   *  side leaves it off, and only the authored reader can see one: the rendered
-   *  model has already resolved it. */
+  /** Container port range an auto-assigned publication targets, when known.
+   *  Both readers set it on a dynamic port whose container side is a literal
+   *  port, so drift can match the host number Docker picks to the runtime
+   *  `privatePort`. A fixed publication carries its host number instead, and a
+   *  container side that is still a template leaves the target off (only the
+   *  authored reader can see one: the rendered model has resolved it). */
   targetStartPort?: number;
   targetEndPort?: number;
 }
@@ -373,9 +374,9 @@ function namedVolumeSource(entry: unknown): string | null {
 }
 
 /**
- * A container port after interpolation: its range, `unknown` when a caller with
- * no lookup still sees a template Compose would resolve, or null when Compose
- * would refuse the text.
+ * A container port after interpolation: its range, `unknown` when the text is
+ * still a template this caller cannot resolve, or null when Compose would
+ * refuse the text.
  */
 type DeclaredContainerTarget = ContainerPortRange | 'unknown' | null;
 
@@ -413,10 +414,10 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
       // A whole entry that is still a template ("${PORTS}") writes no host
       // side at all: it may resolve to a fixed or an auto-assigned
       // publication, so there is no shape to record. Leave it out rather than
-      // invent one, and do the same for a templated interface. A literal
-      // interface keeps the shape even when the container side is a template
-      // ("127.0.0.1::${APP_PORT}"), and an empty host part with a known
-      // container port is an ordinary auto-assigned publication.
+      // invent one, as well as when the interface is templated and the target
+      // is unknown. A literal interface keeps the shape even when the container
+      // side is a template ("127.0.0.1::${APP_PORT}"), and an empty host part
+      // with a known container port is an ordinary auto-assigned publication.
       if (target === 'unknown' && spec.hostPart === ''
         && (spec.hostIp === '' || holdsTemplate(spec.hostIp))) return null;
       return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };

@@ -144,7 +144,8 @@ interface UnresolvedDeclaration {
   protocol: string;
 }
 
-/** The declared ports a service publishes, split by whether the host number is known. */
+/** The declared ports a service publishes, split by whether the host number is
+ *  known, and whether an auto-assigned declaration names its container target. */
 interface DeclaredPorts {
   fixed: Set<string>;
   dynamic: DynamicDeclaration[];
@@ -185,10 +186,12 @@ function interfaceKey(ip: string): string {
  * declaration with no interface asks for every interface, so only an
  * all-interface binding satisfies it; a declaration naming one address needs a
  * binding on that same address. Either way a binding on a different interface
- * than the file asked for reads as drift.
+ * than the file asked for reads as drift. An interface still holding a template
+ * was never resolved, so it constrains nothing and any binding satisfies it.
  */
 function interfaceCompatible(declaredHostIp: string, runtimeHostIp: string): boolean {
-  return interfaceKey(declaredHostIp) === interfaceKey(runtimeHostIp);
+  const declared = interfaceKey(declaredHostIp);
+  return declared.includes('$') || declared === interfaceKey(runtimeHostIp);
 }
 
 /** A declared port as it reads in a finding, with no invented host number. */
@@ -399,19 +402,20 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       }
     }
 
-    // Docker discards a host-network service's port bindings: every container
-    // port is reachable on the host directly, so the declared set and the
-    // runtime set cannot be compared. The Inspector's facts special-case the
-    // same mode, and the operator docs say so.
+    // A service declared with network_mode: host has its port bindings
+    // discarded by Docker: every container port is reachable on the host
+    // directly, so the declared set and the runtime set cannot be compared.
+    // The Inspector treats the same mode as publishing every container port,
+    // and the operator docs say so.
     if (isHostNetwork(svc.networkMode)) continue;
 
     // Ports compare as exact sets, except that a port Docker assigns is matched
-    // by the container port it targets: the host number Docker picked is not a
-    // declaration and must not read as drift. The compose parser collapses a
-    // published range (e.g. "8000-8002:80") to its first port, while the runtime
-    // reports every port in the range, so a range can read as a mismatch. That
-    // errs toward reporting drift rather than hiding it, consistent with the
-    // engine's philosophy.
+    // by the container port it targets and the interface it declares: the host
+    // number Docker picked is not a declaration and must not read as drift. The
+    // compose parser collapses a published range (e.g. "8000-8002:80") to its
+    // first port, while the runtime reports every port in the range, so a range
+    // can read as a mismatch. That errs toward reporting drift rather than
+    // hiding it, consistent with the engine's philosophy.
     //
     // Each runtime binding is consumed at most once per container, fixed
     // declarations first, so a binding a fixed declaration already explains can
@@ -448,8 +452,9 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
           if (!matched) missingDynamic.add(`auto:${target}/${d.protocol}`);
         }
       }
-      // A declaration whose target never resolved is matched by protocol, and
-      // still consumes its own binding so it cannot explain a second one.
+      // A declaration whose target never resolved is matched by protocol and
+      // interface, and still consumes its own binding so it cannot explain a
+      // second one.
       for (const unknown of declaredPorts.unknownTargets) {
         const matched = take((p) => p.protocol === unknown.protocol
           && interfaceCompatible(unknown.hostIp, p.hostIp));

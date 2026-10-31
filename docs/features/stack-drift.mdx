@@ -103,6 +103,8 @@ If the Compose file declares a tag (`:latest`, `:1.25`) and the running containe
 
 A Compose port range such as `8000-8002:8000-8002` is compared conservatively. Because the runtime expands ranges into individual ports, the comparison can read as a difference even when the deployment is correct. Sencho errs toward surfacing the possible difference rather than hiding it.
 
+A service declared with `network_mode: host` is not port-compared: Docker discards its `ports:` bindings, and every container port is reachable on the host directly, so there is no published set to compare.
+
 ### Network findings and the Networking tab
 
 The **network-undeclared** and **network-missing** findings reuse the same comparison the stack's [Networking](/features/compose-networking) tab uses, so the two surfaces never disagree about a network attachment. Sencho-verified `sencho_mesh` attachments for its own container and Mesh-opted-in stacks are excluded, while a manual attachment from an opted-out stack remains actionable. The difference is history: this tab persists findings in the drift ledger over time, while the Networking tab always shows the current live state with no history. A stack with an open network finding also counts toward the **Drift** chip in the Fleet Overview's Networking filter group, so a network-attachment mismatch is visible both per-stack here and across the fleet there.

@@ -492,7 +492,17 @@ describe('drift against a running service with an auto-assigned port', () => {
     ])).toEqual([]);
   });
 
-  it('matches a declaration whose container target is unresolved by protocol only, once', () => {
+  it('does not compare declared ports for a host-network service', () => {
+    // The rendered adapter is the path Stack Drift uses, so this pins that the
+    // mode survives it and reaches the port comparison.
+    const declared = declaredFromEffectiveModel(render({
+      web: { ...app, network_mode: 'host', ports: ['8080:80', '9000'] },
+    }));
+    expect(assembleStackDrift({ stack: 'proj', declared, containers: [running([])] }).findings
+      .filter(f => f.kind === 'ports-mismatch')).toEqual([]);
+  });
+
+  it('matches a declaration whose container target is unresolved by protocol and interface, once', () => {
     const unresolved = (count: number, hostIp = ''): DeclaredCompose => ({
       services: [{
         name: 'web', dependsOn: [], networks: [], volumes: [],
@@ -518,9 +528,15 @@ describe('drift against a running service with an auto-assigned port', () => {
     expect(portMatches(unresolved(2), [one])).toMatchObject([{ expected: 'auto/tcp' }]);
     expect(portMatches(unresolved(2), [one, two])).toEqual([]);
     // The written interface is part of the match, as it is for a resolved target.
-    expect(portMatches(unresolved(1, '127.0.0.1'), [one])).toHaveLength(1);
+    expect(portMatches(unresolved(1, '127.0.0.1'), [one])).toMatchObject([
+      { expected: 'auto/tcp', actual: '32768/tcp' },
+    ]);
     expect(portMatches(unresolved(1, '127.0.0.1'), [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
     expect(portMatches(unresolved(1), [{ ...one, ip: '127.0.0.1' }])).toHaveLength(1);
+    // An interface still holding a template was never resolved, so it
+    // constrains nothing: either binding satisfies it.
+    expect(portMatches(unresolved(1, '${HOST_IP}'), [one])).toEqual([]);
+    expect(portMatches(unresolved(1, '${HOST_IP}'), [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
   });
 });
 

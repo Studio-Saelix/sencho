@@ -5,8 +5,9 @@
  * A host port Docker assigns at start (`"51820/udp"`, `"127.0.0.1::51820"`,
  * a host port of `0`, or a long-form entry with no `published`) is still a
  * publication: the container is reachable from the host's interfaces. Only
- * the concrete port number is unknown, so callers record it as dynamic and
- * never invent one.
+ * the host port number is unknown, so callers record it as dynamic and never
+ * invent one; the authored reader may also lack the container target when that
+ * side is a template.
  */
 
 /** The ports of a service whose host port number is known (not `dynamic`). */
