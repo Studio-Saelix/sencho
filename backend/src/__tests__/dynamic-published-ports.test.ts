@@ -414,6 +414,22 @@ describe('drift against a running service with an auto-assigned port', () => {
       .filter(f => f.kind === 'ports-mismatch')).toEqual([]);
   });
 
+  it('reports a replica that does not publish the declared dynamic port', () => {
+    const declared = declaredFromEffectiveModel(render({ web: { ...app, ports: ['9000'] } }));
+    const replicas = [
+      running([{ ip: '0.0.0.0', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' }]),
+      running([]),
+    ];
+    expect(assembleStackDrift({ stack: 'proj', declared, containers: replicas }).findings
+      .filter(f => f.kind === 'ports-mismatch'))
+      .toMatchObject([{ expected: 'auto:9000/tcp', actual: '32768/tcp' }]);
+  });
+
+  it('reports a runtime port whose container port is unknown, rather than assuming it matches', () => {
+    expect(drift(['9000'], [{ ip: '0.0.0.0', publishedPort: 32768, privatePort: null, protocol: 'tcp' }]))
+      .toHaveLength(1);
+  });
+
   it('matches every container port in an auto-assigned range', () => {
     const picked = (privatePort: number, publishedPort: number) => ({ ip: '0.0.0.0', publishedPort, privatePort, protocol: 'tcp' as const });
     expect(drift(['9000-9002'], [picked(9000, 32768), picked(9001, 32769), picked(9002, 32770)])).toEqual([]);
