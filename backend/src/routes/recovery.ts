@@ -476,6 +476,23 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     throw new RecoveryError('invalid_request');
   }
   const pointId = paramOf(req, 'pointId');
+  const digest = sha256Digest(['restore', pointId, body.targetVolumeName, 'new_volume']);
+  // A retry after a lost response has to reach this answer before the target
+  // check below: by then the first attempt has created the volume it is about to
+  // restore into, and reporting that as a new invalid request would leave the
+  // caller with no way to find the operation that is actually running.
+  const replay = RecoveryOperationStore.getInstance().findReplay({
+    idempotencyKey: body.idempotencyKey,
+    kind: 'restore',
+    actor: actorOf(req),
+    transport: req.machineAuthScope ?? 'local',
+    requestDigest: digest,
+    pointId,
+  });
+  if (replay) {
+    res.status(200).json({ operation: replay });
+    return;
+  }
   // A reserved name would let a restore overwrite Sencho's own infrastructure,
   // and a name it never created is not a target it may write.
   if (body.targetVolumeName.startsWith(RECOVERY_RESERVED_PREFIX)
@@ -491,7 +508,7 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     targetVolumeName: body.targetVolumeName,
     actor: actorOf(req),
     idempotencyKey: body.idempotencyKey,
-    requestDigest: sha256Digest(['restore', pointId, body.targetVolumeName, 'new_volume']),
+    requestDigest: digest,
     transport: req.machineAuthScope ?? 'local',
     authorize: (context) => authorizeWith(req, 'restore')(context),
     authorizeCrossStack: (stackName) =>

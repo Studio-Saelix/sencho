@@ -115,6 +115,16 @@ export interface StartOperationInput {
   requestDigest?: string | null;
 }
 
+/** What a caller supplies to look up a replay before it validates the request again. */
+export interface ReplayLookup {
+  idempotencyKey: string;
+  kind: RecoveryOperationKind;
+  actor: string;
+  transport: RecoveryTransport;
+  requestDigest?: string | null;
+  pointId?: string | null;
+}
+
 export interface StartedOperation {
   operation: RecoveryOperation;
   /** True when the key matched an operation an earlier request created. */
@@ -169,6 +179,25 @@ export class RecoveryOperationStore {
       `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, requestDigest, this.processEpoch, now, now);
       return { operation: this.require(id), replayed: false };
     }).immediate();
+  }
+
+  /**
+   * The operation an earlier request with this key created, or null when there is
+   * none or it belongs to a different request. A route uses this before its own
+   * validation, so a retry after a lost response returns the work that is already
+   * running instead of failing on state that work has since changed (a restore
+   * target that now exists, for instance).
+   */
+  findReplay(lookup: ReplayLookup): RecoveryOperation | null {
+    const key = typeof lookup.idempotencyKey === 'string' ? lookup.idempotencyKey.trim() : '';
+    if (key === '') return null;
+    const row = recoveryDb().prepare('SELECT * FROM recovery_operations WHERE idempotency_key = ?')
+      .get(key) as OperationRow | undefined;
+    if (!row) return null;
+    if (row.kind !== lookup.kind || row.actor !== lookup.actor || row.transport !== lookup.transport) return null;
+    if ((row.request_digest ?? null) !== (lookup.requestDigest ?? null)) return null;
+    if (lookup.pointId !== undefined && row.point_id !== lookup.pointId) return null;
+    return toOperation(row);
   }
 
   get(id: string): RecoveryOperation | null {

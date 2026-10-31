@@ -15,8 +15,9 @@ import SelfIdentityService from '../services/SelfIdentityService';
 import { classifyDie } from '../services/ContainerLifecycleClassifier';
 
 /** A daemon with one recovery repository volume, one spare volume and no containers. */
-function fakeDocker(volumes: string[]) {
+function fakeDocker(volumes: string[], images: Array<{ Id: string; RepoTags?: string[] }> = []) {
   const removed: string[] = [];
+  const removedImages: string[] = [];
   const createdAt = new Date().toISOString();
   const docker = {
     info: async () => ({ ID: 'engine-own' }),
@@ -25,19 +26,26 @@ function fakeDocker(volumes: string[]) {
     }),
     listContainers: async () => [],
     listNetworks: async () => [],
-    listImages: async () => [],
+    listImages: async () => images.map((img) => ({ ...img, Containers: 0 })),
     // `docker system df` goes through the modem, not a dockerode helper.
     modem: {
       dial: (_options: unknown, callback: (err: Error | null, data: unknown) => void) => {
-        callback(null, { Volumes: volumes.map((Name) => ({ Name, UsageData: { RefCount: 0, Size: 10 } })) });
+        callback(null, {
+          Volumes: volumes.map((Name) => ({ Name, UsageData: { RefCount: 0, Size: 10 } })),
+          Images: images.map((img) => ({ Id: img.Id, SharedSize: 0 })),
+          LayersSize: 0,
+        });
       },
     },
+    getImage: (id: string) => ({
+      remove: async () => { removedImages.push(id); },
+    }),
     getVolume: (name: string) => ({
       inspect: async () => ({ Name: name, Driver: 'local', Labels: {}, CreatedAt: createdAt }),
       remove: async () => { removed.push(name); },
     }),
   } as unknown as Docker;
-  return { docker, removed };
+  return { docker, removed, removedImages };
 }
 
 let stub: ReturnType<typeof vi.spyOn>;
@@ -100,6 +108,51 @@ describe('prune paths', () => {
     const result = await DockerController.getInstance(1).pruneManagedOnly('volumes', [], undefined);
     expect(result.success).toBe(true);
     expect(fake.removed).toEqual([]);
+  });
+
+  it('refuses a labelled repository volume even when this process never registered it', async () => {
+    // A downgraded build skips the recovery startup that registers the volume, so
+    // the label has to be enough on its own.
+    const fake = fakeDocker(['sencho-recovery-labelled-g1']);
+    useDocker({
+      ...(fake.docker as unknown as Record<string, unknown>),
+      getVolume: (name: string) => ({
+        inspect: async () => ({
+          Name: name,
+          Driver: 'local',
+          Labels: { 'dev.sencho.recovery.repository': 'repository-1' },
+          CreatedAt: new Date().toISOString(),
+        }),
+        remove: async () => { fake.removed.push(name); },
+      }),
+    } as unknown as Docker);
+    await expect(DockerController.getInstance(1).removeVolume('sencho-recovery-labelled-g1'))
+      .rejects.toThrow(/recovery points/);
+    expect(fake.removed).toEqual([]);
+  });
+
+  it('never offers a labelled repository volume to the itemized plan', async () => {
+    const fake = fakeDocker(['sencho-recovery-labelled-g1', 'ordinary'], []);
+    useDocker({
+      ...(fake.docker as unknown as Record<string, unknown>),
+      listVolumes: async () => ({
+        Volumes: [
+          { Name: 'sencho-recovery-labelled-g1', Driver: 'local', Labels: { 'dev.sencho.recovery.repository': 'r' }, CreatedAt: new Date().toISOString() },
+          { Name: 'ordinary', Driver: 'local', Labels: {}, CreatedAt: new Date().toISOString() },
+        ],
+      }),
+    } as unknown as Docker);
+    const plan = await DockerController.getInstance(1).buildPrunePlan(['volumes'], 'all', [], 1);
+    expect(plan.items.map((item) => item.id)).toEqual(['ordinary']);
+  });
+
+  it('never removes the recovery helper image in an enumerated image prune', async () => {
+    const helperId = 'sha256:' + 'a'.repeat(64);
+    SelfIdentityService.getInstance().registerRecoveryImage(helperId);
+    const fake = fakeDocker([], [{ Id: helperId, RepoTags: ['sencho/sencho-recovery-helper@sha256:' + 'a'.repeat(64)] }]);
+    useDocker(fake.docker);
+    await DockerController.getInstance(1).pruneSystem('images', undefined, () => false);
+    expect(fake.removedImages).toEqual([]);
   });
 
   it('refuses to remove the repository volume through the plain remove path', async () => {

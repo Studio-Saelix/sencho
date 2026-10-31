@@ -6,6 +6,7 @@ import type { LocalVolumeProtectionHealth } from './capability';
 import {
   RepositoryProvisioner,
   checkRepository,
+  generationOfLocator,
   ownerNodeKeyFor,
   readRepositoryConfig,
   recordRepositoryCheck,
@@ -650,8 +651,17 @@ export class RecoveryEngineService {
     transport: RecoveryOperation['transport'];
   }): Promise<AdmissionResult> {
     this.requireReady();
+    // A provision request that is not a replacement resumes the repository this
+    // node already has. Allocating a new generation here would move the active
+    // pointer and strand every existing point, which is the opposite of what an
+    // operator repeating a request means.
     const existing = this.repositories.listForAuthority(getRecoveryAuthorityId());
-    const generation = existing.length + 1;
+    const active = this.repositories.getActive();
+    const highestGeneration = existing.reduce(
+      (highest, repository) => Math.max(highest, generationOfLocator(repository.locator) ?? 1),
+      0,
+    );
+    const generation = input.replace ? highestGeneration + 1 : Math.max(1, highestGeneration);
     const started = this.operations.start({
       idempotencyKey: input.idempotencyKey,
       kind: 'repository_init',
@@ -662,6 +672,12 @@ export class RecoveryEngineService {
     if (started.replayed) return { operation: started.operation, replayed: true };
     const operationId = started.operation.id;
     this.operations.markRunning(operationId);
+    if (!input.replace && active && active.repositoryFingerprint) {
+      // Already provisioned and working: a repeated request confirms it and
+      // changes nothing, including the password that opens the existing points.
+      this.operations.finish(operationId, { state: 'succeeded' });
+      return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+    }
     this.schedule(operationId, () => this.runRepositoryInit(operationId, input.replace, generation));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
   }

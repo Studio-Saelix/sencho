@@ -540,8 +540,12 @@ class DockerController {
   ): Promise<{ success: boolean; reclaimedBytes: number }> {
     const beforeDf = await this.safeDfSnapshot();
     const rawImages = await this.docker.listImages({ all: false });
+    // Sencho's own images are never candidates, whoever calls this: the recovery
+    // helper is unused by any container and would otherwise read as prunable, and
+    // removing it takes away the only program that can read that node's points.
+    const selfIdentity = SelfIdentityService.getInstance();
     const candidates = (rawImages as Array<{ Id: string; RepoTags?: string[] | null; Containers?: number }>)
-      .filter((img) => eligible(img) && !isImageHeld?.(img.Id));
+      .filter((img) => eligible(img) && !selfIdentity.isOwnImage(img.Id) && !isImageHeld?.(img.Id));
 
     for (const img of candidates) {
       if (isImageHeld?.(img.Id)) continue;
@@ -911,7 +915,8 @@ class DockerController {
         // Missing from df: unknown usage; do not prune.
         if (!usage || usage.refCount !== 0) return false;
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && !selfIdentity.isOwnVolume(v.Name);
+          && !selfIdentity.isOwnVolume(v.Name)
+          && !DockerController.isRecoveryRepositoryLabel(v.Labels);
       });
       // Removals are independent and Docker handles concurrent volume
       // deletes; parallelize so wall time matches the slowest single
@@ -1223,6 +1228,7 @@ class DockerController {
       }> }>(rawVolumeData)).Volumes || [];
       for (const vol of rawVolumes) {
         if (selfIdentity.isOwnVolume(vol.Name)) continue;
+        if (DockerController.isRecoveryRepositoryLabel(vol.Labels)) continue;
         const usage = volumeUsage.get(vol.Name);
         if (!usage || usage.refCount !== 0) continue;
         const stack = DockerController.resolveContainerStack(
@@ -1689,6 +1695,9 @@ class DockerController {
     if (!vol) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume no longer exists' };
     }
+    if (DockerController.isRecoveryRepositoryLabel(vol.Labels)) {
+      return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume holds recovery points' };
+    }
     const usageSnapshot = await this.safeVolumeDfSnapshot();
     if (!usageSnapshot) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume usage unavailable' };
@@ -2047,14 +2056,32 @@ class DockerController {
     }
   }
 
+  /**
+
+  /**
+   * True for a volume carrying the recovery repository label. The label is the
+   * durable proof: `SelfIdentityService` is populated at startup, and a downgraded
+   * build skips that step, so a deletion guard that only asked the registry would
+   * fail open exactly when the schema is newer than this build.
+   */
+  static isRecoveryRepositoryLabel(labels: Record<string, string> | null | undefined): boolean {
+    return Boolean(labels && labels['dev.sencho.recovery.repository']);
+  }
+
   public async removeVolume(name: string) {
-    // Sencho's own volumes (including its recovery repository) are never removed
+    // Sencho's own volumes, including its recovery repository, are never removed
     // through this path. The routes refuse them first; this guard is what keeps a
-    // future caller from doing it by accident.
+    // future caller from doing it by accident. The label check runs whether or not
+    // this process registered the volume, so a build that skipped its recovery
+    // startup (a newer schema on disk) still refuses it.
     if (SelfIdentityService.getInstance().isOwnVolume(name)) {
       throw new Error('Cannot remove a volume that belongs to Sencho');
     }
     const volume = this.docker.getVolume(name);
+    const inspected = await volume.inspect() as { Labels?: Record<string, string> | null };
+    if (DockerController.isRecoveryRepositoryLabel(inspected.Labels)) {
+      throw new Error('Cannot remove a volume that holds recovery points');
+    }
     await volume.remove({ force: true });
   }
 

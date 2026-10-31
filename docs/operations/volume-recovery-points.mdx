@@ -294,7 +294,7 @@ Nothing removes points, and nothing prunes the repository. Every point you creat
 
 A recovery request for a remote node runs on that node. The control instance forwards the call, the owning node authorizes it and does its own work, and only metadata comes back; the volume's bytes never pass through the control instance. Target a node with the `x-node-id` header or the `?nodeId=` query parameter.
 
-A role assigned on the node itself covers every volume on that node, including a volume shared by several stacks. A role assigned on a single stack covers only a volume that stack alone uses. For recovery work across a remote node, give the operator the node-wide grant.
+A role assigned on the node itself covers every volume on that node, including a volume shared by several stacks. A role assigned on a single stack covers only a volume that stack alone uses, and only when the request runs on that node directly: a stack-scoped grant is refused over a relay, so give the operator a node-wide grant to use recovery on a remote node.
 
 Reading points requires read access to the stacks that use the volume. Capturing and restoring require edit access to those stacks. Provisioning or replacing the repository, and releasing the repository lock, are administrator actions.
 

@@ -117,7 +117,10 @@ afterAll(async () => {
   await cleanupTestDb(tmpDir);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // A previous case's admitted operation may still be running; settle it before
+  // the tables it reads are cleared.
+  await engine.RecoveryEngineService.getInstance(nodeId).whenIdleForTests();
   engine.RecoveryEngineService.resetForTests();
   capability.resetBackupEnginesForTests();
   vi.restoreAllMocks();
@@ -346,6 +349,72 @@ describe('POST /api/recovery/points/:id/restore', () => {
       .send({ targetVolumeName: 'existing', idempotencyKey: randomUUID() });
     expect(res.status).toBe(400);
     expect(res.body.errorClass).toBe('invalid_request');
+  });
+});
+
+describe('restore replay', () => {
+  it('returns the operation an earlier request made, even after it created the target', async () => {
+    seedRepository();
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    await registerEngine();
+    service().setHelperRunnerForTests({
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        if (spec.profile === 'probe' && spec.onStdoutLine) {
+          spec.onStdoutLine(JSON.stringify({ dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877 }));
+        }
+        return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+      },
+      removeForeignEpochHelpers: async () => 0,
+    } as never);
+    engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake',
+      contractVersion: 1,
+      storageKinds: ['named_volume'],
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({ ok: false as const, errorClass: 'internal' }),
+      verifyPoint: async () => ({ ok: false as const, errorClass: 'internal' }),
+      restore: async () => ({
+        ok: true as const,
+        evidence: { filesRestored: 1, bytesRestored: 1, verified: true },
+      }),
+    }) as never);
+
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:engine-routes',
+      kind: 'named_volume',
+      locator: 'app_data',
+      generationToken: 'tok',
+      dependents: [],
+    });
+    const point = points.RecoveryPointStore.getInstance().begin({
+      kind: 'root',
+      storageId: storage.id,
+      expectedGenerationToken: 'tok',
+      repositoryId: repositories.RecoveryRepositoryStore.getInstance().getActive()?.id ?? '',
+      trigger: 'manual',
+      actor: 'admin',
+      sourceOperationId: 'op-src',
+      sourceNodeKey: 'docker-engine:engine-routes',
+      engineId: 'restic',
+    });
+    points.RecoveryPointStore.getInstance().finalize(point.id, {
+      status: 'succeeded',
+      evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+    });
+
+    const key = randomUUID();
+    const first = await request(app).post(`/api/recovery/points/${point.id}/restore`).set('Cookie', adminCookie)
+      .send({ targetVolumeName: 'fresh_target', idempotencyKey: key });
+    expect(first.status).toBe(202);
+
+    // The retry happens after the first attempt created the volume, which is
+    // exactly when the target-existence check would otherwise answer 400.
+    const replay = await request(app).post(`/api/recovery/points/${point.id}/restore`).set('Cookie', adminCookie)
+      .send({ targetVolumeName: 'fresh_target', idempotencyKey: key });
+    expect(replay.status).toBe(200);
+    expect(replay.body.operation.id).toBe(first.body.operation.id);
+    await service().whenIdleForTests();
   });
 });
 

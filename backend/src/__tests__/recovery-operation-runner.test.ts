@@ -175,7 +175,10 @@ afterAll(async () => {
   await cleanupTestDb(tmpDir);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Let the previous case's background work finish before the tables are cleared:
+  // a leaked operation would otherwise write into this case's rows.
+  await runner.RecoveryEngineService.getInstance(nodeId).whenIdleForTests();
   runner.RecoveryEngineService.resetForTests();
   const db = recoveryDbModule.recoveryDb();
   for (const table of [
@@ -353,6 +356,36 @@ describe('create point', () => {
       nodeId, volumeName: VOLUME, actor: 'alice', idempotencyKey: 'key-7',
       requestDigest: runner.sha256Digest(['create_point', 'other_volume']), transport: 'local', authorize: allowAll,
     })).rejects.toMatchObject({ errorClass: 'invalid_request' });
+  });
+});
+
+describe('repository provisioning', () => {
+  it('a repeated request keeps the working repository instead of replacing it', async () => {
+    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    const seeded = await seedProtectableVolume();
+    service().markReadyForTests();
+
+    const again = await service().admitRepositoryInit({
+      actor: 'alice',
+      idempotencyKey: 'provision-again',
+      replace: false,
+      transport: 'local',
+    });
+    await service().whenIdleForTests();
+
+    expect(operations.RecoveryOperationStore.getInstance().get(again.operation.id)?.state).toBe('succeeded');
+    // The pointer did not move, and no second repository row was registered: a
+    // new generation here would strand every point the old one holds.
+    expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
+    const rows = recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_repositories').all();
+    expect(rows).toHaveLength(1);
+  });
+
+  it('names the generation it resumes, and only a replacement moves past it', async () => {
+    const { generationOfLocator, repositoryVolumeName } = await import('../services/recovery/localRepository');
+    const name = repositoryVolumeName('authority', 'docker-engine:x', 3);
+    expect(generationOfLocator(name)).toBe(3);
+    expect(generationOfLocator('some-other-volume')).toBeNull();
   });
 });
 

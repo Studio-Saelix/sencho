@@ -67,6 +67,14 @@ export function repositoryVolumeName(authorityId: string, ownerNodeKey: string, 
   return `sencho-recovery-${authority}-${owner}-g${generation}`;
 }
 
+/** The generation a repository locator names, or null when it names none. */
+export function generationOfLocator(locator: string): number | null {
+  const match = /-g(\d+)$/.exec(locator);
+  if (!match) return null;
+  const generation = Number(match[1]);
+  return Number.isSafeInteger(generation) && generation >= 1 ? generation : null;
+}
+
 /** The reserved prefix every recovery-owned volume and image name starts with. */
 export const RECOVERY_RESERVED_PREFIX = 'sencho-recovery-';
 
