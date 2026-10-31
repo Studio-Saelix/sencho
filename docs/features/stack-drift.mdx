@@ -52,6 +52,8 @@ This signal is independent of the runtime status. A stack can be **In sync** wit
 
 <Note>
 Sencho records two hashes at deploy time: a raw-file hash (catches any text change, including formatting) and a parsed-model hash (only changes when structure changes, ignoring comments and whitespace). The "source changed" signal uses both: if only the raw hash differs, the edit was formatting or comments. If the model hash also differs, a structural change has been made.
+
+The parsed-model hash records every published port, including an auto-assigned host port and an IPv6 interface. A release that widens what that hash records changes it once for a file that did not change: such a stack reads as **Source changed** until its next deploy records a new baseline. A Compose Doctor acknowledgement set to **Until Compose changes** on such a stack expires once at the upgrade and can be set again.
 </Note>
 
 ## GitOps state

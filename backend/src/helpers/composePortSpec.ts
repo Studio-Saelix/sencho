@@ -98,9 +98,19 @@ export function isFixedHostPort(hostPart: string): boolean {
   return last !== null && last >= first;
 }
 
-/** Whether a container port text is a port or an ascending `start-end` range.
+/** A container port or ascending port range Compose accepts. */
+export interface ContainerPortRange {
+  start: number;
+  end: number;
+}
+
+/** Parses a container port text into its range, or null when Compose refuses it.
  *  Compose reads it with the same numeric grammar as a fixed host port, except
  *  that port 0 is not a target: `8080`, `+8080`, `00080`, and `8000-8002`. */
-export function isContainerPort(container: string | undefined): boolean {
-  return container !== undefined && isFixedHostPort(container);
+export function containerPortRange(container: string | undefined): ContainerPortRange | null {
+  if (container === undefined || !isFixedHostPort(container)) return null;
+  const [startText, endText] = container.split('-');
+  const start = parseInt(startText, 10);
+  const end = endText !== undefined ? parseInt(endText, 10) : start;
+  return { start, end };
 }

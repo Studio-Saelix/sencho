@@ -1,7 +1,7 @@
 import YAML from 'yaml';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../services/network/tunnelDetection';
 import { ComposeEnvFileError, expandComposeEnvTemplate, type ComposeEnvLookup } from '../utils/composeDotenv';
-import { isContainerPort, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from './composePortSpec';
+import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec, type ContainerPortRange } from './composePortSpec';
 
 // Refuse to parse anything beyond this bound so a malformed (or adversarial)
 // compose file cannot exhaust heap while building the dependency map. Mirrors
@@ -16,10 +16,16 @@ export interface DeclaredPort {
   publishedPort: number;
   protocol: string;
   /** Docker assigns the host port at start, so no number is known. The entry
-   *  still publishes the container; port-conflict and drift consumers skip it
-   *  (see `fixedPorts` in composePortSpec). Drift compares only the fixed ports,
-   *  and the ledger hash records it as `auto`. */
+   *  still publishes the container; port-conflict and documented-URL consumers
+   *  skip it (see `fixedPorts` in composePortSpec). Drift matches it to the
+   *  runtime container port by `targetStartPort`/`targetEndPort`, and the
+   *  ledger hash records it as `auto`. */
   dynamic?: true;
+  /** Container port range the publication targets, when known. The rendered
+   *  adapter sets it so drift can match an auto-assigned host port to the
+   *  runtime `privatePort`; a template that never interpolated leaves it off. */
+  targetStartPort?: number;
+  targetEndPort?: number;
 }
 
 /** A service `env_file:` entry. `required: false` tolerates a missing file. */
@@ -365,6 +371,23 @@ function namedVolumeSource(entry: unknown): string | null {
 }
 
 /**
+ * A container port after interpolation: its range, `unknown` when a caller with
+ * no lookup still sees a template Compose would resolve, or null when Compose
+ * would refuse the text.
+ */
+type DeclaredContainerTarget = ContainerPortRange | 'unknown' | null;
+
+function declaredContainerTarget(text: string | undefined): DeclaredContainerTarget {
+  const range = containerPortRange(text);
+  if (range) return range;
+  // Without the environment a caller cannot know a template's value. Compose
+  // accepts the entry once it resolves, so keep the publication rather than
+  // dropping it from that caller's model.
+  if (text !== undefined && holdsTemplate(text)) return 'unknown';
+  return null;
+}
+
+/**
  * Parses a service `ports:` entry into a host-published port, or null. An entry
  * whose host port Docker assigns (container port only, an empty or `0` host
  * port, a long form with no `published`) is returned as `dynamic`.
@@ -375,12 +398,11 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
   if (short !== undefined) {
     const spec = splitShortPortSpec(short);
     if (!spec) return null;
+    if (declaredContainerTarget(spec.container) === null) return null;
     if (isDynamicHostPort(spec.hostPart)) {
-      return isContainerPort(spec.container)
-        ? { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true }
-        : null;
+      return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true };
     }
-    if (!isFixedHostPort(spec.hostPart) || !isContainerPort(spec.container)) return null;
+    if (!isFixedHostPort(spec.hostPart)) return null;
     return { hostIp: spec.hostIp, publishedPort: parseInt(spec.hostPart.split('-')[0], 10), protocol: spec.protocol };
   }
   if (entry && typeof entry === 'object') {
@@ -389,7 +411,7 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const hostIp = interpolateString(asString(obj.host_ip), lookup) ?? '';
     const protocol = interpolateString(asString(obj.protocol), lookup) || 'tcp';
     const target = interpolateString(asString(obj.target), lookup);
-    if (!isContainerPort(target)) return null;
+    if (declaredContainerTarget(target) === null) return null;
     if (isDynamicHostPort(publishedRaw)) {
       return { hostIp, publishedPort: 0, protocol, dynamic: true };
     }

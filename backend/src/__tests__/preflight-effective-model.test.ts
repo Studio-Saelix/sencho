@@ -239,22 +239,30 @@ describe('parseEffectiveModel', () => {
     expect(m.services[0].ports).toEqual([
       { startPort: 8080, endPort: 8080, hostIp: '127.0.0.1', protocol: 'udp' },
       { startPort: 8443, endPort: 8443, hostIp: '', protocol: 'tcp' },
-      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true },
+      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true, targetStartPort: 90, targetEndPort: 90 },
     ]);
   });
 
-  it.each<[string, unknown, { hostIp: string; protocol: string }]>([
-    ['no published key', { target: 51820, protocol: 'udp' }, { hostIp: '', protocol: 'udp' }],
-    ['no published key on an interface', { target: 51820, host_ip: '127.0.0.1', protocol: 'udp' }, { hostIp: '127.0.0.1', protocol: 'udp' }],
-    ['published "0"', { target: 51820, published: '0', protocol: 'udp' }, { hostIp: '', protocol: 'udp' }],
-    ['published 0 as a number', { target: 51820, published: 0, host_ip: '127.0.0.1' }, { hostIp: '127.0.0.1', protocol: 'tcp' }],
-    ['an empty published value', { target: 80, published: '' }, { hostIp: '', protocol: 'tcp' }],
-    ['a short entry with an empty host port', '127.0.0.1::51820/udp', { hostIp: '127.0.0.1', protocol: 'udp' }],
-    ['a short entry with host port 0', '0:80', { hostIp: '', protocol: 'tcp' }],
-    ['a short IPv6 entry with an empty host port', '[::1]::51820/udp', { hostIp: '::1', protocol: 'udp' }],
+  it.each<[string, unknown, { hostIp: string; protocol: string; target: number }]>([
+    ['no published key', { target: 51820, protocol: 'udp' }, { hostIp: '', protocol: 'udp', target: 51820 }],
+    ['no published key on an interface', { target: 51820, host_ip: '127.0.0.1', protocol: 'udp' }, { hostIp: '127.0.0.1', protocol: 'udp', target: 51820 }],
+    ['published "0"', { target: 51820, published: '0', protocol: 'udp' }, { hostIp: '', protocol: 'udp', target: 51820 }],
+    ['published 0 as a number', { target: 51820, published: 0, host_ip: '127.0.0.1' }, { hostIp: '127.0.0.1', protocol: 'tcp', target: 51820 }],
+    ['an empty published value', { target: 80, published: '' }, { hostIp: '', protocol: 'tcp', target: 80 }],
+    ['a short entry with an empty host port', '127.0.0.1::51820/udp', { hostIp: '127.0.0.1', protocol: 'udp', target: 51820 }],
+    ['a short entry with host port 0', '0:80', { hostIp: '', protocol: 'tcp', target: 80 }],
+    ['a short IPv6 entry with an empty host port', '[::1]::51820/udp', { hostIp: '::1', protocol: 'udp', target: 51820 }],
   ])('keeps %s as a dynamic publication', (_label, entry, expected) => {
     const m = parseEffectiveModel({ services: { s: { ports: [entry] } } }, 'p');
-    expect(m.services[0].ports).toEqual([{ ...expected, startPort: 0, endPort: 0, dynamic: true }]);
+    expect(m.services[0].ports).toEqual([{
+      hostIp: expected.hostIp,
+      protocol: expected.protocol,
+      startPort: 0,
+      endPort: 0,
+      dynamic: true,
+      targetStartPort: expected.target,
+      targetEndPort: expected.target,
+    }]);
   });
 
   it('keeps a bracketed IPv6 short entry with a fixed host port, and drops entries with no target or a bad port', () => {
@@ -264,7 +272,7 @@ describe('parseEffectiveModel', () => {
 
   it('keeps a range whose host port starts at 0 as dynamic, as Compose does', () => {
     const m = parseEffectiveModel({ services: { s: { ports: ['0-80:80'] } } }, 'p');
-    expect(m.services[0].ports).toEqual([{ startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true }]);
+    expect(m.services[0].ports).toEqual([{ startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true, targetStartPort: 80, targetEndPort: 80 }]);
   });
 
   it('reads the numeric spellings Compose accepts, and drops the ports it refuses', () => {
@@ -272,7 +280,7 @@ describe('parseEffectiveModel', () => {
     expect(m.services[0].ports).toEqual([
       { startPort: 80, endPort: 80, hostIp: '', protocol: 'tcp' },
       { startPort: 80, endPort: 81, hostIp: '', protocol: 'tcp' },
-      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true },
+      { startPort: 0, endPort: 0, hostIp: '', protocol: 'tcp', dynamic: true, targetStartPort: 80, targetEndPort: 80 },
       { startPort: 8080, endPort: 8080, hostIp: '', protocol: 'tcp' },
     ]);
   });

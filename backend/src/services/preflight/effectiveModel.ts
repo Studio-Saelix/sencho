@@ -12,7 +12,7 @@
  * by the caller, not here.
  */
 
-import { isContainerPort, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
+import { containerPortRange, isDynamicHostPort, isFixedHostPort, splitShortPortSpec } from '../../helpers/composePortSpec';
 import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
 import { serviceUrlFromLabels } from '../../helpers/serviceUrlLabel';
 import { cloudflaredCommandHints, tailscaleForwardFlags, type TailscaleForwardFlag } from '../network/tunnelDetection';
@@ -28,9 +28,14 @@ export interface EffPortSpec {
   protocol: string;
   /** Docker assigns the host port at start (container-only entry, empty or `0`
    *  host port), so no number is known. The container is still published and
-   *  exposure counts it; conflict, drift, and documented-port checks skip it
-   *  (`fixedPorts` in composePortSpec and `portsOf` in rules). */
+   *  exposure counts it; conflict and documented-port checks skip the unknown
+   *  host number (`fixedPorts` in composePortSpec and `portsOf` in rules).
+   *  Drift matches it to the runtime container port by the target below. */
   dynamic?: true;
+  /** Container port range this publication targets, for a `dynamic` entry.
+   *  Drift matches the running container's `privatePort` against it. */
+  targetStartPort?: number;
+  targetEndPort?: number;
 }
 
 export interface EffBind {
@@ -193,12 +198,16 @@ function parsePortRange(raw: string): { startPort: number; endPort: number } | n
 function parsePortSpec(entry: unknown): EffPortSpec | null {
   if (entry && typeof entry === 'object') {
     const o = entry as Record<string, unknown>;
-    if (!isContainerPort(str(o.target))) return null;
+    const target = containerPortRange(str(o.target));
+    if (!target) return null;
     const hostIp = str(o.host_ip) ?? '';
     const protocol = str(o.protocol) ?? 'tcp';
     const publishedRaw = str(o.published);
     if (isDynamicHostPort(publishedRaw)) {
-      return { startPort: 0, endPort: 0, hostIp, protocol, dynamic: true };
+      return {
+        startPort: 0, endPort: 0, hostIp, protocol, dynamic: true,
+        targetStartPort: target.start, targetEndPort: target.end,
+      };
     }
     const range = parsePortRange(publishedRaw as string);
     return range ? { ...range, hostIp, protocol } : null;
@@ -206,9 +215,13 @@ function parsePortSpec(entry: unknown): EffPortSpec | null {
   const short = str(entry);
   if (short === undefined) return null;
   const spec = splitShortPortSpec(short);
-  if (!spec || !isContainerPort(spec.container)) return null;
+  const target = spec ? containerPortRange(spec.container) : null;
+  if (!spec || !target) return null;
   if (isDynamicHostPort(spec.hostPart)) {
-    return { startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true };
+    return {
+      startPort: 0, endPort: 0, hostIp: spec.hostIp, protocol: spec.protocol, dynamic: true,
+      targetStartPort: target.start, targetEndPort: target.end,
+    };
   }
   const range = parsePortRange(spec.hostPart);
   return range ? { ...range, hostIp: spec.hostIp, protocol: spec.protocol } : null;

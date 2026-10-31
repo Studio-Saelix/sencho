@@ -39,6 +39,9 @@ export function declaredFromEffectiveModel(model: EffectiveModel): DeclaredCompo
         publishedPort: p.startPort,
         protocol: p.protocol,
         ...(p.dynamic ? { dynamic: true as const } : {}),
+        ...(p.targetStartPort !== undefined
+          ? { targetStartPort: p.targetStartPort, targetEndPort: p.targetEndPort ?? p.targetStartPort }
+          : {}),
       }),
     ),
     image: s.image,

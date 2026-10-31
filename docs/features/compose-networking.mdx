@@ -125,7 +125,7 @@ Published ports appear with a badge indicating which interface they are bound to
 
 Port ranges appear as `startPort-endPort/protocol`, for example `8000-8002/tcp`.
 
-A port with no host port number, such as `51820/udp`, `127.0.0.1::51820/udp`, or a host port of `0`, is published on a port Docker picks when the container starts. It appears as `auto-assigned/protocol` with the same badges and counts as a published port for exposure. It is left out of the Doctor's port-conflict and documented-URL checks because no number is known, and a running service that declares one is not reported as drift for the port Docker picked. A port listed only under `expose:` is not published and is not shown.
+A port with no host port number, such as `51820/udp`, `127.0.0.1::51820/udp`, or a host port of `0`, is published on a port Docker picks when the container starts. It appears as `auto-assigned/protocol` with the same badges and counts as a published port for exposure. It is left out of the Doctor's port-conflict and documented-URL checks because no number is known. Drift matches the declaration to the running container port it names, so the number Docker picked is not reported as drift while a stale or extra published port still is. A port listed only under `expose:` is not published and is not shown.
 
 ### Network modes
 

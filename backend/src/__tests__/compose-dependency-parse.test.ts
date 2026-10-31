@@ -156,6 +156,30 @@ describe('parseComposeDependencies - ports', () => {
     expect(r.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'udp', dynamic: true }]);
   });
 
+  it('keeps a fixed publication whose container port is a template when no lookup can resolve it', () => {
+    const yaml = 'services:\n  web:\n    ports:\n      - "8080:${APP_PORT}"\n      - { target: "${APP_PORT}", published: 8080 }\n';
+    const r = parseComposeDependencies(yaml);
+    expect(r.services[0].ports).toEqual([
+      { hostIp: '', publishedPort: 8080, protocol: 'tcp' },
+      { hostIp: '', publishedPort: 8080, protocol: 'tcp' },
+    ]);
+    // Once the lookup answers, the same numeric rule applies: Compose refuses a
+    // bad value, so it is not kept as a publication.
+    expect(parseComposeDependencies(yaml, { lookup: () => '8080x' }).services[0].ports).toEqual([]);
+    expect(parseComposeDependencies(yaml, { lookup: name => (name === 'APP_PORT' ? '8443' : undefined) }).services[0].ports[0].publishedPort).toBe(8080);
+    // The same rule holds for an auto-assigned host port: keep the publication
+    // even though the container target is still a template.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "0:${APP_PORT}"')).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: "${APP_PORT}", published: 0 }')).services[0].ports)
+      .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+  });
+
+  it('still drops a fixed publication whose container port Compose refuses without a template', () => {
+    const r = parseComposeDependencies(svc('web', 'ports:\n  - "8080:8080x"\n  - { target: "80-", published: 8080 }'));
+    expect(r.services[0].ports).toEqual([]);
+  });
+
   it('takes the low end of a published range', () => {
     const r = parseComposeDependencies(svc('web', 'ports:\n  - "8000-8002:80"'));
     expect(r.services[0].ports[0].publishedPort).toBe(8000);

@@ -244,15 +244,23 @@ describe('readers that need a port number skip a dynamic one', () => {
     expect(deriveStackExposure(loopback, 'proj', 1).services[0]).toMatchObject({ publiclyExposed: false, reason: null });
   });
 
-  it('carries the flag from the rendered model into the declared view, and out of drift', () => {
+  it('carries the flag and the container target from the rendered model into the declared view', () => {
     const declared = declaredFromEffectiveModel(dynamicModel);
-    expect(declared.services[0].ports).toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
-    const container: DependencyContainer = {
+    expect(declared.services[0].ports).toEqual([
+      { hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true, targetStartPort: 80, targetEndPort: 80 },
+    ]);
+    const container = (ports: DependencyContainer['ports']): DependencyContainer => ({
       id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
-      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports: [],
-    };
-    const report = assembleStackDrift({ stack: 'proj', declared, containers: [container] });
-    expect(report.findings.filter(f => f.kind === 'ports-mismatch')).toEqual([]);
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [], ports,
+    });
+    // The picked host number is not a declaration, so it is not drift.
+    expect(assembleStackDrift({
+      stack: 'proj', declared,
+      containers: [container([{ ip: '0.0.0.0', publishedPort: 32768, privatePort: 80, protocol: 'tcp' }])],
+    }).findings.filter(f => f.kind === 'ports-mismatch')).toEqual([]);
+    // A declared auto-assigned port that the container never publishes is drift.
+    expect(assembleStackDrift({ stack: 'proj', declared, containers: [container([])] }).findings)
+      .toMatchObject([{ kind: 'ports-mismatch', service: 'web', expected: 'auto:80/tcp', actual: 'none' }]);
   });
 
   it('does not make two services claiming a dynamic port a port conflict', () => {
@@ -378,6 +386,45 @@ describe('drift against a running service with an auto-assigned port', () => {
     expect(drift(['80', '8080:81'], [picked])).toHaveLength(1);
     expect(drift(['80', '8080:81'], [picked, { ip: '0.0.0.0', publishedPort: 8080, privatePort: 81, protocol: 'tcp' }])).toEqual([]);
     expect(drift(['8080:81'], [{ ip: '0.0.0.0', publishedPort: 9090, privatePort: 81, protocol: 'tcp' }])).toHaveLength(1);
+  });
+
+  it('reports a stale fixed port beside an auto-assigned one', () => {
+    const runtime = [
+      { ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' },
+      { ip: '0.0.0.0', publishedPort: 5432, privatePort: 5432, protocol: 'tcp' },
+      { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9000, protocol: 'tcp' },
+    ];
+    const findings = drift(['8080:80', '9000'], runtime);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ expected: '8080/tcp, auto:9000/tcp', actual: '32769/tcp, 5432/tcp, 8080/tcp' });
+  });
+
+  it('reports a dynamic declaration that the container does not publish', () => {
+    expect(drift(['9000'], [{ ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }]))
+      .toMatchObject([{ expected: 'auto:9000/tcp', actual: '8080/tcp' }]);
+  });
+
+  it('tolerates one Docker-picked port per replica', () => {
+    const declared = declaredFromEffectiveModel(render({ web: { ...app, ports: ['9000'] } }));
+    const replicas = [
+      running([{ ip: '0.0.0.0', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' }]),
+      running([{ ip: '0.0.0.0', publishedPort: 32769, privatePort: 9000, protocol: 'tcp' }]),
+    ];
+    expect(assembleStackDrift({ stack: 'proj', declared, containers: replicas }).findings
+      .filter(f => f.kind === 'ports-mismatch')).toEqual([]);
+  });
+
+  it('matches every container port in an auto-assigned range', () => {
+    const picked = (privatePort: number, publishedPort: number) => ({ ip: '0.0.0.0', publishedPort, privatePort, protocol: 'tcp' as const });
+    expect(drift(['9000-9002'], [picked(9000, 32768), picked(9001, 32769), picked(9002, 32770)])).toEqual([]);
+    expect(drift(['9000-9002'], [picked(9000, 32768), picked(9001, 32769)])).toHaveLength(1);
+  });
+
+  it('reports an extra picked port for a container port compose does not declare', () => {
+    expect(drift(['9000'], [
+      { ip: '0.0.0.0', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' },
+      { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9001, protocol: 'tcp' },
+    ])).toHaveLength(1);
   });
 });
 
