@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ContainerLabelsTab } from '../ContainerLabelsTab';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
@@ -174,6 +174,81 @@ describe('ContainerLabelsTab', () => {
     expect(await screen.findByText(/Could not read Edge \(unreachable\)/)).toBeInTheDocument();
     expect(screen.getByText(/could not be inspected on Local/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('keeps a node\'s rows when the hub reports it unreachable after a good answer', async () => {
+    const user = userEvent.setup();
+    let edgeDown = false;
+    const edgePiece = {
+      nodes: [{
+        nodeId: 2,
+        nodeName: 'Edge',
+        status: 'ok' as const,
+        error: null,
+        inventory: {
+          nodeId: 2,
+          partial: false,
+          generatedAt: Date.now(),
+          containers: [{
+            id: 'e1',
+            name: 'edge-web',
+            stack: 'demo',
+            service: 'web',
+            state: 'running',
+            labels: [{ key: 'traefik.enable', value: 'true', source: 'runtime' as const }],
+          }],
+          byLabel: [],
+        },
+      }],
+      aggregatedByLabel: [],
+      nodeErrors: {},
+      generatedAt: Date.now(),
+    };
+    const edgeError = {
+      nodes: [{ nodeId: 2, nodeName: 'Edge', status: 'error' as const, inventory: null, error: 'Timed out after 5s' }],
+      aggregatedByLabel: [],
+      nodeErrors: { 2: 'Timed out after 5s' },
+      generatedAt: Date.now(),
+    };
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('nodeId=2')) {
+        return { ok: true, json: async () => (edgeDown ? edgeError : edgePiece) } as Response;
+      }
+      return { ok: true, json: async () => mockFleet } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText('edge-web')).toBeInTheDocument();
+
+    edgeDown = true;
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(/Could not read Edge \(Timed out after 5s, showing its last result\)/)).toBeInTheDocument();
+    expect(screen.getByText('edge-web')).toBeInTheDocument();
+    expect(screen.getByText(/Showing partial fleet data\./)).toBeInTheDocument();
+
+    edgeDown = false;
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Could not read Edge/)).toBeNull());
+    expect(screen.getByText('edge-web')).toBeInTheDocument();
+  });
+
+  it('says no fleet data could be read when the hub reports every node unreachable', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      const nodeId = Number(/nodeId=(\d+)/.exec(String(path))?.[1]);
+      return {
+        ok: true,
+        json: async () => ({
+          nodes: [{ nodeId, nodeName: nodeId === 1 ? 'Local' : 'Edge', status: 'error', inventory: null, error: 'Timed out after 5s' }],
+          aggregatedByLabel: [],
+          nodeErrors: { [nodeId]: 'Timed out after 5s' },
+          generatedAt: Date.now(),
+        }),
+      } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText(/Could not read Local \(Timed out after 5s\)/)).toBeInTheDocument();
+    expect(screen.getByText(/No fleet data could be read\./, { selector: 'p' })).toBeInTheDocument();
+    expect(screen.getByText('No fleet data could be read.', { selector: 'td' })).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
   });
 
   it('shows a loading state, not an empty audit, before the node list arrives', async () => {

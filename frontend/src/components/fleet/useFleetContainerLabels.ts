@@ -78,6 +78,7 @@ function parseLabelPiece(body: unknown): FleetLabelInventoryResponse | null {
     const inventory = n.inventory;
     if (typeof n.nodeId !== 'number' || typeof n.nodeName !== 'string') return null;
     if (n.status !== 'ok' && n.status !== 'error') return null;
+    if (n.error !== null && typeof n.error !== 'string') return null;
     if (inventory !== null) {
       if (!inventory || typeof inventory !== 'object') return null;
       const inv = inventory as Record<string, unknown>;
@@ -88,6 +89,7 @@ function parseLabelPiece(body: unknown): FleetLabelInventoryResponse | null {
     nodes.push(raw as NodeRow);
   }
   if (!o.aggregatedByLabel.every(isLabelIndexRow)) return null;
+  if (!Object.values(o.nodeErrors).every(reason => typeof reason === 'string')) return null;
   return {
     nodes,
     aggregatedByLabel: o.aggregatedByLabel,
@@ -97,10 +99,35 @@ function parseLabelPiece(body: unknown): FleetLabelInventoryResponse | null {
 }
 
 /**
- * Concatenate each node's inventory in node order. A node that failed on the way
- * (the request itself, not the node's own report) keeps the inventory it had
- * before, so a failed refresh does not blank its part of the tab, and its error
- * is reported in the banner above the table.
+ * Why a 200 body cannot replace this node's slice, or null when it can. A
+ * `?nodeId=` read answers with exactly one row for that node, and only a row
+ * that is not itself an error and carries an inventory is an answer. A row
+ * whose status is `error` is how the hub reports an unreachable remote
+ * (timeout, non-ok upstream, untrusted payload, no Pilot target); it is that
+ * node's failure, not a fresh empty inventory, so the caller keeps the previous
+ * slice and names the reason. Anything else is not this node's answer.
+ */
+function unusableNodeReason(piece: FleetLabelInventoryResponse, nodeId: number): string | null {
+  if (piece.nodes.length !== 1 || piece.nodes[0].nodeId !== nodeId) {
+    return 'Unexpected response from the hub';
+  }
+  const row = piece.nodes[0];
+  if (row.status === 'error') {
+    return piece.nodeErrors[nodeId] || row.error || 'The hub could not read this node';
+  }
+  if (row.inventory === null) {
+    return piece.nodeErrors[nodeId] || row.error || 'Unexpected response from the hub';
+  }
+  return null;
+}
+
+/**
+ * Concatenate each node's inventory in node order. A node whose read failed for
+ * this load (a request or HTTP error, an untrusted body, or the hub's own report
+ * that the node was unreachable) keeps the slice the caller last stored for it,
+ * so a failed refresh does not blank its part of the tab, and the error is
+ * reported in the banner above the table. A node with no stored slice is listed
+ * as an error without claiming a last result.
  */
 export function mergeLabelPieces(
   order: readonly LabelsNodeRef[],
@@ -212,8 +239,14 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
         const res = await apiFetch(`/fleet/container-labels?nodeId=${node.id}${revealQs}`, { localOnly: true, signal });
         if (res.ok) {
           const body: unknown = await res.json();
-          piece = parseLabelPiece(body);
-          if (!piece) failure = 'Unexpected response from the hub';
+          const parsed = parseLabelPiece(body);
+          if (!parsed) {
+            failure = 'Unexpected response from the hub';
+          } else {
+            const reason = unusableNodeReason(parsed, node.id);
+            if (reason !== null) failure = reason;
+            else piece = parsed;
+          }
         } else {
           const body = await res.json().catch(() => null) as { error?: string } | null;
           failure = body?.error ?? `Request failed (${res.status})`;
