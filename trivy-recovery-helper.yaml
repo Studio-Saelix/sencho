@@ -1,0 +1,3 @@
+vulnerability:
+  vex:
+    - security/vex/sencho-recovery-helper.openvex.json

@@ -21,16 +21,17 @@ const ERROR_DETAIL: Record<RecoveryErrorClass, string> = {
   update_required: 'This node needs an update before it can protect volumes.',
   schema_unsupported: 'This build cannot read the recovery records on this node.',
   identity_unknown: 'The storage identity could not be established.',
-  lock_held: 'Another recovery operation is running on this storage.',
-  lock_stale: 'An interrupted operation still holds this storage and must be reviewed.',
+  lock_held: 'Another recovery operation is running on this node.',
+  lock_stale: 'An interrupted operation still holds a lock this request needs and must be reviewed.',
   repository_unavailable: 'The recovery repository is not reachable.',
   repository_key_unavailable: 'The recovery repository key is not available.',
   source_unreadable: 'Some data could not be read.',
   integrity_mismatch: 'The recovery point failed its integrity check.',
+  attributes_not_restored: 'The files were restored, but some file attributes could not be applied.',
   interrupted: 'The operation was interrupted before it reported a result.',
   transport_unreachable: 'The node could not be reached.',
   node_refused: 'The node refused the request.',
-  node_error: 'The node could not answer the request.',
+  node_error: 'The node, or the recovery helper running on it, failed to complete the request.',
   internal: 'The recovery operation failed.',
 };
 
@@ -42,13 +43,26 @@ export function isRecoveryErrorClass(value: unknown): value is RecoveryErrorClas
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(ERROR_DETAIL, value);
 }
 
+/** What a refusal can say beyond its class: a machine reason and a more specific sentence. */
+export interface RecoveryErrorOptions {
+  /** A stable token a client can switch on, such as `repository_not_initialized`. */
+  reason?: string;
+  /** A fixed sentence for this refusal. Never built from engine output. */
+  detail?: string;
+}
+
 /** A recovery failure that already carries its sanitized class. */
 export class RecoveryError extends Error {
   readonly errorClass: RecoveryErrorClass;
-  constructor(errorClass: RecoveryErrorClass) {
-    super(ERROR_DETAIL[errorClass]);
+  readonly reason: string | undefined;
+  readonly detail: string;
+  constructor(errorClass: RecoveryErrorClass, options: RecoveryErrorOptions = {}) {
+    const detail = options.detail ?? ERROR_DETAIL[errorClass];
+    super(detail);
     this.name = 'RecoveryError';
     this.errorClass = errorClass;
+    this.reason = options.reason;
+    this.detail = detail;
   }
 }
 

@@ -62,6 +62,37 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
 
+  # The recovery helper image: its Go toolchain pin and its restic source commit.
+  # Kept apart from the root Dockerfile so a helper bump does not rebuild the
+  # application image's review surface, and vice versa.
+  - package-ecosystem: "docker"
+    directory: "/docker/recovery-helper"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    groups:
+      docker-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # The helper's one Go module (the identity probe). restic itself is fetched by
+  # source commit in the Dockerfile, so its dependency floors are maintained
+  # there and reported by the image scan, not by this ecosystem.
+  - package-ecosystem: "gomod"
+    directory: "/docker/recovery-helper/probe"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    groups:
+      all-gomod-helper:
+        applies-to: version-updates
+        patterns: ["*"]
+      all-gomod-helper-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
   # github-actions: scan both top-level workflows (.github/workflows/) and the
   # local composite action (.github/actions/start-app/action.yml). Dependabot
   # only walks each directory it is given, so the composite must be listed

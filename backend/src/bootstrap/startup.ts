@@ -15,6 +15,8 @@ import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryS
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { RecoveryOperationStore } from '../services/recovery/operations';
+import { RecoveryEngineService } from '../services/recovery/operationRunner';
+import { registerResticEngine } from '../services/recovery/restic/engineRegistration';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { SuppressionRetractionRetryService } from '../services/SuppressionRetractionRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
@@ -161,6 +163,31 @@ export function runRecoveryReconcile(): void {
 }
 
 /**
+ * Start the volume-protection engine, if this build has one, and run its boot
+ * sequence.
+ *
+ * The sequence is ordered and gated: foundation reconciliation first, then the
+ * removal of helpers a dead process left, then restic's own locks, then the
+ * restore intents, then the first health read. Until it finishes, every mutating
+ * recovery route answers `503`, so cleanup can never race this process's own
+ * work. It runs detached so a slow Docker daemon cannot hold the HTTP bind; the
+ * gate is what keeps recovery closed until it is done.
+ */
+export function startRecoveryEngine(): void {
+  if (DatabaseService.getInstance().getRecoverySchemaOutcome().kind !== 'current') return;
+  try {
+    const localNode = DatabaseService.getInstance().getDefaultNode();
+    if (!localNode) return;
+    registerResticEngine(localNode.id);
+    void RecoveryEngineService.getInstance(localNode.id).runBootSequence().catch((err: unknown) => {
+      console.error('[Startup] Recovery engine boot failed:', err instanceof Error ? err.message : String(err));
+    });
+  } catch (err) {
+    console.error('[Startup] Recovery engine registration failed:', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
  * Run the startup sequence: stack-directory migration, service initialization,
  * background watchdogs, then bind the HTTP server. The caller passes the
  * already-constructed server so tests can import the module without binding a
@@ -242,6 +269,9 @@ export async function startServer(server: Server): Promise<void> {
   StackUpdateRecoveryService.getInstance().start();
 
   runRecoveryReconcile();
+  // The engine's own boot (helper cleanup, restic locks, restore intents, first
+  // health read) starts here and gates the mutating recovery routes until it ends.
+  startRecoveryEngine();
 
   // Interrupted creates are settled here, ahead of the background mutators and
   // the HTTP bind below, because a scheduler or webhook that fired first could

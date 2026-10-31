@@ -66,6 +66,7 @@ import {
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
+import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -333,6 +334,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // drop (the socket will be destroyed).
       const res = proxyRes as { headersSent?: boolean; status?: (n: number) => { json: (b: unknown) => void } };
       if (typeof res?.headersSent === 'boolean' && !res.headersSent && typeof res.status === 'function') {
+        if (isRecoveryUrl(path)) {
+          sendRecoveryTransportRefusal(
+            res as unknown as Response,
+            'The node could not be reached. Check the API URL and ensure Sencho is running on that host. A request that starts or changes something may already have reached it: send it again with the same idempotency key to see what happened.',
+          );
+          return;
+        }
         res.status(502).json({
           error: 'Remote node is unreachable. Check the API URL and ensure Sencho is running on that host.',
         });
@@ -473,14 +481,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     const target = NodeRegistry.getInstance().getProxyTarget(req.nodeId);
     if (!target) {
-      if (node.mode === 'pilot_agent') {
-        res.status(503).json({
-          error: `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`,
-        });
+      const message = node.mode === 'pilot_agent'
+        ? `Pilot tunnel to "${node.name}" is disconnected. Operations will resume when the agent reconnects.`
+        : `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`;
+      if (isRecoveryProxyPath(req.path)) {
+        sendRecoveryTransportRefusal(res, message);
       } else {
-        res.status(503).json({
-          error: `Remote node "${node.name}" has no API URL or token configured. Update it in Settings → Nodes.`,
-        });
+        res.status(503).json({ error: message });
       }
       return;
     }
@@ -495,6 +502,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             ? 'Remote node target is not allowed.'
             : 'Remote node target host could not be resolved.';
           console.warn(`[Proxy] Refused remote target for node ${node.id}: ${error.reason}`);
+          if (isRecoveryProxyPath(req.path)) {
+            sendRecoveryTransportRefusal(res, message);
+            return;
+          }
           res.status(502).json({ error: message });
           return;
         }
@@ -523,6 +534,23 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
         if (!supported) {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
+          return;
+        }
+      }
+
+      // Recovery skew and reachability. Every `/api/recovery/*` request except
+      // the descriptor is refused here when the node cannot serve it, with the
+      // same resolution the hub's own descriptor read uses, so a node is never
+      // described one way and refused another. A node with the engine passes
+      // through and answers for itself, including `503` while boot is running.
+      if (isRecoveryProxyPath(req.path) && !isRecoveryDescriptorPath(req.path)) {
+        const preflight = await preflightRecoveryRequest(req.nodeId);
+        if (!preflight.ok) {
+          res.status(preflight.httpStatus).json({
+            error: preflight.message,
+            errorClass: preflight.errorClass,
+            code: preflight.code,
+          });
           return;
         }
       }
@@ -929,6 +957,39 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
 /** Max request body size for buffered settings writes (same as ALERT_PROXY_BODY_LIMIT). */
 const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
+
+/**
+ * A recovery request, as the proxy sees it: mounted at `/api/`, so `req.path`
+ * has lost that prefix.
+ */
+function isRecoveryProxyPath(path: string): boolean {
+  return /^\/recovery(?:\/|$)/i.test(path);
+}
+
+/** The descriptor route is the one recovery path that must always reach the node. */
+function isRecoveryDescriptorPath(path: string): boolean {
+  return /^\/recovery\/node\/?(?:\?|$)/i.test(path);
+}
+
+/** A recovery URL with its `/api` prefix still on, as the proxy's error hook sees it. */
+function isRecoveryUrl(url: string): boolean {
+  return /^\/api\/recovery(?:\/|\?|$)/i.test(url);
+}
+
+/**
+ * The refusal a recovery request gets when the hop to its node is not there: a
+ * dead Pilot tunnel, a node with no target, an unreachable URL. Recovery clients
+ * switch on `errorClass`, and the preflight already answers this way once the
+ * hub's 30-second view of the node has expired, so the same condition has the
+ * same answer inside that window and before it.
+ */
+function sendRecoveryTransportRefusal(res: Response, message: string): void {
+  res.status(503).json({
+    error: message,
+    errorClass: 'transport_unreachable',
+    code: 'TRANSPORT_UNREACHABLE',
+  });
+}
 
 /**
  * True when the request configures a remote node's own settings and must run

@@ -21,6 +21,11 @@ import type { StorageDependent, StorageIdentity, StorageKind } from './types';
 /** Docker's own volume-name grammar. Case-sensitive, so no case folding. */
 const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]+$/;
 
+/** True for a name Docker accepts for a volume. Anything else never reaches the daemon. */
+export function isDockerVolumeName(name: string): boolean {
+  return typeof name === 'string' && VOLUME_NAME.test(name);
+}
+
 /**
  * Canonical form of a locator, or `invalid_request`. Normalizing doubled and
  * trailing slashes makes two spellings of one directory one identity; `..`
@@ -33,7 +38,7 @@ export function canonicalizeLocator(kind: StorageKind, raw: string): string {
     throw new RecoveryError('invalid_request');
   }
   if (kind === 'named_volume') {
-    if (!VOLUME_NAME.test(raw)) throw new RecoveryError('invalid_request');
+    if (!isDockerVolumeName(raw)) throw new RecoveryError('invalid_request');
     return raw;
   }
   if (!path.posix.isAbsolute(raw) || raw.split('/').includes('..')) {

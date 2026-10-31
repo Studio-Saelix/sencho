@@ -102,3 +102,49 @@ jobs:
         with:
           sarif_file: trivy-main.sarif
           category: trivy-main-head
+
+  # The recovery helper is a separate image with its own dependency set (restic
+  # and the Go toolchain), so it gets its own scheduled re-scan and its own
+  # OpenVEX document. Findings here never gate a PR; they surface a CVE disclosed
+  # between releases, exactly like the two jobs above.
+  scan-recovery-helper:
+    name: Trivy SARIF (recovery helper, main HEAD build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+
+      - name: Build the recovery helper from main HEAD
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho-recovery-helper:scan
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
+      - name: Trivy scan of the recovery helper
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho-recovery-helper:scan
+          format: sarif
+          output: trivy-recovery-helper.sarif
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          trivy-config: trivy-recovery-helper.yaml
+          ignore-unfixed: false
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-recovery-helper.sarif
+          category: trivy-recovery-helper

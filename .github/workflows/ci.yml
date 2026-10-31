@@ -104,7 +104,9 @@ jobs:
   backend-docker-integration:
     name: Backend Docker integration
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 minutes: the suite now also builds the recovery helper and
+    # runs real restic captures and restores against it.
+    timeout-minutes: 20
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     steps:
@@ -121,6 +123,30 @@ jobs:
       - name: Install Dependencies
         working-directory: ./backend
         run: npm ci
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4
+
+      # The recovery integration suite starts the real helper, so it needs the
+      # image built from this commit. It is passed as an image id: that is one of
+      # the two references the runtime accepts, and it is what a `docker load`
+      # leaves on an air-gapped host.
+      - name: Build the recovery helper for the integration suite
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho-recovery-helper:integration
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
+      - name: Resolve the helper image id
+        run: |
+          set -euo pipefail
+          digest=$(docker image inspect --format '{{.Id}}' localhost/sencho-recovery-helper:integration)
+          echo "SENCHO_RECOVERY_HELPER_IMAGE=$digest" >> "$GITHUB_ENV"
 
       - name: Docker integration tests (dedicated Vitest config)
         working-directory: ./backend
@@ -210,6 +236,43 @@ jobs:
         id: apk-bust
         run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
+      # The recovery helper is built and scanned in PR CI too, so a change to it,
+      # or to the digest plumbing that bakes it into the main image, is exercised
+      # before merge. Nothing is pushed and no tag is created here.
+      - name: Build recovery helper (validation only)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: docker/recovery-helper
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: localhost/sencho-recovery-helper:pr-test
+          cache-from: type=gha,scope=recovery-helper
+          cache-to: type=gha,scope=recovery-helper,mode=max
+
+      - name: Scan recovery helper (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: localhost/sencho-recovery-helper:pr-test
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          trivy-config: trivy-recovery-helper.yaml
+
+      - name: Smoke test recovery helper
+        run: |
+          set -euo pipefail
+          docker run --rm --network none localhost/sencho-recovery-helper:pr-test version
+          docker run --rm --network none --entrypoint /sencho-recovery-probe \
+            localhost/sencho-recovery-helper:pr-test / | grep -q '"ino"'
+
+      - name: Compute the helper digest reference for the image build
+        id: helper
+        run: |
+          set -euo pipefail
+          digest=$(docker image inspect --format '{{.Id}}' localhost/sencho-recovery-helper:pr-test)
+          echo "ref=${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image (validation only)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -221,6 +284,7 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
+            SENCHO_RECOVERY_HELPER_IMAGE=${{ steps.helper.outputs.ref }}
 
       - name: Scan image for vulnerabilities (Trivy)
         # Hard-fails the PR on any HIGH or CRITICAL finding not suppressed by
@@ -248,6 +312,18 @@ jobs:
           set -euo pipefail
           docker run --rm --entrypoint sh sencho:pr-test -c \
             'docker --version && docker compose version && git --version'
+
+      - name: Assert the image pins the helper digest
+        # The pin is baked in as an ENV whose default is empty, so a broken
+        # plumbing change would otherwise ship silently.
+        run: |
+          set -euo pipefail
+          baked=$(docker run --rm --entrypoint sh sencho:pr-test \
+            -c 'printf %s "$SENCHO_RECOVERY_HELPER_IMAGE"')
+          case "$baked" in
+            sha256:*) echo "pinned helper: $baked" ;;
+            *) echo "FAILED: baked helper reference is not a digest: '$baked'"; exit 1 ;;
+          esac
 
   # ---------------------------------------------------------------------------
   # E2E Tests (PRs only, gated by change detection)

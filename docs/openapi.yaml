@@ -70,6 +70,8 @@ tags:
     description: Manage private container registry credentials. Docker Hub, GHCR, and custom registries are available on every tier; AWS ECR requires Admiral. These endpoints are only accessible via browser sessions. API tokens receive `SCOPE_DENIED`.
   - name: Image Updates
     description: Check for available container image updates across stacks
+  - name: Recovery
+    description: Create, verify, and restore application-data recovery points for named Docker volumes on a node
 
 components:
   securitySchemes:
@@ -1151,6 +1153,274 @@ components:
             posture was capped, so a `0` beside it is ambiguous between "none" and "not
             counted".
 
+    RecoveryVolumeProtection:
+      type: object
+      required: [capability, version, state, reason]
+      description: |
+        Whether a node can create and restore volume recovery points, and why not.
+        A node reports `available` or `unavailable` about itself; `update_required` and
+        `unknown` are the control instance's conclusions about a remote node.
+      properties:
+        capability:
+          type: string
+          example: volume-protection-v1
+        version:
+          type: integer
+          example: 1
+        state:
+          type: string
+          enum: [available, unavailable, update_required, unknown]
+        reason:
+          type: string
+          description: |
+            `engine_registered` when available. When unavailable: `engine_not_installed`,
+            `schema_newer_than_build`, `recovery_store_unavailable`, `engine_starting`,
+            `helper_unavailable`, `repository_not_initialized`, `repository_unavailable`,
+            `repository_key_unavailable`. When update_required: `node_contract_older` or
+            `hub_contract_older`. When unknown: `node_unreachable`, `node_refused`,
+            `node_error`, `descriptor_invalid`, `descriptor_mismatch`.
+          example: engine_registered
+
+    RecoveryError:
+      type: object
+      required: [error, errorClass, code]
+      properties:
+        error:
+          type: string
+          description: Fixed, sanitized sentence for this class. Never raw engine output.
+        errorClass:
+          type: string
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal]
+        code:
+          type: string
+          description: The error class upper-cased, for a client to switch on.
+          example: LOCK_HELD
+        reason:
+          type: string
+          description: |
+            A stable token for the specific cause, present on some answers:
+            `engine_starting` while the node is still starting, `repository_not_initialized`
+            when no repository has been provisioned (both `503 capability_unavailable`),
+            `repository_replaced` for a restore of a point in a replaced repository
+            (`503 repository_unavailable`), and `not_cancellable`.
+
+    RecoveryOperation:
+      type: object
+      required: [id, idempotencyKey, kind, storageId, pointId, actor, transport, state, errorClass, errorDetail, processEpoch, createdAt, updatedAt, completedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        idempotencyKey:
+          type: string
+          description: Caller-supplied key. A replay of the same key answers the same operation.
+        kind:
+          type: string
+          enum: [create_point, verify_point, restore, repository_init]
+        storageId: { type: ["string", "null"] }
+        pointId: { type: ["string", "null"] }
+        actor: { type: string }
+        transport:
+          type: string
+          enum: [local, node_proxy, pilot_tunnel]
+        state:
+          type: string
+          enum: [queued, running, succeeded, partial, failed, cancelled, completion_unknown]
+          description: |
+            `completion_unknown` means the process was lost mid-operation. It is never
+            success and is never retried silently.
+        errorClass:
+          type: ["string", "null"]
+          enum: [invalid_request, permission_denied, capability_unavailable, update_required, schema_unsupported, identity_unknown, lock_held, lock_stale, repository_unavailable, repository_key_unavailable, source_unreadable, integrity_mismatch, attributes_not_restored, interrupted, transport_unreachable, node_refused, node_error, internal, null]
+        errorDetail: { type: ["string", "null"] }
+        processEpoch: { type: string }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+        completedAt: { type: ["integer", "null"] }
+
+    RecoveryProgress:
+      type: object
+      required: [operationId, phase, filesDone, bytesDone, bytesTotal]
+      description: Bounded progress while an operation runs. Null once it settles.
+      properties:
+        operationId: { type: string }
+        phase:
+          type: string
+          enum: [preparing, scanning, transferring, verifying, finalizing]
+        filesDone: { type: integer }
+        bytesDone: { type: integer }
+        bytesTotal:
+          type: ["integer", "null"]
+          description: Null when the engine cannot estimate a total.
+
+    RecoveryPoint:
+      type: object
+      required: [id, schemaVersion, storageId, storageGeneration, repositoryId, trigger, actor, sourceOperationId, sourceNodeKey, engineId, capabilityVersion, startedAt, kind, pathScope, status, snapshotId, consistency, capture, exclusions, completedAt, failureClass]
+      properties:
+        id:
+          type: string
+          format: uuid
+        schemaVersion: { type: integer }
+        storageId: { type: string }
+        storageGeneration:
+          type: integer
+          description: The volume generation this point captured. A recreated volume is a new generation.
+        repositoryId: { type: string }
+        trigger:
+          type: string
+          enum: [manual, policy, pre_change, pre_restore]
+        actor: { type: string }
+        sourceOperationId: { type: string }
+        sourceNodeKey: { type: string }
+        engineId: { type: string, example: restic }
+        capabilityVersion: { type: integer }
+        startedAt: { type: integer }
+        kind:
+          type: string
+          enum: [root, path]
+          description: Only a `root` point of the current generation can count toward Protected.
+        pathScope:
+          type: ["string", "null"]
+          description: The path a `path` point covers, relative to the volume root.
+        status:
+          type: string
+          enum: [pending, succeeded, partial, failed, completion_unknown]
+        snapshotId: { type: ["string", "null"] }
+        consistency:
+          type: string
+          enum: [crash_consistent_live, crash_consistent_stopped, unknown]
+          description: |
+            An observation about the capture, not a claim about the application.
+            `crash_consistent_live` means a container was using the volume while it was
+            read; `crash_consistent_stopped` means nothing was observed using it and
+            Sencho stopped nothing.
+        capture:
+          type: ["object", "null"]
+          properties:
+            fileCount: { type: integer }
+            byteCount: { type: integer }
+            skippedCount:
+              type: integer
+              description: Non-zero means the point is `partial` and never counts toward Protected.
+        exclusions:
+          type: array
+          items:
+            type: object
+            required: [path, reason]
+            properties:
+              path: { type: string }
+              reason:
+                type: string
+                enum: [policy_excluded, permission_denied, unreadable, vanished, unsupported_type]
+        completedAt: { type: ["integer", "null"] }
+        failureClass:
+          type: ["string", "null"]
+          description: The error class a failed point ended with.
+
+    RecoveryVerification:
+      type: object
+      required: [id, pointId, method, result, verifiedAt, operationId]
+      properties:
+        id: { type: string }
+        pointId: { type: string }
+        method:
+          type: string
+          enum: [engine_check_metadata, engine_check_read_data]
+        result:
+          type: string
+          enum: [verified, mismatch, error]
+          description: A check that could not run is `error`, which never counts as verified.
+        verifiedAt: { type: integer }
+        operationId: { type: ["string", "null"] }
+
+    RecoveryRootCoverage:
+      type: object
+      required: [storageKey, reason, coveringPointId]
+      properties:
+        storageKey: { type: ["string", "null"] }
+        reason:
+          type: string
+          enum: [covered, no_point, in_progress, completion_unknown, stale, partial_point, failed_only, unverified, integrity_mismatch, older_generation, unsupported, inaccessible, identity_unknown, evidence_inconsistent]
+        coveringPointId: { type: ["string", "null"] }
+
+    RecoveryCoverageVerdict:
+      type: object
+      required: [state, reason, roots]
+      properties:
+        state:
+          type: string
+          enum: [protected, partially_protected, unprotected, unknown]
+        reason:
+          type: string
+          enum: [all_roots_covered, some_roots_covered, no_root_covered, capability_unavailable, capability_update_required, capability_unknown, no_qualifying_storage, root_evidence_unknown]
+        roots:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecoveryRootCoverage"
+
+    RecoveryStorageRoot:
+      type: object
+      description: |
+        One volume considered for protection. A root the caller may not read appears
+        as `{ "access": "inaccessible" }` with no name, and still counts against the
+        verdict.
+      properties:
+        volumeName: { type: string }
+        storageId: { type: ["string", "null"] }
+        eligible: { type: boolean }
+        ineligibleReason:
+          type: ["string", "null"]
+          enum: [volume_missing, reserved_name, repository_volume, sencho_volume, anonymous_volume, non_local_driver, driver_options, null]
+        reason:
+          type: ["string", "null"]
+          description: The sentence shown for a refused volume.
+        coverage:
+          type: string
+          enum: [covered, no_point, in_progress, completion_unknown, stale, partial_point, failed_only, unverified, integrity_mismatch, older_generation, unsupported, inaccessible, identity_unknown, evidence_inconsistent]
+        coveringPointId: { type: ["string", "null"] }
+        access:
+          type: string
+          enum: [inaccessible]
+
+    RecoveryRepositoryInfo:
+      type: object
+      required: [locator, fingerprint, secretState, createdAt, lastCheck]
+      description: Configuration facts, returned only to a caller who may change settings. Never carries the password.
+      properties:
+        locator:
+          type: string
+          example: sencho-recovery-4f2a1c9d8e70-7b3d5a1e9c42-g1
+        fingerprint:
+          type: ["string", "null"]
+          description: The engine's own repository id, recorded when the repository was initialized.
+        secretState:
+          type: string
+          enum: [absent, stored]
+        createdAt: { type: integer }
+        lastCheck:
+          type: ["object", "null"]
+          properties:
+            method:
+              type: string
+              enum: [engine_check_metadata, engine_check_read_data]
+            result:
+              type: string
+              enum: [verified, mismatch, error]
+            checkedAt: { type: integer }
+
+    RecoveryAcceptedOperation:
+      type: object
+      required: [operation, failureDomain, warning]
+      properties:
+        operation:
+          $ref: "#/components/schemas/RecoveryOperation"
+        failureDomain:
+          type: string
+          enum: [same_failure_domain]
+        warning:
+          type: string
+          description: States that the repository shares this node's failure domain and is not an off-host copy.
+
   responses:
     Unauthorized:
       description: Authentication required. Provide a valid Bearer token.
@@ -1181,6 +1451,40 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+
+    RecoveryBadRequest:
+      description: The request is not valid for this storage.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
+    RecoveryForbidden:
+      description: The caller lacks the access this recovery action needs.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
+    RecoveryConflict:
+      description: A live lock is held, an interrupted operation left a stale lock, the storage identity is unknown, a check found a mismatch, an operation was interrupted, or a remote node needs an update.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
+    RecoveryUnavailable:
+      description: |
+        Volume protection is not available on this node, the repository is not reachable
+        or its key is unavailable, the schema is unsupported, or the node could not be
+        reached. A node that is still starting answers with `"reason": "engine_starting"`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
+    RecoveryInternalError:
+      description: The recovery operation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoveryError"
 
 paths:
   # ── Health ──────────────────────────────────────────────
@@ -4721,3 +5025,602 @@ paths:
           description: Upstream registry auth or policy failure (not a Sencho session 401)
         '502':
           description: Upstream registry transport failure
+
+  # ── Recovery ────────────────────────────────────────────
+  /api/recovery/node:
+    get:
+      operationId: getRecoveryNode
+      tags: [Recovery]
+      summary: Read this node's recovery status
+      description: |
+        Returns this node's recovery contract version and whether it can create and
+        restore volume recovery points, with the reason when it cannot. The `operationId`
+        echoes the dispatch id a control instance sent, so a caller can match the answer
+        to its request. A node that predates this route answers `404`, which a control
+        instance reads as an update being required.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: This node's recovery descriptor.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contractVersion, volumeProtection, operationId]
+                properties:
+                  contractVersion:
+                    type: integer
+                    example: 1
+                  volumeProtection:
+                    $ref: "#/components/schemas/RecoveryVolumeProtection"
+                  operationId:
+                    type: ["string", "null"]
+                    description: The dispatch id a control instance sent, echoed back, or null for a direct call.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/recovery/repository:
+    get:
+      operationId: getRecoveryRepository
+      tags: [Recovery]
+      summary: Read this node's recovery repository
+      description: |
+        Returns the repository's health, the reason it is not healthy, the failure
+        domain, and the warning that points share this node's failure domain. The
+        `repository` object names the volume, fingerprint, secret state, creation time,
+        and the last check; it is returned only to a caller who may change these
+        settings. The repository password is never returned by any shape.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Repository health, and configuration facts for a caller who may change settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [health, reason, failureDomain, warning, initialized]
+                properties:
+                  health:
+                    type: string
+                    enum: [available, unavailable, update_required, unknown]
+                  reason:
+                    type: string
+                    description: The capability reason, for example `engine_registered`, `helper_unavailable`, or `repository_not_initialized`.
+                  failureDomain:
+                    type: string
+                    enum: [same_failure_domain, separate, unknown]
+                  warning:
+                    type: string
+                  initialized:
+                    type: boolean
+                  repository:
+                    oneOf:
+                      - $ref: "#/components/schemas/RecoveryRepositoryInfo"
+                      - type: "null"
+                    description: Present only for a caller who may change settings.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+    post:
+      operationId: provisionRecoveryRepository
+      tags: [Recovery]
+      summary: Provision or replace this node's recovery repository
+      description: |
+        Provisions the repository, or continues a provisioning attempt a crash left half
+        done. Idempotent: the same key answers the operation it already created. With
+        `replace: true`, registers a new repository volume generation and moves the
+        active pointer to it; the previous repository and its points are kept.
+        Requires permission to change system settings.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotencyKey]
+              properties:
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                replace:
+                  type: boolean
+                  description: Provision a new repository and keep the previous one and its points.
+      responses:
+        "202":
+          description: Provisioning admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/storage:
+    get:
+      operationId: getRecoveryStorage
+      tags: [Recovery]
+      summary: List volumes and their coverage
+      description: |
+        With `?stack=`, returns the volumes that stack's rendered model declares. Without
+        it, considers every volume on the node. Each root carries its eligibility, its
+        coverage reason, and the covering point when there is one. A root the caller may
+        not read appears as `{"access": "inaccessible"}` with its name withheld, and it
+        still counts against the verdict. A volume recreated since its last capture reads
+        `older_generation` at once, from Docker's creation time, without waiting for a new capture.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+        - name: stack
+          in: query
+          required: false
+          description: |
+            One stack directory name. Omit to consider every volume on the node. A stack that
+            does not exist lists nothing; a repeated parameter or a name that is not a valid
+            stack name answers `400`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Roots, the aggregate verdict, and this node's volume-protection capability.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [roots, verdict, capability]
+                properties:
+                  roots:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RecoveryStorageRoot"
+                  verdict:
+                    $ref: "#/components/schemas/RecoveryCoverageVerdict"
+                  capability:
+                    $ref: "#/components/schemas/RecoveryVolumeProtection"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/storage/{storageId}/points:
+    get:
+      operationId: listRecoveryPoints
+      tags: [Recovery]
+      summary: List a volume's recovery points
+      description: Returns the storage identity with every point recorded against its key, newest first, each with its verifications. A caller who may not read the storage is refused. The volume itself need not exist any more.
+      parameters:
+        - name: storageId
+          in: path
+          required: true
+          description: Storage identity id, as returned in a root's `storageId`.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The storage identity and its points.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [storage, points]
+                properties:
+                  storage:
+                    type: object
+                    required: [id, locator, generation, state]
+                    properties:
+                      id: { type: string }
+                      locator:
+                        type: string
+                        description: The volume name.
+                      generation:
+                        type: integer
+                        description: Increments when the volume is recreated under the same name.
+                      state:
+                        type: string
+                        enum: [current, superseded]
+                  points:
+                    type: array
+                    items:
+                      type: object
+                      required: [point, verifications]
+                      properties:
+                        point:
+                          $ref: "#/components/schemas/RecoveryPoint"
+                        verifications:
+                          type: array
+                          items:
+                            $ref: "#/components/schemas/RecoveryVerification"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/storage/points:
+    post:
+      operationId: createRecoveryPoint
+      tags: [Recovery]
+      summary: Create a point of a volume
+      description: |
+        Admits a root capture of one named volume. Eligibility, readiness, dependent
+        stacks, the access check, a generation probe, the operation record, and the locks
+        all happen before the answer, so a held or stale lock is a real `409` rather than
+        a background failure. A refused request is not recorded, so the same idempotency
+        key can be sent again once the lock is gone. One repository lock covers the node:
+        only one capture, verification, or restore runs at a time on it. A node with no
+        repository answers `503 capability_unavailable` with reason `repository_not_initialized`.
+        The capture runs in the background and is followed by a repository-wide metadata
+        check before the operation ends.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [volumeName, idempotencyKey]
+              properties:
+                volumeName:
+                  type: string
+                  minLength: 2
+                  maxLength: 255
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]+$'
+                  description: A name Docker accepts for a volume. Anything else answers `400`.
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "202":
+          description: Capture admitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryAcceptedOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/verify:
+    post:
+      operationId: verifyRecoveryPoint
+      tags: [Recovery]
+      summary: Verify a point
+      description: |
+        Runs a restic check over the whole repository, so the result covers every point in
+        it. `engine_check_metadata` is the default; `engine_check_read_data` also reads
+        every pack file back. The result is appended as a verification on every point in
+        the repository and never rewrites an older one. A check that finds damage ends the
+        operation `failed` with `integrity_mismatch`. The source volume need not exist any more.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotencyKey]
+              properties:
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                method:
+                  type: string
+                  enum: [engine_check_metadata, engine_check_read_data]
+                  default: engine_check_metadata
+      responses:
+        "202":
+          description: Verification admitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/points/{pointId}/restore:
+    post:
+      operationId: restoreRecoveryPoint
+      tags: [Recovery]
+      summary: Restore a point into a new volume
+      description: |
+        Restores a point into a volume Sencho creates. The source volume need not exist any
+        more. The target name must be a name Docker accepts for a volume (anything else
+        answers `400` before an operation is recorded), must not exist,
+        must not name one of Sencho's own volumes, must not start with `sencho-recovery-`,
+        and needs the same access that changing a stack does when it starts with a known
+        stack's name plus an underscore. Sencho records a restore intent, creates the
+        target with that intent's label, proves it created it, restores with verification,
+        and on failure removes only its own unused target. Extended-attribute-only
+        failures end `partial` with `errorClass: attributes_not_restored` and an
+        `xattrWarnings` count, and the volume is kept. A point in a replaced repository
+        answers `503 repository_unavailable` with reason `repository_replaced`.
+      parameters:
+        - name: pointId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetVolumeName, idempotencyKey]
+              properties:
+                targetVolumeName:
+                  type: string
+                  minLength: 2
+                  maxLength: 255
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]+$'
+                idempotencyKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                targetMode:
+                  type: string
+                  enum: [new_volume, new_path, staged_overwrite]
+                  description: Only `new_volume` is accepted; any other value is refused as an invalid request.
+                  default: new_volume
+      responses:
+        "202":
+          description: Restore admitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "200":
+          description: Replay of an earlier request with the same idempotency key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "503":
+          $ref: "#/components/responses/RecoveryUnavailable"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/operations/{id}:
+    get:
+      operationId: getRecoveryOperation
+      tags: [Recovery]
+      summary: Read a recovery operation
+      description: |
+        Returns the operation with its bounded progress and the evidence it produced.
+        `result` depends on the kind: `{point}` for a capture, `{point, verifications}`
+        for a verification, `{intent}` for a restore, and `{repository}` for a repository
+        provisioning.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Operation id.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: The operation, its progress, and its result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, progress, result]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+                  progress:
+                    oneOf:
+                      - $ref: "#/components/schemas/RecoveryProgress"
+                      - type: "null"
+                  result:
+                    type: ["object", "null"]
+                    description: Evidence for the operation kind.
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/operations/{id}/cancel:
+    post:
+      operationId: cancelRecoveryOperation
+      tags: [Recovery]
+      summary: Cancel a running operation
+      description: |
+        Asks a running operation to stop. A capture settles its point as failed before it
+        settles the operation. A repository provisioning operation is refused as an
+        invalid request, because a half-provisioned repository is settled by the next
+        provisioning attempt.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "202":
+          description: Cancellation requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation]
+                properties:
+                  operation:
+                    $ref: "#/components/schemas/RecoveryOperation"
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"
+
+  /api/recovery/locks/release:
+    post:
+      operationId: releaseRecoveryLock
+      tags: [Recovery]
+      summary: Release a stale lock
+      description: |
+        Releases a lock whose owner ended `completion_unknown`, after review. A live lock
+        is never released here; its owner releases it by finishing, and a request against
+        a live lock answers `409` with `LOCK_HELD`. A repository lock requires permission
+        to change system settings; a storage lock requires the same access a restore does,
+        and the storage's volume need not exist any more. At startup, once no helper of the
+        previous process remains, Sencho releases the repository lock of an interrupted provisioning,
+        and, when restic's own locks are cleared, of interrupted captures, checks and restores
+        itself; every storage lock waits for this call.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scope, resourceKey]
+              properties:
+                scope:
+                  type: string
+                  enum: [storage, repository]
+                resourceKey:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  description: The storage key for `storage`, or the repository id for `repository`.
+      responses:
+        "200":
+          description: The lock row that was released.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released:
+                    type: object
+                    required: [scope, resourceKey, ownerOperationId, processEpoch, acquiredAt, staleSince]
+                    properties:
+                      scope:
+                        type: string
+                        enum: [storage, repository]
+                      resourceKey: { type: string }
+                      ownerOperationId: { type: string }
+                      processEpoch: { type: string }
+                      acquiredAt: { type: integer }
+                      staleSince: { type: ["integer", "null"] }
+        "400":
+          $ref: "#/components/responses/RecoveryBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/RecoveryForbidden"
+        "409":
+          $ref: "#/components/responses/RecoveryConflict"
+        "500":
+          $ref: "#/components/responses/RecoveryInternalError"

@@ -50,6 +50,7 @@ interface OperationRow {
   transport: RecoveryTransport;
   state: RecoveryOperationState;
   error_class: RecoveryErrorClass | null;
+  request_digest: string | null;
   process_epoch: string;
   created_at: number;
   updated_at: number;
@@ -104,6 +105,24 @@ export interface StartOperationInput {
   pointId?: string | null;
   actor: string;
   transport: RecoveryTransport;
+  /**
+   * sha256 of the canonical request this operation is for (the storage, the
+   * method, the target name). A replay with the same key but a different request
+   * is a different operation and is refused, so one key can never answer for two
+   * requests. Required for a new row; an operation created before schema v2 has
+   * no digest and only matches a replay that carries none.
+   */
+  requestDigest?: string | null;
+}
+
+/** What a caller supplies to look up a replay before it validates the request again. */
+export interface ReplayLookup {
+  idempotencyKey: string;
+  kind: RecoveryOperationKind;
+  actor: string;
+  transport: RecoveryTransport;
+  requestDigest?: string | null;
+  pointId?: string | null;
 }
 
 export interface StartedOperation {
@@ -137,13 +156,16 @@ export class RecoveryOperationStore {
     if (key === '' || key.length > 200) throw new RecoveryError('invalid_request');
     const storageId = input.storageId ?? null;
     const pointId = input.pointId ?? null;
+    const requestDigest = input.requestDigest ?? null;
+    if (requestDigest !== null && !/^[0-9a-f]{64}$/.test(requestDigest)) throw new RecoveryError('invalid_request');
     const db = recoveryDb();
     return db.transaction((): StartedOperation => {
       const existing = db.prepare('SELECT * FROM recovery_operations WHERE idempotency_key = ?').get(key) as OperationRow | undefined;
       if (existing) {
         // The same key for a different request, actor or transport is not a replay.
         if (existing.kind !== input.kind || existing.storage_id !== storageId || existing.point_id !== pointId
-          || existing.actor !== input.actor || existing.transport !== input.transport) {
+          || existing.actor !== input.actor || existing.transport !== input.transport
+          || (existing.request_digest ?? null) !== requestDigest) {
           throw new RecoveryError('invalid_request');
         }
         return { operation: toOperation(existing), replayed: true };
@@ -151,11 +173,58 @@ export class RecoveryOperationStore {
       const id = randomUUID();
       db.prepare(`
         INSERT INTO recovery_operations
-          (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, process_epoch, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-      `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, this.processEpoch, now, now);
+          (id, idempotency_key, kind, storage_id, point_id, actor, transport, state, request_digest,
+           process_epoch, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+      `).run(id, key, input.kind, storageId, pointId, input.actor, input.transport, requestDigest, this.processEpoch, now, now);
       return { operation: this.require(id), replayed: false };
     }).immediate();
+  }
+
+  /**
+   * Admit an operation: record it, mark it running and take every lock it needs,
+   * as one step. A refusal at any point (a held or stale lock, a second restore
+   * into the same target) rolls the whole step back, so a refused request leaves
+   * no operation behind. That matters for retries: the idempotency key of a
+   * request that was answered `409` is still free, and the same request can be
+   * sent again once the lock is gone instead of replaying a failure that never
+   * ran. `setup` runs inside the same step, after the locks, for rows that must
+   * exist if and only if the operation is admitted.
+   */
+  admit<T = void>(
+    input: StartOperationInput,
+    locks: ReadonlyArray<{ scope: RecoveryLockScope; resourceKey: string }>,
+    setup?: (operation: RecoveryOperation) => T,
+    now = Date.now(),
+  ): StartedOperation & { setup: T | undefined } {
+    return recoveryDb().transaction((): StartedOperation & { setup: T | undefined } => {
+      const started = this.start(input, now);
+      if (started.replayed) return { ...started, setup: undefined };
+      const operationId = started.operation.id;
+      this.markRunning(operationId, now);
+      for (const lock of locks) this.acquireLock(lock.scope, lock.resourceKey, operationId, now);
+      const prepared = setup ? setup(this.require(operationId)) : undefined;
+      return { operation: this.require(operationId), replayed: false, setup: prepared };
+    }).immediate();
+  }
+
+  /**
+   * The operation an earlier request with this key created, or null when there is
+   * none or it belongs to a different request. A route uses this before its own
+   * validation, so a retry after a lost response returns the work that is already
+   * running instead of failing on state that work has since changed (a restore
+   * target that now exists, for instance).
+   */
+  findReplay(lookup: ReplayLookup): RecoveryOperation | null {
+    const key = typeof lookup.idempotencyKey === 'string' ? lookup.idempotencyKey.trim() : '';
+    if (key === '') return null;
+    const row = recoveryDb().prepare('SELECT * FROM recovery_operations WHERE idempotency_key = ?')
+      .get(key) as OperationRow | undefined;
+    if (!row) return null;
+    if (row.kind !== lookup.kind || row.actor !== lookup.actor || row.transport !== lookup.transport) return null;
+    if ((row.request_digest ?? null) !== (lookup.requestDigest ?? null)) return null;
+    if (lookup.pointId !== undefined && row.point_id !== lookup.pointId) return null;
+    return toOperation(row);
   }
 
   get(id: string): RecoveryOperation | null {
@@ -332,6 +401,37 @@ export class RecoveryOperationStore {
       );
       return toLock(row);
     }).immediate();
+  }
+
+  /**
+   * Release the repository locks that interrupted work left, once the helpers of
+   * the dead process are gone. Captures, checks and restores only read or append
+   * to the active repository: once restic's own locks are cleared (`activeId` is
+   * set) an interrupted one leaves its point or its target volume settled by their
+   * own records, and nothing in the repository that needs a person's review. A
+   * provisioning operation is released on any repository, because the next
+   * provision request continues a half-made repository and takes the lock itself;
+   * with no active repository to unlock there is nothing else to wait for. Every
+   * storage lock stays until it is released on purpose.
+   */
+  releaseInterruptedRepositoryLocks(activeId: string | null): number {
+    return recoveryDb().prepare(`
+      DELETE FROM recovery_locks
+      WHERE scope = 'repository' AND stale_since IS NOT NULL
+        AND owner_operation_id IN (
+          SELECT id FROM recovery_operations
+          WHERE kind = 'repository_init'
+             OR (? IS NOT NULL AND recovery_locks.resource_key = ?
+                 AND kind IN ('create_point','verify_point','restore'))
+        )
+    `).run(activeId, activeId).changes;
+  }
+
+  /** Whether any repository lock is stale, for the log line boot writes when it releases none. */
+  hasStaleRepositoryLock(): boolean {
+    return recoveryDb().prepare(
+      `SELECT 1 FROM recovery_locks WHERE scope = 'repository' AND stale_since IS NOT NULL LIMIT 1`,
+    ).get() !== undefined;
   }
 
   /**
