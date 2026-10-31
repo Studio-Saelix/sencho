@@ -33,6 +33,8 @@ import {
   SERVICE_SCOPED_UPDATE_CAPABILITY,
   SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
   SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+  HOST_USAGE_UNKNOWN_HEADER,
+  HOST_USAGE_UNKNOWN_HEADER_VALUE,
 } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
@@ -182,6 +184,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // state changes within one proxy call.
       const headers = LicenseService.getInstance().getProxyHeaders();
       proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
+      // Advertise that this hub renders null host usage. A remote on a newer
+      // build answers with nulls only when it sees this header; an older hub
+      // forwards none, so a newer remote keeps the numeric shape its dashboard
+      // can render. Strip first so a browser cannot choose the remote's shape.
+      proxyReq.removeHeader(HOST_USAGE_UNKNOWN_HEADER);
+      proxyReq.setHeader(HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE);
       // Forward the signed-in user's role so the remote enforces their RBAC
       // rather than treating every proxied request as admin. Strip first so a
       // browser/API client cannot smuggle the header through the gateway, then

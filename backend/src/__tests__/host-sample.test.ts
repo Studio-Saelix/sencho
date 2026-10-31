@@ -161,10 +161,22 @@ describe('readLocalHostSample when Docker and the kernel agree', () => {
     expect(wire.memory.used).toBeNull();
     expect(wire.memory.usagePercent).toBeNull();
   });
+
+  it('keeps the raw disk percentage internal and the wire one-decimal', async () => {
+    mockFsSize.mockResolvedValue([
+      { fs: '/dev/sda1', mount: '/', size: 100 * GiB, used: 85.04 * GiB, available: 14.96 * GiB, use: 85.04 },
+    ]);
+    const sample = await readLocalHostSample(NODE_ID);
+    // Threshold alerts compare the raw value so 85.04% trips an 85% limit.
+    expect(sample.disk?.use).toBe(85.04);
+    const wire = hostSampleToWire(sample);
+    expect(wire.disk?.usagePercent).toBe('85.0');
+    expect(wire.disk).not.toHaveProperty('use');
+  });
 });
 
 describe('readDockerCapacity', () => {
-  it('falls back to the kernel view when docker info rejects, logging once', async () => {
+  it('falls back to the kernel view when the first docker info probe rejects, logging once', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       mockDockerInfo.mockRejectedValue(Object.assign(new Error('no socket'), { name: 'Enoent' }));
@@ -173,10 +185,10 @@ describe('readDockerCapacity', () => {
       expect(wire.cpu.usage).toBe('12.3');
       expect(wire.memory.total).toBe(KERNEL_TOTAL);
 
-      // The failed read is cached for the 30s window too, so a poll every few
-      // seconds neither re-hits the dead socket nor repeats the warning.
+      // The failure is not cached: a later poll retries the daemon instead of
+      // replaying a 30s-old failure, while the warning stays one per code.
       await readLocalHostSample(NODE_ID);
-      expect(mockDockerInfo).toHaveBeenCalledTimes(1);
+      expect(mockDockerInfo).toHaveBeenCalledTimes(2);
       const failureLogs = warn.mock.calls.filter((call) => String(call[0]).includes('docker info unavailable'));
       expect(failureLogs).toHaveLength(1);
     } finally {
@@ -197,6 +209,34 @@ describe('readDockerCapacity', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps the last good nested capacity through a daemon stall', async () => {
+    // The host was nested when the daemon last answered: 2 cores, 4 GiB.
+    mockDockerInfo.mockResolvedValue({ NCPU: 2, MemTotal: 4 * GiB });
+    const first = hostSampleToWire(await readLocalHostSample(NODE_ID));
+    expect(first.cpu).toEqual({ usage: null, cores: 2 });
+    expect(first.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
+
+    const startedAt = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(startedAt + 31_000);
+    try {
+      mockDockerInfo.mockRejectedValue(Object.assign(new Error('stalled'), { name: 'TimeoutError' }));
+
+      // A stalled daemon must not flip the node back to the 8-core, 16 GiB
+      // kernel view, and must not alert on those numbers.
+      const stalled = hostSampleToWire(await readLocalHostSample(NODE_ID));
+      expect(stalled.cpu).toEqual({ usage: null, cores: 2 });
+      expect(stalled.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
+
+      // The failure is never cached for the capacity TTL, so recovery does not
+      // wait out the window; each poll retries while serving the stale value.
+      await readLocalHostSample(NODE_ID);
+      expect(mockDockerInfo).toHaveBeenCalledTimes(3);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
 
   it('caches capacity for 30s per node', async () => {
     await readDockerCapacity(NODE_ID);
@@ -226,6 +266,30 @@ describe('nested host: capacity from Docker, usage from the cgroup', () => {
     expect(wire.cpu).toEqual({ usage: null, cores: 2 });
     expect(wire.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
   });
+
+  it('serves the kernel view to a reader that cannot render unknown', async () => {
+    setKernel(); // no cgroup fixture registered
+    const wire = hostSampleToWire(await readLocalHostSample(NODE_ID), { allowUnknown: false });
+    // A hub older than nullable usage keeps today's numeric shape instead of
+    // rendering null as NaN%/Critical; the scoped dimensions are still used
+    // when they can be measured.
+    expect(wire.cpu).toEqual({ usage: '12.3', cores: 8 });
+    expect(wire.memory).toEqual({
+      total: KERNEL_TOTAL,
+      used: 4 * GiB,
+      free: 12 * GiB,
+      usagePercent: '25.0',
+    });
+  });
+
+  it('keeps measured nested usage for a legacy reader', async () => {
+    setCgroup({ cpuUsecSequence: [1_000_000, 1_050_000], memoryCurrent: 2 * GiB });
+    const wire = hostSampleToWire(await readLocalHostSample(NODE_ID), { allowUnknown: false });
+    expect(wire.cpu.cores).toBe(2);
+    expect(wire.memory.total).toBe(4 * GiB);
+    expect(wire.memory.usagePercent).toBe('37.5');
+  });
+
 
   it('measures CPU from the cgroup counter, taking a second reading on the first call', async () => {
     setCgroup({ cpuUsecSequence: [1_000_000, 1_050_000] });

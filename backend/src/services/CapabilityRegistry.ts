@@ -75,6 +75,7 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  'host-usage-unknown-v1',
 ] as const;
 
 /**
@@ -193,6 +194,25 @@ export const FLEET_READINESS_V1_CAPABILITY = 'fleet-readiness-v1' as const satis
  */
 export const HEALTH_GATE_OBSERVATION_CAPABILITY =
   'health-gate-observation-v1' as const satisfies Capability;
+
+/**
+ * A node whose `/api/system/stats` and fleet row can report CPU and memory
+ * usage as `null` (a nested container with no trusted cgroup reading) and
+ * whose UI renders that as unknown.
+ *
+ * The flag is checked in both directions. A new hub reads it from a remote
+ * before trusting a null, and a remote uses the request header below to decide
+ * whether the caller can render null. A hub older than this capability sends
+ * no header, so a new remote answers with the pre-nested-support numeric shape
+ * instead of a null that would render as `NaN%` and a Critical fleet card.
+ */
+export const HOST_USAGE_UNKNOWN_CAPABILITY = 'host-usage-unknown-v1' as const satisfies Capability;
+
+/** Request header a hub sets when it advertises `host-usage-unknown-v1`. */
+export const HOST_USAGE_UNKNOWN_HEADER = 'x-sencho-host-usage-unknown';
+
+/** Header value a capable hub sends. Any other value means "cannot render unknown". */
+export const HOST_USAGE_UNKNOWN_HEADER_VALUE = '1';
 
 /**
  * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each

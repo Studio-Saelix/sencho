@@ -17,7 +17,7 @@ import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { MonitorService } from '../services/MonitorService';
-import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
+import { getSenchoVersion, isValidVersion, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
 import { checkPermission, requirePermission } from '../middleware/permissions';
@@ -424,8 +424,12 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
   const baseUrl = target.apiUrl.replace(/\/$/, '');
   const headers: Record<string, string> = target.apiToken
-    ? { Authorization: `Bearer ${target.apiToken}` }
-    : {};
+    ? {
+        Authorization: `Bearer ${target.apiToken}`,
+        // This hub renders null host usage; ask a newer remote for it.
+        [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE,
+      }
+    : { [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE };
   const t0 = Date.now();
 
   try {

@@ -12,6 +12,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { seedPersonas } from './fixtures/personas';
 import { DatabaseService } from '../services/DatabaseService';
 import { resetTrustedProxyBlockListCache } from '../helpers/trustedProxyCidrs';
+import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 
 describe('proxy hop forwarding headers', () => {
   let tmpDir: string;
@@ -113,5 +114,16 @@ describe('proxy hop forwarding headers', () => {
     expect(res.status).toBe(200);
     expect(captured?.['x-forwarded-for']).toBe('203.0.113.7');
     expect(captured?.['x-forwarded-proto']).toBe('https');
+  });
+
+  it('advertises nullable host usage and does not trust a caller-supplied value', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', personas.admin.bearer)
+      .set('x-node-id', String(nodeId))
+      .set(HOST_USAGE_UNKNOWN_HEADER, '0');
+
+    expect(res.status).toBe(200);
+    expect(captured?.[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
   });
 });

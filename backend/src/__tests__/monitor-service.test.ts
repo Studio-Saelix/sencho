@@ -468,6 +468,20 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
   });
 
+  it('compares the raw disk percentage, not the rounded wire value', async () => {
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 85.04 }]);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_disk_limit: '85' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
+
+    // 84.96 rounds to 85.0 but is still below the limit, so it must not alert.
+    mockDispatchAlert.mockClear();
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 84.96 }]);
+    await (svc as any).evaluateGlobalSettings({ host_disk_limit: '85' });
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
+  });
+
   it('skips host limits when threshold is 0 or NaN', async () => {
     mockCurrentLoad.mockResolvedValue({ currentLoad: 99, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
@@ -639,6 +653,31 @@ describe('MonitorService - nested host (Docker and kernel disagree)', () => {
       expect(messages.some((m) => m.includes('/sys/fs/cgroup at /host/sys/fs/cgroup'))).toBe(true);
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it('does not alert on the outer machine when the daemon stalls after a nested probe', async () => {
+    process.env.SENCHO_HOST_CGROUP_PATH = '/nonexistent/monitor-cgroup';
+    mockMem.mockResolvedValue(memSample(15.5e9)); // kernel view: ~97%
+
+    const svc = MonitorService.getInstance();
+    // Seed the last good capacity while the daemon still answers.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '50' });
+    mockDispatchAlert.mockClear();
+
+    const startedAt = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(startedAt + 31_000);
+    try {
+      mockDockerInfo.mockRejectedValue(Object.assign(new Error('stalled'), { name: 'TimeoutError' }));
+      await (svc as any).evaluateGlobalSettings({ host_ram_limit: '50' });
+
+      // The LXC's own usage is unknown, so the threshold is skipped. The
+      // kernel's 97% belongs to the outer machine and must never fire.
+      expect(mockDispatchAlert).not.toHaveBeenCalledWith(
+        'warning', 'monitor_alert', expect.stringContaining('Memory'),
+      );
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 

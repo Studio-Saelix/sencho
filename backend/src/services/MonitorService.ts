@@ -411,9 +411,11 @@ export class MonitorService {
 
                 if (sample.disk) {
                     const diskLimit = parseFloat(settings['host_disk_limit']);
-                    if (!isNaN(diskLimit) && diskLimit > 0 && parseFloat(sample.disk.usagePercent) > diskLimit) {
+                    // Compare the raw percentage, not the one-decimal wire
+                    // string: 85.04% must still trip an 85% limit.
+                    if (!isNaN(diskLimit) && diskLimit > 0 && sample.disk.use > diskLimit) {
                         await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
-                            `Host Disk space utilization is critically high: ${sample.disk.usagePercent}% (Threshold: ${diskLimit}%)`);
+                            `Host Disk space utilization is critically high: ${sample.disk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
                     } else {
                         this.clearHostMetricSuppression('disk');
                     }

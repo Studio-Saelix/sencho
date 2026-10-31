@@ -11,7 +11,8 @@
  */
 import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { installArcstatsFsMock, type ArcstatsFsMock } from './helpers/arcstatsFsMock';
 
 const { mockCurrentLoad, mockMem, mockFsSize, mockDockerInfo } = vi.hoisted(() => ({
@@ -32,6 +33,7 @@ vi.mock('systeminformation', () => ({
 import { CacheService } from '../services/CacheService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { _resetHostSampleStateForTests } from '../helpers/hostSample';
+import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 
 const GiB = 1024 ** 3;
 const KERNEL_TOTAL = 16 * GiB;
@@ -40,6 +42,7 @@ const CGROUP = '/fixture/route-cgroup';
 let tmpDir: string;
 let app: import('express').Express;
 let adminCookie: string;
+let machineAuth: () => string;
 let arcFs: ArcstatsFsMock;
 
 beforeAll(async () => {
@@ -50,6 +53,7 @@ beforeAll(async () => {
   } as unknown as ReturnType<typeof NodeRegistry.prototype.getDocker>);
   ({ app } = await import('../index'));
   adminCookie = await loginAsTestAdmin(app);
+  machineAuth = () => `Bearer ${jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -133,5 +137,40 @@ describe('GET /api/system/stats inside a nested host', () => {
     expect(res.body.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
     // Disk is still the container's own overlay backing filesystem.
     expect(res.body.disk.usagePercent).toBe('40.0');
+  });
+
+  it('serves the legacy numeric shape to a hub that cannot render unknown', async () => {
+    // An older hub proxies with a node_proxy token and no capability header.
+    // Its dashboard parses usage as a number, so null would render as NaN%.
+    const res = await request(app).get('/api/system/stats').set('Authorization', machineAuth());
+    expect(res.status).toBe(200);
+    expect(res.body.cpu).toEqual({ usage: '12.3', cores: 8 });
+    expect(res.body.memory).toEqual({
+      total: KERNEL_TOTAL,
+      used: 4 * GiB,
+      free: 12 * GiB,
+      usagePercent: '25.0',
+    });
+  });
+
+  it('serves nullable usage to a hub that advertises the capability', async () => {
+    const res = await request(app)
+      .get('/api/system/stats')
+      .set('Authorization', machineAuth())
+      .set(HOST_USAGE_UNKNOWN_HEADER, '1');
+    expect(res.status).toBe(200);
+    expect(res.body.cpu).toEqual({ usage: null, cores: 2 });
+    expect(res.body.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
+  });
+
+  it('shapes each response from the cached sample, not a cached wire', async () => {
+    // A legacy hub and a current one can poll the same node inside one 3s
+    // cache window; whichever asks first must not decide the other's shape.
+    const legacy = await request(app).get('/api/system/stats').set('Authorization', machineAuth());
+    const current = await request(app).get('/api/system/stats').set('Cookie', adminCookie);
+    expect(legacy.body.cpu.cores).toBe(8);
+    expect(current.body.cpu).toEqual({ usage: null, cores: 2 });
+    // One sample produced both responses.
+    expect(mockCurrentLoad).toHaveBeenCalledTimes(1);
   });
 });

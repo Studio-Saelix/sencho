@@ -40,6 +40,12 @@ export interface DiskSample {
   total: number;
   used: number;
   free: number;
+  /**
+   * Raw percentage as reported by systeminformation. Threshold alerts compare
+   * this value, not the one-decimal `usagePercent` string, so 85.04% still
+   * trips an 85% limit.
+   */
+  use: number;
   usagePercent: string;
 }
 
@@ -47,13 +53,19 @@ export interface HostSample {
   cpu: { cores: number; usage: UsageReading<number> };
   memory: { total: number; usage: UsageReading<HostMemory> };
   disk: DiskSample | null;
+  /**
+   * The kernel view, kept only for a reader that predates nullable usage. A
+   * hub that advertises no capability for unknown usage cannot render `null`,
+   * so it receives this shape instead (the pre-nested-support behavior).
+   */
+  kernel: { cpu: { cores: number; usage: number }; memory: HostMemory };
 }
 
 /** Wire shape served by /api/system/stats and the fleet overview. */
 export interface HostSampleWire {
   cpu: { usage: string | null; cores: number };
   memory: MemoryWire;
-  disk: DiskSample | null;
+  disk: Omit<DiskSample, 'use'> | null;
 }
 
 /** Where the Docker host's cgroup v2 root is read from when no override is set. */
@@ -265,65 +277,77 @@ function withinTolerance(a: number, b: number): boolean {
   return Math.abs(a - b) / b <= MEMORY_TOLERANCE;
 }
 
-async function fetchDockerCapacity(nodeId: number): Promise<DockerCapacity | null> {
+async function fetchDockerCapacity(nodeId: number): Promise<DockerCapacity> {
+  let info: { NCPU?: number; MemTotal?: number };
   try {
     const docker = NodeRegistry.getInstance().getDocker(nodeId);
-    const info = await withTimeout(docker.info(), CAPACITY_TIMEOUT_MS, 'docker info');
-    const cores = typeof info?.NCPU === 'number' && info.NCPU > 0 ? info.NCPU : 0;
-    const memTotal = typeof info?.MemTotal === 'number' && info.MemTotal > 0 ? info.MemTotal : 0;
-    if (cores === 0 || memTotal === 0) {
-      logCapacityFailure('invalid', `docker info did not report a usable NCPU/MemTotal (NCPU=${cores}, MemTotal=${memTotal})`);
-      return null;
-    }
-    return { cores, memTotal };
+    info = await withTimeout(docker.info(), CAPACITY_TIMEOUT_MS, 'docker info');
   } catch (err) {
     const code = err instanceof Error ? err.name : 'UNKNOWN';
     const message = err instanceof Error ? err.message : String(err);
     logCapacityFailure(code, message);
-    return null;
+    // Throwing (instead of resolving null) lets the cache return the last good
+    // capacity for this node. A stalled daemon must not flip a known nested
+    // host back to the kernel view.
+    throw err instanceof Error ? err : new Error(message);
   }
+  const cores = typeof info?.NCPU === 'number' && info.NCPU > 0 ? info.NCPU : 0;
+  const memTotal = typeof info?.MemTotal === 'number' && info.MemTotal > 0 ? info.MemTotal : 0;
+  if (cores === 0 || memTotal === 0) {
+    const detail = `docker info did not report a usable NCPU/MemTotal (NCPU=${cores}, MemTotal=${memTotal})`;
+    logCapacityFailure('invalid', detail);
+    throw new Error(detail);
+  }
+  return { cores, memTotal };
 }
 
 /**
- * Accepted trade-off: when the daemon cannot be reached, capacity and both
- * dimensions fall back to the kernel view, which is today's behavior. On a
- * nested host that momentarily reports the outer machine again, never for
- * longer than the capacity cache TTL. The alternative (remembering "this host
- * was nested") would keep reporting unknown long after a `DOCKER_HOST` change
- * made the kernel view valid again, and it is not what an operator expects
- * from a probe that cannot see the daemon at all.
+ * A daemon that cannot answer must not erase what the last good probe learned.
+ * `getOrFetch` returns the stale capacity when the fetcher throws, so a nested
+ * host keeps its Docker capacity (and therefore its cgroup path) through a
+ * stall; the failure itself is never cached, so recovery is immediate once the
+ * daemon answers again. Only a process that has never seen a good answer falls
+ * back to the kernel view.
  */
 function logCapacityFailure(code: string, detail: string): void {
   if (loggedCapacityErrors.has(code)) return;
   loggedCapacityErrors.add(code);
   console.warn(
     `[HostSample] docker info unavailable (${code}): ${detail}; ` +
-      'falling back to the kernel view for host capacity',
+      'reusing the last known Docker capacity (kernel view if none)',
   );
 }
 
 /**
  * CPU cores and total memory as the Docker host sees them, cached per node.
- * Null when the daemon cannot answer within the bound, so callers fall back to
- * today's kernel numbers rather than regress.
+ * Null only when no capacity has ever been read: a transient failure reuses
+ * the last good answer instead of falling back to the kernel view.
  */
 export async function readDockerCapacity(nodeId: number): Promise<DockerCapacity | null> {
-  return CacheService.getInstance().getOrFetch(
-    `docker-capacity:${nodeId}`,
-    CAPACITY_CACHE_TTL_MS,
-    () => fetchDockerCapacity(nodeId),
-  );
+  try {
+    return await CacheService.getInstance().getOrFetch(
+      `docker-capacity:${nodeId}`,
+      CAPACITY_CACHE_TTL_MS,
+      () => fetchDockerCapacity(nodeId),
+    );
+  } catch {
+    return null;
+  }
 }
 
 function buildDiskSample(fsSize: Awaited<ReturnType<typeof si.fsSize>>): DiskSample | null {
   const mainDisk = fsSize.find((fs) => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
   if (!mainDisk) return null;
+  // Keep the raw value for threshold comparisons; `usagePercent` is the
+  // one-decimal display string and must not decide whether an alert fires.
+  const rawUse = typeof mainDisk.use === 'number' && Number.isFinite(mainDisk.use) ? mainDisk.use : 0;
   return {
     fs: mainDisk.fs,
     mount: mainDisk.mount,
     total: mainDisk.size,
     used: mainDisk.used,
     free: mainDisk.available,
+    use: rawUse,
     usagePercent: mainDisk.use ? mainDisk.use.toFixed(1) : '0',
   };
 }
@@ -377,20 +401,61 @@ export async function readLocalHostSample(nodeId: number): Promise<HostSample> {
     };
   }
 
-  return { cpu, memory, disk: buildDiskSample(fsSize) };
+  return {
+    cpu,
+    memory,
+    disk: buildDiskSample(fsSize),
+    // The kernel view is not a trusted source while nested, but a reader that
+    // cannot render unknown still needs numbers. Kept here so the wire can
+    // serve the pre-nested-support shape without sampling twice.
+    kernel: {
+      cpu: { cores: kernelCores, usage: kernelLoad.currentLoad },
+      memory: kernelMem,
+    },
+  };
 }
 
-/** Map a sample to the wire shape. `null` usage is the only unknown signal. */
-export function hostSampleToWire(sample: HostSample): HostSampleWire {
+/** The wire disk shape: the raw alert value stays internal. */
+function diskToWire(disk: DiskSample | null): Omit<DiskSample, 'use'> | null {
+  if (!disk) return null;
   return {
-    cpu: {
-      usage: sample.cpu.usage.kind === 'measured' ? sample.cpu.usage.value.toFixed(1) : null,
-      cores: sample.cpu.cores,
-    },
-    memory: sample.memory.usage.kind === 'measured'
-      ? memoryToWire(sample.memory.usage.value)
-      : memoryUnknownWire(sample.memory.total),
-    disk: sample.disk,
+    fs: disk.fs,
+    mount: disk.mount,
+    total: disk.total,
+    used: disk.used,
+    free: disk.free,
+    usagePercent: disk.usagePercent,
+  };
+}
+
+/**
+ * Map a sample to the wire shape. `null` usage is the only unknown signal.
+ *
+ * `allowUnknown: false` is for a reader that predates nullable usage (a hub
+ * older than this release): it receives the kernel view for a dimension that
+ * cannot be measured, so an old dashboard shows numbers instead of `NaN%`.
+ * Dimensions that are measured still report the scoped value, and the local
+ * UI always allows unknown.
+ */
+export function hostSampleToWire(
+  sample: HostSample,
+  options: { allowUnknown?: boolean } = {},
+): HostSampleWire {
+  const allowUnknown = options.allowUnknown ?? true;
+  const cpu = sample.cpu.usage.kind === 'measured'
+    ? { usage: sample.cpu.usage.value.toFixed(1), cores: sample.cpu.cores }
+    : allowUnknown
+      ? { usage: null, cores: sample.cpu.cores }
+      : { usage: sample.kernel.cpu.usage.toFixed(1), cores: sample.kernel.cpu.cores };
+  const memory = sample.memory.usage.kind === 'measured'
+    ? memoryToWire(sample.memory.usage.value)
+    : allowUnknown
+      ? memoryUnknownWire(sample.memory.total)
+      : memoryToWire(sample.kernel.memory);
+  return {
+    cpu,
+    memory,
+    disk: diskToWire(sample.disk),
   };
 }
 

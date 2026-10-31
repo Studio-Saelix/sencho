@@ -14,6 +14,7 @@ import type { ProxyTarget } from '../services/NodeRegistry';
 import si from 'systeminformation';
 import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
+import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -487,6 +488,22 @@ describe('GET /api/fleet/overview host scope', () => {
     expect(status).toBe(200);
     const row = body.find(n => n.id === nodeId);
     expect(row!.systemStats).toEqual(UNKNOWN_STATS);
+  });
+
+  it('advertises nullable host usage on the remote system-stats probe', async () => {
+    const nodeId = addProxyNode('capable-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) seenHeaders = init?.headers as Record<string, string> | undefined;
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    await getOverview();
+    expect((seenHeaders as Record<string, string>)[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
   });
 
   it('reports Docker capacity for a local node whose kernel view is the outer machine', async () => {
