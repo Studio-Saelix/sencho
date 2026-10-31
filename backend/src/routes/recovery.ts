@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { checkPermission, requirePermission } from '../middleware/permissions';
-import { buildLocalRecoveryNodeDescriptor } from '../services/recovery/capability';
+import { buildLocalRecoveryNodeDescriptor, getLocalVolumeProtectionStatus } from '../services/recovery/capability';
 import { operationIdFromRequest } from '../services/recovery/dispatcher';
 import {
   RecoveryEngineService,
@@ -43,7 +43,6 @@ import type {
 } from '../services/recovery/types';
 import { errorMessageForLog } from '../utils/safeLog';
 import DockerController from '../services/DockerController';
-import { getLocalVolumeProtectionStatus } from '../services/recovery/capability';
 import { ComposeService } from '../services/ComposeService';
 import { parseEffectiveModel } from '../services/preflight/effectiveModel';
 
@@ -222,7 +221,7 @@ recoveryRouter.get('/repository', handle(async (req, res) => {
   const configured = authorizeStorageAccess(req, 'configure', null).allowed;
   const body: Record<string, unknown> = {
     health: status.state,
-    reason: status.state === 'available' ? status.reason : status.reason,
+    reason: status.reason,
     failureDomain: active?.failureDomain ?? RECOVERY_FAILURE_DOMAIN,
     warning: SAME_FAILURE_DOMAIN_WARNING,
     initialized: active !== null,
