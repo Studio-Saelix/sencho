@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FLEET_READ_BUDGET_MS,
   FleetReadTimeoutError,
+  LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS,
   describeFleetReadFailure,
   fleetReadSignal,
   withinFleetReadBudget,
@@ -30,6 +31,7 @@ describe('fleet read budget', () => {
 
   it('names a budget overrun instead of surfacing the runtime abort text', () => {
     expect(describeFleetReadFailure(new FleetReadTimeoutError(FLEET_READ_BUDGET_MS, 'labels'))).toBe('Timed out after 5s');
+    expect(describeFleetReadFailure(new FleetReadTimeoutError(LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS, 'labels'))).toBe('Timed out after 12s');
     expect(describeFleetReadFailure(new DOMException('aborted', 'TimeoutError'))).toBe('Timed out after 5s');
     expect(describeFleetReadFailure(new Error('connect ECONNREFUSED'))).toBe('connect ECONNREFUSED');
     expect(describeFleetReadFailure('boom')).toBe('Failed to reach node');

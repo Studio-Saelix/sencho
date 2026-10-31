@@ -5,14 +5,15 @@ import {
   FleetReadTimeoutError,
   LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS,
 } from '../helpers/fleetReadBudget';
-import { readLocalLabelInventory } from '../helpers/localLabelInventory';
+import { readLocalLabelInventory, type LocalLabelInventoryBudget } from '../helpers/localLabelInventory';
 
 /**
  * Scaled-down version of the fleet budget and the local ceiling: 20 ms for the
- * liveness check, 200 ms for the build. A 10x ratio keeps the stage the test is
- * exercising unambiguous without waiting the real 5 + 12 seconds.
+ * liveness check, 400 ms for the build. The build delay below is four times the
+ * liveness budget, so the stage the test exercises is unambiguous without
+ * waiting the real 5 + 12 seconds.
  */
-const TEST_BUDGET = { livenessBudgetMs: 20, ceilingMs: 200 };
+const TEST_BUDGET: LocalLabelInventoryBudget = { livenessBudgetMs: 20, ceilingMs: 400 };
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -105,11 +106,25 @@ describe('readLocalLabelInventory', () => {
   });
 
   it('bounds a build that stalls after the ping by the local ceiling', async () => {
-    stubDocker({ containerCount: 1, buildNeverSettles: true });
+    const docker = stubDocker({ containerCount: 1, buildNeverSettles: true });
 
     const error = await readLocalLabelInventory(1, {}, TEST_BUDGET).catch((err: unknown) => err);
 
+    expect(docker.ping).toHaveBeenCalledTimes(1);
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
     expect(error).toBeInstanceOf(FleetReadTimeoutError);
     expect((error as FleetReadTimeoutError).budgetMs).toBe(TEST_BUDGET.ceilingMs);
+  });
+
+  it('surfaces a ping that rejects promptly instead of calling it a timeout', async () => {
+    const docker = stubDocker({ containerCount: 1 });
+    docker.ping.mockRejectedValueOnce(new Error('connect ECONNREFUSED /var/run/docker.sock'));
+
+    const error = await readLocalLabelInventory(1, {}, TEST_BUDGET).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as Error).message).toContain('ECONNREFUSED');
+    expect(docker.listContainersForLabelInventory).not.toHaveBeenCalled();
   });
 });

@@ -958,8 +958,9 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
 /**
  * Fleet-wide Docker label inventory, or one node's slice of it with `?nodeId=`
  * so the tab can draw each node as it answers. Auth + node:read (Community).
- * Fans out to each node's /api/system/container-labels within the shared
- * fleet-read budget; unreachable nodes degrade to a per-node error.
+ * Remote nodes are read through their /api/system/container-labels within the
+ * shared fleet-read budget; the hub's own read is built in-process under its
+ * ping plus local ceiling. Unreachable nodes degrade to a per-node error.
  */
 fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;

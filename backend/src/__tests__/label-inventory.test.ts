@@ -74,9 +74,9 @@ function stubDockerList(
     return { labels: {} };
   });
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-    // The fleet route pings before it builds; the pre-count listing is gone.
+    // The fleet route pings before it builds; getAllContainers is absent on
+    // purpose, so the removed pre-count would fail loudly if it came back.
     ping: vi.fn().mockResolvedValue(undefined),
-    getAllContainers: vi.fn().mockResolvedValue(withDefaults.map(r => ({ Id: r.id }))),
     listContainersForLabelInventory: vi.fn().mockResolvedValue(withDefaults),
     getContainersByStack: vi.fn().mockImplementation(async (stack: string) =>
       withDefaults.filter(r => r.stack === stack).map(r => ({

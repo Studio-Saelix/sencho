@@ -506,9 +506,9 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     function stubLocalLabelDocker(): void {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
         // The route pings, then builds the inventory; both answer at once in
-        // the healthy case.
+        // the healthy case. getAllContainers is absent on purpose: the old
+        // pre-count must fail loudly if it comes back.
         ping: vi.fn().mockResolvedValue(undefined),
-        getAllContainers: vi.fn().mockResolvedValue([]),
         listContainersForLabelInventory: vi.fn().mockResolvedValue([]),
         inspectImageLabels: vi.fn(),
       } as unknown as DockerController);
