@@ -2136,6 +2136,16 @@ class DockerController {
     return this.validateApiData<any[]>(containers);
   }
 
+  /**
+   * Cheap liveness check against the daemon. `/containers/json` scales with the
+   * host (seconds on a hub with hundreds of containers), so it cannot also be
+   * the first-contact check inside a flat transport budget. `/_ping` answers
+   * from the daemon's own state and stays fast while the listing is slow.
+   */
+  public async ping(): Promise<void> {
+    await this.docker.ping();
+  }
+
   public async getAllContainers() {
     const containers = await this.docker.listContainers({ all: true });
     return this.validateApiData<any[]>(containers);

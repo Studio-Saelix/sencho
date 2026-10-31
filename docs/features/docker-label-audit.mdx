@@ -69,7 +69,7 @@ The tab reads each node on its own, a few at a time, and draws each answer as it
 - **Could not read *node* (*reason*).** The node did not answer in time (for example *Timed out after 5s*), the network call failed, or (on a mixed-version fleet) the node does not implement the endpoint at all. A node that has never answered contributes no rows to either layout; a node that answered before and then failed keeps its last rows until it answers again, and the banner says so.
 - **Some containers or images could not be inspected on *node*.** The node responded, but `docker inspect` failed for one or more containers or their images on that node. The affected labels show the **Unknown** provenance badge instead of being silently dropped.
 
-The hub's own inventory is given extra time in proportion to the containers it holds, so a large hub is not reported as timed out while it is still building its answer; a node that stops answering is still cut off, and the banner says so.
+The hub's own inventory is given up to 12 seconds to list and inspect its containers once a cheap daemon check shows Docker is answering, so a large hub is not reported as timed out before it can build its answer. A Docker socket that stops answering is still cut off after 5 seconds, and the banner says so.
 
 Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing, and **Retry** reloads only the nodes that failed. Refreshing keeps the last inventory each node returned until its new answer replaces it, so a failed refresh does not blank the table.
 

@@ -505,8 +505,9 @@ describe('node-data fan-outs share the fleet-read budget', () => {
   describe('GET /api/fleet/container-labels', () => {
     function stubLocalLabelDocker(): void {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-        // The route asks for the listing first, then builds the inventory; both
-        // answer at once in the healthy case.
+        // The route pings, then builds the inventory; both answer at once in
+        // the healthy case.
+        ping: vi.fn().mockResolvedValue(undefined),
         getAllContainers: vi.fn().mockResolvedValue([]),
         listContainersForLabelInventory: vi.fn().mockResolvedValue([]),
         inspectImageLabels: vi.fn(),
@@ -607,8 +608,9 @@ describe('node-data fan-outs share the fleet-read budget', () => {
 
     it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-        // A wedged local Docker socket never answers the listing and cannot be
-        // aborted, so the first contact with Docker costs one budget.
+        // A wedged local Docker socket never answers the liveness check and
+        // cannot be aborted, so the first contact with Docker costs one budget.
+        ping: vi.fn().mockReturnValue(new Promise(() => {})),
         getAllContainers: vi.fn().mockReturnValue(new Promise(() => {})),
         listContainersForLabelInventory: vi.fn().mockReturnValue(new Promise(() => {})),
       } as unknown as DockerController);
@@ -636,7 +638,10 @@ describe('node-data fan-outs share the fleet-read budget', () => {
         inspectFailed: false,
       }));
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-        getAllContainers: vi.fn().mockResolvedValue(containers.map((c) => ({ Id: c.id }))),
+        ping: vi.fn().mockResolvedValue(undefined),
+        // The old pre-count listing: never answers, so a regression to it
+        // cannot pass this test on a fast stub.
+        getAllContainers: vi.fn(() => new Promise(() => {})),
         // A hub this size needs longer than the transport budget even when
         // Docker answers every call promptly.
         listContainersForLabelInventory: vi.fn(() => new Promise((resolve) => {

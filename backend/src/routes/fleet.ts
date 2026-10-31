@@ -972,9 +972,9 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNodeLabelInventoryResult> => {
         if (node.type === 'local') {
-          // The hub's own read is bounded by what it was asked to read: one
-          // budget to reach Docker, then an allowance that grows with the
-          // container count, so a large healthy hub is not cut at 5 s.
+          // The hub's own read scales with the host, so a cheap daemon check
+          // proves Docker answers within the transport budget and the build
+          // then runs under the local ceiling.
           const inventory = await readLocalLabelInventory(node.id, options);
           return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
         }
