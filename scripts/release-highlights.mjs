@@ -199,15 +199,25 @@ export function insertHighlights(sectionText, hash, paragraphs) {
 const RESIDUE_RE = /[<>[\]@]|&(?:#\w+|[A-Za-z]\w*);|:\/\/|www\.|(?:^|\s)\/\//i
 const MAX_SANITIZE_PASSES = 5
 
+/** Apply a removal until it stops matching, so taking one match out cannot assemble another. */
+function replaceUntilStable(text, pattern, replacement) {
+  let current = text
+  for (;;) {
+    const next = current.replace(pattern, replacement)
+    if (next === current) return current
+    current = next
+  }
+}
+
 function sanitizeOnce(raw) {
   const PREFIX_RE = /^\s*(?:#{1,6}(?:\s+|$)|[*+-](?:\s+|$)|\d+[.)](?:\s+|$)|>\s*)/
-  const paragraphs = raw
-    .replace(/\r\n?/g, '\n')
-    .replace(/&(?:#\w+|[A-Za-z]\w*);/g, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!--[\s\S]*$/, '')
-    .replace(/<\/?[A-Za-z][^<>\n]*>/g, '')
-    .replace(/!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+  let markup = raw.replace(/\r\n?/g, '\n')
+  markup = replaceUntilStable(markup, /&(?:#\w+|[A-Za-z]\w*);/g, '')
+  markup = replaceUntilStable(markup, /<!--[\s\S]*?-->/g, '')
+  markup = markup.replace(/<!--[\s\S]*$/, '')
+  markup = replaceUntilStable(markup, /<\/?[A-Za-z][^<>\n]*>/g, '')
+  markup = replaceUntilStable(markup, /!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+  const paragraphs = markup
     .replace(/[<>[\]]/g, '')
     .replace(/(?:https?:\/\/|www\.)[^\s)]+/gi, '')
     .replace(/(^|[\s(])\/\/\S+/g, '$1')
