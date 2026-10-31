@@ -17,7 +17,9 @@ import { getErrorMessage } from '../utils/errors';
  * healthy nodes to shave two seconds off the one bad node. 5 s also matches the
  * cap the fleet image-update reads already used, so one number replaces the
  * 8 s the map and networking summary carried and the 30 s the Docker Labels
- * inventory carried.
+ * inventory carried. The hub's own label inventory adds a per-container
+ * allowance on top (see {@link localLabelInventoryBudgetMs}), because that read
+ * does work per container rather than one round trip.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
  * different contract: the Overview card probe stays at 3 s (it reads three small
@@ -29,6 +31,42 @@ import { getErrorMessage } from '../utils/errors';
  * request, while deploys, prune and update run on much longer ones.
  */
 export const FLEET_READ_BUDGET_MS = 5_000;
+
+/**
+ * Extra allowance, per container, for the hub's own label inventory.
+ *
+ * A remote read is one round trip, so the budget is the transport budget. The
+ * hub's own read is different: it inspects every container on the host, so its
+ * cost grows with the node, and a host with a few hundred containers needs
+ * several seconds even when Docker answers every call promptly. Cutting that
+ * work at the transport budget reports a healthy node as timed out, forever,
+ * and leaves the abandoned inventory running. The answer is still bounded, one
+ * budget to reach Docker plus this per-container allowance up to the ceiling.
+ */
+export const LOCAL_LABEL_INVENTORY_PER_CONTAINER_MS = 25;
+/**
+ * Ceiling on the hub's own label inventory, so a wedged Docker socket still
+ * yields a row. It also keeps the worst case for one node read (the listing
+ * budget plus this ceiling) inside the Docker Labels tab's 20 s per-node
+ * client timeout, with room for the transfer.
+ */
+export const LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS = 12_000;
+
+/**
+ * The budget for the hub's own label inventory, scaled by what the node said it
+ * holds. `firstAnswerBudgetMs` is the budget already spent (or allowed) on the
+ * listing call that returned `containerCount`.
+ */
+export function localLabelInventoryBudgetMs(
+  containerCount: number,
+  firstAnswerBudgetMs: number = FLEET_READ_BUDGET_MS,
+): number {
+  const count = Number.isFinite(containerCount) ? Math.max(0, Math.floor(containerCount)) : 0;
+  return Math.min(
+    firstAnswerBudgetMs + count * LOCAL_LABEL_INVENTORY_PER_CONTAINER_MS,
+    LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS,
+  );
+}
 
 /** A read that outlived the fleet-read budget, so a caller can tell it from a transport failure. */
 export class FleetReadTimeoutError extends Error {

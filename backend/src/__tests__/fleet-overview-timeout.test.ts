@@ -505,6 +505,9 @@ describe('node-data fan-outs share the fleet-read budget', () => {
   describe('GET /api/fleet/container-labels', () => {
     function stubLocalLabelDocker(): void {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        // The route asks for the listing first, then builds the inventory; both
+        // answer at once in the healthy case.
+        getAllContainers: vi.fn().mockResolvedValue([]),
         listContainersForLabelInventory: vi.fn().mockResolvedValue([]),
         inspectImageLabels: vi.fn(),
       } as unknown as DockerController);
@@ -602,9 +605,11 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
     });
 
-    it('bounds the hub\'s own read by the same budget', async () => {
+    it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-        // A wedged local Docker socket never answers and cannot be aborted.
+        // A wedged local Docker socket never answers the listing and cannot be
+        // aborted, so the first contact with Docker costs one budget.
+        getAllContainers: vi.fn().mockReturnValue(new Promise(() => {})),
         listContainersForLabelInventory: vi.fn().mockReturnValue(new Promise(() => {})),
       } as unknown as DockerController);
 
@@ -617,6 +622,36 @@ describe('node-data fan-outs share the fleet-read budget', () => {
         .toMatchObject({ status: 'error', error: 'Timed out after 5s' });
       expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
       expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
+    }, 30_000);
+
+    it('returns a large hub\'s own inventory instead of calling it a timeout', async () => {
+      const containers = Array.from({ length: 455 }, (_, i) => ({
+        id: `container-${i}`,
+        name: `container-${i}`,
+        state: 'running',
+        stack: 'demo',
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        getAllContainers: vi.fn().mockResolvedValue(containers.map((c) => ({ Id: c.id }))),
+        // A hub this size needs longer than the transport budget even when
+        // Docker answers every call promptly.
+        listContainersForLabelInventory: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(containers), 5_500);
+        })),
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const res = await getLabels('?nodeId=1');
+
+      expect(res.status).toBe(200);
+      const localRow = (res.body.nodes as { nodeId: number; status: string; inventory: { containers: unknown[] } | null }[])[0];
+      expect(localRow.status).toBe('ok');
+      expect(localRow.inventory?.containers).toHaveLength(455);
+      expect(res.body.nodeErrors).toEqual({});
     }, 30_000);
 
     it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {

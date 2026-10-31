@@ -89,12 +89,13 @@ import {
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { describeFleetReadFailure, fleetReadSignal, withinFleetReadBudget } from '../helpers/fleetReadBudget';
+import { readLocalLabelInventory } from '../helpers/localLabelInventory';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { READINESS_DOMAINS, type ReadinessDomainKey } from '../services/readiness/types';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
-import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -971,7 +972,10 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNodeLabelInventoryResult> => {
         if (node.type === 'local') {
-          const inventory = await withinFleetReadBudget(buildNodeLabelInventory(node.id, options), 'container labels');
+          // The hub's own read is bounded by what it was asked to read: one
+          // budget to reach Docker, then an allowance that grows with the
+          // container count, so a large healthy hub is not cut at 5 s.
+          const inventory = await readLocalLabelInventory(node.id, options);
           return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
         }
 

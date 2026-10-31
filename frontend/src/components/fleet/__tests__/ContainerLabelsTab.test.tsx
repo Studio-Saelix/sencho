@@ -246,8 +246,14 @@ describe('ContainerLabelsTab', () => {
     });
     render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
     expect(await screen.findByText(/Could not read Local \(Timed out after 5s\)/)).toBeInTheDocument();
-    expect(screen.getByText(/No fleet data could be read\./, { selector: 'p' })).toBeInTheDocument();
-    expect(screen.getByText('No fleet data could be read.', { selector: 'td' })).toBeInTheDocument();
+    // One fact, one place: the banner names every node and says there is no
+    // fleet data, and Retry sits on the same line instead of below it.
+    const banner = screen.getByText(/No fleet data could be read\./, { selector: 'p' });
+    expect(banner).toHaveTextContent('Could not read Local (Timed out after 5s)');
+    expect(banner).toHaveTextContent('Edge (Timed out after 5s)');
+    expect(banner.querySelector('button')).toBe(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.getAllByText(/No fleet data could be read\./)).toHaveLength(1);
+    expect(screen.queryByText('No fleet data could be read.', { selector: 'td' })).toBeNull();
     expect(screen.queryByText('No containers match this filter.')).toBeNull();
   });
 
@@ -283,8 +289,8 @@ describe('ContainerLabelsTab', () => {
     vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: 'unreachable' }) } as Response);
     render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }]} />);
     expect(await screen.findByText(/Could not read Local \(unreachable\)/)).toBeInTheDocument();
-    expect(screen.getByText(/No fleet data could be read\./, { selector: 'p' })).toBeInTheDocument();
-    expect(screen.getByText('No fleet data could be read.', { selector: 'td' })).toBeInTheDocument();
+    expect(screen.getAllByText(/No fleet data could be read\./)).toHaveLength(1);
+    expect(screen.queryByText('No fleet data could be read.', { selector: 'td' })).toBeNull();
     expect(screen.queryByText('No containers match this filter.')).toBeNull();
   });
 });
