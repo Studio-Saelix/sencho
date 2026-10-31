@@ -160,7 +160,7 @@ describe('WhatsNewModal', () => {
     expect(mockApiFetch).not.toHaveBeenCalled();
   });
 
-  it('marks the release seen once its notes loaded, not before and not on a failed load', async () => {
+  it('marks the release seen once the lookup answered, not before', async () => {
     let resolveNotes: (value: unknown) => void = noop;
     mockApiFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveNotes = resolve; }));
     render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
@@ -169,13 +169,48 @@ describe('WhatsNewModal', () => {
       resolveNotes(notesResponse('0.98.1', WITH_HIGHLIGHTS));
     });
     await waitFor(() => expect(mockMarkSeen).toHaveBeenCalledTimes(1));
+  });
 
-    mockMarkSeen.mockClear();
+  it('also marks it seen after a failed lookup, so the dot clears on a hub that cannot reach GitHub', async () => {
     mockApiFetch.mockResolvedValue({ ok: false, status: 502, json: async () => ({}) });
-    givenVersion('0.99.0');
     render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
     expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
-    expect(mockMarkSeen).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockMarkSeen).toHaveBeenCalledTimes(1));
+  });
+
+  it('shows the loading state, not the old error, while a retry is in flight', async () => {
+    mockApiFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) });
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+
+    let resolveRetry: (value: unknown) => void = noop;
+    mockApiFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+    await act(async () => {
+      resolveRetry(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    });
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+  });
+
+  it('ignores a failure that arrives late from a superseded request', async () => {
+    let rejectFirst: (reason: unknown) => void = noop;
+    mockApiFetch
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+
+    await act(async () => {
+      rejectFirst(new Error('late network error'));
+    });
+    expect(screen.getByText('Cordon is here.')).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
   });
 
   it('"Got it" closes the modal without disabling the feature', async () => {

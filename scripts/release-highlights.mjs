@@ -25,11 +25,12 @@
  * and the block has text, the LLM is not called again, so a rerun against an
  * untouched release branch (a retried workflow, a manual dispatch) is a no-op.
  * When main moves, release-please rewrites the whole section, which drops the
- * block, and the next run generates a new one for the new change list. Read the
- * final text after the freeze; an earlier read can be replaced.
+ * block, and the next run generates a new one for the new change list. Edits to
+ * the block are lost whenever main moves, so review the text last, just before
+ * merging the Release PR.
  *
- * The block is a contract shared with three readers that must stay in sync:
- * frontend/src/lib/releaseHighlights.ts and the website Worker's
+ * The block is written here and read by two other parsers that must stay in
+ * sync with it: frontend/src/lib/releaseHighlights.ts and the website Worker's
  * extractHighlights (heading text, heading depth, comment form).
  *
  * Fail soft: a missing key, an API error, or an unusable answer never fails the
@@ -50,7 +51,8 @@ import { parseVersionSection, splitLines } from './credit-changelog-contributors
 export const HIGHLIGHTS_HEADING = '### Highlights'
 
 const CATEGORY_HEADING_RE = /^###\s+(.+?)\s*$/
-const ANY_HEADING_RE = /^#{1,3}\s/
+const ANY_HEADING_RE = /^ {0,3}#{1,3}\s/
+const HIGHLIGHTS_HEADING_RE = /^###\s+Highlights\s*$/
 const HASH_RE = /^<!--\s*highlights-hash:\s*([0-9a-f]{16})\s*-->$/
 const MAX_HIGHLIGHTS_CHARS = 6000
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
@@ -138,7 +140,7 @@ function findBlock(sectionText) {
   let start = -1
   for (const line of lines) {
     if (start === -1) {
-      if (line.content.trim() === HIGHLIGHTS_HEADING) start = offset
+      if (HIGHLIGHTS_HEADING_RE.test(line.content.trim())) start = offset
     } else if (ANY_HEADING_RE.test(line.content)) {
       return { start, end: offset }
     }
@@ -163,7 +165,7 @@ export function readBlockText(sectionText) {
   if (!block) return ''
   return splitLines(sectionText.slice(block.start, block.end))
     .map((line) => line.content)
-    .filter((line) => line.trim() !== HIGHLIGHTS_HEADING && !HASH_RE.test(line.trim()))
+    .filter((line) => !HIGHLIGHTS_HEADING_RE.test(line.trim()) && !HASH_RE.test(line.trim()))
     .join('\n')
     .trim()
 }
@@ -196,25 +198,31 @@ export function insertHighlights(sectionText, hash, paragraphs) {
 /**
  * Reduce model output to plain paragraphs. Commit titles are untrusted input
  * that end up in a published release body, so structure and anything that
- * GitHub or the in-app renderer would turn into a link, mention, fence or
- * heading is removed rather than trusted: HTML and comments (including an
- * unclosed one), inline links and images, bare URLs, @mentions, code fences,
- * thematic breaks, and heading, list and quote prefixes (stripped repeatedly,
- * so "- ### x" cannot leave a heading behind). Em dashes become commas.
- * Inline code and #123 references are left alone.
+ * GitHub or the in-app renderer would turn into a link, image, mention, fence
+ * or heading is removed or defused rather than trusted: complete HTML tags and
+ * comments (an unclosed comment drops everything after it), every markdown
+ * link or image (the text is kept, the target is dropped) and all square
+ * brackets (so reference links and footnotes cannot form), bare and
+ * protocol-relative URLs, the "@" of a mention, code fence lines, thematic
+ * breaks, and heading, list and quote prefixes (stripped repeatedly, so
+ * "- ### x" cannot leave a heading behind). Em dashes become commas. Inline
+ * code and #123 references are left alone; a tag inside inline code is
+ * stripped like any other.
  * @returns {string | null} null when nothing usable remains or the answer is
  *   longer than MAX_HIGHLIGHTS_CHARS
  */
 export function sanitizeHighlights(raw) {
   if (typeof raw !== 'string') return null
-  const PREFIX_RE = /^\s*(?:#{1,6}(?:\s+|$)|[*+-]\s+|\d+[.)]\s+|>\s*)/
+  const PREFIX_RE = /^\s*(?:#{1,6}(?:\s+|$)|[*+-](?:\s+|$)|\d+[.)](?:\s+|$)|>\s*)/
   const paragraphs = raw
     .replace(/\r\n?/g, '\n')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<!--[\s\S]*$/, '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/!?\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)/g, '$1')
+    .replace(/<\/?[A-Za-z][^<>\n]*>/g, '')
+    .replace(/!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
+    .replace(/[\[\]]/g, '')
     .replace(/(?:https?:\/\/|www\.)[^\s)]+/gi, '')
+    .replace(/(^|[\s(])\/\/\S+/g, '$1')
     .replace(/@(?=[A-Za-z0-9])/g, '')
     .split(/\n{2,}/)
     .map((p) =>
@@ -261,16 +269,29 @@ export async function generateHighlights(version, grouped, apiKey, fetchImpl = f
           ],
         }),
       })
-      if (!res.ok) throw new Error(`DeepSeek returned ${res.status}`)
+      if (!res.ok) {
+        const failure = new Error(`DeepSeek returned ${res.status}`)
+        // A rejected key or request will be rejected again; only 429 and 5xx are worth a retry.
+        failure.retryable = res.status === 429 || res.status >= 500
+        throw failure
+      }
       const data = await res.json()
       const choice = data?.choices?.[0]
       // A cut-off answer ends mid-sentence, which is worse than no overview.
       if (choice?.finish_reason === 'length') throw new Error('DeepSeek answer was cut off')
-      const text = sanitizeHighlights(choice?.message?.content)
-      if (!text) throw new Error('DeepSeek returned no usable overview')
+      const content = choice?.message?.content
+      const text = sanitizeHighlights(content)
+      if (!text) {
+        throw new Error(
+          typeof content === 'string' && content.length > MAX_HIGHLIGHTS_CHARS
+            ? 'DeepSeek overview was too long'
+            : 'DeepSeek returned no usable overview',
+        )
+      }
       return text
     } catch (err) {
       failures.push(err.message)
+      if (err.retryable === false) break
     }
   }
   throw new Error(failures.join('; then '))
@@ -283,7 +304,13 @@ export async function generateHighlights(version, grouped, apiKey, fetchImpl = f
 function warn(message) {
   console.log(`::warning title=Release highlights::${message}`)
   const summary = process.env.GITHUB_STEP_SUMMARY
-  if (summary) appendFileSync(summary, `Release highlights: ${message}\n\n`)
+  if (!summary) return
+  try {
+    appendFileSync(summary, `Release highlights: ${message}\n\n`)
+  } catch (err) {
+    // The annotation above already carries the message; a broken summary file must not fail the step.
+    console.error(`Could not write the job summary: ${err.message}`)
+  }
 }
 
 /**

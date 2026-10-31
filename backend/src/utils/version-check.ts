@@ -201,7 +201,8 @@ const RELEASE_BY_VERSION_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
  * while after publish (credits, highlights), so the cache is short rather than
  * long-lived. Only a canonical semver string is accepted ("v1.2.3" or padding
  * would address a different cache key and tag than the one meant). Returns null
- * for a non-canonical version or a failed lookup; failures are not cached.
+ * for a non-canonical version or a failed lookup; failures are not cached, and a
+ * stale entry is served instead when a refresh of a cached version fails.
  */
 export async function getReleaseByVersion(version: string, forceRefresh = false): Promise<SenchoRelease | null> {
   if (semver.valid(version) !== version) return null;

@@ -26,24 +26,30 @@ const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:u
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
   const { version, markSeen, setEnabled } = useWhatsNewPreference();
   // The last lookup, keyed by the version it answered. A result for any other
-  // version reads as loading. A failed lookup, and a release that had no
-  // highlights yet (its body is edited shortly after publish), are fetched
-  // again the next time the modal opens; a loaded block is kept for the session.
+  // version reads as loading. A loaded block is kept for the session; a failed
+  // lookup, and a release that had no highlights yet (its body is edited shortly
+  // after publish), are dropped when the modal reopens so they load again.
   const [result, setResult] = useState<ReleaseNotesResult | null>(null);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open && result && (result.failed || result.highlights === null)) setResult(null);
+  }
 
   const current = result && result.version === version ? result : null;
   const settled = current !== null && !current.failed && current.highlights !== null;
   const needsFetch = open && version !== null && !settled;
 
-  // The release counts as seen once its notes actually loaded, so a failed
-  // lookup keeps the dot lit for the next try.
-  const loaded = current !== null && !current.failed;
+  // Opening the modal and getting an answer, even a failed one, counts as seeing
+  // this release, so the dot does not stay lit on a hub that cannot reach GitHub.
+  const answered = current !== null;
   useEffect(() => {
-    if (open && loaded) markSeen();
-  }, [open, loaded, markSeen]);
+    if (open && answered) markSeen();
+  }, [open, answered, markSeen]);
 
-  // After a failure needsFetch stays true, so this effect does not re-run until
-  // the modal is closed and reopened; do not add `result` to the dependencies.
+  // After a failure or an empty result needsFetch stays true, so this effect does
+  // not re-run until the modal is closed and reopened; do not add `result` to
+  // the dependencies.
   useEffect(() => {
     if (!needsFetch || version === null) return;
     let cancelled = false;
@@ -90,8 +96,8 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
           </div>
         ) : current.failed ? (
           <p className="text-sm text-muted-foreground">
-            The release notes could not be loaded. They are fetched from GitHub when this opens, so check that this
-            instance can reach it, then open this again.
+            The release notes could not be loaded from GitHub. Check that this instance can reach it, then open this
+            again.
           </p>
         ) : current.highlights ? (
           <>

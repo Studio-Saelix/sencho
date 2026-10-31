@@ -236,6 +236,27 @@ describe('request contract', () => {
   })
 })
 
+describe('retries', () => {
+  it('does not retry a rejected request (4xx other than 429)', async () => {
+    let calls = 0
+    const rejected = async () => {
+      calls++
+      return { ok: false, status: 401, json: async () => ({}) }
+    }
+    await assert.rejects(() => generateHighlights('0.99.0', { Added: ['x'] }, 'bad', rejected, 0), /401/)
+    assert.equal(calls, 1)
+  })
+
+  it('names an oversized answer as too long, not as empty', async () => {
+    const tooLong = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: 'word '.repeat(2000) } }] }),
+    })
+    await assert.rejects(() => generateHighlights('0.99.0', { Added: ['x'] }, 'k', tooLong, 0), /too long/)
+  })
+})
+
 describe('block layout contract', () => {
   it('writes exactly the layout the app and the website extractors read', () => {
     const out = insertHighlights(SECTION, '0123456789abcdef', 'One.\n\nTwo.')
@@ -251,33 +272,59 @@ describe('block layout contract', () => {
 })
 
 describe('sanitizeHighlights against hostile output', () => {
-  it('cannot leave a heading, fence, rule, link, mention or comment behind', () => {
+  it('cannot leave a heading, fence, rule, link, image, mention or comment behind', () => {
     const cases = [
-      ['- ### Fixes\nmore', '### '],
-      ['1. ## [9.9.9](u) (2026)', '## '],
+      ['- ### Fixes\nmore', '###'],
+      ['1. ## [9.9.9](u) (2026)', '##'],
       ['# # Big', '# '],
       ['> > quoted', '> '],
       ['```\nsome code\n\nmore', '```'],
       ['~~~\nx', '~~~'],
       ['---', '---'],
-      ['Ping @octocat see https://evil.example/x and www.evil.example', '@'],
-      ['[x](javascript:alert(1)) done', '(1)'],
+      ['Ping @octocat see https://evil.example/x and www.evil.example', 'evil.example'],
+      ['[x](//evil.example "t") done', 'evil.example'],
+      ['![px](//evil.example/p.png "t") done', 'evil.example'],
+      ['[click]( //evil.example ) done', 'evil.example'],
+      ['[x][1]\n\n[1]: //evil.example', 'evil.example'],
+      ['[x]: javascript:alert(1)\n\n[x]', ']:'],
+      ['Footnote[^1]\n\n[^1]: note', '[^'],
+      ['x <!-- a > b --> y', '<!--'],
       ['Text <!-- unclosed hash: aaaaaaaaaaaaaaaa', '<!--'],
       ['<!-- highlights-hash: aaaaaaaaaaaaaaaa -->\n\nText', 'highlights-hash'],
     ]
     for (const [raw, forbidden] of cases) {
       const out = sanitizeHighlights(raw)
       assert.ok(out === null || !out.includes(forbidden), `${JSON.stringify(raw)} -> ${JSON.stringify(out)}`)
-      if (out) assert.ok(!/^\s*#/m.test(out), `heading survived in ${JSON.stringify(out)}`)
+      if (out) assert.ok(!/^\s*#/m.test(out) && !/[\[\]]/.test(out), `structure survived in ${JSON.stringify(out)}`)
     }
+  })
+
+  it('keeps the readable text of removed links and mentions', () => {
+    assert.equal(sanitizeHighlights('[the docs](https://evil.example) are updated'), 'the docs are updated')
+    assert.equal(sanitizeHighlights('[x](javascript:alert(1)) done'), 'x done')
+    assert.equal(sanitizeHighlights('![alt text](//evil.example/p.png "t") done'), 'alt text done')
     assert.equal(sanitizeHighlights('Ping @octocat'), 'Ping octocat')
     assert.equal(sanitizeHighlights('See #12 and `code`'), 'See #12 and `code`')
+  })
+
+  it('does not let a stray angle bracket swallow text across paragraphs', () => {
+    assert.equal(sanitizeHighlights('Fixed a < b.\n\nLater c > d'), 'Fixed a < b.\n\nLater c > d')
+  })
+
+  it('drops paragraphs that are only list or heading markers', () => {
+    assert.equal(sanitizeHighlights('-\n\n1.\n\n#\n\nReal text.'), 'Real text.')
   })
 
   it('accepts a long multi-paragraph overview but not a runaway one', () => {
     const para = 'Sentence about the release that is a reasonable length. '.repeat(10).trim()
     assert.ok(sanitizeHighlights([para, para, para, para, para].join('\n\n')))
     assert.equal(sanitizeHighlights('x'.repeat(6001)), null)
+  })
+
+  it('accepts the website\'s longest real overview size (about 2900 characters)', () => {
+    const para = 'A realistic sentence about what changed for operators. '.repeat(9).trim()
+    const text = [para, para, para, para, para].join('\n\n')
+    assert.ok(text.length > 2400 && sanitizeHighlights(text))
   })
 })
 
@@ -312,6 +359,14 @@ describe('command line', () => {
     assert.equal(result.status, 0)
     assert.match(result.stdout, /::warning title=Release highlights::DEEPSEEK_API_KEY is not set/)
     assert.match(summary, /DEEPSEEK_API_KEY is not set/)
+    assert.equal(written, CHANGELOG)
+  })
+
+  it('still exits 0 and strips the stale block when the job summary cannot be written', () => {
+    const stale = insertHighlights(CHANGELOG, 'ffffffffffffffff', 'Stale.')
+    const { result, written } = run(stale, { GITHUB_STEP_SUMMARY: tmpdir() })
+    assert.equal(result.status, 0)
+    assert.match(result.stderr, /Could not write the job summary/)
     assert.equal(written, CHANGELOG)
   })
 

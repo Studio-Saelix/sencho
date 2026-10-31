@@ -73,6 +73,13 @@ describe('useWhatsNewPreference', () => {
     expect(localStorage.getItem(LAST_SEEN)).toBe('0.98.1');
   });
 
+  it('markSeen never lowers the watermark (a rollback keeps the higher version)', () => {
+    localStorage.setItem(LAST_SEEN, '0.99.0');
+    const { result } = renderHook(() => useWhatsNewPreference());
+    act(() => result.current.markSeen());
+    expect(localStorage.getItem(LAST_SEEN)).toBe('0.99.0');
+  });
+
   it('markSeen clears hasUnseen and stores the running version', () => {
     localStorage.setItem(LAST_SEEN, '0.98.0');
     const { result } = renderHook(() => useWhatsNewPreference());

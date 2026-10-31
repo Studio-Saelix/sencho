@@ -2,7 +2,7 @@ import type { BuildInfo } from '@/context/BuildInfoProvider';
 
 const HEADING_RE = /^ {0,3}#{1,3}\s/;
 const HIGHLIGHTS_HEADING_RE = /^###\s+Highlights\s*$/;
-const STABLE_VERSION_RE = /^\d+\.\d+\.\d+$/;
+const STABLE_VERSION_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 
 /**
  * Pull the "### Highlights" block out of a GitHub release body: the text
@@ -28,9 +28,13 @@ export function extractHighlights(body: string | null | undefined): string | nul
   return text === '' ? null : text;
 }
 
-/** Drop HTML comments (the generator's hash marker) from release markdown before rendering it as text. */
+/**
+ * Drop lines that are only an HTML comment (the generator's hash marker) from
+ * release markdown before it is rendered, because the renderer shows raw HTML
+ * as literal text. A comment inside a sentence or a code span is left alone.
+ */
 export function stripHtmlComments(markdown: string): string {
-  return markdown.replace(/<!--[\s\S]*?-->/g, '');
+  return markdown.replace(/^[ \t]*<!--.*?-->[ \t]*(?:\r?\n|$)/gm, '');
 }
 
 /**
@@ -44,7 +48,7 @@ export function stableReleaseVersion(buildInfo: BuildInfo | null): string | null
   return STABLE_VERSION_RE.test(buildInfo.version) ? buildInfo.version : null;
 }
 
-/** True when stable X.Y.Z `a` is a later release than `b`. A malformed `b` counts as older. */
+/** True when stable X.Y.Z `a` is a later release than `b`. A malformed `b` counts as older; a malformed `a` is never newer. */
 export function isNewerStableVersion(a: string, b: string): boolean {
   const parse = (v: string) => (STABLE_VERSION_RE.test(v) ? v.split('.').map(Number) : null);
   const left = parse(a);

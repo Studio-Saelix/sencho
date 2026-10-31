@@ -82,8 +82,12 @@ export function useWhatsNewPreference(): UseWhatsNewPreferenceResult {
     setEnabledState(next);
   }, []);
 
+  // The watermark only moves forward, so running an older release (a rollback)
+  // does not lower it and make the next upgrade look unseen twice.
   const markSeen = useCallback(() => {
     if (version === null) return;
+    const stored = readLastSeenVersion();
+    if (stored !== null && !isNewerStableVersion(version, stored)) return;
     writeSetting(LAST_SEEN_KEY, version);
     setLastSeenVersionState(version);
   }, [version]);

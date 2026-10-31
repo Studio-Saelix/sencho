@@ -69,13 +69,21 @@ describe('stableReleaseVersion', () => {
     expect(stableReleaseVersion(info({ channel: 'preview' }))).toBeNull();
     expect(stableReleaseVersion(info({ version: null }))).toBeNull();
     expect(stableReleaseVersion(info({ version: '0.98.1-rc.1' }))).toBeNull();
+    expect(stableReleaseVersion(info({ version: '01.2.3' }))).toBeNull();
     expect(stableReleaseVersion(null)).toBeNull();
   });
 });
 
 describe('stripHtmlComments', () => {
-  it('removes comments and keeps the rest', () => {
-    expect(stripHtmlComments('a <!-- x --> b\n<!--\nmulti\n-->c')).toBe('a  b\nc');
+  it('removes a line that is only a comment, including the hash marker', () => {
+    expect(stripHtmlComments('### Highlights\n\n<!-- highlights-hash: 0123456789abcdef -->\n\nText')).toBe(
+      '### Highlights\n\n\nText',
+    );
+  });
+
+  it('leaves a comment inside a sentence or a code span alone', () => {
+    const text = 'fix `<!-- x -->` parsing\nand a <!-- y --> mid-line';
+    expect(stripHtmlComments(text)).toBe(text);
   });
 });
 
