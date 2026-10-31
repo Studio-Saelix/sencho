@@ -67,9 +67,13 @@ function volumeName(prefix: string): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
 }
 
+/** Every volume a case creates, so the suite leaves the host as it found it. */
+const createdVolumes = new Set<string>();
+
 function createVolume(name: string, labels: Record<string, string> = {}, extra: string[] = []): void {
   const labelArgs = Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
   docker(['volume', 'create', ...labelArgs, ...extra, name]);
+  createdVolumes.add(name);
 }
 
 function removeVolume(name: string): void {
@@ -231,6 +235,7 @@ async function provisionRepository(owner: string): Promise<Provisioned> {
     },
     { generation: 1 },
   );
+  createdVolumes.add(provisioned.repository.locator);
   return {
     id: provisioned.repository.id,
     locator: provisioned.repository.locator,
@@ -294,12 +299,14 @@ beforeAll(async () => {
   // The provisioner names the volume from the authority and the engine identity,
   // so the test reads that name back rather than inventing one.
   repositoryVolume = provisioned.repository.locator;
+  createdVolumes.add(repositoryVolume);
   secret = RecoveryRepositoryStore.getInstance().readSecret(repositoryId);
 });
 
 afterAll(() => {
   if (!hasDocker || !hasHelper) return;
-  if (repositoryVolume) removeVolume(repositoryVolume);
+  for (const volume of createdVolumes) removeVolume(volume);
+  createdVolumes.clear();
   cleanupTestDb(tmpDir);
 });
 
