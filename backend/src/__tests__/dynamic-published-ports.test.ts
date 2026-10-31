@@ -504,6 +504,24 @@ describe('drift against a running service with an auto-assigned port', () => {
       .filter(f => f.kind === 'ports-mismatch')).toEqual([]);
   });
 
+  it('matches a large auto-assigned set without stalling', () => {
+    const ports = Array.from({ length: 300 }, (_, i) => ({
+      hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 1000 + i, targetEndPort: 1000 + i,
+    })) as DeclaredPort[];
+    const declared: DeclaredCompose = {
+      services: [{ name: 'web', dependsOn: [], networks: [], volumes: [], ports }],
+      networks: {}, volumes: {},
+    };
+    const runtime = Array.from({ length: 299 }, (_, i) => ({
+      ip: '0.0.0.0', publishedPort: 40000 + i, privatePort: 1000 + i, protocol: 'tcp',
+    }));
+    const findings = assembleStackDrift({ stack: 'proj', declared, containers: [running(runtime)] })
+      .findings.filter(f => f.kind === 'ports-mismatch');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].expected).toContain('auto:1299/tcp');
+  });
+
   it('matches a declaration whose container target is unresolved by protocol and interface, once', () => {
     const unresolved = (count: number, hostIp = ''): DeclaredCompose => ({
       services: [{

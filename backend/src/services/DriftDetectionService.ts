@@ -159,12 +159,26 @@ interface PortRequirement {
  * bipartite matching rather than a greedy pass: a declaration whose interface
  * is still a template matches every binding, and a greedy pass could let it
  * take the one binding a resolved declaration needs and report drift where a
- * valid assignment exists.
+ * valid assignment exists. Above the bound below, the cubic worst case would
+ * stall a pathological stack, so a greedy pass errs toward reporting drift
+ * instead, as the engine does elsewhere.
  */
+const MAX_EXACT_PORT_REQUIREMENTS = 256;
+
 function matchPortRequirements(
   requirements: PortRequirement[],
   bindings: RuntimePort[],
 ): { missing: string[]; unexplained: RuntimePort[] } {
+  if (requirements.length > MAX_EXACT_PORT_REQUIREMENTS) {
+    const free = [...bindings];
+    const missing: string[] = [];
+    for (const requirement of requirements) {
+      const index = free.findIndex(requirement.matches);
+      if (index === -1) missing.push(requirement.label);
+      else free.splice(index, 1);
+    }
+    return { missing, unexplained: free };
+  }
   const owner = new Array<number>(bindings.length).fill(-1);
   const assign = (requirement: number, seen: boolean[]): boolean => {
     for (let b = 0; b < bindings.length; b++) {
