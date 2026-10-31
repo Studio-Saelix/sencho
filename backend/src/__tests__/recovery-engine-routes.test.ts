@@ -229,6 +229,54 @@ describe('POST /api/recovery/storage/points', () => {
     expect(JSON.stringify(res.body)).not.toContain('stack');
   });
 
+  it('admits a capture with the failure domain and the warning sentence', async () => {
+    seedRepository();
+    service().markReadyForTests();
+    await stubDocker(['app_data']);
+    await registerEngine();
+    service().setHelperRunnerForTests({
+      run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+        if (spec.profile === 'probe' && spec.onStdoutLine) {
+          spec.onStdoutLine(JSON.stringify({ dev: 1, ino: 2, uid: 0, gid: 0, mode: 16877 }));
+          return { exitCode: 0, stderrTail: '', aborted: false, killed: false };
+        }
+        return { exitCode: 1, stderrTail: '', aborted: false, killed: false };
+      },
+      removeForeignEpochHelpers: async () => 0,
+    } as never);
+    engine.RecoveryEngineService.setEngineFactoryForTests(() => ({
+      engineId: 'fake',
+      contractVersion: 1,
+      storageKinds: ['named_volume'],
+      probe: async () => ({ engineId: 'fake', build: 'test', usable: true }),
+      createPoint: async () => ({
+        ok: true as const,
+        evidence: {
+          snapshotId: 'snap-route',
+          capture: { fileCount: 1, byteCount: 1, skippedCount: 0 },
+          exclusions: [],
+          consistency: 'crash_consistent_stopped',
+        },
+      }),
+      verifyPoint: async () => ({ ok: true as const, evidence: { result: 'verified' } }),
+      restore: async () => ({ ok: false as const, errorClass: 'internal' }),
+    }) as never);
+
+    const res = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
+      .send({ volumeName: 'app_data', idempotencyKey: randomUUID() });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      failureDomain: 'same_failure_domain',
+      warning: expect.stringContaining('not an off-host copy'),
+    });
+    expect(res.body.operation.kind).toBe('create_point');
+    await service().whenIdleForTests();
+    const polled = await request(app).get(`/api/recovery/operations/${res.body.operation.id}`)
+      .set('Cookie', adminCookie);
+    expect(polled.body.operation.state).toBe('succeeded');
+    expect(polled.body.result.point.status).toBe('succeeded');
+  });
+
   it('answers 503 before boot finishes, even for an administrator', async () => {
     const res = await request(app).post('/api/recovery/storage/points').set('Cookie', adminCookie)
       .send({ volumeName: 'app_data', idempotencyKey: randomUUID() });
