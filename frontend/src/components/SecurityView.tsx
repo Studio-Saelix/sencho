@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
-import { classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadError, classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -78,7 +78,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
-  const [overviewLoadError, setOverviewLoadError] = useState<'unsupported' | 'failed' | 'timeout' | null>(null);
+  const [overviewLoadError, setOverviewLoadError] = useState<
+    'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'failed' | null
+  >(null);
   const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
@@ -227,7 +229,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           // server error: the operator gets copy they can act on.
           const readFailure = classifyRemoteReadFailure(overviewRes);
           setOverviewLoadError(
-            overviewRes.status === 404 ? 'unsupported' : readFailure === 'timeout' ? 'timeout' : 'failed',
+            overviewRes.status === 404
+              ? 'unsupported'
+              : readFailure === 'timeout' || readFailure === 'unreachable' || readFailure === 'unauthorized'
+                ? readFailure
+                : 'failed',
           );
           if (overviewRes.status !== 404) {
             console.warn('[Security] overview request failed:', overviewRes.status);
@@ -252,7 +258,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         if (cancelled) return;
         console.warn('[Security] failed to load security data:', err);
         setOverview(null);
-        setOverviewLoadError('failed');
+        const thrown = classifyRemoteReadError(err);
+        setOverviewLoadError(
+          thrown === 'timeout' || thrown === 'unreachable' || thrown === 'unauthorized' ? thrown : 'failed',
+        );
         setSummaries({});
         setSummariesError(true);
       } finally {

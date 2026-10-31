@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { fetchStackStatusesShared } from '@/lib/stackStatusesFetch';
-import { classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadError, classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 import { visibilityInterval } from '@/lib/utils';
 import type {
   Stats,
@@ -151,8 +151,8 @@ export function useDashboardData(): DashboardData {
         return { ok: false, failure: classifyRemoteReadFailure(res) ?? 'http' };
       }
       return { ok: true, data: await res.json() as T };
-    } catch {
-      return { ok: false, failure: 'error' };
+    } catch (error) {
+      return { ok: false, failure: classifyRemoteReadError(error) };
     }
   }, []);
 

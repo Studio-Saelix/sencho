@@ -39,10 +39,12 @@ export const REMOTE_READ_TIMEOUT_CODE = 'remote_read_timeout';
  *  - downloads, which do real work (enumerate a tree, pack a tarball, fetch an
  *    object) before the first byte and then copy a file body.
  *
- * The last item is a safety net rather than a route list: the hop also clears
- * the deadline as soon as the remote's response headers arrive, so any stream
- * or attachment this list does not name is still exempt from the moment its
- * headers land. Paths here are post-`/api` strip, matching the dispatcher.
+ * This list is the first of two guards, not the only one: the hop also releases
+ * the deadline as soon as the remote's response headers say the answer is a
+ * stream or an attachment, so a route this list does not name is still exempt
+ * from the moment its headers land. Naming the known ones here means a slow
+ * first byte on a log tail or a large export is never cut short either. Paths
+ * here are post-`/api` strip, matching the dispatcher.
  */
 const LONG_LIVED_READS: ReadonlyArray<RegExp> = [
   // Server-sent events.

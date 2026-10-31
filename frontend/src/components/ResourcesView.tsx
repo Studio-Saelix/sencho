@@ -342,6 +342,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Why the inventory read failed, when it is a reason worth naming: a node
     // that missed its read deadline is not the same as an empty node.
     const [inventoryFailure, setInventoryFailure] = useState<RemoteReadFailure | null>(null);
+    // The external containers are their own read inside the inventory batch: if
+    // only that one fails, the tab must say so rather than claim the node has
+    // none.
+    const [orphansState, setOrphansState] = useState<LoadState>('loading');
     const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
     const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
@@ -413,6 +417,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         if (!background) {
             setInventoryState('loading');
             setInventoryFailure(null);
+            setOrphansState('loading');
         }
         try {
             const signal = controller.signal;
@@ -444,6 +449,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (orphansData) {
                 setOrphans(orphansData);
                 setSelectedOrphans([]);
+                setOrphansState('ready');
+            } else {
+                console.error('Failed to fetch external containers', orphansRes.status);
+                setOrphansState('error');
             }
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
@@ -499,6 +508,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         setVolumes([]);
         setNetworks([]);
         setOrphans({});
+        setOrphansState('loading');
         setSelectedOrphans([]);
         setRollbackGenerations([]);
         void loadInventory();
@@ -1142,9 +1152,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 && inventoryState === 'loading' ? (
+                        {totalOrphansCount === 0 && orphansState === 'loading' ? (
                             <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
-                        ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
+                        ) : orphansState === 'error' ? (
                             <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
                                 <span>Could not load external containers.</span>
                                 {inventoryFailureReason ? (
@@ -1152,7 +1162,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 ) : null}
                                 <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
                             </div>
-                        ) : totalOrphansCount === 0 ? (
+                        ) : totalOrphansCount === 0 && orphansState === 'ready' ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
                                     <ShieldCheck className="w-6 h-6 text-success" />

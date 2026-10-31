@@ -33,9 +33,11 @@ interface OverviewTabProps {
   overview: SecurityOverview | null;
   /**
    * 'unsupported' = node has no overview endpoint (benign); 'timeout' = the node
-   * missed its read deadline and may answer on a retry; 'failed' = a real error.
+   * missed its read deadline and may answer on a retry; 'unreachable' = no
+   * answer at all; 'unauthorized' = the operator's grants, not the node;
+   * 'failed' = a real error.
    */
-  loadError: 'unsupported' | 'timeout' | 'failed' | null;
+  loadError: 'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'failed' | null;
   /** Retry the overview read (the surface's only recovery path when it fails). */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
@@ -52,6 +54,33 @@ interface OverviewTabProps {
   /** Verbs, dismissals, and the single handler that runs them for the review queue. */
   reasons: SecurityReasons;
 }
+
+/**
+ * Why the overview is not on screen. Each kind keeps its own cause, because
+ * "the node did not answer", "the node is unreachable", and "you cannot read
+ * this here" send the operator to different places.
+ */
+const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'failed', {
+  title: string;
+  body: string;
+}> = {
+  timeout: {
+    title: 'This node did not answer',
+    body: 'The security overview did not arrive in time. The node is unreachable or still starting, so nothing is shown rather than an empty result.',
+  },
+  unreachable: {
+    title: 'This node is unreachable',
+    body: 'The security overview could not be read because the node is not answering. Check that Sencho is running on that host.',
+  },
+  unauthorized: {
+    title: 'No access to this overview',
+    body: 'Your account cannot read the security overview on this node. Ask an administrator for access.',
+  },
+  failed: {
+    title: "Couldn't load the overview",
+    body: 'The security overview failed to load for this node. Switch nodes and back, or try again shortly.',
+  },
+};
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
   value: 'text-stat-value',
@@ -180,18 +209,14 @@ export function OverviewTab({
     );
   }
 
-  if (loadError === 'failed' || loadError === 'timeout') {
-    return (
+  if (loadError !== null) {
+    // 'unsupported' returned above, so this is a timeout, an unreachable node,
+    // an authorization failure, or a real error.
+    const copy = UNAVAILABLE_COPY[loadError];    return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <ShieldOff className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">
-          {loadError === 'timeout' ? 'This node did not answer' : "Couldn't load the overview"}
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          {loadError === 'timeout'
-            ? 'The security overview did not arrive in time. The node is unreachable or still starting, so nothing is shown rather than an empty result.'
-            : 'The security overview failed to load for this node. Switch nodes and back, or try again shortly.'}
-        </p>
+        <h3 className="text-lg font-medium mb-1">{copy.title}</h3>
+        <p className="mb-4 text-sm text-muted-foreground">{copy.body}</p>
         <Button variant="outline" size="sm" onClick={onReload}>
           <RefreshCw className="mr-1.5 h-4 w-4" />
           Retry

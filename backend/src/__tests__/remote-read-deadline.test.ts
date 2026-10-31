@@ -13,6 +13,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import http from 'http';
 import type { AddressInfo, Socket } from 'net';
+import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import {
@@ -35,6 +36,7 @@ describe('interactive remote read deadline', () => {
   let tmpDir: string;
   let app: import('express').Express;
   let authHeader: string;
+  let viewerBearer: string;
   let remoteNodeId: number;
   let pilotNodeId: number;
   let stub: http.Server;
@@ -79,6 +81,17 @@ describe('interactive remote read deadline', () => {
 
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
     authHeader = `Bearer ${token}`;
+
+    // A non-admin request runs the mixed-version RBAC gate before the hop, so
+    // the gate's own answer has to stay truthful about a silent node.
+    const hash = await bcrypt.hash('password123', 1);
+    DatabaseService.getInstance().addUser({ username: 'read-deadline-viewer', password_hash: hash, role: 'viewer' });
+    const viewer = DatabaseService.getInstance().getUserByUsername('read-deadline-viewer')!;
+    viewerBearer = `Bearer ${jwt.sign(
+      { username: 'read-deadline-viewer', role: 'viewer', tv: viewer.token_version },
+      TEST_JWT_SECRET,
+      { expiresIn: '10m' },
+    )}`;
   });
 
   afterAll(async () => {
@@ -197,6 +210,52 @@ describe('interactive remote read deadline', () => {
       // timeout the test harness happens to impose.
       expect(elapsed).toBeGreaterThanOrEqual(INTERACTIVE_REMOTE_READ_TIMEOUT_MS - 250);
       expect(elapsed).toBeLessThan(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 4_000);
+    }, 20_000);
+
+    it('bounds a GitOps identity read, which hydrates the Git sources page', async () => {
+      responder = null;
+      const startedAt = Date.now();
+
+      const res = await request(app)
+        .get('/api/git-sources')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(504);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBe('1');
+      expect(Date.now() - startedAt).toBeLessThan(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 4_000);
+    }, 20_000);
+
+    it('reports a silent node as unavailable to a non-admin, not as an old node', async () => {
+      responder = null;
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', viewerBearer)
+        .set('x-node-id', String(remoteNodeId));
+
+      // The capability probe could not run, which proves nothing about the
+      // remote's version: answering "upgrade it" would send an operator to fix
+      // the wrong thing.
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('remote_unreachable');
+      expect(res.body.error).not.toMatch(/upgrade/i);
+    }, 20_000);
+
+    it('still refuses a reachable node that does not enforce per-user permissions', async () => {
+      responder = (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ version: '0.1.0', capabilities: ['fleet'] }));
+      };
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', viewerBearer)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/does not enforce per-user permissions/i);
     }, 20_000);
 
     it('does not bound a long-running operation', async () => {

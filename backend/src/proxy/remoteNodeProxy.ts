@@ -33,9 +33,10 @@ import {
 } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
-import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability, probeRemoteCapability } from '../helpers/remoteCapabilities';
+import { remoteAdvertisesCapability, probeRemoteCapability } from '../helpers/remoteCapabilities';
 import { hubImageUpdateJsonParser } from '../middleware/jsonParser';
 import {
+  CROSS_NODE_RBAC_CAPABILITY,
   STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
   STACK_DELETE_PRUNE_VOLUMES_CAPABILITY,
   SERVICE_SCOPED_UPDATE_CAPABILITY,
@@ -167,6 +168,9 @@ function armInteractiveReadDeadline(req: Request, res: Response, nodeName: strin
       if (res.headersSent) {
         // Headers are already on the wire, so the only honest answer left is to
         // end the response rather than append a JSON error to a partial body.
+        // The hop is still recorded as a timeout: the visible symptom is a
+        // truncated body, and the log should name the bound that caused it.
+        finalizeProxyTiming(req, 'timeout');
         res.destroy();
       } else {
         finalizeProxyTiming(req, 'timeout');
@@ -209,6 +213,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
     proxyReq: (proxyReq, req) => {
       // Remember the upstream request so a missed read deadline can abort it.
       proxyRequests.set(req, proxyReq);
+      // A deadline that fired before the connection existed had nothing to
+      // abort. Destroy the socket as soon as it appears rather than leaving the
+      // hop talk to a remote nobody is waiting for.
+      if (interactiveReadDeadlines.get(req)?.fired) {
+        proxyReq.destroy();
+        return;
+      }
       // Strip headers that must not reach the remote instance:
       // - x-node-id: remote Sencho treats all requests as local
       // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
@@ -605,9 +616,22 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
       // Mixed-version RBAC gate (non-admin only). Runs before alert body
       // buffering so an unauthorized client cannot force unbounded memory use.
+      //
+      // Tri-state: a node that did not answer proved nothing about its version,
+      // so it is reported as unavailable rather than as an old node. Only a
+      // reachable remote that answered without the capability is a version
+      // problem, and only that answer deserves the upgrade message.
       if (req.user?.role !== 'admin') {
-        const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
-        if (!rbacSupported) {
+        const rbac = await probeRemoteCapability(req.nodeId, CROSS_NODE_RBAC_CAPABILITY);
+        if (rbac.kind === 'unreachable') {
+          res.status(503).json({
+            error: `Remote node "${node.name}" did not answer, so its permission model could not be verified. Try again when the node is reachable.`,
+            code: 'remote_unreachable',
+            retryable: true,
+          });
+          return;
+        }
+        if (rbac.kind === 'unsupported') {
           res.status(403).json({
             error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
           });
@@ -974,6 +998,13 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         req.gitopsIdentity = { query: prepared.search.toString(), preRewritePath: req.path };
         beginProxyTiming(req, res);
+        // The identity hop's 30 s proxyTimeout bounds a stalled body. It is not a
+        // UX deadline: a Git sources or drift page is hydration like any other, so
+        // a GET that answers a page is on the interactive clock here too. The
+        // drift re-check is a POST and stays off it.
+        if (isInteractiveRemoteRead(req.method, req.path)) {
+          armInteractiveReadDeadline(req, res, node.name);
+        }
         const selectedIdentityProxy = node.mode === 'pilot_agent'
           ? identityProxy
           : target.apiUrl.startsWith('https:') ? safeHttpsIdentityProxy : safeHttpIdentityProxy;

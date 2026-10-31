@@ -471,4 +471,15 @@ describe('OverviewTab unavailable states', () => {
     expect(screen.getByText(/couldn't load the overview/i)).toBeInTheDocument();
     expect(screen.queryByText(/did not answer/i)).toBeNull();
   });
+
+  it('keeps an unreachable node and an authorization failure distinct from a timeout', () => {
+    renderUnavailable('unreachable');
+    expect(screen.getByText(/this node is unreachable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).toBeNull();
+    cleanup();
+
+    renderUnavailable('unauthorized');
+    expect(screen.getByText(/no access to this overview/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).toBeNull();
+  });
 });

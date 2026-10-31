@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   REMOTE_READ_TIMEOUT_HEADER,
+  classifyRemoteReadError,
   classifyRemoteReadFailure,
   remoteReadFailureMessage,
 } from '../remoteReadFailure';
@@ -36,6 +37,18 @@ describe('classifyRemoteReadFailure', () => {
     expect(classifyRemoteReadFailure(status(404))).toBe('unsupported');
     expect(classifyRemoteReadFailure(status(500))).toBe('http');
     expect(classifyRemoteReadFailure(status(200, []))).toBeNull();
+  });
+});
+
+describe('classifyRemoteReadError', () => {
+  it('reads the response apiFetch attached to its Unauthorized throw', () => {
+    const unauthorized = Object.assign(new Error('Unauthorized'), { response: status(401) });
+    expect(classifyRemoteReadError(unauthorized)).toBe('unauthorized');
+  });
+
+  it('keeps a transport failure a plain error', () => {
+    expect(classifyRemoteReadError(new TypeError('Failed to fetch'))).toBe('error');
+    expect(classifyRemoteReadError(null)).toBe('error');
   });
 });
 

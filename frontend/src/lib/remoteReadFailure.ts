@@ -36,6 +36,18 @@ export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | nu
 }
 
 /**
+ * Classify a read that threw instead of returning. `apiFetch` throws on 401
+ * before the caller sees the response, so the response it attached to the error
+ * is the only way to keep an authorization failure distinct from a transport
+ * failure.
+ */
+export function classifyRemoteReadError(error: unknown): RemoteReadFailure {
+  const response = (error as { response?: unknown } | null | undefined)?.response;
+  if (response instanceof Response) return classifyRemoteReadFailure(response) ?? 'error';
+  return 'error';
+}
+
+/**
  * One plain sentence for a failed read, naming the node the operator selected.
  * `http` keeps the status so an unexpected answer is still visible; every other
  * kind is a state the operator can act on.

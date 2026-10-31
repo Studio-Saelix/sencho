@@ -984,4 +984,35 @@ describe('ResourcesView', () => {
       });
     });
   });
+
+  it('does not report "No external containers" when only the external read failed', async () => {
+    // A node that answers /system/resources but misses the read deadline on
+    // /system/orphans has not told us it has none. The only external slice
+    // failed, so that tab names the failure instead of claiming an empty host.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve({
+          ok: false,
+          status: 504,
+          json: async () => ({ code: 'remote_read_timeout' }),
+          headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.queryByText('No external containers')).toBeNull();
+  });
 });
