@@ -86,7 +86,7 @@ export function FleetView({
         [can, isAdmin],
     );
     const canExportDossier = can('node:read') && can('stack:read');
-    const { hasCapability, nodes: registryNodes } = useNodes();
+    const { hasCapability, nodes: registryNodes, isLoading: registryLoading } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; permission gates still apply when on.
@@ -304,7 +304,7 @@ export function FleetView({
                 </TabsContent>
                 {containerLabelsEnabled && (
                     <TabsContent value="container-labels">
-                        <ContainerLabelsTab onNavigateToNode={onNavigateToNode} nodes={nodeRefs} />
+                        <ContainerLabelsTab onNavigateToNode={onNavigateToNode} nodes={nodeRefs} nodesLoading={registryLoading} />
                     </TabsContent>
                 )}
                 <TabsContent value="deployments">

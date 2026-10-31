@@ -29,6 +29,8 @@ interface ContainerLabelsTabProps {
   onNavigateToNode: (nodeId: number, stackName: string) => void;
   /** The fleet's nodes, read one at a time so each answer draws as it lands. */
   nodes: readonly LabelsNodeRef[];
+  /** True while the node registry is still loading, so an empty list is not final. */
+  nodesLoading?: boolean;
 }
 
 function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () => void }) {
@@ -50,7 +52,7 @@ function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () 
   );
 }
 
-export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsTabProps) {
+export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = false }: ContainerLabelsTabProps) {
   const { isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>('container');
   const [search, setSearch] = useState('');
@@ -59,6 +61,9 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
   const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
 
   const { data, loading, progress, refresh, retryFailed } = useFleetContainerLabels(nodes, revealSecrets);
+  // The registry is the tab's own input, so its load counts as this tab's load.
+  const busy = loading || (nodes.length === 0 && nodesLoading);
+  const noNodes = nodes.length === 0 && !nodesLoading;
 
   const allContainers = useMemo(() => {
     if (!data) return [] as Array<ContainerLabelRow & { nodeId: number; nodeName: string }>;
@@ -103,9 +108,9 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
     });
   };
 
-  // Nodes whose read failed (with the hub's reason) or whose inventory came back
-  // partial (some containers or images could not be inspected). Named so the
-  // warning is truthful.
+  // Nodes whose read failed (with whatever reason the failure carried) or whose
+  // inventory came back partial (some containers or images could not be
+  // inspected). Named so the warning is truthful.
   const degradedNodes = useMemo(() => {
     const unread: Array<{ name: string; error: string }> = [];
     const partial: string[] = [];
@@ -135,6 +140,21 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
   const handleReveal = () => {
     setRevealSecrets(true);
   };
+
+  if (noNodes) {
+    return (
+      <div className="space-y-4" data-testid="container-labels-tab">
+        <p className="text-xs text-stat-subtitle leading-relaxed max-w-3xl">{LABEL_DISAMBIGUATION_COPY}</p>
+        <p className="text-sm text-stat-subtitle">No nodes could be listed. Reload the page to try again.</p>
+      </div>
+    );
+  }
+
+  // No node answered and none of them has an inventory to fall back on: say so
+  // instead of calling it an empty filter result.
+  const noResultsCopy = degradedNodes.unread.length > 0 && !degradedNodes.hasData
+    ? 'No fleet data could be read.'
+    : null;
 
   return (
     <div className="space-y-4" data-testid="container-labels-tab">
@@ -200,8 +220,8 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
               </PopoverContent>
             </Popover>
           )}
-          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={refresh} disabled={loading} aria-label="Refresh">
-            <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
+          <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={refresh} disabled={busy} aria-label="Refresh">
+            <RefreshCw className={cn('h-4 w-4', busy && 'animate-spin')} />
           </Button>
         </div>
       </div>
@@ -210,7 +230,7 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
         <p className="text-xs text-stat-subtitle">Checking {progress.done} of {progress.total} nodes...</p>
       )}
 
-      {loading && !data && (
+      {busy && !data && (
         <p className="text-sm text-stat-subtitle">Loading Docker label audit...</p>
       )}
 
@@ -222,7 +242,7 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
             {degradedNodes.hasData ? 'Showing partial fleet data.' : 'No fleet data could be read.'}
           </p>
           {degradedNodes.unread.length > 0 && (
-            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={retryFailed}>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={retryFailed} disabled={loading}>
               Retry
             </Button>
           )}
@@ -295,9 +315,11 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
                   </Fragment>
                 );
               })}
-              {filteredContainers.length === 0 && !loading && (
+              {filteredContainers.length === 0 && !busy && (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-sm text-stat-subtitle py-6 text-center">No containers match this filter.</TableCell>
+                  <TableCell colSpan={7} className="text-sm text-stat-subtitle py-6 text-center">
+                    {noResultsCopy ?? 'No containers match this filter.'}
+                  </TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -316,8 +338,10 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes }: ContainerLabelsT
           {filteredByLabel.map((row) => (
             <LabelGroupCard key={`${row.key}=${row.value}=${row.source}`} row={row} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} onNavigateToNode={onNavigateToNode} />
           ))}
-          {filteredByLabel.length === 0 && !loading && (
-            <p className="text-sm text-stat-subtitle py-4 text-center">No labels match this filter.</p>
+          {filteredByLabel.length === 0 && !busy && (
+            <p className="text-sm text-stat-subtitle py-4 text-center">
+              {noResultsCopy ?? 'No labels match this filter.'}
+            </p>
           )}
         </div>
       )}

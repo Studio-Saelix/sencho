@@ -100,7 +100,7 @@ function parseLabelPiece(body: unknown): FleetLabelInventoryResponse | null {
  * Concatenate each node's inventory in node order. A node that failed on the way
  * (the request itself, not the node's own report) keeps the inventory it had
  * before, so a failed refresh does not blank its part of the tab, and its error
- * is reported beside it.
+ * is reported in the banner above the table.
  */
 export function mergeLabelPieces(
   order: readonly LabelsNodeRef[],
@@ -167,7 +167,7 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
   const [failures, setFailures] = useState<ReadonlyMap<number, string>>(new Map());
   const [pending, setPending] = useState<ReadonlySet<number>>(new Set());
   // Held only while a load over the whole node set runs; a retry of a few nodes
-  // does not reset it, because "n of N" means nodes of the fleet.
+  // leaves it alone, because "n of N" describes the fleet, not the retry.
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const controllersRef = useRef(new Set<AbortController>());
@@ -270,9 +270,10 @@ export function useFleetContainerLabels(nodes: readonly LabelsNodeRef[], reveal:
     return mergeLabelPieces(nodes, pieces, failures);
   }, [nodes, pieces, failures]);
 
-  // `data === null` covers the first paint and a node list that has not arrived
-  // yet, so the tab shows a loading state instead of an empty audit.
-  const loading = pending.size > 0 || data === null;
+  // `data === null` covers the first paint when there are nodes to read, so the
+  // tab shows a loading state instead of an empty audit. An empty node list is
+  // the caller's problem (it knows whether the registry is still loading).
+  const loading = pending.size > 0 || (data === null && nodes.length > 0);
   return {
     data,
     loading,

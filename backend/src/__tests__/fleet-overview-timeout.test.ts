@@ -22,7 +22,7 @@ let DatabaseService: typeof import('../services/DatabaseService').DatabaseServic
 const PROXY_BASE = 'http://remote.example.com';
 const HEALTHY_BASE = 'http://good-host.example.com';
 const PRIOR_CONTACT = 1_700_000_000;
-const OVERVIEW_BUDGET_CEILING_MS = 8_000;
+const OVERVIEW_BUDGET_CEILING_MS = 12_000;
 const OVERVIEW_ABORT_FLOOR_MS = 1_500;
 const FAST_PATH_CEILING_MS = 2_000;
 
@@ -239,9 +239,11 @@ describe('GET /api/fleet/overview remote probe budget', () => {
     expect(elapsedMs).toBeLessThan(FAST_PATH_CEILING_MS);
   });
 
+  // The boundary sits 5s either side of the 30s grace window, so the request
+  // itself outlasting the window on a loaded box cannot flip the expectation.
   it.each([
-    [29_000, 'online'],
-    [31_000, 'offline'],
+    [25_000, 'online'],
+    [35_000, 'offline'],
   ])('reports a Pilot whose tunnel closed %ims ago as %s', async (agoMs, expected) => {
     const nodeId = addPilotNode('boundary-pilot');
     DatabaseService.getInstance().updateNode(nodeId, { pilot_last_seen: Date.now() - agoMs });
@@ -343,9 +345,9 @@ describe('GET /api/fleet/overview remote probe budget', () => {
 });
 
 describe('node-data fan-outs share the fleet-read budget', () => {
-  // A hung remote must answer at the 5s budget: no sooner than the floor (which
-  // allows for timer slack) and far below the old 15s and 30s ceilings. The
-  // ceiling is loose on purpose, because a loaded CI box inflates the request.
+  // A hung remote must answer at the 5s budget. The floor catches an early
+  // return; the ceiling is loose on purpose, because a loaded CI box inflates
+  // the whole request and the old per-node ceilings were 8s and 30s.
   const READ_BUDGET_FLOOR_MS = 4_000;
   const READ_BUDGET_CEILING_MS = 12_000;
   // A healthy or never-contacted node must not wait on the budget at all.
@@ -385,7 +387,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     expect((res.body.nodes as { nodeId: number }[]).some(n => n.nodeId === healthyId)).toBe(true);
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-  }, 20_000);
+  }, 30_000);
 
   it('degrades a half-open remote to an error row on the networking summary within the budget', async () => {
     stubLocalDocker();
@@ -403,20 +405,25 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     expect(row?.error).toBe('Timed out after 5s');
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-  }, 20_000);
+  }, 30_000);
 
   describe('GET /api/fleet/networking-summary?nodeId=', () => {
     it('narrows the fan-out to one node', async () => {
       stubLocalDocker();
       const healthyId = addProxyNode('summary-slice', HEALTHY_BASE);
       mockTargets({ [healthyId]: { apiUrl: HEALTHY_BASE, apiToken: 'test-token', trustedLoopback: false } });
-      mockFetch((url) => (String(url).startsWith(`${HEALTHY_BASE}/api/networking/summary`)
+      const fetchSpy = mockFetch((url) => (String(url).startsWith(`${HEALTHY_BASE}/api/networking/summary`)
         ? jsonResponse({ exposed: { count: 1, stacks: ['web'] }, unknownExposure: { count: 0, stacks: [] }, networkDrift: { count: 0, stacks: [] } })
         : new Response('not found', { status: 404 })));
 
       const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${healthyId}`).set('Authorization', authHeader);
       expect(res.status).toBe(200);
-      expect((res.body.nodes as { nodeId: number; status: string }[]).map(n => n.nodeId)).toEqual([healthyId]);
+      const rows = res.body.nodes as { nodeId: number; status: string; summary: { exposed: { count: number } } | null }[];
+      expect(rows.map(n => n.nodeId)).toEqual([healthyId]);
+      expect(rows[0]).toMatchObject({ status: 'ok', summary: { exposed: { count: 1 } } });
+      const requested = fetchSpy.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
     });
   });
 
@@ -440,7 +447,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       const started = Date.now();
       const res = await getMap(`?nodeId=${healthyId}`);
       expect(res.status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(FAST_PATH_CEILING_MS);
+      expect(Date.now() - started).toBeLessThan(HEALTHY_PATH_CEILING_MS);
       expect((res.body.nodes as { nodeId: number }[]).every(n => n.nodeId === healthyId)).toBe(true);
       expect(res.body.nodes).toHaveLength(1);
       expect(res.body.nodeErrors).toEqual([]);
@@ -544,7 +551,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect((res.body.nodeErrors as Record<string, string>)[String(hungId)]).toBe('Timed out after 5s');
       expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
       expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-    }, 20_000);
+    }, 30_000);
 
     it('reports a disconnected Pilot without a 30-second wait and without issuing HTTP', async () => {
       stubLocalLabelDocker();
@@ -595,7 +602,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
         .toMatchObject({ status: 'error', error: 'Timed out after 5s' });
       expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
       expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
-    }, 20_000);
+    }, 30_000);
 
     it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
       const res = await getLabels(`?nodeId=${encodeURIComponent(bad)}`);

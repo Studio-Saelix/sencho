@@ -177,9 +177,39 @@ describe('ContainerLabelsTab', () => {
   });
 
   it('shows a loading state, not an empty audit, before the node list arrives', async () => {
-    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} />);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} nodesLoading />);
     expect(await screen.findByText('Loading Docker label audit...')).toBeInTheDocument();
     expect(screen.queryByText('No containers match this filter.')).toBeNull();
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('says no nodes could be listed when the registry is empty and settled', async () => {
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[]} />);
+    expect(await screen.findByText('No nodes could be listed. Reload the page to try again.')).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('shows progress while one node is still pending', async () => {
+    let releaseEdge: (r: Response) => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (String(path).includes('nodeId=2')) {
+        return new Promise<Response>((resolve) => { releaseEdge = resolve; });
+      }
+      return { ok: true, json: async () => mockFleet } as Response;
+    });
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }, { id: 2, name: 'Edge' }]} />);
+    expect(await screen.findByText('Checking 1 of 2 nodes...')).toBeInTheDocument();
+    releaseEdge({ ok: true, json: async () => ({ nodes: [{ nodeId: 2, nodeName: 'Edge', status: 'ok', error: null, inventory: { nodeId: 2, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] } }], aggregatedByLabel: [], nodeErrors: {}, generatedAt: Date.now() }) } as Response);
+    await screen.findByText('web-1');
+  });
+
+  it('says no fleet data could be read when every node failed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: 'unreachable' }) } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} nodes={[{ id: 1, name: 'Local' }]} />);
+    expect(await screen.findByText(/Could not read Local \(unreachable\)/)).toBeInTheDocument();
+    expect(screen.getByText(/No fleet data could be read\./, { selector: 'p' })).toBeInTheDocument();
+    expect(screen.getByText('No fleet data could be read.', { selector: 'td' })).toBeInTheDocument();
+    expect(screen.queryByText('No containers match this filter.')).toBeNull();
   });
 });
