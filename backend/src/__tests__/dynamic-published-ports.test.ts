@@ -493,11 +493,11 @@ describe('drift against a running service with an auto-assigned port', () => {
   });
 
   it('matches a declaration whose container target is unresolved by protocol only, once', () => {
-    const unresolved = (count: number): DeclaredCompose => ({
+    const unresolved = (count: number, hostIp = ''): DeclaredCompose => ({
       services: [{
         name: 'web', dependsOn: [], networks: [], volumes: [],
         ports: Array.from({ length: count }, () => (
-          { hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort
+          { hostIp, publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort
         )),
       }],
       networks: {}, volumes: {},
@@ -517,6 +517,10 @@ describe('drift against a running service with an auto-assigned port', () => {
     // apart, so one is still one label.
     expect(portMatches(unresolved(2), [one])).toMatchObject([{ expected: 'auto/tcp' }]);
     expect(portMatches(unresolved(2), [one, two])).toEqual([]);
+    // The written interface is part of the match, as it is for a resolved target.
+    expect(portMatches(unresolved(1, '127.0.0.1'), [one])).toHaveLength(1);
+    expect(portMatches(unresolved(1, '127.0.0.1'), [{ ...one, ip: '127.0.0.1' }])).toEqual([]);
+    expect(portMatches(unresolved(1), [{ ...one, ip: '127.0.0.1' }])).toHaveLength(1);
   });
 });
 
@@ -535,6 +539,23 @@ describe('authored port forms beyond the audit matrix', () => {
   it('keeps a TCP and a UDP auto-assigned port as two entries', () => {
     const r = parseComposeDependencies('services:\n  web:\n    ports:\n      - "80"\n      - "51820/udp"\n');
     expect(r.services[0].ports.map(p => p.protocol)).toEqual(['tcp', 'udp']);
+  });
+
+  it('keeps a dynamic declaration with a written interface and an unresolved target, and matches it by interface', () => {
+    const parsed = parseComposeDependencies('services:\n  web:\n    ports:\n      - "127.0.0.1::${APP_PORT}"\n');
+    expect(parsed.services[0].ports).toEqual([
+      { hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true },
+    ]);
+    const container = (ip: string): DependencyContainer => ({
+      id: 'c1', name: 'c1', service: 'web', composeProject: null, stack: 'proj', state: 'running', exitCode: null,
+      image: 'ghcr.io/example/app:1.2', networks: [], volumes: [],
+      ports: [{ ip, publishedPort: 32768, privatePort: 9000, protocol: 'tcp' }],
+    });
+    const portFindings = (ip: string) => assembleStackDrift({
+      stack: 'proj', declared: parsed, containers: [container(ip)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(portFindings('127.0.0.1')).toEqual([]);
+    expect(portFindings('0.0.0.0')).toHaveLength(1);
   });
 
   it.each(['"0abc:80"', '"0x50:80"', '"127.0.0.1:80"', '"8080x:80"'])('drops %s, which Compose refuses', (entry) => {

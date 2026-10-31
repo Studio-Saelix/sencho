@@ -8,6 +8,7 @@ import { parseEffectiveModel } from './preflight/effectiveModel';
 import {
   compareStackNetworks,
   fromDeclaredCompose,
+  isHostNetwork,
   type ManagedNetworkAttachmentPredicate,
 } from './network/normalize';
 import { resolveManagedMeshAttachment } from './network/managedMeshAttachment';
@@ -133,9 +134,10 @@ interface DynamicDeclaration {
 }
 
 /**
- * A dynamic declaration whose container side is still a template, so Compose
- * decides both the protocol and the target only at runtime. It can be matched
- * by protocol alone, once per running binding.
+ * A dynamic declaration whose container side is still a template, so only its
+ * protocol and interface are known. Compose resolves the target when it
+ * interpolates the entry, which a caller with no lookup cannot see, so it is
+ * matched by protocol and interface alone, once per running binding.
  */
 interface UnresolvedDeclaration {
   hostIp: string;
@@ -396,6 +398,12 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
         });
       }
     }
+
+    // Docker discards a host-network service's port bindings: every container
+    // port is reachable on the host directly, so the declared set and the
+    // runtime set cannot be compared. The Inspector's facts special-case the
+    // same mode, and the operator docs say so.
+    if (isHostNetwork(svc.networkMode)) continue;
 
     // Ports compare as exact sets, except that a port Docker assigns is matched
     // by the container port it targets: the host number Docker picked is not a

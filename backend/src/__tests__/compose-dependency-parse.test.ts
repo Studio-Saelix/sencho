@@ -196,6 +196,11 @@ describe('parseComposeDependencies - ports', () => {
       .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
     expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: "${APP_PORT}", published: 0 }')).services[0].ports)
       .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+    // A written interface is a shape, so the declaration survives with its
+    // interface and no target; a templated interface has none to record.
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "127.0.0.1::${APP_PORT}"')).services[0].ports)
+      .toEqual([{ hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_IP}::${APP_PORT}"')).services[0].ports).toEqual([]);
   });
 
   it('still drops a fixed publication whose container port Compose refuses without a template', () => {

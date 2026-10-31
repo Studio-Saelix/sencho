@@ -131,7 +131,7 @@ A port with no host port number, such as `51820/udp`, `127.0.0.1::51820/udp`, or
 
 When a service uses `network_mode:` instead of individual network attachments, the mode appears as an amber badge beside the service name:
 
-- **`network_mode: host`**: the service shares the host network stack entirely. Every container port is accessible directly on the host, even without any `ports:` entries. The card shows **all container ports / host-exposed** to make this explicit.
+- **`network_mode: host`**: the service shares the host network stack entirely. Every container port is accessible directly on the host, even without any `ports:` entries. The card shows **all container ports / host-exposed** to make this explicit. Docker discards any `ports:` bindings in this mode, so runtime drift does not compare the declared ports with the container's.
 - **`network_mode: none`**: the service has no network connectivity at all.
 - **`network_mode: service:<name>`** or **`network_mode: container:<name>`**: the service shares another container's network namespace.
 

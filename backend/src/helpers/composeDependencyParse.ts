@@ -22,9 +22,10 @@ export interface DeclaredPort {
    *  ledger hash records it as `auto`. */
   dynamic?: true;
   /** Container port range the publication targets, when known. Both readers
-   *  set it when the container side is a literal number, so drift can match an
-   *  auto-assigned host port to the runtime `privatePort`; a container side that
-   *  is still a template Compose would resolve leaves it off. */
+   *  set it for a literal container port, so drift can match an auto-assigned
+   *  host port to the runtime `privatePort`. Only a template on the container
+   *  side leaves it off, and only the authored reader can see one: the rendered
+   *  model has already resolved it. */
   targetStartPort?: number;
   targetEndPort?: number;
 }
@@ -409,12 +410,15 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
     const target = declaredContainerTarget(spec.container);
     if (target === null) return null;
     if (isDynamicHostPort(spec.hostPart)) {
-      // A whole entry that is still a template ("${PORTS}") has no host side
-      // written at all: it may resolve to a fixed or an auto-assigned
+      // A whole entry that is still a template ("${PORTS}") writes no host
+      // side at all: it may resolve to a fixed or an auto-assigned
       // publication, so there is no shape to record. Leave it out rather than
-      // invent one. An empty host part with a known container port is an
-      // ordinary auto-assigned publication.
-      if (target === 'unknown' && spec.hostPart === '') return null;
+      // invent one, and do the same for a templated interface. A literal
+      // interface keeps the shape even when the container side is a template
+      // ("127.0.0.1::${APP_PORT}"), and an empty host part with a known
+      // container port is an ordinary auto-assigned publication.
+      if (target === 'unknown' && spec.hostPart === ''
+        && (spec.hostIp === '' || holdsTemplate(spec.hostIp))) return null;
       return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };
     }
     if (!isFixedHostPort(spec.hostPart)) return null;
