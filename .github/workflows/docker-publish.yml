@@ -275,6 +275,10 @@ jobs:
             [ "$helper_tag" != "$tag" ] || { echo "FAILED: unexpected tag $tag"; exit 1; }
             docker buildx imagetools create -t "$helper_tag" "saelix/sencho-recovery-helper@${HELPER_DIGEST}"
           done <<< "$TAGS"
+          if [ -z "${TAGS// }" ]; then
+            echo "No tags to sign (a workflow_dispatch run on a non-tag ref)."
+            exit 0
+          fi
           cosign sign --yes \
             "saelix/sencho-recovery-helper@${HELPER_DIGEST}" \
             "ghcr.io/studio-saelix/sencho-recovery-helper@${HELPER_DIGEST}"
