@@ -136,9 +136,9 @@ interface DynamicDeclaration {
 
 /**
  * A dynamic declaration whose container side is still a template, so its
- * target is unknown. The protocol is always known, and the interface is known
- * unless it too is a template. It is matched by whichever of those the
- * declaration has, once per running binding.
+ * target is unknown. The protocol and interface are known unless they too are
+ * templates. It is matched by whichever of those the declaration has, once per
+ * running binding.
  */
 interface UnresolvedDeclaration {
   hostIp: string;
@@ -151,9 +151,38 @@ interface UnresolvedDeclaration {
  */
 interface PortRequirement {
   label: string;
-  /** The declaration's interface is still a template, so any binding matches. */
-  wildcard: boolean;
   matches: (p: RuntimePort) => boolean;
+}
+
+/**
+ * Assign each requirement its own binding, or report it missing. A maximum
+ * bipartite matching rather than a greedy pass: a declaration whose interface
+ * is still a template matches every binding, and a greedy pass could let it
+ * take the one binding a resolved declaration needs and report drift where a
+ * valid assignment exists.
+ */
+function matchPortRequirements(
+  requirements: PortRequirement[],
+  bindings: RuntimePort[],
+): { missing: string[]; unexplained: RuntimePort[] } {
+  const owner = new Array<number>(bindings.length).fill(-1);
+  const assign = (requirement: number, seen: boolean[]): boolean => {
+    for (let b = 0; b < bindings.length; b++) {
+      if (seen[b] || !requirements[requirement].matches(bindings[b])) continue;
+      seen[b] = true;
+      if (owner[b] === -1 || assign(owner[b], seen)) {
+        owner[b] = requirement;
+        return true;
+      }
+    }
+    return false;
+  };
+  const matched = requirements.map((_, requirement) =>
+    assign(requirement, new Array<boolean>(bindings.length).fill(false)));
+  return {
+    missing: requirements.filter((_, requirement) => !matched[requirement]).map((requirement) => requirement.label),
+    unexplained: bindings.filter((_, binding) => owner[binding] === -1),
+  };
 }
 
 /** The declared ports a service publishes, split by whether the host number is
@@ -184,11 +213,8 @@ function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
       protocol: p.protocol,
     });
   }
-  // A declaration whose interface is still a template can take any binding, so
-  // match the resolved ones first. Otherwise it could consume the binding a
-  // resolved declaration needs and report drift where a valid assignment exists.
-  // A declaration whose interface is still a template can take any binding, so
-  // it is matched last (see the requirement order below).
+  // A declaration whose interface is still a template can take any binding;
+  // the matching below accounts for that.
   return { fixed, dynamic, unknownTargets };
 }
 
@@ -426,7 +452,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     // and the operator docs say so.
     if (isHostNetwork(svc.networkMode)) continue;
 
-    // Ports compare as exact sets, except that a port Docker assigns is matched
+    // Ports compare as exact sets, except that an auto-assigned port is matched
     // by the container port it targets and the interface it declares: the host
     // number Docker picked is not a declaration and must not read as drift. The
     // compose parser collapses a published range (e.g. "8000-8002:80") to its
@@ -438,13 +464,9 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     // declarations first, so a binding a fixed declaration already explains can
     // never stand in for an auto-assigned declaration that Docker did not
     // publish. Two declarations therefore need two bindings, and a second
-    // declaration with no binding of its own reads as drift. A declaration
-    // whose interface is still a template can take any binding, so it is
-    // matched last: otherwise it could consume the binding a resolved
-    // declaration needs and report drift where a valid assignment exists.
-    // Resolved declarations with a known target come first, then resolved
-    // protocol-only ones, then the two wildcard forms; the stable sort keeps
-    // declaration order within each group.
+    // declaration with no binding of its own reads as drift. The assignment is
+    // a maximum matching, so a declaration whose interface is still a template
+    // cannot take the binding a resolved declaration needs.
     //
     // The list API reports the host number a container is bound to, not whether
     // the file asked for it. A fixed host number on a container port declared
@@ -461,7 +483,6 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
         for (let target = d.startPort; target <= d.endPort; target++) {
           out.push({
             label: `auto:${target}/${d.protocol}`,
-            wildcard: holdsTemplate(d.hostIp),
             matches: (p) => p.privatePort === target
               && p.protocol === d.protocol
               && interfaceCompatible(d.hostIp, p.hostIp),
@@ -474,11 +495,10 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       // second one.
       ...declaredPorts.unknownTargets.map((unknown) => ({
         label: `auto/${unknown.protocol}`,
-        wildcard: holdsTemplate(unknown.hostIp),
         matches: (p: RuntimePort) => p.protocol === unknown.protocol
           && interfaceCompatible(unknown.hostIp, p.hostIp),
       })),
-    ].sort((a, b) => Number(a.wildcard) - Number(b.wildcard));
+    ];
     const unexplained: RuntimePort[] = [];
     // A replica must publish the declared container port itself; a sibling's
     // picked number does not stand in for a replica that is missing it.
@@ -487,14 +507,9 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       // Fixed declarations take their bindings first, so what remains is only
       // available to an auto-assigned declaration.
       const open = containerPorts.filter((p) => !fixedRunning(p));
-      const take = (predicate: (p: RuntimePort) => boolean): RuntimePort | null => {
-        const index = open.findIndex(predicate);
-        return index === -1 ? null : open.splice(index, 1)[0];
-      };
-      for (const requirement of requirements) {
-        if (!take(requirement.matches)) missingDynamic.add(requirement.label);
-      }
-      unexplained.push(...open);
+      const matched = matchPortRequirements(requirements, open);
+      for (const label of matched.missing) missingDynamic.add(label);
+      unexplained.push(...matched.unexplained);
     }
     const missingFixed = [...declaredPorts.fixed].filter((key) => !runtimePorts.some((p) => portKey(p.publishedPort, p.protocol) === key));
     if (unexplained.length > 0 || missingFixed.length > 0 || missingDynamic.size > 0) {

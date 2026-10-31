@@ -196,13 +196,13 @@ describe('parseComposeDependencies - ports', () => {
       .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
     expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: "${APP_PORT}", published: 0 }')).services[0].ports)
       .toEqual([{ hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
-    // A written interface is a shape, so the short form survives with its
-    // interface and no target; a templated short-form interface has none to
-    // record. The long form keeps it, and drift lets any same-protocol binding
-    // satisfy the unresolved interface.
+    // A written interface is a shape, so the declaration survives with its
+    // interface and no target, whether that interface is a literal or a
+    // template. A whole-entry template has no host side to record.
     expect(parseComposeDependencies(svc('web', 'ports:\n  - "127.0.0.1::${APP_PORT}"')).services[0].ports)
       .toEqual([{ hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
-    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_IP}::${APP_PORT}"')).services[0].ports).toEqual([]);
+    expect(parseComposeDependencies(svc('web', 'ports:\n  - "${HOST_IP}::${APP_PORT}"')).services[0].ports)
+      .toEqual([{ hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true }]);
     // The long form keeps a templated interface, which drift treats as
     // unresolved and lets any binding satisfy.
     expect(parseComposeDependencies(svc('web', 'ports:\n  - { target: "${APP_PORT}", published: 0, host_ip: "${HOST_IP}" }')).services[0].ports)

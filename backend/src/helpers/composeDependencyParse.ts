@@ -415,13 +415,10 @@ function declaredPort(entry: unknown, lookup?: ComposeEnvLookup): DeclaredPort |
       // A whole entry that is still a template ("${PORTS}") writes no host
       // side at all: it may resolve to a fixed or an auto-assigned
       // publication, so there is no shape to record. Leave it out rather than
-      // invent one, as well as a short entry with an empty host part, a
-      // templated interface, and an unknown target. A literal interface keeps
-      // the shape even when the container side is a template
-      // ("127.0.0.1::${APP_PORT}"), and an empty host part with a known
-      // container port is an ordinary auto-assigned publication.
-      if (target === 'unknown' && spec.hostPart === ''
-        && (spec.hostIp === '' || holdsTemplate(spec.hostIp))) return null;
+      // invent one. An empty host part with a written interface or a known
+      // container port is an ordinary auto-assigned publication, and an
+      // unresolved interface is recorded as written.
+      if (target === 'unknown' && spec.hostPart === '' && spec.hostIp === '') return null;
       return { hostIp: spec.hostIp, publishedPort: 0, protocol: spec.protocol, dynamic: true, ...dynamicTarget(target) };
     }
     if (!isFixedHostPort(spec.hostPart)) return null;

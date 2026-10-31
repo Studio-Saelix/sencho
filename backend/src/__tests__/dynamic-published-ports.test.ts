@@ -575,6 +575,11 @@ describe('drift against a running service with an auto-assigned port', () => {
       networks: {}, volumes: {},
     };
     expect(portMatches(crossPhase, [loopback, one])).toEqual([]);
+    // The matching must also reassign: a wildcard known target and a resolved
+    // protocol-only declaration both fit the loopback interface, but only one
+    // fits the 9000 binding.
+    const loopback9001 = { ...one, ip: '127.0.0.1', publishedPort: 32770, privatePort: 9001 };
+    expect(portMatches(crossPhase, [loopback, loopback9001])).toEqual([]);
   });
 });
 
