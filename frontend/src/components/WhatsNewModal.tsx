@@ -23,6 +23,47 @@ type ReleaseNotesResult = { version: string } & (
 // font-sans/normal-case/tracking-normal reset ModalFooter's inherited kicker styling (font-mono uppercase tracking-[0.22em]) so the footer link reads as a link, not a label.
 const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:underline font-sans normal-case tracking-normal';
 
+interface ReleaseNotesBodyProps {
+  /** The lookup for the running version; null while it loads. */
+  notes: ReleaseNotesResult | null;
+}
+
+function ReleaseNotesBody({ notes }: ReleaseNotesBodyProps) {
+  if (notes === null) {
+    return (
+      <div className="space-y-2" aria-busy="true">
+        <Skeleton className="h-3 w-full" />
+        <Skeleton className="h-3 w-11/12" />
+        <Skeleton className="h-3 w-4/5" />
+      </div>
+    );
+  }
+  if (notes.failed) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        The release notes could not be loaded from GitHub. Check that this instance can reach it, then open this again.
+      </p>
+    );
+  }
+  if (!notes.highlights) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This release has no highlights. The full list of changes is in the changelog.
+      </p>
+    );
+  }
+  return (
+    <>
+      <MarkdownContent>{notes.highlights}</MarkdownContent>
+      {notes.htmlUrl && (
+        <a href={notes.htmlUrl} target="_blank" rel="noopener noreferrer" className={linkClassName}>
+          View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+        </a>
+      )}
+    </>
+  );
+}
+
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
   const { version, markSeen, setEnabled } = useWhatsNewPreference();
   // The last lookup, keyed by the version it answered. A result for any other
@@ -88,31 +129,7 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
             Release {formatVersion(version)}
           </div>
         )}
-        {current === null ? (
-          <div className="space-y-2" aria-busy="true">
-            <Skeleton className="h-3 w-full" />
-            <Skeleton className="h-3 w-11/12" />
-            <Skeleton className="h-3 w-4/5" />
-          </div>
-        ) : current.failed ? (
-          <p className="text-sm text-muted-foreground">
-            The release notes could not be loaded from GitHub. Check that this instance can reach it, then open this
-            again.
-          </p>
-        ) : current.highlights ? (
-          <>
-            <MarkdownContent>{current.highlights}</MarkdownContent>
-            {current.htmlUrl && (
-              <a href={current.htmlUrl} target="_blank" rel="noopener noreferrer" className={linkClassName}>
-                View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
-              </a>
-            )}
-          </>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            This release has no highlights. The full list of changes is in the changelog.
-          </p>
-        )}
+        <ReleaseNotesBody notes={current} />
       </ModalBody>
       <ModalFooter
         hint={
