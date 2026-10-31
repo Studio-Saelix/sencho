@@ -147,56 +147,72 @@ interface UnresolvedDeclaration {
 
 /**
  * One binding a declared port needs on each running container, with the label
- * a finding uses when no binding satisfies it.
+ * a finding uses when no binding satisfies it and the indexes of the bindings
+ * it may use.
  */
 interface PortRequirement {
   label: string;
-  matches: (p: RuntimePort) => boolean;
+  candidates: number[];
 }
 
 /**
  * Assign each requirement its own binding, or report it missing. A maximum
  * bipartite matching rather than a greedy pass: a declaration whose interface
- * is still a template matches every binding, and a greedy pass could let it
- * take the one binding a resolved declaration needs and report drift where a
- * valid assignment exists. Above the bound below, the cubic worst case would
- * stall a pathological stack, so a greedy pass errs toward reporting drift
- * instead, as the engine does elsewhere.
+ * is still a template can use any candidate binding, and a greedy pass could
+ * let it take the one binding a resolved declaration needs and report drift
+ * where a valid assignment exists.
+ *
+ * Each requirement carries only the bindings it can use, so a stack whose
+ * declarations target distinct container ports costs one candidate each no
+ * matter how many it declares. The augmenting-path search is exact while it
+ * stays inside a fixed work budget, which bounds the cost per container. Only
+ * a graph with enough candidate pairs to exhaust the budget (many declarations
+ * that each match nearly every binding) falls back to a first-fit pass, which
+ * errs toward reporting drift, as the engine does elsewhere.
  */
-const MAX_EXACT_PORT_REQUIREMENTS = 256;
+const MAX_MATCH_EDGE_CHECKS = 1_000_000;
 
 function matchPortRequirements(
   requirements: PortRequirement[],
   bindings: RuntimePort[],
 ): { missing: string[]; unexplained: RuntimePort[] } {
-  if (requirements.length > MAX_EXACT_PORT_REQUIREMENTS) {
-    const free = [...bindings];
-    const missing: string[] = [];
-    for (const requirement of requirements) {
-      const index = free.findIndex(requirement.matches);
-      if (index === -1) missing.push(requirement.label);
-      else free.splice(index, 1);
-    }
-    return { missing, unexplained: free };
-  }
   const owner = new Array<number>(bindings.length).fill(-1);
+  let checks = 0;
+  let exhausted = false;
   const assign = (requirement: number, seen: boolean[]): boolean => {
-    for (let b = 0; b < bindings.length; b++) {
-      if (seen[b] || !requirements[requirement].matches(bindings[b])) continue;
+    for (const b of requirements[requirement].candidates) {
+      if (++checks > MAX_MATCH_EDGE_CHECKS) {
+        exhausted = true;
+        return false;
+      }
+      if (seen[b]) continue;
       seen[b] = true;
       if (owner[b] === -1 || assign(owner[b], seen)) {
         owner[b] = requirement;
         return true;
       }
+      if (exhausted) return false;
     }
     return false;
   };
-  const matched = requirements.map((_, requirement) =>
-    assign(requirement, new Array<boolean>(bindings.length).fill(false)));
-  return {
-    missing: requirements.filter((_, requirement) => !matched[requirement]).map((requirement) => requirement.label),
-    unexplained: bindings.filter((_, binding) => owner[binding] === -1),
-  };
+  const matched: boolean[] = [];
+  for (let requirement = 0; requirement < requirements.length && !exhausted; requirement++) {
+    matched[requirement] = assign(requirement, new Array<boolean>(bindings.length).fill(false));
+  }
+  if (!exhausted) {
+    return {
+      missing: requirements.filter((_, requirement) => !matched[requirement]).map((requirement) => requirement.label),
+      unexplained: bindings.filter((_, binding) => owner[binding] === -1),
+    };
+  }
+  const used = new Array<boolean>(bindings.length).fill(false);
+  const missing: string[] = [];
+  for (const requirement of requirements) {
+    const index = requirement.candidates.find((b) => !used[b]);
+    if (index === undefined) missing.push(requirement.label);
+    else used[index] = true;
+  }
+  return { missing, unexplained: bindings.filter((_, binding) => !used[binding]) };
 }
 
 /** The declared ports a service publishes, split by whether the host number is
@@ -227,8 +243,8 @@ function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
       protocol: p.protocol,
     });
   }
-  // A declaration whose interface is still a template can take any binding;
-  // the matching below accounts for that.
+  // A declaration whose interface is still a template can use any candidate
+  // binding for its target; the matching below accounts for that.
   return { fixed, dynamic, unknownTargets };
 }
 
@@ -239,16 +255,56 @@ function interfaceKey(ip: string): string {
 }
 
 /**
- * Whether a declared interface can be satisfied by a runtime binding. A
- * declaration with no interface asks for every interface, so only an
- * all-interface binding satisfies it; a declaration naming one address needs a
- * binding on that same address. Either way a binding on a different interface
- * than the file asked for reads as drift. An interface still holding a template
- * was never resolved, so it constrains nothing and any binding satisfies it.
+ * The bindings each declared port may use, as indexes into the container's open
+ * bindings. A declaration with no interface asks for every interface, so only
+ * an all-interface binding satisfies it; a declaration naming one address needs
+ * a binding on that same address. An interface still holding a template was
+ * never resolved, so it constrains nothing and may use any binding the rest of
+ * the declaration allows. The lookups keep the candidate list short:
+ * declarations that target distinct container ports each get one candidate
+ * however many the stack declares.
  */
-function interfaceCompatible(declaredHostIp: string, runtimeHostIp: string): boolean {
-  if (holdsTemplate(declaredHostIp)) return true;
-  return interfaceKey(declaredHostIp) === interfaceKey(runtimeHostIp);
+function portRequirements(declaredPorts: DeclaredPorts, bindings: RuntimePort[]): PortRequirement[] {
+  const byTargetInterface = new Map<string, number[]>();
+  const byTarget = new Map<string, number[]>();
+  const byInterface = new Map<string, number[]>();
+  const byProtocol = new Map<string, number[]>();
+  const add = (map: Map<string, number[]>, key: string, index: number): void => {
+    const list = map.get(key);
+    if (list) list.push(index);
+    else map.set(key, [index]);
+  };
+  bindings.forEach((p, index) => {
+    const iface = interfaceKey(p.hostIp);
+    const target = `${p.privatePort ?? '?'}/${p.protocol}`;
+    add(byTargetInterface, `${target}/${iface}`, index);
+    add(byTarget, target, index);
+    add(byInterface, `${p.protocol}/${iface}`, index);
+    add(byProtocol, p.protocol, index);
+  });
+  const requirements: PortRequirement[] = [];
+  for (const d of declaredPorts.dynamic) {
+    const wildcardInterface = holdsTemplate(d.hostIp);
+    for (let target = d.startPort; target <= d.endPort; target++) {
+      const key = `${target}/${d.protocol}`;
+      requirements.push({
+        label: `auto:${target}/${d.protocol}`,
+        candidates: (wildcardInterface
+          ? byTarget.get(key)
+          : byTargetInterface.get(`${key}/${interfaceKey(d.hostIp)}`)) ?? [],
+      });
+    }
+  }
+  // A declaration whose target never resolved is matched by protocol and
+  // interface, and still consumes its own binding so it cannot explain a
+  // second one.
+  for (const unknown of declaredPorts.unknownTargets) {
+    const candidates = holdsTemplate(unknown.hostIp)
+      ? byProtocol.get(unknown.protocol)
+      : byInterface.get(`${unknown.protocol}/${interfaceKey(unknown.hostIp)}`);
+    requirements.push({ label: `auto/${unknown.protocol}`, candidates: candidates ?? [] });
+  }
+  return requirements;
 }
 
 /** A declared port as it reads in a finding, with no invented host number. */
@@ -491,28 +547,6 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     const declaredPorts = declaredPortsOf(svc);
     const runtimePorts = [...runtime.ports.values()];
     const fixedRunning = (p: RuntimePort): boolean => declaredPorts.fixed.has(portKey(p.publishedPort, p.protocol));
-    const requirements: PortRequirement[] = [
-      ...declaredPorts.dynamic.flatMap((d) => {
-        const out: PortRequirement[] = [];
-        for (let target = d.startPort; target <= d.endPort; target++) {
-          out.push({
-            label: `auto:${target}/${d.protocol}`,
-            matches: (p) => p.privatePort === target
-              && p.protocol === d.protocol
-              && interfaceCompatible(d.hostIp, p.hostIp),
-          });
-        }
-        return out;
-      }),
-      // A declaration whose target never resolved is matched by protocol and
-      // interface, and still consumes its own binding so it cannot explain a
-      // second one.
-      ...declaredPorts.unknownTargets.map((unknown) => ({
-        label: `auto/${unknown.protocol}`,
-        matches: (p: RuntimePort) => p.protocol === unknown.protocol
-          && interfaceCompatible(unknown.hostIp, p.hostIp),
-      })),
-    ];
     const unexplained: RuntimePort[] = [];
     // A replica must publish the declared container port itself; a sibling's
     // picked number does not stand in for a replica that is missing it.
@@ -521,7 +555,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       // Fixed declarations take their bindings first, so what remains is only
       // available to an auto-assigned declaration.
       const open = containerPorts.filter((p) => !fixedRunning(p));
-      const matched = matchPortRequirements(requirements, open);
+      const matched = matchPortRequirements(portRequirements(declaredPorts, open), open);
       for (const label of matched.missing) missingDynamic.add(label);
       unexplained.push(...matched.unexplained);
     }

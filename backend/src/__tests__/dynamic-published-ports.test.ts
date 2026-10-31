@@ -522,6 +522,97 @@ describe('drift against a running service with an auto-assigned port', () => {
     expect(findings[0].expected).toContain('auto:1299/tcp');
   });
 
+  it('stays exact past 256 declarations when a wildcard could take a resolved binding', () => {
+    // The augmenting-path matching used to hand this set to a greedy pass as
+    // soon as it passed 256 declarations, and the wildcard declaration below
+    // (listed first) took the loopback binding the resolved one needs. A
+    // work budget now keeps a set this size exact: only a graph dense enough
+    // to exhaust the budget degrades.
+    const wildcard: DeclaredPort = {
+      hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const loopbackDecl: DeclaredPort = {
+      hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const fillers = Array.from({ length: 255 }, (_, i) => ({
+      hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true as const,
+      targetStartPort: 1000 + i, targetEndPort: 1000 + i,
+    }));
+    const declared: DeclaredCompose = {
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: [wildcard, ...fillers, loopbackDecl],
+      }],
+      networks: {}, volumes: {},
+    };
+    const loopback = { ip: '127.0.0.1', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' };
+    const allInterfaces = { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9000, protocol: 'tcp' };
+    const fillerBindings = Array.from({ length: 255 }, (_, i) => ({
+      ip: '0.0.0.0', publishedPort: 40000 + i, privatePort: 1000 + i, protocol: 'tcp',
+    }));
+    const findings = assembleStackDrift({
+      stack: 'proj', declared, containers: [running([loopback, allInterfaces, ...fillerBindings])],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(findings).toEqual([]);
+  });
+
+  it('stays exact for a large set of declarations that target distinct ports', () => {
+    // Scanning every binding for every declaration made this sparse set spend
+    // the budget and fall back to greedy, which then let the wildcard take the
+    // loopback binding. Indexing by target and interface keeps it exact.
+    const wildcard: DeclaredPort = {
+      hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const loopbackDecl: DeclaredPort = {
+      hostIp: '127.0.0.1', publishedPort: 0, protocol: 'tcp', dynamic: true,
+      targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const fillers = Array.from({ length: 1500 }, (_, i) => ({
+      hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true as const,
+      targetStartPort: 1000 + i, targetEndPort: 1000 + i,
+    }));
+    const declared: DeclaredCompose = {
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: [wildcard, ...fillers, loopbackDecl],
+      }],
+      networks: {}, volumes: {},
+    };
+    const loopback = { ip: '127.0.0.1', publishedPort: 32768, privatePort: 9000, protocol: 'tcp' };
+    const allInterfaces = { ip: '0.0.0.0', publishedPort: 32769, privatePort: 9000, protocol: 'tcp' };
+    const fillerBindings = Array.from({ length: 1500 }, (_, i) => ({
+      ip: '0.0.0.0', publishedPort: 40000 + i, privatePort: 1000 + i, protocol: 'tcp',
+    }));
+    const findings = assembleStackDrift({
+      stack: 'proj', declared, containers: [running([loopback, allInterfaces, ...fillerBindings])],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(findings).toEqual([]);
+  });
+
+  it('falls back without stalling when every declaration matches every binding', () => {
+    // Dense enough to exhaust the work budget, so the first-fit pass runs. It
+    // still reports the one declaration with no binding of its own.
+    const unresolved = (count: number): DeclaredCompose => ({
+      services: [{
+        name: 'web', dependsOn: [], networks: [], volumes: [],
+        ports: Array.from({ length: count }, () => (
+          { hostIp: '${HOST_IP}', publishedPort: 0, protocol: 'tcp', dynamic: true } as DeclaredPort
+        )),
+      }],
+      networks: {}, volumes: {},
+    });
+    const runtime = Array.from({ length: 299 }, (_, i) => ({
+      ip: '0.0.0.0', publishedPort: 40000 + i, privatePort: 1000 + i, protocol: 'tcp',
+    }));
+    const findings = assembleStackDrift({
+      stack: 'proj', declared: unresolved(300), containers: [running(runtime)],
+    }).findings.filter(f => f.kind === 'ports-mismatch');
+    expect(findings).toMatchObject([{ expected: 'auto/tcp', actual: expect.any(String) }]);
+  });
+
   it('matches a declaration whose container target is unresolved by protocol and interface, once', () => {
     const unresolved = (count: number, hostIp = ''): DeclaredCompose => ({
       services: [{
