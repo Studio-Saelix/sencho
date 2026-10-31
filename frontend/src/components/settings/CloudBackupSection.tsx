@@ -100,7 +100,8 @@ async function putConfig(body: unknown, fallback: string): Promise<void> {
 // endpoint that never answers releases the hold with an error instead of
 // leaving Save, the picker and Auto-upload disabled until the page is left.
 // A transfer (import, download, recover) gets longer because it moves a whole
-// archive.
+// archive; the deadline is a total, not an idle limit, so a transfer that is
+// still moving at the end of it is cut too.
 const REQUEST_DEADLINE_MS = 60_000;
 const TRANSFER_DEADLINE_MS = 180_000;
 
@@ -110,14 +111,24 @@ class RequestTimeoutError extends Error {
     }
 }
 
+// The hub keeps working after the panel stops waiting, so an import or a
+// recovery that timed out here may still have created the snapshot.
+function withTimeoutHint(err: unknown, hint: string): string {
+    const message = (err as Error)?.message || 'Request failed.';
+    return err instanceof RequestTimeoutError ? `${message} ${hint}` : message;
+}
+
+const MAY_HAVE_FINISHED = 'It may still have finished, so check Fleet → Snapshots before trying again.';
+
 function cloudFetch(endpoint: string, options: ApiFetchOptions = {}, deadlineMs = REQUEST_DEADLINE_MS): Promise<Response> {
     const controller = new AbortController();
     const timeout = new RequestTimeoutError(deadlineMs);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-            // Aborting also cuts a body that stalls after the headers arrived,
-            // which is why the timer is not cleared when the response does.
+            // Aborting also cuts a body still being read when the deadline
+            // passes, which is why the timer is not cleared when the headers
+            // arrive. The race below covers a fetch that ignores the abort.
             controller.abort(timeout);
             reject(timeout);
         }, deadlineMs);
@@ -309,8 +320,9 @@ export function CloudBackupSection() {
     }, [loadSnapshots]);
 
     // After a write that failed without an answer, the server may or may not
-    // have stored it. Read the stored destination back so nothing is offered
-    // against a guess; if that read fails too, lock the section until Retry.
+    // have stored it. Read the stored destination and encryption settings back
+    // so nothing is offered or shown against a guess; if that read fails too,
+    // lock the section until Retry.
     const resyncConfirmed = useCallback(async () => {
         try {
             const res = await cloudFetch('/cloud-backup/config');
@@ -318,6 +330,8 @@ export function CloudBackupSection() {
             const data: ConfigResponse = await res.json();
             confirmDestination(data.provider, customDestination(data.custom));
             setProvider(data.provider);
+            setEncryptArchives(data.encrypt_archives === true);
+            setPassphraseSaved(data.archive_passphrase === '***');
         } catch {
             setLoadFailed(true);
             setProvider(confirmedRef.current.provider);
@@ -454,9 +468,7 @@ export function CloudBackupSection() {
             if (!res.ok || data?.error) throw new Error(data?.error || 'Provisioning failed.');
             toast.success('Sencho Snapshot Vault activated.');
             setSenchoProvisioned(true);
-            // The refreshes report their own failures; the hold covers the
-            // provision call only.
-            void Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
+            await Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
         } catch (err) {
             toast.error((err as Error)?.message || 'Provisioning failed.');
         } finally {
@@ -464,23 +476,13 @@ export function CloudBackupSection() {
         }
     };
 
-    const persistEncryption = async (enabled: boolean, passphrase: string) => {
+    const persistEncryption = (enabled: boolean, passphrase: string) => putConfig({
         // Encryption only. The destination and its credentials are saved by
         // their own Save action, so toggling encryption never submits an
         // unsaved S3 draft.
-        const body = {
-            encrypt_archives: enabled,
-            archive_passphrase: passphrase,
-        };
-        const res = await cloudFetch('/cloud-backup/config', {
-            method: 'PUT',
-            body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err?.error || 'Failed to save archive encryption');
-        }
-    };
+        encrypt_archives: enabled,
+        archive_passphrase: passphrase,
+    }, 'Failed to save archive encryption');
 
     const handleEncryptToggle = async (next: boolean) => {
         if (next && !passphraseSaved) {
@@ -500,6 +502,7 @@ export function CloudBackupSection() {
         } catch (err) {
             setEncryptArchives(!next);
             toast.error((err as Error)?.message || 'Failed to save archive encryption.');
+            if (!(err instanceof ConfigRejectedError)) await resyncConfirmed();
         } finally {
             setSavingEncryption(false);
         }
@@ -522,6 +525,7 @@ export function CloudBackupSection() {
             toast.success('Archive passphrase saved.');
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to save archive encryption.');
+            if (!(err instanceof ConfigRejectedError)) await resyncConfirmed();
         } finally {
             setSavingEncryption(false);
         }
@@ -564,7 +568,7 @@ export function CloudBackupSection() {
             }
             throw new Error(err.error || (action === 'import' ? 'Import failed' : 'Download failed'));
         } catch (err) {
-            toast.error((err as Error)?.message || 'Request failed.');
+            toast.error(action === 'import' ? withTimeoutHint(err, MAY_HAVE_FINISHED) : (err as Error)?.message || 'Request failed.');
         } finally {
             archiveBusyRef.current = false;
             setArchiveBusy(false);
@@ -628,7 +632,7 @@ export function CloudBackupSection() {
             setRecoveryOpen(false);
             loadSnapshots();
         } catch (err) {
-            setRecoveryError((err as Error)?.message || 'Recovery failed.');
+            setRecoveryError(withTimeoutHint(err, MAY_HAVE_FINISHED));
         } finally {
             recoveryBusyRef.current = false;
             setRecoveryBusy(false);
@@ -670,6 +674,8 @@ export function CloudBackupSection() {
             if (confirmed.provider === 'sencho') loadUsage();
         } catch (err) {
             toast.error((err as Error)?.message || 'Failed to delete cloud snapshot.');
+            // A request that timed out may still have deleted the object.
+            loadSnapshots();
         } finally {
             deleteBusyRef.current = false;
             setDeleteBusy(false);

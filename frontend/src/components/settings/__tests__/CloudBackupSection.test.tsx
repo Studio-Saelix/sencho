@@ -988,6 +988,8 @@ describe('CloudBackupSection destination binding', () => {
         provider: 'disabled' | 'sencho' | 'custom';
         provisioned: boolean;
         custom: StoredCustom;
+        // Stored encryption flag, written by a configuration write that names it.
+        encrypt: boolean;
         log: string[];
         // Destination every listing request resolved against.
         lists: string[];
@@ -1031,6 +1033,7 @@ describe('CloudBackupSection destination binding', () => {
         const server: Server = {
             provisioned: initial.provider === 'sencho' || initial.provisioned === true,
             custom: STORED,
+            encrypt: true,
             log: [],
             lists: [],
             putHolds: [],
@@ -1056,6 +1059,7 @@ describe('CloudBackupSection destination binding', () => {
                 if (status >= 400) return json({ error: 'save refused' }, status);
                 if (body.provider === 'custom' && !isSavableCustom(body.custom ?? {})) return json({ error: 'Invalid custom S3 settings' }, 400);
                 if (body.provider) server.provider = body.provider;
+                if (body.encrypt_archives !== undefined) server.encrypt = body.encrypt_archives;
                 if (body.provider === 'custom') server.custom = { ...server.custom, ...body.custom };
                 const hold = server.putHolds.shift();
                 if (hold) await hold.promise;
@@ -1071,7 +1075,7 @@ describe('CloudBackupSection destination binding', () => {
                     sencho_provisioned: server.provisioned,
                     sencho_provisioned_at: null,
                     custom: server.custom,
-                    encrypt_archives: true,
+                    encrypt_archives: server.encrypt,
                     archive_passphrase: '***',
                 });
             }
@@ -1542,6 +1546,7 @@ describe('CloudBackupSection destination binding', () => {
     const REQUEST_DEADLINE = 60_000;
     const TRANSFER_DEADLINE = 180_000;
     const TIMED_OUT = (seconds: number) => `The request timed out after ${seconds} seconds.`;
+    const MAY_HAVE_FINISHED = 'It may still have finished, so check Fleet → Snapshots before trying again.';
 
     // The controls Save, the picker and Auto-upload sit behind: each must be
     // usable again once the request they waited on has been given up.
@@ -1569,9 +1574,15 @@ describe('CloudBackupSection destination binding', () => {
         }
         await passDeadline(() => fireEvent.click(confirmButton ?? button), deadline);
 
-        expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(deadline / 1000));
+        // An import that timed out may still have created the snapshot, and
+        // the message says so.
+        expect(toast.error).toHaveBeenCalledWith(
+            action === 'Import snapshot' ? `${TIMED_OUT(deadline / 1000)} ${MAY_HAVE_FINISHED}` : TIMED_OUT(deadline / 1000),
+        );
         await expectDestinationControlsFree();
         expect(enabledActions()).toContain('Test');
+        // A delete that timed out may still have removed the object: the list is read again.
+        if (action === 'Delete snapshot') expect(server.lists).toHaveLength(2);
         // Save is usable, not merely enabled.
         fireEvent.click(screen.getByRole('button', { name: 'Save' }));
         await waitFor(() => expect(apiFetch.mock.calls.some(call => call[1]?.method === 'PUT')).toBe(true));
@@ -1599,7 +1610,7 @@ describe('CloudBackupSection destination binding', () => {
         server.hang.push('POST /cloud-backup/recover');
         await passDeadline(() => fireEvent.click(screen.getByRole('button', { name: 'Recover' })), TRANSFER_DEADLINE);
 
-        expect(await screen.findByText(TIMED_OUT(180))).toBeInTheDocument();
+        expect(await screen.findByText(`${TIMED_OUT(180)} ${MAY_HAVE_FINISHED}`)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Recover' })).toBeEnabled();
         await user.click(screen.getByRole('button', { name: 'Cancel' }));
         await waitFor(() => expect(enabledActions()).toContain('Reprovision'));
@@ -1631,7 +1642,7 @@ describe('CloudBackupSection destination binding', () => {
         expect(screen.getAllByRole('switch')[0]).not.toBeChecked();
     });
 
-    it('frees the Encrypt archives switch when its write never answers', async () => {
+    it('frees the Encrypt archives switch when its write never answers, showing what the hub stored', async () => {
         const server = startServer({ provider: 'custom' });
         render(<CloudBackupSection />);
         expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
@@ -1642,6 +1653,82 @@ describe('CloudBackupSection destination binding', () => {
         expect(toast.error).toHaveBeenCalledWith(TIMED_OUT(60));
         await waitFor(() => expect(toggle).toBeEnabled());
         expect(toggle).toBeChecked();
+        expect(screen.getByRole('combobox')).toBeEnabled();
+    });
+
+    it('rereads the stored encryption setting when its write is stored but the answer is lost', async () => {
+        const server = startServer({ provider: 'custom', dropNextPutResponse: true });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const toggle = screen.getByRole('switch', { name: 'Encrypt archives' });
+        fireEvent.click(toggle);
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        // The hub stored encryption off; reverting the switch would show it on.
+        await waitFor(() => expect(server.encrypt).toBe(false));
+        await waitFor(() => expect(toggle).not.toBeChecked());
+        expect(toggle).toBeEnabled();
+    });
+
+    it('rereads the stored passphrase state when saving it is stored but the answer is lost', async () => {
+        const server = startServer({ provider: 'custom', dropNextPutResponse: true });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('first-bucket-1.tar.gz.senc')).toBeInTheDocument();
+        const user = userEvent.setup();
+        await user.type(screen.getByLabelText('Archive passphrase'), 'correct-horse-battery');
+        await user.click(screen.getByRole('button', { name: 'Save passphrase' }));
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith('network down'));
+        await waitFor(() => expect(apiFetch.mock.calls.filter(call => call[0] === '/cloud-backup/config' && !call[1]?.method).length).toBeGreaterThan(1));
+        expect(screen.getByRole('combobox')).toBeEnabled();
+        expect(server.encrypt).toBe(true);
+    });
+
+    it('cuts a body that stalls after the headers, through the abort signal', async () => {
+        const server = startServer({ provider: 'custom' });
+        const base = apiFetch.getMockImplementation()!;
+        let stalledSignal: AbortSignal | undefined;
+        apiFetch.mockImplementation(async (path: string, options?: { method?: string; signal?: AbortSignal }) => {
+            if (path !== '/cloud-backup/snapshots' || stalledSignal) return base(path, options);
+            stalledSignal = options?.signal;
+            // Headers answered; the body only ever settles when the request is aborted.
+            return {
+                ok: true,
+                status: 200,
+                json: () => new Promise((_, reject) => {
+                    options?.signal?.addEventListener('abort', () => reject(options.signal?.reason));
+                }),
+            };
+        });
+        await passDeadline(() => { render(<CloudBackupSection />); }, REQUEST_DEADLINE);
+
+        expect(await screen.findByText(TIMED_OUT(60))).toBeInTheDocument();
+        expect(stalledSignal?.aborted).toBe(true);
+        expect(screen.queryByText('Loading cloud snapshots...')).not.toBeInTheDocument();
+        expect(server.lists).toHaveLength(0);
+    });
+
+    it('holds the controls through the provision refreshes, which are bounded too', async () => {
+        const server = startServer({ provider: 'sencho' });
+        render(<CloudBackupSection />);
+        expect(await screen.findByText('managed-1.tar.gz.senc')).toBeInTheDocument();
+        // The provision call answers; the configuration read that follows never does.
+        server.hang.push('GET /cloud-backup/config');
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+            fireEvent.click(screen.getByRole('button', { name: 'Reprovision' }));
+            await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+            expect(server.log).toEqual(['provision']);
+            expect(enabledActions()).toEqual([]);
+            expect(screen.getByRole('combobox')).toBeDisabled();
+            await act(async () => { await vi.advanceTimersByTimeAsync(REQUEST_DEADLINE); });
+        } finally {
+            vi.useRealTimers();
+        }
+        // The failed refresh leaves the section locked with a working Retry,
+        // the same as a configuration read that fails on load.
+        const retry = await screen.findByRole('button', { name: 'Retry' });
+        expect(retry).toBeEnabled();
+        fireEvent.click(retry);
+        await waitFor(() => expect(enabledActions()).toContain('Reprovision'));
         expect(screen.getByRole('combobox')).toBeEnabled();
     });
 

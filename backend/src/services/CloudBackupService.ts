@@ -35,10 +35,15 @@ import {
     type ArchiveEntryPlan,
 } from './cloudBackupArchive';
 
-// Bounds on every request to the S3 endpoint. The socket timeout is inactivity,
-// not total time, so a large archive that keeps moving is not cut off. Tests
-// shrink these to prove a silent endpoint fails fast.
-export const S3_TIMEOUTS = { connectionMs: 10_000, socketMs: 30_000 };
+// Bounds on requests to the S3 endpoint, all shorter than the panel's own
+// 60 s deadline so the operator sees the endpoint's failure, not a generic
+// timeout. connectionMs and socketMs (inactivity, so a large archive that keeps
+// moving is not cut off) cover the connect and the wait for response headers;
+// the SDK arms no socket timer once headers have arrived. operationMs therefore
+// bounds a whole small request (Test, listings, delete), and bodyIdleMs bounds
+// a gap in an archive download. Tests shrink these to prove a silent endpoint
+// fails fast.
+export const S3_TIMEOUTS = { connectionMs: 10_000, socketMs: 30_000, operationMs: 45_000, bodyIdleMs: 30_000 };
 
 // Cloud backup is opt-in (paid feature) and the AWS SDK v3 client pulls
 // in dozens of @smithy/* and @aws-sdk/middleware-* packages, so installs
@@ -271,10 +276,10 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) return { success: false, error: 'No cloud backup configuration is active.' };
         try {
-            // One attempt: the SDK retries a timeout, and a Test that fails
-            // should say so within one connection timeout, not three.
+            // One attempt: the SDK retries a timeout up to three times by
+            // default, and a Test that fails should report after one.
             const { client, sdk } = await this.buildS3Client(cfg, 1);
-            await client.send(new sdk.HeadBucketCommand({ Bucket: cfg.bucket }));
+            await this.runBounded(signal => client.send(new sdk.HeadBucketCommand({ Bucket: cfg.bucket }), { abortSignal: signal }));
             return { success: true };
         } catch (err) {
             return { success: false, error: getErrorMessage(err, 'Connection test failed.') };
@@ -316,7 +321,7 @@ export class CloudBackupService {
                 console.log(`[CloudBackup:debug] Uploaded snapshot ${snapshotId} (${protectedBody.body.byteLength} bytes) to ${cfg.bucket}/${objectKey}`);
             }
         } catch (err) {
-            const message = getErrorMessage(err, 'Cloud upload failed.');
+            const message = getErrorMessage(s3TimeoutError(err) ?? err, 'Cloud upload failed.');
             this.setStatus(snapshotId, { status: 'failed', objectKey, error: message, updatedAt: Date.now() });
             throw new Error(message);
         }
@@ -378,27 +383,30 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) return { entries: [], truncated: false };
         const { client, sdk } = await this.buildS3Client(cfg);
-        const objects: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
-        let continuationToken: string | undefined;
-        let truncated = false;
-        for (let page = 0; page < RECOVERY_LIST_PAGE_LIMIT; page += 1) {
-            const result = await client.send(new sdk.ListObjectsV2Command({
-                Bucket: cfg.bucket,
-                Prefix: `${cfg.pathPrefix}instances/`,
-                MaxKeys: 1000,
-                ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
-            }));
-            objects.push(...(result.Contents || []));
-            if (!result.IsTruncated) break;
-            if (!result.NextContinuationToken) {
-                // A provider that truncates without a token cannot be followed;
-                // report the list as incomplete rather than as complete.
-                truncated = true;
-                break;
+        const { objects, truncated } = await this.runBounded(async signal => {
+            const found: Array<{ Key?: string; Size?: number; LastModified?: Date }> = [];
+            let continuationToken: string | undefined;
+            let truncated = false;
+            for (let page = 0; page < RECOVERY_LIST_PAGE_LIMIT; page += 1) {
+                const result = await client.send(new sdk.ListObjectsV2Command({
+                    Bucket: cfg.bucket,
+                    Prefix: `${cfg.pathPrefix}instances/`,
+                    MaxKeys: 1000,
+                    ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+                }), { abortSignal: signal });
+                found.push(...(result.Contents || []));
+                if (!result.IsTruncated) break;
+                if (!result.NextContinuationToken) {
+                    // A provider that truncates without a token cannot be followed;
+                    // report the list as incomplete rather than as complete.
+                    truncated = true;
+                    break;
+                }
+                continuationToken = result.NextContinuationToken;
+                truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
             }
-            continuationToken = result.NextContinuationToken;
-            truncated = page === RECOVERY_LIST_PAGE_LIMIT - 1;
-        }
+            return { objects: found, truncated };
+        });
         const current = this.getInstanceId();
         const entries: CloudSnapshotEntry[] = [];
         for (const object of objects) {
@@ -427,11 +435,11 @@ export class CloudBackupService {
         if (!cfg) return [];
         const { client, sdk } = await this.buildS3Client(cfg);
         const prefix = `${cfg.pathPrefix}instances/${this.getInstanceId()}/snapshots/`;
-        const result = await client.send(new sdk.ListObjectsV2Command({
+        const result = await this.runBounded(signal => client.send(new sdk.ListObjectsV2Command({
             Bucket: cfg.bucket,
             Prefix: prefix,
             MaxKeys: 1000,
-        }));
+        }), { abortSignal: signal }));
         const objects = result.Contents || [];
         return objects
             .filter(o => !!o.Key)
@@ -455,7 +463,7 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) throw new Error('Cloud backup is not configured.');
         const { client, sdk } = await this.buildS3Client(cfg);
-        await client.send(new sdk.DeleteObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
+        await this.runBounded(signal => client.send(new sdk.DeleteObjectCommand({ Bucket: cfg.bucket, Key: objectKey }), { abortSignal: signal }));
     }
 
     public assertSnapshotObjectKey(objectKey: string): void {
@@ -516,13 +524,28 @@ export class CloudBackupService {
             region: cfg.region,
             credentials: { accessKeyId: cfg.accessKey, secretAccessKey: cfg.secretKey },
             forcePathStyle: true,
-            // Without these a blackholed or silent endpoint holds the request
-            // open indefinitely, and the Snapshot Vault panel keeps its
-            // destination controls disabled while a request is running.
+            // Without these an endpoint that accepts the connection and never
+            // answers holds the request open indefinitely, and the Snapshot
+            // Vault panel keeps its destination controls disabled meanwhile.
             requestHandler: { connectionTimeout: S3_TIMEOUTS.connectionMs, socketTimeout: S3_TIMEOUTS.socketMs },
             ...(maxAttempts !== undefined ? { maxAttempts } : {}),
         });
         return { client, sdk };
+    }
+
+    /**
+     * Runs one S3 request (or a short sequence of them) under a single
+     * deadline that also covers the response body, which the SDK's socket
+     * timeout does not once headers have arrived. A timeout of any kind is
+     * rethrown with a message that names the endpoint, not the SDK.
+     */
+    private async runBounded<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+        const signal = AbortSignal.timeout(S3_TIMEOUTS.operationMs);
+        try {
+            return await run(signal);
+        } catch (err) {
+            throw s3TimeoutError(err, signal) ?? err;
+        }
     }
 
     private getInstanceId(): string {
@@ -562,7 +585,8 @@ export class CloudBackupService {
         const cfg = this.getResolvedConfig();
         if (!cfg) throw new Error('Cloud backup is not configured.');
         const { client, sdk } = await this.buildS3Client(cfg);
-        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }));
+        const result = await client.send(new sdk.GetObjectCommand({ Bucket: cfg.bucket, Key: objectKey }))
+            .catch((err: unknown) => { throw s3TimeoutError(err) ?? err; });
         const body = result.Body as Readable | undefined;
         if (!body) throw new Error('Empty response body.');
         if (typeof result.ContentLength === 'number' && result.ContentLength > MAX_ARCHIVE_OBJECT_BYTES) {
@@ -570,7 +594,7 @@ export class CloudBackupService {
             body.destroy();
             throw new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit');
         }
-        return streamToBuffer(body, MAX_ARCHIVE_OBJECT_BYTES);
+        return streamToBuffer(body, MAX_ARCHIVE_OBJECT_BYTES, S3_TIMEOUTS.bodyIdleMs);
     }
 
     private async buildArchive(
@@ -649,23 +673,52 @@ export class CloudBackupService {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-function streamToBuffer(stream: Readable, maxBytes: number): Promise<Buffer> {
+function streamToBuffer(stream: Readable, maxBytes: number, idleMs: number): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = [];
         let total = 0;
+        // The SDK arms no inactivity timer once headers have arrived, so a
+        // body that stalls mid-archive is cut here.
+        let idle: ReturnType<typeof setTimeout> | undefined;
+        const armIdle = () => {
+            clearTimeout(idle);
+            idle = setTimeout(() => {
+                stream.destroy();
+                reject(new Error(`The storage endpoint stopped sending data for ${Math.round(idleMs / 1000)} seconds.`));
+            }, idleMs);
+        };
+        armIdle();
         stream.on('data', (chunk: Buffer | string) => {
+            armIdle();
             const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
             total += buf.length;
             if (total > maxBytes) {
+                clearTimeout(idle);
                 stream.destroy();
                 reject(new ArchiveFormatError('TOO_LARGE', 'Archive is larger than the import limit'));
                 return;
             }
             chunks.push(buf);
         });
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', reject);
+        stream.on('end', () => { clearTimeout(idle); resolve(Buffer.concat(chunks)); });
+        stream.on('error', err => { clearTimeout(idle); reject(err); });
     });
+}
+
+/**
+ * The SDK's timeout and abort errors name the library ("the request socket
+ * timed out after 30000 ms of inactivity (configured by client
+ * requestHandler)"). Returns an error an operator can act on, or null when
+ * the failure is not a timeout.
+ */
+function s3TimeoutError(err: unknown, signal?: AbortSignal): Error | null {
+    if (signal?.aborted) {
+        return new Error(`The storage endpoint did not answer within ${Math.round(S3_TIMEOUTS.operationMs / 1000)} seconds.`, { cause: err });
+    }
+    if (err instanceof Error && err.name === 'TimeoutError') {
+        return new Error('The storage endpoint stopped answering. Check that it is reachable from this host.', { cause: err });
+    }
+    return null;
 }
 
 function sanitizePathSegment(input: string): string {
