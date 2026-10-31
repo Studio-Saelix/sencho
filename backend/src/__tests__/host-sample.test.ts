@@ -228,15 +228,48 @@ describe('readDockerCapacity', () => {
       expect(stalled.cpu).toEqual({ usage: null, cores: 2 });
       expect(stalled.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
 
-      // The failure is never cached for the capacity TTL, so recovery does not
-      // wait out the window; each poll retries while serving the stale value.
+      // The failure is not cached as a null fallback: while the probe is
+      // throttled, the last good capacity keeps being served, and once the
+      // short retry window passes the daemon is probed again.
       await readLocalHostSample(NODE_ID);
+      expect(mockDockerInfo).toHaveBeenCalledTimes(2);
+
+      nowSpy.mockReturnValue(startedAt + 31_000 + 6_000);
+      mockDockerInfo.mockResolvedValue({ NCPU: 4, MemTotal: 8 * GiB });
+      const recovered = hostSampleToWire(await readLocalHostSample(NODE_ID));
       expect(mockDockerInfo).toHaveBeenCalledTimes(3);
+      expect(recovered.cpu.cores).toBe(4);
+      expect(recovered.memory.total).toBe(8 * GiB);
     } finally {
       nowSpy.mockRestore();
     }
   });
 
+
+  it('does not let a joined stale read clear the retry throttle', async () => {
+    mockDockerInfo.mockResolvedValue({ NCPU: 2, MemTotal: 4 * GiB });
+    await readLocalHostSample(NODE_ID); // one good probe
+
+    const startedAt = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(startedAt + 31_000);
+    try {
+      mockDockerInfo.mockRejectedValue(Object.assign(new Error('stalled'), { name: 'TimeoutError' }));
+      const [first, joined] = await Promise.all([
+        readLocalHostSample(NODE_ID),
+        readLocalHostSample(NODE_ID),
+      ]);
+      expect(first.cpu.usage.kind).toBe('unknown');
+      expect(joined.cpu.usage.kind).toBe('unknown');
+      // One failed probe served both callers.
+      expect(mockDockerInfo).toHaveBeenCalledTimes(2);
+
+      // The joining caller must not clear the throttle the owner set.
+      await readLocalHostSample(NODE_ID);
+      expect(mockDockerInfo).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 
   it('caches capacity for 30s per node', async () => {
     await readDockerCapacity(NODE_ID);

@@ -163,6 +163,13 @@ describe('GET /api/system/stats inside a nested host', () => {
     expect(res.body.memory).toEqual({ total: 4 * GiB, used: null, free: null, usagePercent: null });
   });
 
+  it('serves the legacy numeric shape to a Pilot tunnel that cannot render unknown', async () => {
+    const token = jwt.sign({ scope: 'pilot_tunnel' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const res = await request(app).get('/api/system/stats').set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.cpu).toEqual({ usage: '12.3', cores: 8 });
+  });
+
   it('shapes each response from the cached sample, not a cached wire', async () => {
     // A legacy hub and a current one can poll the same node inside one 3s
     // cache window; whichever asks first must not decide the other's shape.

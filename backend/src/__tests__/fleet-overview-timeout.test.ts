@@ -15,6 +15,7 @@ import si from 'systeminformation';
 import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
 import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
+import { _resetHostSampleStateForTests } from '../helpers/hostSample';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -506,11 +507,29 @@ describe('GET /api/fleet/overview host scope', () => {
     expect((seenHeaders as Record<string, string>)[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
   });
 
+  it('advertises nullable host usage on a pilot target with no token', async () => {
+    const nodeId = addProxyNode('pilot-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: '', trustedLoopback: true } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) seenHeaders = init?.headers as Record<string, string> | undefined;
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    await getOverview();
+    expect(seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
+    expect(seenHeaders?.Authorization).toBeUndefined();
+  });
+
   it('reports Docker capacity for a local node whose kernel view is the outer machine', async () => {
     const db = DatabaseService.getInstance();
     const localNode = db.getDefaultNode();
     if (!localNode) throw new Error('expected a default local node');
     CacheService.getInstance().flush();
+    _resetHostSampleStateForTests();
     // The Docker client is stubbed for the whole local overview: the capacity
     // probe uses getDocker().info(), and the container list must not hit the
     // real socket in CI.

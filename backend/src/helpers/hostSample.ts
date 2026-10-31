@@ -73,6 +73,8 @@ export const HOST_CGROUP_FIXED_PATH = '/host/sys/fs/cgroup';
 
 /** Capacity changes rarely, but Proxmox can resize an LXC live. */
 const CAPACITY_CACHE_TTL_MS = 30_000;
+/** Serve the last good capacity without another probe for this long after a failure. */
+const CAPACITY_RETRY_MS = 5_000;
 /** A slow daemon must not stall a dashboard poll. */
 const CAPACITY_TIMEOUT_MS = 3_000;
 /** Two cgroup CPU counters closer than this are too noisy to divide. */
@@ -95,6 +97,18 @@ interface CpuCounterSample {
 const cpuCounterSamples = new Map<string, CpuCounterSample>();
 // Memoized so a failing daemon logs once per error code, not every tick.
 const loggedCapacityErrors = new Set<string>();
+// Capacity probe failures are logged once per code too, but a recovery clears
+// the memory so a later failure of the same kind is not silent.
+const loggedCapacityProbeErrors = new Set<string>();
+// The last good capacity survives a failed probe even if the cache entry was
+// evicted between calls.
+const lastGoodCapacity = new Map<number, DockerCapacity>();
+// Next time a failed probe may retry. The stale capacity is served meanwhile,
+// which keeps a wedged daemon from holding one `docker info` request per poll.
+const capacityRetryAt = new Map<number, number>();
+// Nodes currently served from the last good probe, so a recovery is visible in
+// the log instead of silently resuming fresh capacity.
+const staleCapacityNodes = new Set<number>();
 
 function cgroupRoot(): string {
   const raw = process.env.SENCHO_HOST_CGROUP_PATH?.trim();
@@ -303,15 +317,16 @@ async function fetchDockerCapacity(nodeId: number): Promise<DockerCapacity> {
 
 /**
  * A daemon that cannot answer must not erase what the last good probe learned.
- * `getOrFetch` returns the stale capacity when the fetcher throws, so a nested
- * host keeps its Docker capacity (and therefore its cgroup path) through a
- * stall; the failure itself is never cached, so recovery is immediate once the
- * daemon answers again. Only a process that has never seen a good answer falls
- * back to the kernel view.
+ * The last good capacity is served through a stall, and it survives eviction
+ * from the shared cache. Once the daemon has been down for longer than the
+ * TTL, probes are throttled to one every few seconds instead of one per poll,
+ * so a wedged daemon does not accumulate open `docker info` requests; recovery
+ * is still prompt because the throttle is short. Only a process that has never
+ * seen a good answer falls back to the kernel view.
  */
 function logCapacityFailure(code: string, detail: string): void {
-  if (loggedCapacityErrors.has(code)) return;
-  loggedCapacityErrors.add(code);
+  if (loggedCapacityProbeErrors.has(code)) return;
+  loggedCapacityProbeErrors.add(code);
   console.warn(
     `[HostSample] docker info unavailable (${code}): ${detail}; ` +
       'reusing the last known Docker capacity (kernel view if none)',
@@ -324,14 +339,35 @@ function logCapacityFailure(code: string, detail: string): void {
  * the last good answer instead of falling back to the kernel view.
  */
 export async function readDockerCapacity(nodeId: number): Promise<DockerCapacity | null> {
+  const known = lastGoodCapacity.get(nodeId);
+  if (known && Date.now() < (capacityRetryAt.get(nodeId) ?? 0)) {
+    return known;
+  }
   try {
-    return await CacheService.getInstance().getOrFetch(
+    const { value, outcome } = await CacheService.getInstance().getOrFetchWithMeta(
       `docker-capacity:${nodeId}`,
       CAPACITY_CACHE_TTL_MS,
       () => fetchDockerCapacity(nodeId),
     );
+    lastGoodCapacity.set(nodeId, value);
+    if (outcome === 'stale') {
+      capacityRetryAt.set(nodeId, Date.now() + CAPACITY_RETRY_MS);
+      staleCapacityNodes.add(nodeId);
+    } else if (outcome !== 'inflight') {
+      // Only a fresh value (a computed probe or a cache hit) is a recovery. A
+      // joining caller shares the owner's outcome, so it must not clear the
+      // throttle or claim a recovery the owner may not have reached.
+      capacityRetryAt.delete(nodeId);
+      loggedCapacityProbeErrors.clear();
+      if (staleCapacityNodes.delete(nodeId)) {
+        console.info(`[HostSample] docker info recovered for node ${nodeId}; capacity refreshed`);
+      }
+    }
+    return value;
   } catch {
-    return null;
+    capacityRetryAt.set(nodeId, Date.now() + CAPACITY_RETRY_MS);
+    staleCapacityNodes.add(nodeId);
+    return known ?? null;
   }
 }
 
@@ -459,8 +495,12 @@ export function hostSampleToWire(
   };
 }
 
-/** Clear the shared CPU window and the log dedup sets. Tests only. */
+/** Clear the shared CPU window, capacity memory and the log dedup sets. Tests only. */
 export function _resetHostSampleStateForTests(): void {
   cpuCounterSamples.clear();
   loggedCapacityErrors.clear();
+  loggedCapacityProbeErrors.clear();
+  lastGoodCapacity.clear();
+  capacityRetryAt.clear();
+  staleCapacityNodes.clear();
 }

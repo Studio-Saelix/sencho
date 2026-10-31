@@ -22,7 +22,26 @@ describe('requestAcceptsUnknownHostUsage', () => {
   it('treats a repeated header as the first value', () => {
     expect(requestAcceptsUnknownHostUsage({
       machineAuthScope: 'node_proxy',
+      headers: { [HOST_USAGE_UNKNOWN_HEADER]: '1, 0' },
+    })).toBe(true);
+    expect(requestAcceptsUnknownHostUsage({
+      machineAuthScope: 'node_proxy',
+      headers: { [HOST_USAGE_UNKNOWN_HEADER]: '0, 1' },
+    })).toBe(false);
+    expect(requestAcceptsUnknownHostUsage({
+      machineAuthScope: 'node_proxy',
       headers: { [HOST_USAGE_UNKNOWN_HEADER]: [HOST_USAGE_UNKNOWN_HEADER_VALUE, '0'] },
+    })).toBe(true);
+  });
+
+  it('refuses unknown from an opaque API token unless it advertises the capability', () => {
+    expect(requestAcceptsUnknownHostUsage({
+      apiTokenScope: 'read-only',
+      headers: {},
+    })).toBe(false);
+    expect(requestAcceptsUnknownHostUsage({
+      apiTokenScope: 'read-only',
+      headers: { [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE },
     })).toBe(true);
   });
 

@@ -204,6 +204,7 @@ vi.mock('util', () => ({
 }));
 
 import { MonitorService, _resetHostAlertSuppressionStateForTests } from '../services/MonitorService';
+import { _resetHostSampleStateForTests } from '../helpers/hostSample';
 import { CacheService } from '../services/CacheService';
 
 // Host memory now reads ZFS ARC stats; intercept those reads so the suite does
@@ -476,7 +477,10 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
 
     // 84.96 rounds to 85.0 but is still below the limit, so it must not alert.
+    // Reset the suppression window so a wrongly fired alert is observable
+    // instead of being swallowed as a duplicate.
     mockDispatchAlert.mockClear();
+    _resetHostAlertSuppressionStateForTests();
     mockFsSize.mockResolvedValue([{ mount: '/', use: 84.96 }]);
     await (svc as any).evaluateGlobalSettings({ host_disk_limit: '85' });
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Disk'));
@@ -614,6 +618,7 @@ describe('MonitorService - nested host (Docker and kernel disagree)', () => {
     mockDockerInfo.mockResolvedValue(NESTED_CAPACITY);
     arcFs.clear();
     CacheService.getInstance().flush();
+    _resetHostSampleStateForTests();
   });
 
   afterEach(() => {
@@ -621,6 +626,7 @@ describe('MonitorService - nested host (Docker and kernel disagree)', () => {
     arcFs.clear();
     mockDockerInfo.mockResolvedValue({ NCPU: 8, MemTotal: 16e9 });
     CacheService.getInstance().flush();
+    _resetHostSampleStateForTests();
   });
 
   it('skips both thresholds and clears suppression when usage is unknown', async () => {
