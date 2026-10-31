@@ -10,6 +10,7 @@ import { computeStackHashes } from './DriftLedgerService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { getExposureContext } from './network/exposureContext';
+import { isStackMeshManaged } from './network/managedMeshAttachment';
 import type { ExposureIntent } from './network/types';
 import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
 import type {
@@ -278,6 +279,7 @@ export class ComposeDoctorService {
     ]);
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls, exposureAvailable } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
+    const meshManaged = model ? await isStackMeshManaged(nodeId, stackName) : false;
 
     return {
       stackName,
@@ -302,6 +304,7 @@ export class ComposeDoctorService {
       hasAccessUrls,
       exposureAvailable,
       isSelfStack: selfStack,
+      meshManaged,
       healthchecks,
     };
   }

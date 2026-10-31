@@ -8,19 +8,21 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 import { ExposureIntentPicker } from '@/components/networking/ExposureIntentPicker';
 import { asIntents, saveExposureIntent, type IntentEntry } from '@/hooks/useExposureIntent';
-import type { ExposureIntent } from '@/types/networking';
+import { isRoutingUnverified, tunnelProviderLabel, tunnelScopeLabel } from '@/lib/tunnelExposure';
+import type { ExposureIntent, ServiceTunnelExposure, TunnelConnector } from '@/types/networking';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
 // backend).
 
 interface NetworkFactNetwork { key: string; name: string; external: boolean; internal: boolean; createdByStack: boolean }
-interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
+interface NetworkFactPort { hostIp: string; startPort: number; endPort: number; protocol: string; dynamic?: true; allInterfaces: boolean; loopbackOnly: boolean }
 interface NetworkFactService {
   name: string;
   networks: { key: string; aliases: string[] }[];
   publishedPorts: NetworkFactPort[];
   networkMode?: string;
   extraHosts: string[];
+  tunnel?: ServiceTunnelExposure;
 }
 interface NetworkDriftFacts {
   runtimeOnlyAttachments: { container: string; service: string | null; network: string }[];
@@ -43,6 +45,8 @@ interface StackNetworkFacts {
     blockReason?: string;
     unsupportedFeatures: string[];
   }>;
+  /** Absent from nodes that predate tunnel detection. */
+  tunnels?: TunnelConnector[];
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
@@ -50,6 +54,8 @@ const ACTION_CLASS = 'inline-flex items-center gap-1 font-mono text-[10px] upper
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
 
 function portLabel(p: NetworkFactPort): string {
+  // Docker assigns the host port at start, so no number exists to show.
+  if (p.dynamic) return `auto-assigned/${p.protocol}`;
   const range = p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
   return `${range}/${p.protocol}`;
 }
@@ -63,6 +69,36 @@ function BindingBadge({ port }: { port: NetworkFactPort }) {
     return <span className="rounded border border-success/30 bg-success/[0.06] px-1 py-0.5 font-mono text-[10px] text-success">loopback</span>;
   }
   return <span className="rounded border border-muted bg-card/40 px-1 py-0.5 font-mono text-[10px] text-stat-subtitle">{port.hostIp}</span>;
+}
+
+const CHIP_CLASS = 'rounded border px-1 py-0.5 font-mono text-[10px]';
+
+/** Tunnel facts for one service: the connector it runs, or the tunnel that reaches it.
+ *  A public edge reads as a warning; a private overlay stays neutral. */
+function TunnelBadges({ connector, tunnel }: { connector?: TunnelConnector; tunnel?: ServiceTunnelExposure }) {
+  if (!connector && !tunnel) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {connector && (
+        <span className={cn(CHIP_CLASS, 'border-brand/40 bg-brand/[0.08] text-brand')}>
+          {tunnelProviderLabel(connector.provider)} connector · {tunnelScopeLabel(connector.scope)}
+        </span>
+      )}
+      {tunnel && (
+        <>
+          <span className={cn(CHIP_CLASS, tunnel.scope === 'public-edge'
+            ? 'border-warning/40 bg-warning/[0.08] text-warning'
+            : 'border-muted bg-card/40 text-foreground/80')}
+          >
+            via {tunnelProviderLabel(tunnel.provider)} ({tunnel.connector}) · {tunnelScopeLabel(tunnel.scope)}
+          </span>
+          {isRoutingUnverified(tunnel) && (
+            <span className={cn(CHIP_CLASS, 'border-muted bg-card/40 text-stat-subtitle')}>routing unverified</span>
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled }: {
@@ -225,6 +261,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
                   ))}
                 </div>
               )}
+              <TunnelBadges connector={facts.tunnels?.find(c => c.service === svc.name)} tunnel={svc.tunnel} />
               {svc.networkMode === 'host' && (
                 // Host networking publishes every container port on the host, so
                 // the service is host-exposed even with no published-port rows.

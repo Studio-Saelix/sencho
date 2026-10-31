@@ -13,6 +13,7 @@ import { ComposeDoctorService } from '../ComposeDoctorService';
 import type { PreflightFinding } from '../preflight/types';
 import type { DependencySnapshot } from '../DockerController';
 import type { StackNetworkFacts } from './types';
+import { describeServiceTunnel, describeTunnelConnector } from './tunnelDetection';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 import { NETWORKING_SEVERITY_RANK } from './networkingSeverity';
@@ -25,7 +26,7 @@ import type {
   NetworkingRecommendedAction,
 } from './networkingTypes';
 
-/** The 11 Compose Doctor rules with a networking-relevant interpretation. */
+/** The Compose Doctor rules with a networking-relevant interpretation. */
 export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> = {
   'port-conflict-node': 'port-conflict-node',
   'port-conflict-internal': 'port-conflict-internal',
@@ -33,6 +34,8 @@ export const DOCTOR_NETWORKING_RULE_KIND: Record<string, NetworkingFindingKind> 
   'port-exposed-all-interfaces': 'exposure-all-interfaces',
   'network-mode-host': 'network-mode-host',
   'exposure-internal-published': 'exposure-intent-mismatch',
+  'exposure-internal-tunneled': 'exposure-intent-mismatch',
+  'tunnel-exposure': 'tunnel-exposure',
   'sensitive-service-broad-exposure': 'sensitive-service-broad-exposure',
   'exposure-unclassified': 'exposure-unclassified',
   'exposure-port-vs-dossier': 'exposure-port-vs-dossier',
@@ -57,6 +60,7 @@ const LIVE_OVERLAP_KINDS = new Set<NetworkingFindingKind>([
   'exposure-all-interfaces',
   'exposure-intent-mismatch',
   'exposure-unclassified',
+  'tunnel-exposure',
   'network-missing', // new-network reconciles into this when the stack is running
 ]);
 
@@ -84,6 +88,7 @@ function liveDedupeKey(
     case 'exposure-all-interfaces':
     case 'exposure-intent-mismatch':
     case 'exposure-unclassified':
+    case 'tunnel-exposure':
       return f.service ? { key: `${kind}\0${stack}\0${f.service}`, mergeKind: kind } : null;
     case 'new-network': {
       const network = resolveNetworkName(f.sourcePath, facts);
@@ -138,6 +143,19 @@ function isStillPlausible(
   snapshot: DependencySnapshot | null,
 ): boolean {
   if (!facts?.renderable) return true; // can't check; keep cached
+  // The tunnel rules are retired as soon as the current facts read differently
+  // from the tunnel they described: a connector card once the live connector
+  // does (removed, its reach changed, or its Mesh opt-in toggled), and a
+  // reached service once its strongest tunnel path does (gone, or a different
+  // connector or path). Both compare the shared message builders' text, so a
+  // copy change retires cached cards too; that is safe because the live
+  // findings always carry the current connector card and path.
+  if (f.ruleId === 'tunnel-exposure') {
+    return facts.tunnels.some((c) => c.service === f.service && describeTunnelConnector(c).message === f.message);
+  }
+  if (f.ruleId === 'exposure-internal-tunneled') {
+    return facts.services.some((svc) => svc.name === f.service && svc.tunnel !== undefined && f.message.endsWith(describeServiceTunnel(svc.tunnel)));
+  }
   switch (kind) {
     case 'network-mode-host':
     case 'exposure-all-interfaces':

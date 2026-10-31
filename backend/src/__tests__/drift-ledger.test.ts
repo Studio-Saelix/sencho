@@ -12,6 +12,8 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import DockerController from '../services/DockerController';
 import type { StackDriftReport, StackDriftFinding, DriftFindingKind } from '../services/DriftDetectionService';
+import { isPreflightAckActive } from '../utils/preflight-ack-filter';
+import type { PreflightAcknowledgement } from '../services/DatabaseService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -77,6 +79,32 @@ describe('computeStackHashes', () => {
     const v1 = computeStackHashes('services:\n  web:\n    image: nginx:1.27\n');
     const v2 = computeStackHashes('services:\n  web:\n    image: nginx:1.28\n');
     expect(v2.renderedHash).not.toBe(v1.renderedHash);
+  });
+
+  it('changes the rendered hash when a port Docker assigns is added, removed, or moved to a wider interface', () => {
+    const hash = (ports: string[]) => computeStackHashes(
+      `services:\n  web:\n    image: nginx:1.27\n    ports:\n${ports.map(p => `      - "${p}"`).join('\n')}\n`,
+    ).renderedHash;
+    const fixed = hash(['8080:80']);
+    const withDynamic = hash(['8080:80', '51820/udp']);
+    expect(withDynamic).not.toBe(fixed);
+    expect(hash(['8080:80', '127.0.0.1::51820/udp'])).not.toBe(withDynamic);
+    expect(hash(['8080:80', '51820/udp'])).toBe(withDynamic);
+  });
+
+  it('keeps the rendered hash of a stack with only fixed ports as it was', () => {
+    // Pin the value an earlier release stored: a recorded baseline must not read
+    // as changed after an upgrade. Recomputing both sides here would let a change
+    // to the fixed-port serialization pass unnoticed.
+    expect(computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"\n').renderedHash)
+      .toBe('8d199bc2b032b553204e48bb8fe1bfb4ae2947e54c37461afa1fa4ffcc96aa7a');
+  });
+
+  it('keeps the pinned rendered hash of a fixed publication with a templated container port', () => {
+    // The authored parser keeps the entry when no lookup resolves the container
+    // port, so its model hash matches the same fixed host port as before.
+    expect(computeStackHashes('services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:${APP_PORT}"\n').renderedHash)
+      .toBe('8d199bc2b032b553204e48bb8fe1bfb4ae2947e54c37461afa1fa4ffcc96aa7a');
   });
 
   it('returns a null rendered hash when the model cannot be parsed', () => {
@@ -171,6 +199,51 @@ describe('DriftLedgerService.computeTemporal', () => {
     db().setStackDossierHashes(nodeId, 'tempstack', baseline.sourceHash, baseline.renderedHash);
     const t = DriftLedgerService.getInstance().computeTemporal(nodeId, 'tempstack', `# a note\n${content}\n`);
     expect(t).toEqual({ hasBaseline: true, sourceChanged: true, renderedChanged: false });
+  });
+});
+
+/**
+ * The parsed-model hash now records an auto-assigned host port and an IPv6
+ * interface, which the earlier authored parser dropped. The chosen upgrade
+ * behaviour is a deliberate one-time change: an unchanged file reads as
+ * changed once, and the next deploy (or a fresh acknowledgement) re-anchors it.
+ */
+describe('rendered-hash upgrade behaviour for ports the earlier parser dropped', () => {
+  beforeEach(() => clearLedger('tempstack'));
+  const file = (ports: string[]): string =>
+    `services:\n  web:\n    image: nginx:1.27\n    ports:\n${ports.map(p => `      - "${p}"`).join('\n')}\n`;
+  const PORTLESS = 'services:\n  web:\n    image: nginx:1.27\n';
+  const CASES: Array<[string, string]> = [
+    ['an auto-assigned port', file(['51820/udp'])],
+    ['a short IPv6 fixed port', file(['[::1]:8080:80'])],
+  ];
+
+  it.each(CASES)('reads an earlier baseline as changed once, then stable, for %s', (_label, content) => {
+    const legacy = computeStackHashes(PORTLESS).renderedHash!;
+    const current = computeStackHashes(content).renderedHash!;
+    expect(current).not.toBe(legacy);
+    // The baseline was recorded by the earlier parser, so its rendered side is
+    // the port-less value even though the file source is the same.
+    db().setStackDossierHashes(nodeId, 'tempstack', computeStackHashes(content).sourceHash, legacy);
+    expect(DriftLedgerService.getInstance().computeTemporal(nodeId, 'tempstack', content))
+      .toEqual({ hasBaseline: true, sourceChanged: false, renderedChanged: true });
+    const rebaselined = computeStackHashes(content);
+    db().setStackDossierHashes(nodeId, 'tempstack', rebaselined.sourceHash, rebaselined.renderedHash);
+    expect(DriftLedgerService.getInstance().computeTemporal(nodeId, 'tempstack', content))
+      .toEqual({ hasBaseline: true, sourceChanged: false, renderedChanged: false });
+  });
+
+  it.each(CASES)('expires an until_compose_change acknowledgement once, then honours a new one, for %s', (_label, content) => {
+    const legacy = computeStackHashes(PORTLESS).renderedHash!;
+    const current = computeStackHashes(content).renderedHash!;
+    const ack = (anchor: string): PreflightAcknowledgement => ({
+      id: 1, node_id: nodeId, stack_name: 'tempstack', rule_id: 'uid-gid-risk', service: 'web',
+      reason: 'verified ownership', expiry_mode: 'until_compose_change', expires_at: null,
+      anchor_rendered_hash: anchor, anchor_image_ref: null, created_by: 'admin', created_at: 1,
+    });
+    const ctx = { renderedHash: current, serviceImages: {} };
+    expect(isPreflightAckActive(ack(legacy), ctx)).toBe(false);
+    expect(isPreflightAckActive(ack(current), ctx)).toBe(true);
   });
 });
 

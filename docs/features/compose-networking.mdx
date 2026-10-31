@@ -71,7 +71,9 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 
 **Permissions:** editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
 
-**How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
+**How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port or sits behind a tunnel, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
+
+**Tunnel-exposed services:** a service behind a Cloudflare Tunnel publishes no host port but is reachable from the internet, so classify it **public** (or **reverse-proxy** when the tunnel points at your proxy). A service reached over Tailscale or WireGuard is reachable only by the peers of that private network; **lan** is the closest intent. A service that only shares a network with a connector you know does not route to it, or that shares a network namespace with a cloudflared connector, can stay **internal**: Doctor asks you to confirm that, and Security takes the intent at your word. See [Tunnels and private overlays](#tunnels-and-private-overlays).
 
 ## Networks
 
@@ -123,6 +125,8 @@ Published ports appear with a badge indicating which interface they are bound to
 
 Port ranges appear as `startPort-endPort/protocol`, for example `8000-8002/tcp`.
 
+A port with no host port number, such as `51820/udp`, `127.0.0.1::51820/udp`, or a host port of `0`, is published on a port Docker picks when the container starts. It appears as `auto-assigned/protocol` with the same badges and counts as a published port for exposure. It is left out of the Doctor's port-conflict and documented-URL checks because no number is known. Drift matches the declaration to the running container port it names, so the number Docker picked is not reported as drift while a stale or extra published port still is. A port listed only under `expose:` is not published and is not shown.
+
 ### Network modes
 
 When a service uses `network_mode:` instead of individual network attachments, the mode appears as an amber badge beside the service name:
@@ -130,6 +134,27 @@ When a service uses `network_mode:` instead of individual network attachments, t
 - **`network_mode: host`**: the service shares the host network stack entirely. Every container port is accessible directly on the host, even without any `ports:` entries. The card shows **all container ports / host-exposed** to make this explicit.
 - **`network_mode: none`**: the service has no network connectivity at all.
 - **`network_mode: service:<name>`** or **`network_mode: container:<name>`**: the service shares another container's network namespace.
+
+### Tunnels and private overlays
+
+Tunnels publish no host ports, so the port badges alone would make a tunnel-exposed service look internal. Sencho recognizes three kinds of tunnel connector in the effective model:
+
+| Connector | Scope | How Sencho recognizes it |
+|-----------|-------|--------------------------|
+| **Cloudflare Tunnel** | Public edge: anyone on the internet through Cloudflare, unless Cloudflare Access restricts it | A `cloudflared` image, or a `TUNNEL_TOKEN` or `TUNNEL_TOKEN_FILE` variable |
+| **Tailscale** | Private overlay: devices on the tailnet | A `tailscale` image, or a `TS_AUTHKEY` or `TS_AUTH_KEY` variable |
+| **WireGuard** | Private overlay: WireGuard peers | A `wg-easy` image, a `WG_HOST` variable, or a `wireguard` image running as a server (`PEERS`, `SERVERURL`, `SERVERPORT`, `WG_HOST`, or a published UDP port) |
+
+Sencho reads image names, variable *names*, `cap_add`, `devices`, mount targets, `network_mode`, network membership, whether a service publishes ports and on which protocol, whether `command` or `entrypoint` names the cloudflared `tunnel`, `proxy-dns`, or `access` subcommand, and whether `TS_EXTRA_ARGS` turns on `--advertise-routes` or `--advertise-exit-node` (in single- or double-dash form). A tunnel token, auth key, password, or other environment value is never retained in a finding or log. The node summary reads the variable names a service's `env_file` and `environment` set, and the one `TS_EXTRA_ARGS` value, the way Compose does: a name written with no value (`TUNNEL_TOKEN`, or `TUNNEL_TOKEN:`) counts only when the environment Compose runs in sets it, and left unset it removes the same name from an `env_file`; a `format: raw` env file keeps quotes and `$` literally and trims leading Unicode whitespace from each line, such as a no-break space or U+0085, as Compose does. The project `.env` and process environment are read only to interpolate and answer those names; the summary keeps none of them. An `env_file` in a format other than `raw`, or a name or reference it cannot answer without that environment, makes the stack count as unknown exposure. Containers that only connect outward are not reported: a WireGuard or other VPN client (a VPN for your torrent client, for example), a cloudflared DNS proxy (`proxy-dns` or `TUNNEL_DNS_*` settings), and a cloudflared `access` client. An explicit `proxy-dns` or `access` subcommand outweighs a mounted cloudflared config or a token. A connector with `network_mode: none` has no network and is not reported either.
+
+The connector's card shows a badge such as **Cloudflare Tunnel connector · public edge**. Each service the connector reaches shows **via Cloudflare Tunnel (cloudflared) · public edge** (amber for a public edge, neutral for a private overlay):
+
+- **Shares the connector's network namespace** (`network_mode: service:<connector>`, or the connector runs in the service's namespace): the service listens on the connector's own address. For Tailscale and WireGuard, overlay peers reach it directly, so Sencho counts the reach as certain. A cloudflared sidecar reaches it on `localhost`, but Cloudflare's ingress still decides which origin and port each incoming request reaches, so that path shows **routing unverified** like a shared network.
+- **Shares a network with the connector**, or, when the connector uses `network_mode: host`, **publishes a host port or also uses the host network**: the connector can reach the service, but which services it actually routes to is configured outside the Compose file (Cloudflare ingress rules, Tailscale Serve and ACLs, WireGuard AllowedIPs). These services also show a **routing unverified** badge.
+
+Sencho treats a Tailscale container on the stack's networks as forwarding beyond its own namespace only when `TS_ROUTES`, `TS_SERVE_CONFIG`, or `TS_DEST_IP` is set, or `TS_EXTRA_ARGS` advertises routes or an exit node (or its value cannot be read, for example a `${VAR}` or a key with no value when Sencho cannot read the environment Compose runs in, or a template Compose refuses; a key with no value that this environment does not set is unset and forwards nothing); when a flag is repeated, the last occurrence decides, as in Tailscale's own parser, whatever other flags sit between the repeats (a token after a value flag such as `--hostname` is that flag's value, not a repeat; after a flag Sencho does not recognize, a following repeat may be a flag or that flag's value, so an enabling repeat counts and a disabling one does not switch an earlier occurrence off); otherwise tailnet peers reach the Tailscale node itself. A Tailscale container on the host network makes the host itself a tailnet node, so it reaches every service that publishes a host port or uses the host network. A connector that runs in another container's namespace (`network_mode: container:<name>`) is reported with its reach unknown. A service with `network_mode: bridge` (or `default`) joins Docker's default bridge rather than the stack's networks, so it shares no network with a connector on those networks; two `network_mode: bridge` services share the default bridge with each other.
+
+Reach is worked out within one stack. A connector on an external network may also reach services of other stacks on that network, and a connector on the Sencho Mesh network (declared in Compose, or added because the stack is opted into Mesh) may route to services on other nodes through Mesh aliases. Sencho cannot see those routes from the Compose file, so those services are not marked; the connector's Doctor finding names the networks instead. Tunnel detection never changes Mesh routing.
 
 ### Extra hosts
 
@@ -163,13 +188,15 @@ When Docker is not reachable, the section shows **runtime unavailable, showing t
 
 ## Doctor findings
 
-When Compose Doctor is available on the active node, a prompt at the bottom of the Networking tab directs you to the Doctor tab for deploy and security checks. The Doctor tab reads the same effective model and, when exposure intents are set, adds five exposure-aware findings on top of its standard checks:
+When Compose Doctor is available on the active node, a prompt at the bottom of the Networking tab directs you to the Doctor tab for deploy and security checks. The Doctor tab reads the same effective model and adds these exposure-aware findings on top of its standard checks:
 
 1. A service classified **internal** or **same-node** that publishes a host port.
-2. A database or admin image published on all interfaces.
-3. A stack that publishes ports but has no exposure intent set.
-4. A published port that the Stack Dossier's documented access URLs do not mention.
-5. Reverse-proxy labels with no documented URL or reverse-proxy intent set.
+2. A service classified **internal** or **same-node** that a tunnel connector reaches.
+3. A database or admin image published on all interfaces.
+4. A tunnel connector, with its provider, scope, the services it reaches, and what Sencho cannot verify.
+5. A stack that publishes ports or is reachable through a tunnel but has no exposure intent set.
+6. A published port that the Stack Dossier's documented access URLs do not mention.
+7. Reverse-proxy labels with no documented URL or reverse-proxy intent set.
 
 See [Compose Doctor](/features/compose-doctor) for the complete check set and severity levels.
 
@@ -242,7 +269,7 @@ After the network is created, the Networking tab refreshes automatically. The ne
     The node-wide operator page: full network inventory, an interactive topology graph, and cross-stack findings, independent of which stack they belong to.
   </Card>
   <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
-    Runs preflight checks against the same effective model, including the five exposure-aware findings that rely on the intents set in the Networking tab.
+    Runs preflight checks against the same effective model, including the exposure-aware findings that rely on the intents set in the Networking tab.
   </Card>
   <Card title="Drift Detection" icon="code-compare" href="/features/stack-drift">
     Shows the same four runtime drift types with a persistent history, so you can see when drift first appeared and when it cleared.

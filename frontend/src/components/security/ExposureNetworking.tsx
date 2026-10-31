@@ -1,6 +1,7 @@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
+import { tunnelPathLabel } from '@/lib/tunnelExposure';
 import type { ImageExposureContext } from '@/types/security';
 
 function openNetworking(nodeId: number | undefined, stackName: string) {
@@ -36,6 +37,9 @@ function NetworkingContextList({
               <span className="block truncate font-mono text-[11px] text-stat-value">
                 {ctx.stackName}/{ctx.serviceName}
               </span>
+              {ctx.tunnel ? (
+                <span className="block font-mono text-[10px] text-stat-subtitle">{tunnelPathLabel(ctx.tunnel)}</span>
+              ) : null}
               {showConflictHint && ctx.intentConflict ? (
                 <span className="font-mono text-[10px] text-warning">Intent mismatch</span>
               ) : null}
@@ -60,9 +64,11 @@ export function NetworkExposedControl({
   nodeId?: number;
   className?: string;
 }) {
+  // With one context there is no list to open, so a tunnel says so on the badge itself.
+  const singleTunnel = contexts.length === 1 ? contexts[0]!.tunnel : undefined;
   const badge = (
     <span className={cn('font-mono text-[10px] uppercase tracking-[0.14em] text-warning whitespace-nowrap', className)}>
-      Network exposed
+      {singleTunnel ? 'Network exposed · tunnel' : 'Network exposed'}
     </span>
   );
 
@@ -72,15 +78,17 @@ export function NetworkExposedControl({
 
   if (contexts.length === 1) {
     const only = contexts[0]!;
+    const via = only.tunnel ? `, ${tunnelPathLabel(only.tunnel)}` : '';
     return (
       <button
         type="button"
         className="hover:underline"
+        title={only.tunnel ? tunnelPathLabel(only.tunnel) : undefined}
         onClick={(e) => {
           e.stopPropagation();
           openNetworking(nodeId, only.stackName);
         }}
-        aria-label={`${networkingActionLabel(only)} for ${only.stackName}/${only.serviceName}`}
+        aria-label={`${networkingActionLabel(only)} for ${only.stackName}/${only.serviceName}${via}`}
       >
         {badge}
       </button>

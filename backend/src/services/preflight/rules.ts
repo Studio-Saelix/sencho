@@ -3,6 +3,14 @@ import type { EffService, EffPortSpec, EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
 import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
+import {
+  describeServiceTunnel,
+  describeTunnelConnector,
+  detectTunnels,
+  isCertainTunnelPath,
+  tunnelExposureByService,
+  type TunnelConnector,
+} from '../network/tunnelDetection';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -14,6 +22,7 @@ export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warni
 export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
   'healthcheck-inherited',
   'docker-socket-proxy-client',
+  'tunnel-exposure',
 ]);
 
 export function isPreflightNoteFinding(ruleId: string): boolean {
@@ -41,7 +50,9 @@ function interfaceOverlap(a: string, b: string): boolean {
   return isAllInterfaces(a) || isAllInterfaces(b) || a === b;
 }
 
+/** Every host port a spec claims; none for a dynamic one, whose number Docker picks at start. */
 function portsOf(spec: EffPortSpec): number[] {
+  if (spec.dynamic) return [];
   const end = Math.min(spec.endPort, spec.startPort + MAX_RANGE - 1);
   const out: number[] = [];
   for (let p = spec.startPort; p <= end; p++) out.push(p);
@@ -49,7 +60,13 @@ function portsOf(spec: EffPortSpec): number[] {
 }
 
 function specLabel(spec: EffPortSpec): string {
+  if (spec.dynamic) return 'an auto-assigned host port';
   return spec.startPort === spec.endPort ? `${spec.startPort}` : `${spec.startPort}-${spec.endPort}`;
+}
+
+/** The distinct labels of a service's specs, so several auto-assigned ports read once. */
+function specLabels(specs: readonly EffPortSpec[]): string {
+  return [...new Set(specs.map(specLabel))].join(', ');
 }
 
 /** True when the image reference resolves to a moving `latest` tag. */
@@ -303,16 +320,24 @@ const portExposedAllInterfaces: PreflightRule = {
     if (!ctx.model) return [];
     const findings: PreflightFinding[] = [];
     for (const svc of ctx.model.services) {
+      const dynamicSeen = new Set<string>();
       for (const spec of svc.ports) {
         if (!isAllInterfaces(spec.hostIp)) continue;
+        // Auto-assigned ports have no number to tell them apart: one finding per protocol.
+        if (spec.dynamic) {
+          if (dynamicSeen.has(spec.protocol)) continue;
+          dynamicSeen.add(spec.protocol);
+        }
         findings.push({
           ruleId: 'port-exposed-all-interfaces',
           severity: 'high',
-          title: `Port ${specLabel(spec)} exposed on all interfaces`,
-          message: `Service "${svc.name}" publishes ${specLabel(spec)}/${spec.protocol} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
+          title: spec.dynamic
+            ? `An auto-assigned ${spec.protocol} port is exposed on all interfaces`
+            : `Port ${specLabel(spec)} exposed on all interfaces`,
+          message: `Service "${svc.name}" publishes ${spec.dynamic ? `${specLabel(spec)} (${spec.protocol})` : `${specLabel(spec)}/${spec.protocol}`} on all interfaces (0.0.0.0), so it is reachable from every network the host is attached to.`,
           sourcePath: svc.name,
           service: svc.name,
-          remediation: `Bind to a specific interface, e.g. 127.0.0.1:${spec.startPort}, if this should not be public.`,
+          remediation: `Bind to a specific interface, e.g. ${spec.dynamic ? '127.0.0.1::<container port>' : `127.0.0.1:${spec.startPort}`}, if this should not be public.`,
         });
       }
     }
@@ -429,7 +454,7 @@ const dockerSocketProxyPublished: PreflightRule = {
         ruleId: 'docker-socket-proxy-published',
         severity: 'high' as const,
         title: 'Docker socket proxy publishes a host port',
-        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${svc.ports.map(specLabel).join(', ')} to the host, which can make the proxy reachable beyond the Compose network.`,
+        message: `Service "${svc.name}" is a Docker socket proxy and publishes ${specLabels(svc.ports)} to the host, which can make the proxy reachable beyond the Compose network.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Remove host port mappings from the proxy and let dependents reach it only over an internal Compose network.',
@@ -976,7 +1001,9 @@ const REVERSE_PROXY_LABEL_HINTS = ['traefik', 'caddy', 'virtual.host'];
 
 /** A service's effective intent: its own override, else the stack-level intent. */
 function effectiveIntent(ctx: PreflightContext, service: string): ExposureIntent | null {
-  return ctx.serviceIntents[service] ?? ctx.stackIntent;
+  return Object.prototype.hasOwnProperty.call(ctx.serviceIntents, service)
+    ? ctx.serviceIntents[service]
+    : ctx.stackIntent;
 }
 
 const exposureInternalPublished: PreflightRule = {
@@ -994,7 +1021,7 @@ const exposureInternalPublished: PreflightRule = {
         ruleId: 'exposure-internal-published',
         severity: 'high',
         title: `"${svc.name}" is classified ${intent} but publishes a host port`,
-        message: `Service "${svc.name}" is classified as ${intent} exposure, but it publishes ${offending.map(specLabel).join(', ')} to the host, which contradicts that intent.`,
+        message: `Service "${svc.name}" is classified as ${intent} exposure, but it publishes ${specLabels(offending)} to the host, which contradicts that intent.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: intent === 'same-node'
@@ -1006,27 +1033,102 @@ const exposureInternalPublished: PreflightRule = {
   },
 };
 
+const tunnelsByContext = new WeakMap<PreflightContext, TunnelConnector[]>();
+
+/** Tunnel connectors in the context's model, detected once per run across the rules. */
+function tunnelsOf(ctx: PreflightContext): TunnelConnector[] {
+  if (!ctx.model) return [];
+  let tunnels = tunnelsByContext.get(ctx);
+  if (!tunnels) {
+    tunnels = detectTunnels(ctx.model, { meshManaged: ctx.meshManaged });
+    tunnelsByContext.set(ctx, tunnels);
+  }
+  return tunnels;
+}
+
+const exposureInternalTunneled: PreflightRule = {
+  id: 'exposure-internal-tunneled',
+  run(ctx) {
+    if (!ctx.model) return [];
+    const findings: PreflightFinding[] = [];
+    for (const [service, tunnel] of tunnelExposureByService(tunnelsOf(ctx))) {
+      const intent = effectiveIntent(ctx, service);
+      if (intent !== 'internal' && intent !== 'same-node') continue;
+      const certain = isCertainTunnelPath(tunnel);
+      let remediation: string;
+      if (certain) {
+        remediation = 'Move the service out of the tunnel connector\'s network namespace, or reclassify the exposure intent.';
+      } else if (tunnel.path === 'shared-namespace') {
+        remediation = 'Confirm the tunnel does not route to this service and acknowledge this finding, move the service out of the connector\'s network namespace, or reclassify the exposure intent.';
+      } else {
+        remediation = 'Confirm the tunnel does not route to this service and acknowledge this finding, take the service off the connector\'s network (or, when the connector uses the host network, stop publishing its port or take it off the host network), or reclassify the exposure intent.';
+      }
+      findings.push({
+        ruleId: 'exposure-internal-tunneled',
+        // A shared network, the host network, or a cloudflared namespace only
+        // means the tunnel could route here.
+        severity: certain ? 'high' : 'warning',
+        title: `"${service}" is classified ${intent} but is reachable through a tunnel`,
+        message: `Service "${service}" is classified as ${intent} exposure. ${describeServiceTunnel(tunnel)}`,
+        sourcePath: service,
+        service,
+        remediation,
+      });
+    }
+    return findings;
+  },
+};
+
+const tunnelExposure: PreflightRule = {
+  id: 'tunnel-exposure',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return tunnelsOf(ctx).map((connector): PreflightFinding => {
+      const { title, message } = describeTunnelConnector(connector);
+      return {
+        ruleId: 'tunnel-exposure',
+        severity: 'info',
+        title,
+        message,
+        sourcePath: connector.service,
+        service: connector.service,
+        remediation: 'Record the public hostname or tailnet name in the Stack Dossier access URLs, and set the exposure intent of the services it reaches.',
+      };
+    });
+  },
+};
+
 const exposureUnclassified: PreflightRule = {
   id: 'exposure-unclassified',
   run(ctx) {
     if (!ctx.model) return [];
     // A read failure leaves every intent null; do not read that as "unclassified".
     if (!ctx.exposureAvailable) return [];
-    const publishing = ctx.model.services.filter(s => s.ports.length > 0);
-    if (publishing.length === 0) return [];
-    // Fire only when a publishing service is still effectively unclassified: a
+    const tunneled = tunnelExposureByService(tunnelsOf(ctx));
+    const exposed = ctx.model.services.filter(s => s.ports.length > 0 || tunneled.has(s.name));
+    if (exposed.length === 0) return [];
+    // Fire only when an exposed service is still effectively unclassified: a
     // service-level intent suppresses the warning for that service even when the
     // stack itself is unset.
-    const unclassified = publishing.some(s => {
+    const unclassified = exposed.filter(s => {
       const intent = effectiveIntent(ctx, s.name);
       return intent === null || intent === 'unknown';
     });
-    if (!unclassified) return [];
+    if (unclassified.length === 0) return [];
+    if (unclassified.every(s => s.ports.length > 0)) {
+      return [{
+        ruleId: 'exposure-unclassified',
+        severity: 'warning',
+        title: 'Stack publishes ports without an exposure intent',
+        message: 'This stack publishes one or more host ports but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
+        remediation: 'Set the stack exposure intent in the Networking tab.',
+      }];
+    }
     return [{
       ruleId: 'exposure-unclassified',
       severity: 'warning',
-      title: 'Stack publishes ports without an exposure intent',
-      message: 'This stack publishes one or more host ports but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
+      title: 'Stack is reachable without an exposure intent',
+      message: 'This stack publishes host ports or is reachable through a tunnel connector, but has no exposure intent set. Classifying it (internal, LAN, reverse proxy, public) lets Sencho flag mismatches later.',
       remediation: 'Set the stack exposure intent in the Networking tab.',
     }];
   },
@@ -1101,7 +1203,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
         ruleId: 'sensitive-service-broad-exposure',
         severity: 'high',
         title: `Sensitive service "${svc.name}" is exposed on all interfaces`,
-        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${broad.map(specLabel).join(', ')} on all interfaces. Broadly exposing it is a common source of compromise.`,
+        message: `Service "${svc.name}" looks like a database or admin service (${svc.image}) and publishes ${specLabels(broad)} on all interfaces. Broadly exposing it is a common source of compromise.`,
         sourcePath: svc.name,
         service: svc.name,
         remediation: 'Bind it to a specific interface such as 127.0.0.1, or keep it on an internal network only.',
@@ -1149,7 +1251,9 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   containerNameInternalDup,
   containerNameCollision,
   exposureInternalPublished,
+  exposureInternalTunneled,
   sensitiveServiceBroadExposure,
+  tunnelExposure,
   exposureUnclassified,
   exposurePortVsDossier,
   reverseProxyUndocumented,

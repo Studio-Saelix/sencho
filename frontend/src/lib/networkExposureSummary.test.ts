@@ -1,6 +1,6 @@
 /**
  * The redacted networking + exposure summary for the dossier export: it carries
- * only names, intents, port numbers, and binding scope, never env or label
+ * only names, intents, port labels, and binding scope, never env or label
  * values, and renders nothing when there is nothing to document.
  */
 import { describe, it, expect } from 'vitest';
@@ -31,16 +31,40 @@ describe('buildNetworkExposureSummary', () => {
     expect(s).toEqual({
       stackIntent: 'internal',
       networks: [{ name: 'app_backend', external: false, internal: true }],
-      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false }],
+      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false, tunnel: null }],
     });
+  });
+  it('names a port Docker assigns as auto-assigned, with no invented number', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'vpn', publishedPorts: [
+        { startPort: 0, endPort: 0, protocol: 'udp', dynamic: true, allInterfaces: true, loopbackOnly: false },
+        { startPort: 0, endPort: 0, protocol: 'tcp', dynamic: true, allInterfaces: false, loopbackOnly: true },
+      ] }],
+    }, []);
+    expect(s?.services[0].ports).toEqual(['auto-assigned/udp (all interfaces)', 'auto-assigned/tcp (loopback)']);
+    expect(networkExposureSection(s)).toContain('ports auto-assigned/udp (all interfaces), auto-assigned/tcp (loopback)');
   });
   it('flags a host-network service as host-exposed even with no published ports', () => {
     const s = buildNetworkExposureSummary({ renderable: true, networks: [], services: [{ name: 'app', publishedPorts: [], networkMode: 'host' }] }, []);
     expect(s).toEqual({
       stackIntent: null,
       networks: [],
-      services: [{ name: 'app', intent: null, ports: [], hostNetwork: true }],
+      services: [{ name: 'app', intent: null, ports: [], hostNetwork: true, tunnel: null }],
     });
+  });
+  it('documents a service reached only through a tunnel, naming the connector and unverified routing', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [
+        { name: 'cloudflared', publishedPorts: [] },
+        { name: 'app', publishedPorts: [], tunnel: { connector: 'cloudflared', provider: 'cloudflared', scope: 'public-edge', path: 'shared-network' } },
+      ],
+    }, []);
+    expect(s?.services.find(x => x.name === 'app')?.tunnel).toBe('via Cloudflare Tunnel (cloudflared), routing unverified');
+    expect(networkExposureSection(s)).toContain('- **app:** reachable via Cloudflare Tunnel (cloudflared), routing unverified');
   });
 });
 
@@ -69,5 +93,32 @@ describe('networkExposureSection', () => {
     expect(md).not.toContain('SECRET-9f3a');
     expect(md).not.toContain('LABEL-SECRET');
     expect(md).not.toContain('SECRET-DRIVER');
+  });
+});
+
+describe('tunnel path labels', () => {
+  it('marks a host-network reach as unverified like a shared network', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'app', publishedPorts: [], tunnel: { connector: 'cf', provider: 'cloudflared', scope: 'public-edge', path: 'host-network' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Cloudflare Tunnel (cf), routing unverified');
+  });
+  it('omits the caveat for a Tailscale shared namespace', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'admin', publishedPorts: [], tunnel: { connector: 'ts', provider: 'tailscale', scope: 'private-overlay', path: 'shared-namespace' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Tailscale (ts)');
+  });
+  it('keeps the caveat for a cloudflared shared namespace', () => {
+    const s = buildNetworkExposureSummary({
+      renderable: true,
+      networks: [],
+      services: [{ name: 'app', publishedPorts: [], tunnel: { connector: 'cf', provider: 'cloudflared', scope: 'public-edge', path: 'shared-namespace' } }],
+    }, []);
+    expect(s?.services[0]?.tunnel).toBe('via Cloudflare Tunnel (cf), routing unverified');
   });
 });

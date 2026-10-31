@@ -38,7 +38,7 @@ vi.mock('../services/DatabaseService', () => ({
   },
 }));
 
-import { composeFileEnvVarSelection } from '../utils/authoredComposeArgs';
+import { composeFileEnvVarSelection, composeInterpolation, type ComposeInterpolation } from '../utils/authoredComposeArgs';
 import { resolveRollbackInventory } from '../services/rollbackInventory';
 import {
   ComposeEnvFiles,
@@ -1219,6 +1219,93 @@ describe('composeFileEnvVarSelection', () => {
         composeEnvFiles: [],
         loadedEnvFiles: [selected],
       });
+    });
+  });
+
+  describe('composeInterpolation', () => {
+    afterEach(() => {
+      delete process.env.TS_ARGS;
+    });
+
+    /** The value the lookup gives `name`, or the reason there is no lookup. */
+    function valueOf(interpolation: ComposeInterpolation, name: string): string | undefined {
+      if (interpolation.kind !== 'lookup') throw new Error(`no lookup: ${interpolation.reason}`);
+      return interpolation.lookup(name);
+    }
+
+    it('answers from the project .env, with the process environment above it', async () => {
+      writeStackFile('.env', 'TS_ARGS=--from-file\n');
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-file');
+
+      process.env.TS_ARGS = '--from-process';
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-process');
+    });
+
+    it('answers from a selected env file and ignores the project .env', async () => {
+      writeStackFile('.env', 'TS_ARGS=--from-project\n');
+      writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-selected');
+    });
+
+    it('has no lookup when the stack .env disables itself, since Compose does not interpolate with its values', async () => {
+      writeStackFile('.env', 'COMPOSE_DISABLE_ENV_FILE=true\nTS_ARGS=--from-file\n');
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'env-file-disabled' });
+    });
+
+    it('has no lookup when the env files cannot be read the way Compose reads them', async () => {
+      writeStackFile('.env', 'COMPOSE_DISABLE_ENV_FILE=maybe\n');
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'unreadable' });
+    });
+
+    it('has no lookup when the project directory may hold a .env of its own', async () => {
+      // COMPOSE_FILE can point into a subfolder, whose .env Compose then loads too.
+      writeStackFile('.env', 'COMPOSE_FILE=sub/compose.yaml\n');
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'project-directory-env' });
+
+      fs.rmSync(stackPath('.env'));
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: 'sub' } });
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'project-directory-env' });
+    });
+
+    it('has no lookup when the deploy spec\'s first compose file is in a subfolder', async () => {
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['sub/compose.yaml'], contextDir: null } });
+      expect(await composeInterpolation(STACK, 1)).toEqual({ kind: 'unavailable', reason: 'project-directory-env' });
+    });
+
+    it('keeps the lookup when COMPOSE_FILE only layers files at the stack root', async () => {
+      writeStackFile('.env', 'COMPOSE_FILE=compose.yaml:compose.prod.yaml\nTS_ARGS=--from-file\n');
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-file');
+      writeStackFile('.env', 'COMPOSE_PATH_SEPARATOR=;\nCOMPOSE_FILE=./compose.yaml;sub/extra.yaml\nTS_ARGS=--from-file\n');
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-file');
+    });
+
+    it('throws on a deploy spec a deploy would refuse instead of calling the env files unreadable', async () => {
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/context directory/i);
+    });
+
+    it('throws on a refused deploy spec even when an explicit env file would answer', async () => {
+      writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/context directory/i);
+    });
+
+    it('throws when the deploy spec or the env-file selection cannot be read', async () => {
+      mockGetGitSource.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/SQLITE_BUSY/);
+
+      mockGetGitSource.mockReturnValue(undefined);
+      mockGetStackProjectEnvFiles.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+      await expect(composeInterpolation(STACK, 1)).rejects.toThrow(/SQLITE_BUSY/);
+    });
+
+    it('keeps the lookup with a project directory when an explicit env file replaces every project .env', async () => {
+      writeStackFile('select.env', 'TS_ARGS=--from-selected\n');
+      mockGetStackProjectEnvFiles.mockReturnValue(['select.env']);
+      mockGetGitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: 'sub' } });
+      expect(valueOf(await composeInterpolation(STACK, 1), 'TS_ARGS')).toBe('--from-selected');
     });
   });
 });

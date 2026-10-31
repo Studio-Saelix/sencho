@@ -102,21 +102,75 @@ export function normalizeImageRef(ref: string): string {
 
 const portKey = (publishedPort: number, protocol: string): string => `${publishedPort}/${protocol}`;
 
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
 function formatPorts(ports: Set<string>): string {
   return ports.size ? [...ports].sort().join(', ') : 'none';
+}
+
+/** A published port as the running container reports it. */
+interface RuntimePort {
+  publishedPort: number;
+  privatePort: number | null;
+  protocol: string;
 }
 
 /** Runtime aggregate for one service across its (possibly replicated) containers. */
 interface RuntimeService {
   images: Set<string>;
-  ports: Set<string>;
+  /** Unique by published port, container port, and protocol, across all replicas. */
+  ports: Map<string, RuntimePort>;
+  /** Each running container's own published ports, so a replica cannot borrow a sibling's. */
+  containerPorts: RuntimePort[][];
 }
+
+/** A declared port Docker assigns, matched to the container port it targets. */
+interface DynamicDeclaration {
+  startPort: number;
+  endPort: number;
+  protocol: string;
+}
+
+/** The declared ports a service publishes, split by whether the host number is known. */
+interface DeclaredPorts {
+  fixed: Set<string>;
+  dynamic: DynamicDeclaration[];
+  /** Dynamic declarations whose container target never resolved, by protocol. */
+  unknownTargetProtocols: string[];
+}
+
+function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
+  const fixed = new Set<string>();
+  const dynamic: DynamicDeclaration[] = [];
+  const unknownTargetProtocols: string[] = [];
+  for (const p of svc.ports) {
+    if (!p.dynamic) {
+      fixed.add(portKey(p.publishedPort, p.protocol));
+      continue;
+    }
+    if (p.targetStartPort === undefined) {
+      unknownTargetProtocols.push(p.protocol);
+      continue;
+    }
+    dynamic.push({
+      startPort: p.targetStartPort,
+      endPort: p.targetEndPort ?? p.targetStartPort,
+      protocol: p.protocol,
+    });
+  }
+  return { fixed, dynamic, unknownTargetProtocols };
+}
+
+/** A declared port as it reads in a finding, with no invented host number. */
+function declaredPortLabel(p: { publishedPort: number; protocol: string; dynamic?: true; targetStartPort?: number; targetEndPort?: number }): string {
+  if (!p.dynamic) return portKey(p.publishedPort, p.protocol);
+  const target = p.targetStartPort === undefined
+    ? ''
+    : p.targetStartPort === (p.targetEndPort ?? p.targetStartPort)
+      ? `:${p.targetStartPort}`
+      : `:${p.targetStartPort}-${p.targetEndPort}`;
+  return `auto${target}/${p.protocol}`;
+}
+
+const runtimePortKey = (p: RuntimePort): string => `${p.publishedPort}/${p.privatePort ?? '?'}/${p.protocol}`;
 
 export interface AssembleStackDriftInput {
   stack: string;
@@ -228,9 +282,23 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
   for (const c of containers) {
     const name = c.service ?? c.name;
     if (RUNNING_STATES.has(c.state)) {
-      const agg = runtimeByService.get(name) ?? { images: new Set<string>(), ports: new Set<string>() };
+      const agg = runtimeByService.get(name) ?? {
+        images: new Set<string>(),
+        ports: new Map<string, RuntimePort>(),
+        containerPorts: [],
+      };
       if (c.image) agg.images.add(normalizeImageRef(c.image));
-      for (const p of c.ports) agg.ports.add(portKey(p.publishedPort, p.protocol));
+      const ownPorts = new Map<string, RuntimePort>();
+      for (const p of c.ports) {
+        const port: RuntimePort = {
+          publishedPort: p.publishedPort,
+          privatePort: p.privatePort,
+          protocol: p.protocol,
+        };
+        ownPorts.set(runtimePortKey(port), port);
+        agg.ports.set(runtimePortKey(port), port);
+      }
+      agg.containerPorts.push([...ownPorts.values()]);
       runtimeByService.set(name, agg);
       continue;
     }
@@ -298,19 +366,53 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       }
     }
 
-    // Ports compare as exact sets. The compose parser collapses a published
-    // range (e.g. "8000-8002:80") to its first port, while the runtime reports
-    // every port in the range, so a range can read as a mismatch. That errs
-    // toward reporting drift rather than hiding it, consistent with the engine's
-    // philosophy.
-    const declaredPorts = new Set(svc.ports.map((p) => portKey(p.publishedPort, p.protocol)));
-    if (!setsEqual(declaredPorts, runtime.ports)) {
+    // Ports compare as exact sets, except that a port Docker assigns is matched
+    // by the container port it targets: the host number Docker picked is not a
+    // declaration and must not read as drift. The compose parser collapses a
+    // published range (e.g. "8000-8002:80") to its first port, while the runtime
+    // reports every port in the range, so a range can read as a mismatch. That
+    // errs toward reporting drift rather than hiding it, consistent with the
+    // engine's philosophy. A stale or extra runtime port is still reported on a
+    // service that declares an auto-assigned one, and so is a dynamic
+    // declaration that no running container port satisfies.
+    const declaredPorts = declaredPortsOf(svc);
+    const runtimePorts = [...runtime.ports.values()];
+    const fixedRunning = (p: RuntimePort): boolean => declaredPorts.fixed.has(portKey(p.publishedPort, p.protocol));
+    const dynamicRunning = (p: RuntimePort): boolean => declaredPorts.dynamic.some((d) =>
+      d.protocol === p.protocol
+      && p.privatePort !== null
+      && p.privatePort >= d.startPort
+      && p.privatePort <= d.endPort);
+    // A dynamic declaration whose target never resolved can only be matched by
+    // protocol; it explains the picked number rather than inventing a target.
+    const unknownTargetRunning = (p: RuntimePort): boolean => declaredPorts.unknownTargetProtocols.includes(p.protocol);
+    const unexplained = runtimePorts.filter((p) => !fixedRunning(p) && !dynamicRunning(p) && !unknownTargetRunning(p));
+    const missingFixed = [...declaredPorts.fixed].filter((key) => !runtimePorts.some((p) => portKey(p.publishedPort, p.protocol) === key));
+    // A replica must publish the declared container port itself; a sibling's
+    // picked number does not stand in for a replica that is missing it.
+    const missingDynamic = new Set<string>();
+    for (const containerPorts of runtime.containerPorts) {
+      for (const d of declaredPorts.dynamic) {
+        for (let target = d.startPort; target <= d.endPort; target++) {
+          if (!containerPorts.some((p) => p.privatePort === target && p.protocol === d.protocol)) {
+            missingDynamic.add(`auto:${target}/${d.protocol}`);
+          }
+        }
+      }
+      // A dynamic declaration whose target never resolved can only be matched
+      // by protocol; a running container with no port of that protocol leaves it
+      // unsatisfied.
+      for (const protocol of declaredPorts.unknownTargetProtocols) {
+        if (!containerPorts.some((p) => p.protocol === protocol)) missingDynamic.add(`auto/${protocol}`);
+      }
+    }
+    if (unexplained.length > 0 || missingFixed.length > 0 || missingDynamic.size > 0) {
       findings.push({
         kind: 'ports-mismatch',
         service: name,
         detail: `Service "${name}" publishes different ports than compose declares.`,
-        expected: formatPorts(declaredPorts),
-        actual: formatPorts(runtime.ports),
+        expected: formatPorts(new Set(svc.ports.map(declaredPortLabel))),
+        actual: formatPorts(new Set(runtimePorts.map((p) => portKey(p.publishedPort, p.protocol)))),
       });
     }
   }
