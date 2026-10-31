@@ -459,6 +459,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         } catch (err) {
             if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
             console.error('Failed to fetch data', err);
+            // The batch rejects as a whole when any one read throws (a remote
+            // 401 is the common case), so the external-container slice has to be
+            // settled here too or that tab keeps its skeleton forever.
+            setOrphansState('error');
             if (!background) toast.error('Failed to load resources data');
             failInventory(background, 'error');
         }

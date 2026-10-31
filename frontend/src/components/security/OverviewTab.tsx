@@ -212,7 +212,9 @@ export function OverviewTab({
   if (loadError !== null) {
     // 'unsupported' returned above, so this is a timeout, an unreachable node,
     // an authorization failure, or a real error.
-    const copy = UNAVAILABLE_COPY[loadError];    return (
+    const copy = UNAVAILABLE_COPY[loadError];
+
+    return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <ShieldOff className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
         <h3 className="text-lg font-medium mb-1">{copy.title}</h3>

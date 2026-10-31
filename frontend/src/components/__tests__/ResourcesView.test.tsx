@@ -1015,4 +1015,27 @@ describe('ResourcesView', () => {
     expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
     expect(screen.queryByText('No external containers')).toBeNull();
   });
+
+  it('settles the external tab when the inventory batch rejects as a whole', async () => {
+    // apiFetch throws on a 401, which rejects the batch before any per-slice
+    // branch runs: the external tab must not keep its skeleton.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') return Promise.reject(new Error('Unauthorized'));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+    expect(screen.queryByText('No external containers')).toBeNull();
+  });
 });
