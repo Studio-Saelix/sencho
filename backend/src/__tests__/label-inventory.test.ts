@@ -74,6 +74,8 @@ function stubDockerList(
     return { labels: {} };
   });
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    // The fleet route asks how many containers to budget for before it builds.
+    getAllContainers: vi.fn().mockResolvedValue(withDefaults.map(r => ({ Id: r.id }))),
     listContainersForLabelInventory: vi.fn().mockResolvedValue(withDefaults),
     getContainersByStack: vi.fn().mockImplementation(async (stack: string) =>
       withDefaults.filter(r => r.stack === stack).map(r => ({

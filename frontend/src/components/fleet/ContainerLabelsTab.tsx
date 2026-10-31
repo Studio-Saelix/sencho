@@ -150,11 +150,10 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = fal
     );
   }
 
-  // No node answered and none of them has an inventory to fall back on: say so
-  // instead of calling it an empty filter result.
-  const noResultsCopy = degradedNodes.unread.length > 0 && !degradedNodes.hasData
-    ? 'No fleet data could be read.'
-    : null;
+  // No node answered and none of them has an inventory to fall back on: the
+  // banner owns that fact, and Retry sits in it, so the empty table below does
+  // not repeat either one.
+  const noFleetData = degradedNodes.unread.length > 0 && !degradedNodes.hasData;
 
   return (
     <div className="space-y-4" data-testid="container-labels-tab">
@@ -235,18 +234,22 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = fal
       )}
 
       {data && (degradedNodes.unread.length > 0 || degradedNodes.partial.length > 0) && (
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="text-xs text-warning">
-            {degradedNodes.unread.length > 0 && `Could not read ${degradedNodes.unread.map(n => `${n.name} (${n.error})`).join(', ')}. `}
-            {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
-            {degradedNodes.hasData ? 'Showing partial fleet data.' : 'No fleet data could be read.'}
-          </p>
+        <p className="text-xs text-warning">
+          {degradedNodes.unread.length > 0 && `Could not read ${degradedNodes.unread.map(n => `${n.name} (${n.error})`).join(', ')}. `}
+          {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
+          {degradedNodes.hasData ? 'Showing partial fleet data.' : 'No fleet data could be read.'}
           {degradedNodes.unread.length > 0 && (
-            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={retryFailed} disabled={loading}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-1 h-5 px-1.5 align-baseline text-xs"
+              onClick={retryFailed}
+              disabled={loading}
+            >
               Retry
             </Button>
           )}
-        </div>
+        </p>
       )}
 
       {viewMode === 'container' && (
@@ -315,10 +318,10 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = fal
                   </Fragment>
                 );
               })}
-              {filteredContainers.length === 0 && !busy && (
+              {filteredContainers.length === 0 && !busy && !noFleetData && (
                 <TableRow>
                   <TableCell colSpan={7} className="text-sm text-stat-subtitle py-6 text-center">
-                    {noResultsCopy ?? 'No containers match this filter.'}
+                    No containers match this filter.
                   </TableCell>
                 </TableRow>
               )}
@@ -338,9 +341,9 @@ export function ContainerLabelsTab({ onNavigateToNode, nodes, nodesLoading = fal
           {filteredByLabel.map((row) => (
             <LabelGroupCard key={`${row.key}=${row.value}=${row.source}`} row={row} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} onNavigateToNode={onNavigateToNode} />
           ))}
-          {filteredByLabel.length === 0 && !busy && (
+          {filteredByLabel.length === 0 && !busy && !noFleetData && (
             <p className="text-sm text-stat-subtitle py-4 text-center">
-              {noResultsCopy ?? 'No labels match this filter.'}
+              No labels match this filter.
             </p>
           )}
         </div>
