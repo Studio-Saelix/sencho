@@ -30,6 +30,7 @@ import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
+import { classifyRemoteReadFailure, remoteReadFailureMessage, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
 import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
@@ -338,6 +339,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Inventory (tables) and disk usage load as separate requests on separate
     // clocks, so the tables never wait on the usage figures.
     const [inventoryState, setInventoryState] = useState<LoadState>('loading');
+    // Why the inventory read failed, when it is a reason worth naming: a node
+    // that missed its read deadline is not the same as an empty node.
+    const [inventoryFailure, setInventoryFailure] = useState<RemoteReadFailure | null>(null);
     const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
     const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
@@ -382,12 +386,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // claims a generation; only the latest call is allowed to write state.
     const inventoryGenerationRef = useRef(0);
     const usageGenerationRef = useRef(0);
+    // A node switch abandons the reads started for the previous node, so the
+    // backend stops working on an answer nobody will read.
+    const inventoryAbortRef = useRef<AbortController | null>(null);
+    const usageAbortRef = useRef<AbortController | null>(null);
 
     // `background` refreshes keep the current rows on screen (after a prune or
     // delete); a foreground load (mount, node switch, Retry) shows skeletons.
     // A background failure still ends a superseded foreground load, so the
     // tables can never stay on skeletons.
-    const failInventory = (background: boolean) => {
+    const failInventory = (background: boolean, failure: RemoteReadFailure) => {
+        setInventoryFailure(failure);
         if (background) {
             toast.error('Failed to refresh resources');
             setInventoryState((state) => (state === 'loading' ? 'error' : state));
@@ -398,13 +407,20 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++inventoryGenerationRef.current;
-        if (!background) setInventoryState('loading');
+        inventoryAbortRef.current?.abort();
+        const controller = new AbortController();
+        inventoryAbortRef.current = controller;
+        if (!background) {
+            setInventoryState('loading');
+            setInventoryFailure(null);
+        }
         try {
+            const signal = controller.signal;
             const [resourcesRes, orphansRes, summariesRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/resources'),
-                apiFetch('/system/orphans'),
-                apiFetch('/security/image-summaries').catch(() => null),
-                apiFetch('/system/rollback/generations').catch(() => null),
+                apiFetch('/system/resources', { signal }),
+                apiFetch('/system/orphans', { signal }),
+                apiFetch('/security/image-summaries', { signal }).catch(() => null),
+                apiFetch('/system/rollback/generations', { signal }).catch(() => null),
             ]);
 
             // Resolve every body before the staleness check so a stale
@@ -414,7 +430,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
             const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
 
-            if (inventoryGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
 
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
@@ -423,7 +439,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 setInventoryState('ready');
             } else {
                 console.error('Failed to fetch resources', resourcesRes.status);
-                failInventory(background);
+                failInventory(background, classifyRemoteReadFailure(resourcesRes) ?? 'http');
             }
             if (orphansData) {
                 setOrphans(orphansData);
@@ -432,10 +448,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
         } catch (err) {
-            if (inventoryGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
             console.error('Failed to fetch data', err);
             if (!background) toast.error('Failed to load resources data');
-            failInventory(background);
+            failInventory(background, 'error');
         }
     };
 
@@ -449,11 +465,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++usageGenerationRef.current;
+        usageAbortRef.current?.abort();
+        const controller = new AbortController();
+        usageAbortRef.current = controller;
         if (!background) setUsageLoad({ status: 'loading' });
         try {
-            const res = await apiFetch('/system/docker-df');
+            const res = await apiFetch('/system/docker-df', { signal: controller.signal });
             const data = res.ok ? await res.json() : null;
-            if (usageGenerationRef.current !== generation) return;
+            if (usageGenerationRef.current !== generation || controller.signal.aborted) return;
             if (data) {
                 setUsageLoad({ status: 'ready', data });
             } else {
@@ -461,6 +480,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             }
         } catch (err) {
             if (usageGenerationRef.current !== generation) return;
+            if (controller.signal.aborted) return;
             failUsage(err);
         }
     };
@@ -499,6 +519,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     useEffect(() => () => {
         inventoryGenerationRef.current += 1;
         usageGenerationRef.current += 1;
+        inventoryAbortRef.current?.abort();
+        usageAbortRef.current?.abort();
     }, []);
 
     type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
@@ -693,6 +715,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
 
     const mastheadModel = deriveResourcesMastheadState(usageLoad);
+    // Only the failures whose cause the operator can act on are named; a plain
+    // 4xx/5xx keeps the existing short copy.
+    const inventoryFailureReason = inventoryFailure === 'timeout' || inventoryFailure === 'unreachable'
+        ? remoteReadFailureMessage(inventoryFailure, { nodeName: activeNode?.name })
+        : null;
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
     // Reclaim frees everything the masthead advertises. Order matters:
@@ -858,7 +885,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="images" onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1019,7 +1046,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="volumes" onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1120,6 +1147,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
                             <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
                                 <span>Could not load external containers.</span>
+                                {inventoryFailureReason ? (
+                                    <span className="text-xs text-stat-subtitle">{inventoryFailureReason}</span>
+                                ) : null}
                                 <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
                             </div>
                         ) : totalOrphansCount === 0 ? (

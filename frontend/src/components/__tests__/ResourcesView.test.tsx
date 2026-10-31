@@ -410,7 +410,10 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
@@ -457,7 +460,10 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
 
     const extraRef = await screen.findByText('ghcr.io/example/very-long-app-name:latest');
@@ -482,7 +488,10 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/resources',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(screen.getByText(/old:v1/)).toBeInTheDocument());

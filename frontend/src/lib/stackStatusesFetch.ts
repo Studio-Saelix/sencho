@@ -1,12 +1,15 @@
 import { apiFetch } from '@/lib/api';
+import { classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
 
 /**
  * Bound for the in-flight owner so a hung remote cannot occupy the coalescer
- * across a dashboard statuses poll tick (10s).
+ * across a dashboard statuses poll tick (10s). The gateway's own interactive
+ * read deadline normally answers first, so this is the backstop for a hub that
+ * is slow to even reach the proxy hop.
  */
 export const STACK_STATUSES_OWNER_TIMEOUT_MS = 8000;
 
-export type StackStatusesFetchFailure = 'http' | 'timeout' | 'auth-abort';
+export type StackStatusesFetchFailure = 'http' | 'timeout' | 'unreachable' | 'auth-abort';
 
 /**
  * Raw transport result for GET /stacks/statuses. Callers keep all
@@ -67,13 +70,22 @@ async function requestStackStatuses(
   if (res.ok) {
     body = await res.json();
   }
+  // A gateway read deadline and an unreachable node are failures the operator
+  // can act on, so they keep their own names instead of collapsing into the
+  // generic HTTP status.
+  const classified = classifyRemoteReadFailure(res);
+  const failure: StackStatusesFetchFailure | undefined = res.ok
+    ? undefined
+    : classified === 'timeout' || classified === 'unreachable'
+      ? classified
+      : 'http';
   return {
     ok: res.ok,
     status: res.status,
     proxied,
     body,
     coalesced: false,
-    failure: res.ok ? undefined : 'http',
+    failure,
   };
 }
 

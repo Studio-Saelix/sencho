@@ -1,4 +1,5 @@
-import { ShieldOff } from 'lucide-react';
+import { RefreshCw, ShieldOff } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
@@ -30,8 +31,13 @@ type NavigateFn = (
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
-  /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
-  loadError: 'unsupported' | 'failed' | null;
+  /**
+   * 'unsupported' = node has no overview endpoint (benign); 'timeout' = the node
+   * missed its read deadline and may answer on a retry; 'failed' = a real error.
+   */
+  loadError: 'unsupported' | 'timeout' | 'failed' | null;
+  /** Retry the overview read (the surface's only recovery path when it fails). */
+  onReload: () => void;
   trend: SecurityRiskTrendPoint[];
   /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
   exploitIntel: ExploitIntelFinding[];
@@ -157,6 +163,7 @@ export function OverviewTab({
   onInspect,
   canScan,
   onScanComplete,
+  onReload,
   reasons,
 }: OverviewTabProps) {
   const isMobile = useIsMobile();
@@ -173,14 +180,22 @@ export function OverviewTab({
     );
   }
 
-  if (loadError === 'failed') {
+  if (loadError === 'failed' || loadError === 'timeout') {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <ShieldOff className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">Couldn't load the overview</h3>
-        <p className="text-sm text-muted-foreground">
-          The security overview failed to load for this node. Switch nodes and back, or try again shortly.
+        <h3 className="text-lg font-medium mb-1">
+          {loadError === 'timeout' ? 'This node did not answer' : "Couldn't load the overview"}
+        </h3>
+        <p className="mb-4 text-sm text-muted-foreground">
+          {loadError === 'timeout'
+            ? 'The security overview did not arrive in time. The node is unreachable or still starting, so nothing is shown rather than an empty result.'
+            : 'The security overview failed to load for this node. Switch nodes and back, or try again shortly.'}
         </p>
+        <Button variant="outline" size="sm" onClick={onReload}>
+          <RefreshCw className="mr-1.5 h-4 w-4" />
+          Retry
+        </Button>
       </div>
     );
   }

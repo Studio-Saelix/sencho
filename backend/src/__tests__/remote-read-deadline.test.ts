@@ -1,0 +1,295 @@
+/**
+ * Bounded interactive reads against a remote node.
+ *
+ * The gateway used to forward a GET to a remote node with no deadline, so a
+ * node that accepted the connection and went silent left the page pending for as
+ * long as the transport allowed. These cases pin the contract: an ordinary read
+ * answers within the deadline as an explicit timeout, while streams, downloads,
+ * long-running operations, and a disconnected Pilot keep their own lifetimes,
+ * and the timeout stays distinguishable from authorization failure and from a
+ * confirmed empty answer.
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import request from 'supertest';
+import http from 'http';
+import type { AddressInfo, Socket } from 'net';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import {
+  INTERACTIVE_REMOTE_READ_TIMEOUT_MS,
+  REMOTE_READ_TIMEOUT_HEADER,
+  isInteractiveRemoteRead,
+  isStreamingOrDownloadResponse,
+} from '../proxy/interactiveRemoteRead';
+
+/** A stub remote whose answer each case decides. `null` hangs up on the request
+ *  side: the socket is accepted and never written to, which is the black-holed
+ *  node this feature exists for. */
+type Responder = ((req: http.IncomingMessage, res: http.ServerResponse) => void) | null;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+describe('interactive remote read deadline', () => {
+  let tmpDir: string;
+  let app: import('express').Express;
+  let authHeader: string;
+  let remoteNodeId: number;
+  let pilotNodeId: number;
+  let stub: http.Server;
+  let stubUrl: string;
+  let responder: Responder = null;
+  const stubSockets = new Set<Socket>();
+
+  beforeAll(async () => {
+    tmpDir = await setupTestDb();
+
+    stub = http.createServer((req, res) => {
+      if (responder) responder(req, res);
+    });
+    stub.on('connection', (socket: Socket) => {
+      stubSockets.add(socket);
+      socket.on('close', () => stubSockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    stubUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
+
+    ({ app } = await import('../index'));
+
+    const { DatabaseService } = await import('../services/DatabaseService');
+    remoteNodeId = DatabaseService.getInstance().addNode({
+      name: 'silent-remote',
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: stubUrl,
+      api_token: 'read-deadline-test-token',
+    });
+    pilotNodeId = DatabaseService.getInstance().addNode({
+      name: 'pilot-offline',
+      type: 'remote',
+      mode: 'pilot_agent',
+      compose_dir: '/tmp',
+      is_default: false,
+      api_url: '',
+      api_token: '',
+    });
+
+    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '10m' });
+    authHeader = `Bearer ${token}`;
+  });
+
+  afterAll(async () => {
+    for (const socket of stubSockets) socket.destroy();
+    await new Promise<void>((resolve) => stub.close(() => resolve()));
+    cleanupTestDb(tmpDir);
+  });
+
+  beforeEach(() => {
+    responder = null;
+  });
+
+  describe('route classification', () => {
+    it('treats an ordinary page read as interactive', () => {
+      expect(isInteractiveRemoteRead('GET', '/stacks')).toBe(true);
+      expect(isInteractiveRemoteRead('GET', '/stacks/statuses')).toBe(true);
+      expect(isInteractiveRemoteRead('GET', '/networking/overview?x=1')).toBe(true);
+      expect(isInteractiveRemoteRead('GET', '/security/overview')).toBe(true);
+      expect(isInteractiveRemoteRead('GET', '/stacks/web/containers')).toBe(true);
+    });
+
+    it('keeps work off the interactive clock', () => {
+      expect(isInteractiveRemoteRead('POST', '/stacks/web/deploy')).toBe(false);
+      expect(isInteractiveRemoteRead('POST', '/stacks/web/update')).toBe(false);
+      expect(isInteractiveRemoteRead('DELETE', '/stacks/web')).toBe(false);
+    });
+
+    it('keeps streams and downloads off the interactive clock', () => {
+      expect(isInteractiveRemoteRead('GET', '/containers/abc/logs')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/metrics/logs/global/stream')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/mesh/activity/stream')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/audit-log/export?format=csv')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/security/vex/export')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/stacks/web/files/download?path=a.yml')).toBe(false);
+      expect(isInteractiveRemoteRead('GET', '/stacks/web/files/bulk-download')).toBe(false);
+    });
+
+    it('recognizes a response that turned out to be a stream or a download', () => {
+      expect(isStreamingOrDownloadResponse({ 'content-type': 'text/event-stream' })).toBe(true);
+      expect(isStreamingOrDownloadResponse({
+        'content-type': 'application/gzip',
+        'content-disposition': 'attachment; filename="snapshot.tar.gz"',
+      })).toBe(true);
+      expect(isStreamingOrDownloadResponse({ 'content-type': 'application/json' })).toBe(false);
+    });
+  });
+
+  describe('against a remote node', () => {
+    it('answers a healthy read normally, with no timeout marker', async () => {
+      responder = (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(['web']));
+      };
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(['web']);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
+    });
+
+    it('keeps a confirmed empty answer distinct from a timeout', async () => {
+      responder = (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end('[]');
+      };
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
+    });
+
+    it('keeps an authorization failure distinct from a timeout', async () => {
+      responder = (_req, res) => {
+        res.statusCode = 403;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ error: 'Permission denied.' }));
+      };
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe('Permission denied.');
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBeUndefined();
+    });
+
+    it('answers a black-holed read with an explicit timeout inside the deadline', async () => {
+      responder = null;
+      const startedAt = Date.now();
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+
+      const elapsed = Date.now() - startedAt;
+      expect(res.status).toBe(504);
+      expect(res.headers[REMOTE_READ_TIMEOUT_HEADER]).toBe('1');
+      expect(res.body.code).toBe('remote_read_timeout');
+      expect(res.body.error).toContain('silent-remote');
+      expect(res.body.error).not.toMatch(/permission|unauthor/i);
+      // Bounded: the gateway answers at its own deadline, not at a transport
+      // timeout the test harness happens to impose.
+      expect(elapsed).toBeGreaterThanOrEqual(INTERACTIVE_REMOTE_READ_TIMEOUT_MS - 250);
+      expect(elapsed).toBeLessThan(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 4_000);
+    }, 20_000);
+
+    it('does not bound a long-running operation', async () => {
+      responder = null;
+
+      const pending = request(app)
+        .post('/api/stacks/web/deploy')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId))
+        .send({});
+      const settled = await Promise.race([
+        pending.then(() => 'responded', () => 'failed'),
+        sleep(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 1_500).then(() => 'pending'),
+      ]);
+
+      expect(settled).toBe('pending');
+      pending.abort();
+    }, 20_000);
+
+    it('does not bound a log stream', async () => {
+      responder = null;
+
+      const pending = request(app)
+        .get('/api/containers/abc/logs')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+      const settled = await Promise.race([
+        pending.then(() => 'responded', () => 'failed'),
+        sleep(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 1_500).then(() => 'pending'),
+      ]);
+
+      expect(settled).toBe('pending');
+      pending.abort();
+    }, 20_000);
+
+    it('releases the deadline once a read turns out to be a stream', async () => {
+      responder = (_req, res) => {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream');
+        res.flushHeaders();
+        // Then stay silent, like an idle activity feed.
+      };
+
+      const pending = request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+      const settled = await Promise.race([
+        pending.then(() => 'responded', () => 'failed'),
+        sleep(INTERACTIVE_REMOTE_READ_TIMEOUT_MS + 800).then(() => 'pending'),
+      ]);
+
+      expect(settled).toBe('pending');
+      pending.abort();
+    }, 20_000);
+
+    it('drops the upstream request when the caller goes away', async () => {
+      responder = null;
+      const socketsBefore = stubSockets.size;
+      const waitForSocketChange = async (from: number): Promise<number> => {
+        for (let i = 0; i < 20; i += 1) {
+          if (stubSockets.size !== from) return stubSockets.size;
+          await sleep(100);
+        }
+        return stubSockets.size;
+      };
+
+      const pending = request(app)
+        .get('/api/stacks/statuses')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(remoteNodeId));
+      void pending.then(() => 'responded', () => 'failed');
+      // Let the hop open its socket to the silent remote, then abandon it the
+      // way a node switch does.
+      const connected = await waitForSocketChange(socketsBefore);
+      expect(connected).toBeGreaterThan(0);
+      pending.abort();
+
+      await expect.poll(() => stubSockets.size, { timeout: 3_000 }).toBeLessThanOrEqual(socketsBefore);
+    }, 20_000);
+
+    it('fails a disconnected Pilot promptly, without waiting out the deadline', async () => {
+      responder = null;
+      const startedAt = Date.now();
+
+      const res = await request(app)
+        .get('/api/stacks')
+        .set('Authorization', authHeader)
+        .set('x-node-id', String(pilotNodeId));
+
+      expect(res.status).toBe(503);
+      expect(res.body.error).toMatch(/pilot tunnel/i);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    });
+  });
+});

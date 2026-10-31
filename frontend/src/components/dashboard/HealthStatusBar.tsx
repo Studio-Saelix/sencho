@@ -12,7 +12,8 @@ interface HealthStatusBarProps {
   activeNodeName: string;
   nodeCount: number;
   lastSyncAt: number | null;
-  /** True after several consecutive metrics polls have failed (Docker socket or metrics path down). */
+  /** True when the metrics reads are not answering: several consecutive failures,
+   *  or one bounded gateway timeout against a remote node. */
   metricsStale?: boolean;
 }
 
@@ -35,6 +36,18 @@ const healthConfig: Record<HealthLevel, { label: string; textClass: string; rail
     railClass: 'bg-destructive/70',
     tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
   },
+};
+
+/**
+ * Shown instead of the derived level when the metrics reads are not answering.
+ * A node nobody can reach has no health to report, and its last known zeros must
+ * not be read as a clean bill of health.
+ */
+const unavailableHealth = {
+  label: 'Unknown',
+  textClass: 'text-muted-foreground',
+  railClass: 'bg-muted-foreground/40',
+  tintClass: 'from-muted-foreground/[0.04] via-transparent to-transparent',
 };
 
 function formatGib(bytes: number): string {
@@ -75,7 +88,7 @@ export function HealthStatusBar({
     () => deriveHealth(stats, systemStats, notifications),
     [stats, systemStats, notifications],
   );
-  const config = healthConfig[level];
+  const config = metricsStale ? unavailableHealth : healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
@@ -83,7 +96,7 @@ export function HealthStatusBar({
   const memLabel = systemStats ? formatGib(systemStats.memory.effectiveUsed ?? systemStats.memory.used) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
-  const reasonsLine = reasons.join(' · ');
+  const reasonsLine = metricsStale ? 'This node is not answering.' : reasons.join(' · ');
 
   return (
     <div

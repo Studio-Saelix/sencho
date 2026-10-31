@@ -174,4 +174,35 @@ describe('useDashboardData metricsStale threshold', () => {
     await tickStats();
     expect(result.current.metricsStale).toBe(true);
   });
+
+  it('trips on the first bounded read deadline instead of waiting for three polls', async () => {
+    // A node that missed the gateway read deadline is not a transient hiccup:
+    // it is reported as unavailable on the first answer, so the gauges stop
+    // reading as zeros while the node stays silent.
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_read_timeout' }),
+          { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+        ));
+      }
+      if (requested === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (requested === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsStale).toBe(true);
+  });
+
+  it('does not treat an ordinary HTTP failure as an unavailable node', async () => {
+    setEndpointOutcome('/stats', false);
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsStale).toBe(false);
+  });
 });

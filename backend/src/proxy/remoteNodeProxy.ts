@@ -1,6 +1,14 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import type { ClientRequest } from 'http';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import type { OnProxyEvent } from 'http-proxy-middleware';
+import {
+  INTERACTIVE_REMOTE_READ_TIMEOUT_MS,
+  REMOTE_READ_TIMEOUT_HEADER,
+  isInteractiveRemoteRead,
+  isStreamingOrDownloadResponse,
+  remoteReadTimeoutBody,
+} from './interactiveRemoteRead';
 import {
   IDENTITY_PROXY_TIMEOUT_MS,
   isIdentityFailure,
@@ -74,7 +82,7 @@ import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGa
  * enforces exactly-once finalization across the downstream finish/close events
  * and the proxy error handler.
  */
-type ProxyTimingOutcome = 'ok' | 'non2xx' | 'aborted' | 'error';
+type ProxyTimingOutcome = 'ok' | 'non2xx' | 'aborted' | 'error' | 'timeout';
 
 interface ProxyTiming {
   startedAt: number;
@@ -128,6 +136,62 @@ function finalizeProxyTiming(req: Request, outcome: ProxyTimingOutcome): void {
 }
 
 /**
+ * Deadline state for an interactive read against a remote node, kept off the
+ * Request type via WeakMaps so it is collected with the request. `fired` lets
+ * the proxy error handler tell our own upstream abort from a real transport
+ * failure; the entry stays for the life of the request, because the abort it
+ * triggers arrives after the deadline has already answered.
+ */
+interface InteractiveReadDeadline {
+  timer: NodeJS.Timeout;
+  fired: boolean;
+}
+
+const interactiveReadDeadlines = new WeakMap<Request, InteractiveReadDeadline>();
+/** The upstream request the hop opened, so a missed deadline can abort it. */
+const proxyRequests = new WeakMap<Request, ClientRequest>();
+
+/**
+ * Bound an interactive read. On expiry the gateway answers 504 with the timeout
+ * code and destroys the upstream request, so a remote that accepted the
+ * connection and then went silent cannot hold a socket or a page's loading
+ * state. The deadline is released at the first byte of a stream or download (see
+ * `isStreamingOrDownloadResponse`) and on response completion.
+ */
+function armInteractiveReadDeadline(req: Request, res: Response, nodeName: string | undefined): void {
+  const deadline: InteractiveReadDeadline = {
+    fired: false,
+    timer: setTimeout(() => {
+      deadline.fired = true;
+      const upstream = proxyRequests.get(req);
+      if (res.headersSent) {
+        // Headers are already on the wire, so the only honest answer left is to
+        // end the response rather than append a JSON error to a partial body.
+        res.destroy();
+      } else {
+        finalizeProxyTiming(req, 'timeout');
+        res.status(504);
+        res.setHeader(REMOTE_READ_TIMEOUT_HEADER, '1');
+        res.json(remoteReadTimeoutBody(nodeName));
+      }
+      upstream?.destroy();
+    }, INTERACTIVE_REMOTE_READ_TIMEOUT_MS),
+  };
+  interactiveReadDeadlines.set(req, deadline);
+  res.once('finish', () => releaseInteractiveReadDeadline(req));
+  res.once('close', () => releaseInteractiveReadDeadline(req));
+}
+
+/** Release an armed deadline. A deadline that already fired stays recorded so
+ *  the abort it caused is not reported as a transport failure. */
+function releaseInteractiveReadDeadline(req: Request): void {
+  const deadline = interactiveReadDeadlines.get(req);
+  if (!deadline || deadline.fired) return;
+  clearTimeout(deadline.timer);
+  interactiveReadDeadlines.delete(req);
+}
+
+/**
  * Build the remote-node HTTP proxy middleware. Mount once at `/api/` after
  * authGate / auditLog / apiTokenScope; the middleware decides per-request
  * whether to proxy or call next().
@@ -143,6 +207,8 @@ export function createRemoteProxyMiddleware(): RequestHandler {
   // identical however a request is forwarded.
   const sharedOn: OnProxyEvent<Request, Response> = {
     proxyReq: (proxyReq, req) => {
+      // Remember the upstream request so a missed read deadline can abort it.
+      proxyRequests.set(req, proxyReq);
       // Strip headers that must not reach the remote instance:
       // - x-node-id: remote Sencho treats all requests as local
       // - cookie: the browser's sencho_token is signed with THIS instance's JWT secret;
@@ -257,6 +323,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
     },
     proxyRes: (proxyRes, req) => {
+      // A read that turned out to be a stream or a download keeps its own
+      // lifetime: release the interactive deadline at the first byte rather than
+      // cutting a log tail or a file body short mid-flight.
+      if (isStreamingOrDownloadResponse(proxyRes.headers)) {
+        releaseInteractiveReadDeadline(req);
+      }
       // Mark every response forwarded from a remote node with a sentinel
       // header. The frontend (apiFetch / fetchForNode) checks this before
       // firing the global 'sencho-unauthorized' event: a 401 from a remote
@@ -306,6 +378,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
     },
     error: (err, req, proxyRes) => {
+      // The read deadline aborts the upstream request itself. That abort is not
+      // a transport failure to report, and the 504 has already answered, so the
+      // error handler must not turn it into a 502 or an audit entry.
+      if (interactiveReadDeadlines.get(req)?.fired) return;
       // Finalize the hop timing with an error outcome before the existing
       // 502 handling; the logged guard keeps the later finish/close a no-op.
       finalizeProxyTiming(req, 'error');
@@ -908,6 +984,12 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       beginProxyTiming(req, res);
       if (req.registryDeliveryAbortController?.signal.aborted) {
         return;
+      }
+      // Ordinary interactive reads are bounded; work and streams are not. Armed
+      // here, after the gates and the identity dispatch, so only the hop that
+      // actually answers a page is on the clock.
+      if (isInteractiveRemoteRead(req.method, req.path)) {
+        armInteractiveReadDeadline(req, res, node.name);
       }
       if (req.method === 'POST' && /^\/stacks\/[^/]+\/update\/?$/i.test(req.path)
         && (await probeRemoteCapability(req.nodeId, 'remote-image-inspect-v1')).kind === 'supported') {

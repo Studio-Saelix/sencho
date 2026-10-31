@@ -725,4 +725,25 @@ describe('useStackListState stale callback node targeting', () => {
     expect(result.current.hydrationStatus).toBe('ok');
     expect(result.current.actionsReady).toBe(true);
   });
+
+  it('names a missed read deadline on the stack list instead of printing a 504', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(JSON.stringify({ code: 'remote_read_timeout' }), {
+          status: 504,
+          headers: { 'x-sencho-read-timeout': '1' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.files).toEqual([]);
+    expect(result.current.stacksLoadError).toMatch(/did not answer in time/i);
+  });
 });
