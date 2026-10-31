@@ -94,17 +94,19 @@ function overview(reasons: PostureReason[], extra: Partial<SecurityOverview> = {
 
 type OverviewProps = ComponentProps<typeof OverviewTab>;
 
-function Harness({ data, onNavigate, onInspect, reload }: {
+function Harness({ data, onNavigate, onInspect, reload, loadError = null, onReload = () => {} }: {
   data: SecurityOverview;
   onNavigate: OverviewNavigate;
   onInspect: OverviewProps['onInspect'];
   reload: () => void;
+  loadError?: OverviewProps['loadError'];
+  onReload?: () => void;
 }) {
   const reasons = useSecurityReasons({ overview: data, isReplica: false, onNavigate, reload });
   return (
     <OverviewTab
       overview={data}
-      loadError={null}
+      loadError={loadError}
       trend={[]}
       exploitIntel={[]}
       exploitTruncated={false}
@@ -112,6 +114,7 @@ function Harness({ data, onNavigate, onInspect, reload }: {
       onInspect={onInspect}
       canScan={false}
       onScanComplete={vi.fn()}
+      onReload={onReload}
       reasons={reasons}
     />
   );
@@ -429,5 +432,68 @@ describe('OverviewTab remediation affordances', () => {
       await user.click(screen.getByRole('button', { name: /restore/i }));
       expect(dismissalState.restore).toHaveBeenCalledWith(7);
     });
+  });
+});
+
+describe('OverviewTab unavailable states', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nodeState.activeNode = { id: 1, type: 'local' };
+    nodeState.activeNodeMeta = null;
+  });
+
+  function renderUnavailable(loadError: OverviewProps['loadError']) {
+    const onReload = vi.fn();
+    render(
+      <Harness
+        data={overview([])}
+        onNavigate={vi.fn()}
+        onInspect={vi.fn()}
+        reload={vi.fn()}
+        loadError={loadError}
+        onReload={onReload}
+      />,
+    );
+    return { onReload };
+  }
+
+  it('says the node did not answer for a bounded read deadline, and offers Retry', async () => {
+    const user = userEvent.setup();
+    const { onReload } = renderUnavailable('timeout');
+    expect(screen.getByText(/this node did not answer/i)).toBeInTheDocument();
+    expect(screen.getByText(/nothing is shown rather than an empty result/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+    expect(onReload).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the generic failure copy distinct from the timeout copy', () => {
+    renderUnavailable('failed');
+    expect(screen.getByText(/couldn't load the overview/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).toBeNull();
+  });
+
+  it('keeps an unreachable node and an authorization failure distinct from a timeout', () => {
+    renderUnavailable('unreachable');
+    expect(screen.getByText(/this node is unreachable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).toBeNull();
+    cleanup();
+
+    renderUnavailable('unauthorized');
+    expect(screen.getByText(/no access to this overview/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer/i)).toBeNull();
+  });
+
+  it('names a rejected node credential instead of the operator’s access', () => {
+    renderUnavailable('node-credential');
+    expect(screen.getByText(/rejected the hub credential/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your account cannot read/i)).toBeNull();
+    expect(screen.queryByText(/unreachable/i)).toBeNull();
+  });
+
+  it('does not call a node silent when its permission model was unverified', () => {
+    renderUnavailable('unverified');
+    expect(screen.getByText(/permissions could not be verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/permission model could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/unreachable|did not answer/i)).toBeNull();
   });
 });

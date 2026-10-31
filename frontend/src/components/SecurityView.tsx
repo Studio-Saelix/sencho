@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
+import { classifyRemoteReadError, classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -77,7 +78,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
-  const [overviewLoadError, setOverviewLoadError] = useState<'unsupported' | 'failed' | null>(null);
+  const [overviewLoadError, setOverviewLoadError] = useState<
+    'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null
+  >(null);
   const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
@@ -183,6 +186,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // remote node that lacks the endpoint).
   useEffect(() => {
     let cancelled = false;
+    // A node switch abandons the reads started for the previous node, so the
+    // backend stops working on an answer nobody will read. `cancelled` already
+    // guards state writes; the abort also releases the request itself.
+    const controller = new AbortController();
     const fetchedNodeId = activeNode?.id;
     (async () => {
       setSummariesLoading(true);
@@ -192,13 +199,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       // failure included, not just a non-OK/malformed body) so it can never
       // poison the overview/summaries error state. It degrades to an empty chart
       // with its own "no history" message.
-      const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend')
+      const trendPromise: Promise<SecurityRiskTrendPoint[]> = apiFetch('/security/overview/trend', { signal: controller.signal })
         .then((r) => (r.ok ? r.json() : []))
         .then((t) => (Array.isArray(t) ? t : []))
         .catch(() => []);
       // Exploit-intel powers two overview charts; isolate it like the trend so a
       // failure (or an older node without the endpoint) degrades to empty panels.
-      const exploitIntelPromise: Promise<{ items: ExploitIntelFinding[]; truncated: boolean }> = apiFetch('/security/overview/exploit-intel')
+      const exploitIntelPromise: Promise<{ items: ExploitIntelFinding[]; truncated: boolean }> = apiFetch('/security/overview/exploit-intel', { signal: controller.signal })
         .then((r) => (r.ok ? r.json() : { items: [], truncated: false }))
         .then((b) => ({
           items: b && Array.isArray(b.items) ? b.items : [],
@@ -207,8 +214,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         .catch(() => ({ items: [], truncated: false }));
       try {
         const [overviewRes, summariesRes] = await Promise.all([
-          apiFetch('/security/overview', { cache: 'no-store' }),
-          apiFetch('/security/image-summaries', { cache: 'no-store' }),
+          apiFetch('/security/overview', { cache: 'no-store', signal: controller.signal }),
+          apiFetch('/security/image-summaries', { cache: 'no-store', signal: controller.signal }),
         ]);
         if (cancelled) return;
         if (overviewRes.ok) {
@@ -218,7 +225,20 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           setOverviewNodeId(fetchedNodeId);
         } else {
           setOverview(null);
-          setOverviewLoadError(overviewRes.status === 404 ? 'unsupported' : 'failed');
+          // A node that missed its read deadline is an unavailable node, not a
+          // server error: the operator gets copy they can act on.
+          const readFailure = classifyRemoteReadFailure(overviewRes);
+          setOverviewLoadError(
+            overviewRes.status === 404
+              ? 'unsupported'
+              : readFailure === 'timeout'
+                || readFailure === 'unreachable'
+                || readFailure === 'unauthorized'
+                || readFailure === 'node-credential'
+                || readFailure === 'unverified'
+                ? readFailure
+                : 'failed',
+          );
           if (overviewRes.status !== 404) {
             console.warn('[Security] overview request failed:', overviewRes.status);
           }
@@ -242,7 +262,16 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         if (cancelled) return;
         console.warn('[Security] failed to load security data:', err);
         setOverview(null);
-        setOverviewLoadError('failed');
+        const thrown = classifyRemoteReadError(err);
+        setOverviewLoadError(
+          thrown === 'timeout'
+            || thrown === 'unreachable'
+            || thrown === 'unauthorized'
+            || thrown === 'node-credential'
+            || thrown === 'unverified'
+            ? thrown
+            : 'failed',
+        );
         setSummaries({});
         setSummariesError(true);
       } finally {
@@ -255,7 +284,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         setExploitTruncated(intelData.truncated);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [activeNode?.id, reloadToken]);
 
   // Toggling image-update checks flips overview.updateChecksDisabled, which
@@ -354,6 +386,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           <OverviewTab
             overview={nodeOverview}
             loadError={overviewLoadError}
+            onReload={reloadOverview}
             trend={trend}
             exploitIntel={exploitIntel}
             exploitTruncated={exploitTruncated}

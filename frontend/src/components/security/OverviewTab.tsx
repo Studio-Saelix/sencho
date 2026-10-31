@@ -1,4 +1,5 @@
-import { ShieldOff } from 'lucide-react';
+import { RefreshCw, ShieldOff } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignalRail, type SignalTile } from '@/components/ui/SignalRail';
 import { cn } from '@/lib/utils';
@@ -30,8 +31,15 @@ type NavigateFn = (
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
-  /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
-  loadError: 'unsupported' | 'failed' | null;
+  /**
+   * 'unsupported' = node has no overview endpoint (benign); 'timeout' = the node
+   * missed its read deadline and may answer on a retry; 'unreachable' = no
+   * answer at all; 'unauthorized' = the operator's grants, not the node;
+   * 'failed' = a real error.
+   */
+  loadError: 'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null;
+  /** Retry the overview read (the surface's only recovery path when it fails). */
+  onReload: () => void;
   trend: SecurityRiskTrendPoint[];
   /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
   exploitIntel: ExploitIntelFinding[];
@@ -46,6 +54,41 @@ interface OverviewTabProps {
   /** Verbs, dismissals, and the single handler that runs them for the review queue. */
   reasons: SecurityReasons;
 }
+
+/**
+ * Why the overview is not on screen. Each kind keeps its own cause, because
+ * "the node did not answer", "the node is unreachable", and "you cannot read
+ * this here" send the operator to different places.
+ */
+const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed', {
+  title: string;
+  body: string;
+}> = {
+  timeout: {
+    title: 'This node did not answer',
+    body: 'The security overview did not arrive in time, so nothing is shown rather than an empty result.',
+  },
+  unreachable: {
+    title: 'This node is unreachable',
+    body: 'The security overview could not be read because the node is not answering. Check that Sencho is running on that host.',
+  },
+  unauthorized: {
+    title: 'No access to this overview',
+    body: 'Your account cannot read the security overview on this node. Ask an administrator for access.',
+  },
+  'node-credential': {
+    title: 'This node rejected the hub credential',
+    body: "The stored API token for this node was rejected. Update the node's token in Settings → Nodes.",
+  },
+  unverified: {
+    title: 'Permissions could not be verified',
+    body: "This node's permission model could not be verified. Try again once the node is healthy.",
+  },
+  failed: {
+    title: "Couldn't load the overview",
+    body: 'The security overview failed to load for this node. Switch nodes and back, or try again shortly.',
+  },
+};
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
   value: 'text-stat-value',
@@ -157,6 +200,7 @@ export function OverviewTab({
   onInspect,
   canScan,
   onScanComplete,
+  onReload,
   reasons,
 }: OverviewTabProps) {
   const isMobile = useIsMobile();
@@ -173,14 +217,20 @@ export function OverviewTab({
     );
   }
 
-  if (loadError === 'failed') {
+  if (loadError !== null) {
+    // 'unsupported' returned above, so this is a timeout, an unreachable node,
+    // an authorization failure, or a real error.
+    const copy = UNAVAILABLE_COPY[loadError];
+
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <ShieldOff className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
-        <h3 className="text-lg font-medium mb-1">Couldn't load the overview</h3>
-        <p className="text-sm text-muted-foreground">
-          The security overview failed to load for this node. Switch nodes and back, or try again shortly.
-        </p>
+        <h3 className="text-lg font-medium mb-1">{copy.title}</h3>
+        <p className="mb-4 text-sm text-muted-foreground">{copy.body}</p>
+        <Button variant="outline" size="sm" onClick={onReload}>
+          <RefreshCw className="mr-1.5 h-4 w-4" />
+          Retry
+        </Button>
       </div>
     );
   }

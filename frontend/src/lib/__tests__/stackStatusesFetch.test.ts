@@ -265,4 +265,31 @@ describe('fetchStackStatusesShared timeout and auth abort', () => {
     expect(next.failure).toBeUndefined();
     expect(next.ok).toBe(true);
   });
+
+  it('reports the gateway read deadline as a timeout, not a generic HTTP failure', async () => {
+    apiFetchSpy.mockResolvedValueOnce(new Response(
+      JSON.stringify({ code: 'remote_read_timeout' }),
+      { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+    ));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('timeout');
+    expect(result.status).toBe(504);
+  });
+
+  it('reports an unreachable node separately from a timeout', async () => {
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({ error: 'Remote node is unreachable.' }, { status: 502 }));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('unreachable');
+    expect(result.status).toBe(502);
+  });
+
+  it('leaves a confirmed empty answer a success', async () => {
+    apiFetchSpy.mockResolvedValueOnce(jsonResponse({}));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(true);
+    expect(result.failure).toBeUndefined();
+    expect(result.body).toEqual({});
+  });
 });

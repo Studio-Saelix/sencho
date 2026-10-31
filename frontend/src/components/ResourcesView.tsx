@@ -30,6 +30,13 @@ import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
+import {
+    classifyRemoteReadError,
+    classifyRemoteReadFailure,
+    isUnreadableNode,
+    remoteReadFailureMessage,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
 import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
@@ -338,6 +345,16 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Inventory (tables) and disk usage load as separate requests on separate
     // clocks, so the tables never wait on the usage figures.
     const [inventoryState, setInventoryState] = useState<LoadState>('loading');
+    // Why the inventory read failed, when it is a reason worth naming: a node
+    // that missed its read deadline is not the same as an empty node.
+    const [inventoryFailure, setInventoryFailure] = useState<RemoteReadFailure | null>(null);
+    // The external containers are their own read inside the inventory batch: if
+    // only that one fails, the tab must say so rather than claim the node has
+    // none.
+    const [orphansState, setOrphansState] = useState<LoadState>('loading');
+    // The external read's own failure, so its tab names that read's cause
+    // rather than borrowing the inventory read's.
+    const [orphansFailure, setOrphansFailure] = useState<RemoteReadFailure | null>(null);
     const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
     const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
@@ -382,12 +399,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // claims a generation; only the latest call is allowed to write state.
     const inventoryGenerationRef = useRef(0);
     const usageGenerationRef = useRef(0);
+    // A node switch abandons the reads started for the previous node, so the
+    // backend stops working on an answer nobody will read.
+    const inventoryAbortRef = useRef<AbortController | null>(null);
+    const usageAbortRef = useRef<AbortController | null>(null);
 
     // `background` refreshes keep the current rows on screen (after a prune or
     // delete); a foreground load (mount, node switch, Retry) shows skeletons.
     // A background failure still ends a superseded foreground load, so the
     // tables can never stay on skeletons.
-    const failInventory = (background: boolean) => {
+    const failInventory = (background: boolean, failure: RemoteReadFailure) => {
+        setInventoryFailure(failure);
         if (background) {
             toast.error('Failed to refresh resources');
             setInventoryState((state) => (state === 'loading' ? 'error' : state));
@@ -396,15 +418,42 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
+    // A background failure keeps the external rows on screen, as the inventory
+    // tables do, and names its own cause on the tab. A foreground load ends on
+    // the error state so the tab can never keep its skeleton.
+    const failOrphans = (background: boolean, failure: RemoteReadFailure, notify = true) => {
+        setOrphansFailure(failure);
+        // A background refresh only keeps the tab populated when it had rows to
+        // keep. With none on screen, a failed refresh is not a confirmed empty
+        // host, so it must read as unavailable rather than "No external
+        // containers".
+        const hasRows = Object.values(orphans).some((containers) => containers.length > 0);
+        if (background) {
+            if (notify) toast.error('Failed to refresh external containers');
+            setOrphansState(hasRows ? 'ready' : 'error');
+        } else {
+            setOrphansState('error');
+        }
+    };
+
     const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++inventoryGenerationRef.current;
-        if (!background) setInventoryState('loading');
+        inventoryAbortRef.current?.abort();
+        const controller = new AbortController();
+        inventoryAbortRef.current = controller;
+        if (!background) {
+            setInventoryState('loading');
+            setInventoryFailure(null);
+            setOrphansState('loading');
+            setOrphansFailure(null);
+        }
         try {
+            const signal = controller.signal;
             const [resourcesRes, orphansRes, summariesRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/resources'),
-                apiFetch('/system/orphans'),
-                apiFetch('/security/image-summaries').catch(() => null),
-                apiFetch('/system/rollback/generations').catch(() => null),
+                apiFetch('/system/resources', { signal }),
+                apiFetch('/system/orphans', { signal }),
+                apiFetch('/security/image-summaries', { signal }).catch(() => null),
+                apiFetch('/system/rollback/generations', { signal }).catch(() => null),
             ]);
 
             // Resolve every body before the staleness check so a stale
@@ -414,7 +463,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
             const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
 
-            if (inventoryGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
 
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
@@ -423,19 +472,31 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 setInventoryState('ready');
             } else {
                 console.error('Failed to fetch resources', resourcesRes.status);
-                failInventory(background);
+                failInventory(background, classifyRemoteReadFailure(resourcesRes) ?? 'http');
             }
             if (orphansData) {
                 setOrphans(orphansData);
                 setSelectedOrphans([]);
+                setOrphansFailure(null);
+                setOrphansState('ready');
+            } else {
+                console.error('Failed to fetch external containers', orphansRes.status);
+                failOrphans(background, classifyRemoteReadFailure(orphansRes) ?? 'http');
             }
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
         } catch (err) {
-            if (inventoryGenerationRef.current !== generation) return;
+            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
             console.error('Failed to fetch data', err);
+            // The batch rejects as a whole when any one read throws (a remote
+            // 401 is the common case), so the external-container slice has to be
+            // settled here too or that tab keeps its skeleton forever. The
+            // inventory toast already reports the failed refresh, so the
+            // external slice only records its cause.
+            const failure = classifyRemoteReadError(err);
+            failOrphans(background, failure, false);
             if (!background) toast.error('Failed to load resources data');
-            failInventory(background);
+            failInventory(background, failure);
         }
     };
 
@@ -449,11 +510,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++usageGenerationRef.current;
+        usageAbortRef.current?.abort();
+        const controller = new AbortController();
+        usageAbortRef.current = controller;
         if (!background) setUsageLoad({ status: 'loading' });
         try {
-            const res = await apiFetch('/system/docker-df');
+            const res = await apiFetch('/system/docker-df', { signal: controller.signal });
             const data = res.ok ? await res.json() : null;
-            if (usageGenerationRef.current !== generation) return;
+            if (usageGenerationRef.current !== generation || controller.signal.aborted) return;
             if (data) {
                 setUsageLoad({ status: 'ready', data });
             } else {
@@ -461,6 +525,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             }
         } catch (err) {
             if (usageGenerationRef.current !== generation) return;
+            if (controller.signal.aborted) return;
             failUsage(err);
         }
     };
@@ -479,6 +544,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         setVolumes([]);
         setNetworks([]);
         setOrphans({});
+        setOrphansState('loading');
+        setOrphansFailure(null);
         setSelectedOrphans([]);
         setRollbackGenerations([]);
         void loadInventory();
@@ -499,6 +566,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     useEffect(() => () => {
         inventoryGenerationRef.current += 1;
         usageGenerationRef.current += 1;
+        inventoryAbortRef.current?.abort();
+        usageAbortRef.current?.abort();
     }, []);
 
     type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
@@ -693,6 +762,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
 
     const mastheadModel = deriveResourcesMastheadState(usageLoad);
+    // Only the failures whose cause the operator can act on are named; a plain
+    // 4xx/5xx keeps the existing short copy.
+    const inventoryFailureReason = inventoryFailure !== null && isUnreadableNode(inventoryFailure)
+        ? remoteReadFailureMessage(inventoryFailure, { nodeName: activeNode?.name })
+        : null;
+    // The external tab names its own read's cause, never the inventory read's.
+    const orphansFailureReason = orphansFailure !== null && isUnreadableNode(orphansFailure)
+        ? remoteReadFailureMessage(orphansFailure, { nodeName: activeNode?.name })
+        : null;
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
     // Reclaim frees everything the masthead advertises. Order matters:
@@ -858,7 +936,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="images" onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1019,7 +1097,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="volumes" onRetry={() => void loadInventory()} />
+                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={() => void loadInventory()} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1115,14 +1193,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 && inventoryState === 'loading' ? (
+                        {totalOrphansCount === 0 && orphansState === 'loading' ? (
                             <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
-                        ) : totalOrphansCount === 0 && inventoryState === 'error' ? (
+                        ) : orphansState === 'error' && totalOrphansCount === 0 ? (
                             <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
                                 <span>Could not load external containers.</span>
+                                {orphansFailureReason ? (
+                                    <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
+                                ) : null}
                                 <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
                             </div>
-                        ) : totalOrphansCount === 0 ? (
+                        ) : totalOrphansCount === 0 && orphansState === 'ready' ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
                                     <ShieldCheck className="w-6 h-6 text-success" />
