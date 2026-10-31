@@ -2,7 +2,15 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useFleetLabels, labelPaletteKey } from './useFleetLabels';
 import { useNodeLabels } from './useNodeLabels';
-import { attentionRank, isCritical, getNodeCpu, getNodeMem, getNodeMemUsed, getNodeDisk } from '../nodeUtils';
+import {
+    attentionRank,
+    isCritical,
+    getNodeCpu,
+    getNodeMem,
+    getNodeCpuUsage,
+    getNodeMemUsed,
+    getNodeDisk,
+} from '../nodeUtils';
 import type { FleetNode, ViewMode, FleetPreferences, NodeUpdateStatus } from '../types';
 
 interface MastheadStats {
@@ -11,8 +19,10 @@ interface MastheadStats {
     criticalCount: number;
     totalContainers: number;
     totalContainersAll: number;
-    avgCpuNum: number;
-    totalMemUsed: number;
+    /** Null when no online node can report CPU usage (all nested, no cgroup mount). */
+    avgCpuNum: number | null;
+    /** Null when no online node can report memory usage. */
+    totalMemUsed: number | null;
 }
 
 interface UseFleetOverviewOptions {
@@ -152,10 +162,20 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         const criticalCount = onlineNodes.filter(isCritical).length;
         const totalContainers = nodes.reduce((sum, n) => sum + (n.stats?.active ?? 0), 0);
         const totalContainersAll = nodes.reduce((sum, n) => sum + (n.stats?.total ?? 0), 0);
-        const avgCpuNum = onlineNodes.length > 0
-            ? onlineNodes.reduce((sum, n) => sum + getNodeCpu(n), 0) / onlineNodes.length
-            : 0;
-        const totalMemUsed = onlineNodes.reduce((sum, n) => sum + getNodeMemUsed(n), 0);
+        // Unknown usage is left out of both the numerator and the denominator:
+        // counting it as 0% would report a fleet load nobody measured.
+        const cpuReadings = onlineNodes
+            .map(getNodeCpuUsage)
+            .filter((value): value is number => value !== null);
+        const avgCpuNum = cpuReadings.length > 0
+            ? cpuReadings.reduce((sum, value) => sum + value, 0) / cpuReadings.length
+            : null;
+        const memReadings = onlineNodes
+            .map(getNodeMemUsed)
+            .filter((value): value is number => value !== null);
+        const totalMemUsed = memReadings.length > 0
+            ? memReadings.reduce((sum, value) => sum + value, 0)
+            : null;
         return {
             nodeCount: nodes.length,
             onlineCount,

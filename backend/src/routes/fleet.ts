@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import path from 'path';
 import semver from 'semver';
-import si from 'systeminformation';
 import type Dockerode from 'dockerode';
 import { DatabaseService, type FleetSnapshot, type Node, type StackDossierFields } from '../services/DatabaseService';
 import { awaitHubPostUpdateVerification } from '../services/hubPostUpdateVerification';
@@ -11,7 +10,8 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry, type ProxyTarget } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
-import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMemory';
+import { type MemoryWire } from '../helpers/hostMemory';
+import { readLocalHostSample, hostSampleToWire } from '../helpers/hostSample';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -253,7 +253,7 @@ interface FleetNodeOverview {
     total: number;
   } | null;
   systemStats: {
-    cpu: { usage: string; cores: number };
+    cpu: { usage: string | null; cores: number };
     memory: MemoryWire;
     disk: { total: number; used: number; free: number; usagePercent: string } | null;
   } | null;
@@ -291,12 +291,10 @@ async function resolveUpdateTarget(requested?: string): Promise<string | undefin
 async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
-    const [allContainers, stacks, currentLoad, hostMem, fsSize] = await Promise.all([
+    const [allContainers, stacks, hostSample] = await Promise.all([
       DockerController.getInstance(node.id).getAllContainers(),
       FileSystemService.getInstance(node.id).getStacks(),
-      si.currentLoad(),
-      getHostMemory(),
-      si.fsSize(),
+      readLocalHostSample(node.id),
     ]);
 
     const isManagedByComposeDir = (c: Dockerode.ContainerInfo): boolean => {
@@ -313,7 +311,7 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
     const managed = containers.filter(c => c.State === 'running' && isManagedByComposeDir(c)).length;
     const unmanaged = containers.filter(c => c.State === 'running' && !isManagedByComposeDir(c)).length;
 
-    const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
+    const systemStats = hostSampleToWire(hostSample);
 
     return {
       id: node.id,
@@ -322,15 +320,13 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       status: 'online',
       stats: { active, managed, unmanaged, exited, total },
       systemStats: {
-        cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
-        // ARC/balloon aware: reclaimable ARC is added back into available,
-        // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
-        memory: memoryToWire(hostMem),
-        disk: mainDisk ? {
-          total: mainDisk.size,
-          used: mainDisk.used,
-          free: mainDisk.available,
-          usagePercent: mainDisk.use ? mainDisk.use.toFixed(1) : '0',
+        cpu: systemStats.cpu,
+        memory: systemStats.memory,
+        disk: systemStats.disk ? {
+          total: systemStats.disk.total,
+          used: systemStats.disk.used,
+          free: systemStats.disk.free,
+          usagePercent: systemStats.disk.usagePercent,
         } : null,
       },
       stacks,
@@ -441,7 +437,9 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
     ]);
 
     interface RemoteSystemStats {
-      cpu: { usage: string; cores: number };
+      // Null usage passes through unchanged: a newer remote reports null when
+      // it cannot measure host usage without leaking the outer machine.
+      cpu: { usage: string | null; cores: number };
       memory: MemoryWire;
       disk?: { total: number; used: number; free: number; usagePercent: string } | null;
     }

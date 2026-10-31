@@ -31,7 +31,8 @@ import { StackSection } from './NodeCardStackList';
 import { openGitOpsWorkplace } from '@/components/gitops/portfolio/portfolioNavigation';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
-import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
+import { getNodeCpuUsage, getNodeMemUsage, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
 
 // --- Types ---
 
@@ -99,8 +100,8 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
     const isLocal = node.type === 'local';
     const formattedVersion = formatVersion(updateStatus?.version);
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
-    const cpuPercent = getNodeCpu(node);
-    const memPercent = getNodeMem(node);
+    const cpuPercent = getNodeCpuUsage(node);
+    const memPercent = getNodeMemUsage(node);
     const memUsed = getNodeMemUsed(node);
     const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
@@ -284,18 +285,30 @@ export function NodeCard({ node, onNavigate, gitopsAttention, labelMap, updateSt
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <Cpu className="w-3 h-3" /> CPU
                                 </span>
-                                <span className="font-medium">{node.systemStats.cpu.usage}%</span>
+                                <span className="font-medium">{node.systemStats.cpu.usage !== null ? `${node.systemStats.cpu.usage}%` : '--'}</span>
                             </div>
-                            <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            {cpuPercent !== null ? (
+                                <UsageBar percent={cpuPercent} color={cpuPercent > 80 ? 'bg-destructive/80' : cpuPercent > 60 ? 'bg-warning' : 'bg-success'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         <div>
                             <div className="flex items-center justify-between text-xs mb-1">
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <MemoryStick className="w-3 h-3" /> RAM
                                 </span>
-                                <span className="font-medium">{formatBytes(memUsed, 1)} / {formatBytes(memTotal, 1)}</span>
+                                <span className="font-medium">
+                                    {memUsed !== null && memTotal !== null
+                                        ? `${formatBytes(memUsed, 1)} / ${formatBytes(memTotal, 1)}`
+                                        : '--'}
+                                </span>
                             </div>
-                            <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            {memPercent !== null ? (
+                                <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
+                            ) : (
+                                <div className="mt-1"><ShowUsageLink /></div>
+                            )}
                         </div>
                         {node.systemStats.disk && (
                             <div>

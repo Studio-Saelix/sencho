@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
 import { Sparkline } from '@/components/ui/sparkline';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
+import { parseHostUsage } from '@/lib/hostUsage';
 import type { SystemStats } from './types';
 
 interface ResourceGaugesProps {
@@ -48,12 +50,20 @@ function GaugeBar({ value, warn = 80, crit = 90 }: { value: number; warn?: numbe
 }
 
 export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEndAt }: ResourceGaugesProps) {
-  const cpuVal = parseFloat(systemStats?.cpu.usage || '0');
+  // Null usage means the host cannot be measured from here (a nested container
+  // with no cgroup mount). It is not zero, so it reads `--` with no threshold
+  // tone and no bar.
+  const cpuVal = parseHostUsage(systemStats?.cpu.usage);
+  const cpuUnknown = systemStats !== null && cpuVal === null;
   const memory = systemStats?.memory;
   // Balloon-adjusted percent so hero, tone, bar, and used/total agree with the
   // shared health verdict. Host RAM alerts still read working-set usagePercent.
-  const ramVal = parseFloat(memory?.effectiveUsagePercent ?? memory?.usagePercent ?? '0');
-  const ramUsed = memory?.effectiveUsed ?? memory?.used ?? 0;
+  const ramVal = parseHostUsage(memory?.effectiveUsagePercent ?? memory?.usagePercent);
+  const ramUnknown = systemStats !== null && ramVal === null;
+  const ramUsed = memory?.effectiveUsed ?? memory?.used ?? null;
+  // Raw working set, kept separately: the ARC line reports memory in use
+  // before the balloon adjustment, as it always has.
+  const ramRawUsed = memory?.used ?? null;
   const ramTotal = memory?.effectiveTotal ?? memory?.total ?? 0;
   const ramBallooned = memory?.ballooned ?? 0;
   const ramArcReclaimable = memory?.arcReclaimable ?? 0;
@@ -87,13 +97,18 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
       {/* CPU hero */}
       <div className="relative px-[var(--density-row-x)] py-[var(--density-tile-y)] md:border-r md:border-border/60">
         <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">
-          CPU{systemStats ? ` · ${systemStats.cpu.cores} cores` : ''}
+          CPU{cpuUnknown ? '' : systemStats ? ` · ${systemStats.cpu.cores} cores` : ''}
         </div>
-        <div className={`mt-2 font-mono tabular-nums text-4xl leading-none ${systemStats ? getValueTone(cpuVal) : 'text-stat-value'}`}>
-          {systemStats ? `${cpuVal.toFixed(1)}%` : '--'}
+        <div className={`mt-2 font-mono tabular-nums text-4xl leading-none ${cpuVal !== null ? getValueTone(cpuVal) : 'text-stat-value'}`}>
+          {cpuVal !== null ? `${cpuVal.toFixed(1)}%` : '--'}
         </div>
         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">
-          {cpuHistory.length > 0
+          {cpuUnknown ? (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>{systemStats.cpu.cores} cores · usage unknown</span>
+              <ShowUsageLink />
+            </span>
+          ) : cpuHistory.length > 0
             ? `avg ${cpuAvg.toFixed(0)}% last 10m · peak ${cpuPeak.toFixed(0)}%${cpuPeakLabel ? ` @ ${cpuPeakLabel}` : ''}`
             : 'collecting metrics…'}
         </div>
@@ -112,11 +127,16 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
         <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">
           MEMORY
         </div>
-        <div className={`mt-2 font-mono tabular-nums text-2xl leading-none ${systemStats ? getValueTone(ramVal) : 'text-stat-value'}`}>
-          {systemStats ? `${ramVal.toFixed(0)}%` : '--'}
+        <div className={`mt-2 font-mono tabular-nums text-2xl leading-none ${ramVal !== null ? getValueTone(ramVal) : 'text-stat-value'}`}>
+          {ramVal !== null ? `${ramVal.toFixed(0)}%` : '--'}
         </div>
         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">
-          {systemStats ? `${formatBytes(ramUsed)} / ${formatBytes(ramTotal)}` : '\u00A0'}
+          {ramUnknown ? (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span>{formatBytes(ramTotal)} total · usage unknown</span>
+              <ShowUsageLink />
+            </span>
+          ) : ramUsed !== null ? `${formatBytes(ramUsed)} / ${formatBytes(ramTotal)}` : '\u00A0'}
         </div>
         {ramBallooned > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
@@ -129,13 +149,13 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
             <div>Balloon reclaimable: {formatBytes(ramBallooned)}</div>
           </div>
         ) : null}
-        {memory && ramArcReclaimable > 0 ? (
+        {ramRawUsed !== null && ramArcReclaimable > 0 ? (
           <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
-            <div>Current memory in use: {formatBytes(memory.used + ramArcReclaimable)}</div>
+            <div>Current memory in use: {formatBytes(ramRawUsed + ramArcReclaimable)}</div>
             <div>ZFS ARC reclaimable: {formatBytes(ramArcReclaimable)}</div>
           </div>
         ) : null}
-        {systemStats ? <GaugeBar value={ramVal} /> : null}
+        {ramVal !== null ? <GaugeBar value={ramVal} /> : null}
       </div>
 
       {/* Disk */}

@@ -17,7 +17,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
   mockGetContainerRestartCount, mockGetDiskUsage, mockGetImages, mockGetStacks,
   mockDispatchAlert,
-  mockCurrentLoad, mockMem, mockFsSize,
+  mockCurrentLoad, mockMem, mockFsSize, mockDockerInfo,
   mockExecAsync,
   mockFetchLatestSenchoVersion,
   mockGetLatestVersion,
@@ -57,9 +57,12 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockGetImages: vi.fn().mockResolvedValue([]),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
-  mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
+  mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
   mockFsSize: vi.fn().mockResolvedValue([{ mount: '/', use: 30 }]),
+  // Agrees with the kernel view by default, so every pre-existing alert test
+  // stays on today's kernel path.
+  mockDockerInfo: vi.fn().mockResolvedValue({ NCPU: 8, MemTotal: 16e9 }),
   mockExecAsync: vi.fn().mockResolvedValue({ stdout: '' }),
   mockFetchLatestSenchoVersion: vi.fn().mockRejectedValue(new Error('not configured')),
   mockGetLatestVersion: vi.fn().mockResolvedValue(null),
@@ -179,6 +182,7 @@ vi.mock('../services/NodeRegistry', () => ({
     getInstance: () => ({
       getDefaultNodeId: () => 1,
       getNode: () => ({ id: 1, name: 'local-test', type: 'local' }),
+      getDocker: () => ({ info: mockDockerInfo }),
     }),
   },
 }));
@@ -200,6 +204,7 @@ vi.mock('util', () => ({
 }));
 
 import { MonitorService, _resetHostAlertSuppressionStateForTests } from '../services/MonitorService';
+import { CacheService } from '../services/CacheService';
 
 // Host memory now reads ZFS ARC stats; intercept those reads so the suite does
 // not depend on whether the machine running it is itself a ZFS host.
@@ -386,7 +391,7 @@ describe('MonitorService - evaluateCondition', () => {
 describe('MonitorService - evaluateGlobalSettings', () => {
   it('dispatches CPU warning when over threshold', async () => {
     mockGetGlobalSettings.mockReturnValue({ host_cpu_limit: '50' });
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 75 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 75, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50' });
@@ -395,7 +400,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
   });
 
   it('does not dispatch when CPU below threshold', async () => {
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 25 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 25, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50' });
@@ -464,7 +469,7 @@ describe('MonitorService - evaluateGlobalSettings', () => {
   });
 
   it('skips host limits when threshold is 0 or NaN', async () => {
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 99 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 99, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '0' });
@@ -493,7 +498,7 @@ describe('MonitorService - host_alerts_enabled toggle', () => {
   });
 
   it('skips host metrics and dispatch when disabled', async () => {
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 75 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 75, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_cpu_limit: '50' });
@@ -572,6 +577,84 @@ describe('MonitorService - host_alerts_enabled toggle', () => {
     await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
 
     expect(mockGetLatestVersionInfo).toHaveBeenCalled();
+  });
+});
+
+describe('MonitorService - nested host (Docker and kernel disagree)', () => {
+  const CGROUP = '/fixture/monitor-cgroup';
+  const NESTED_CAPACITY = { NCPU: 2, MemTotal: 4e9 };
+
+  const setCgroup = (opts: { cpuUsecSequence?: number[]; memoryCurrent?: number } = {}) => {
+    arcFs.setRead(`${CGROUP}/cgroup.controllers`, 'cpuset cpu memory\n');
+    arcFs.setRead(`${CGROUP}/cpuset.cpus.effective`, '0-1\n');
+    arcFs.setReadSequence(
+      `${CGROUP}/cpu.stat`,
+      (opts.cpuUsecSequence ?? [1_000_000, 1_050_000]).map((usec) => `usage_usec ${usec}\n`),
+    );
+    arcFs.setRead(`${CGROUP}/memory.max`, `${NESTED_CAPACITY.MemTotal}\n`);
+    arcFs.setRead(`${CGROUP}/memory.current`, `${opts.memoryCurrent ?? 1e9}\n`);
+    arcFs.setRead(`${CGROUP}/memory.stat`, 'inactive_file 0\n');
+  };
+
+  beforeEach(() => {
+    mockDockerInfo.mockResolvedValue(NESTED_CAPACITY);
+    arcFs.clear();
+    CacheService.getInstance().flush();
+  });
+
+  afterEach(() => {
+    delete process.env.SENCHO_HOST_CGROUP_PATH;
+    arcFs.clear();
+    mockDockerInfo.mockResolvedValue({ NCPU: 8, MemTotal: 16e9 });
+    CacheService.getInstance().flush();
+  });
+
+  it('skips both thresholds and clears suppression when usage is unknown', async () => {
+    process.env.SENCHO_HOST_CGROUP_PATH = '/nonexistent/monitor-cgroup';
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 99, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
+    mockMem.mockResolvedValue(memSample(15.5e9)); // kernel view: ~94%
+
+    const svc = MonitorService.getInstance();
+    const clearSpy = vi.spyOn(svc as any, 'clearHostMetricSuppression');
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50', host_ram_limit: '50' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+    const cleared = clearSpy.mock.calls.map((call) => call[0]);
+    expect(cleared).toContain('cpu');
+    expect(cleared).toContain('ram');
+  });
+
+  it('warns once per process that usage is not visible, naming the mount', async () => {
+    process.env.SENCHO_HOST_CGROUP_PATH = '/nonexistent/monitor-cgroup';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const svc = MonitorService.getInstance();
+      await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50', host_ram_limit: '50' });
+      await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50', host_ram_limit: '50' });
+
+      const messages = warn.mock.calls.map((call) => String(call[0]));
+      expect(messages.filter((m) => m.includes('Host CPU usage is not visible'))).toHaveLength(1);
+      expect(messages.filter((m) => m.includes('Host memory usage is not visible'))).toHaveLength(1);
+      expect(messages.some((m) => m.includes('/sys/fs/cgroup at /host/sys/fs/cgroup'))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('alerts on the cgroup usage when the nested host is genuinely busy', async () => {
+    process.env.SENCHO_HOST_CGROUP_PATH = CGROUP;
+    // 90% of the LXC's 4 GB, measured from the cgroup rather than the 16 GB kernel.
+    setCgroup({ memoryCurrent: 3.6e9, cpuUsecSequence: [1_000_000, 10_000_000] });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '50', host_ram_limit: '50' });
+
+    const messages = mockDispatchAlert.mock.calls.map((call) => call[2] as string);
+    expect(messages.some((m) => m.includes('CPU'))).toBe(true);
+    expect(messages.some((m) => m.includes('Memory'))).toBe(true);
+    // The alert percentage comes from the LXC (90%), not the 16 GB kernel view.
+    expect(messages.some((m) => m.includes('90.0%'))).toBe(true);
   });
 });
 
@@ -775,7 +858,7 @@ describe('MonitorService - host alert suppression (F-11)', () => {
 
   it('CPU and RAM suppression states are isolated per metric', async () => {
     const svc = MonitorService.getInstance();
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 95 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 95, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
 
     // First cycle: both fire.
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
@@ -790,11 +873,11 @@ describe('MonitorService - host alert suppression (F-11)', () => {
     expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
 
     // CPU drops below threshold (recovers); RAM stays high.
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 10 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 10, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
 
     // CPU re-breaches; RAM still in suppression window.
-    mockCurrentLoad.mockResolvedValue({ currentLoad: 95 });
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 95, cpus: [{}, {}, {}, {}, {}, {}, {}, {}] });
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: '80', host_ram_limit: '80' });
 
     // CPU fires fresh; RAM stays silent.

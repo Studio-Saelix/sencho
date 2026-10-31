@@ -11,6 +11,8 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import type { ProxyTarget } from '../services/NodeRegistry';
+import si from 'systeminformation';
+import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
 
 let tmpDir: string;
@@ -457,5 +459,76 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toContain(addedId);
     });
+  });
+});
+
+// Host scope parity across the three transports: the local sample is scoped to
+// the Docker host, and a remote that reports unknown usage passes it through
+// unchanged instead of being coerced to 0.
+describe('GET /api/fleet/overview host scope', () => {
+  const GiB = 1024 ** 3;
+  const UNKNOWN_STATS = {
+    cpu: { usage: null, cores: 2 },
+    memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+    disk: null,
+  };
+
+  it('passes a remote node\'s unknown usage through unchanged', async () => {
+    const nodeId = addProxyNode('nested-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    mockFetch((url) => {
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    const { status, body } = await getOverview();
+    expect(status).toBe(200);
+    const row = body.find(n => n.id === nodeId);
+    expect(row!.systemStats).toEqual(UNKNOWN_STATS);
+  });
+
+  it('reports Docker capacity for a local node whose kernel view is the outer machine', async () => {
+    const db = DatabaseService.getInstance();
+    const localNode = db.getDefaultNode();
+    if (!localNode) throw new Error('expected a default local node');
+    CacheService.getInstance().flush();
+    // The Docker client is stubbed for the whole local overview: the capacity
+    // probe uses getDocker().info(), and the container list must not hit the
+    // real socket in CI.
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getAllContainers: () => Promise.resolve([]),
+    } as unknown as DockerController);
+    process.env.SENCHO_HOST_CGROUP_PATH = '/nonexistent/fleet-overview-cgroup';
+    vi.spyOn(NodeRegistry.prototype, 'getDocker').mockReturnValue({
+      info: () => Promise.resolve({ NCPU: 2, MemTotal: 4 * GiB }),
+    } as unknown as ReturnType<typeof NodeRegistry.prototype.getDocker>);
+    vi.spyOn(si, 'currentLoad').mockResolvedValue({
+      currentLoad: 33,
+      cpus: Array.from({ length: 8 }, () => ({})),
+    } as unknown as Awaited<ReturnType<typeof si.currentLoad>>);
+    vi.spyOn(si, 'mem').mockResolvedValue({
+      total: 16 * GiB,
+      available: 12 * GiB,
+      active: 4 * GiB,
+      used: 4 * GiB,
+      free: 12 * GiB,
+      buffcache: 0,
+    } as unknown as Awaited<ReturnType<typeof si.mem>>);
+    vi.spyOn(si, 'fsSize').mockResolvedValue([
+      { fs: '/dev/sda1', mount: '/', size: 100 * GiB, used: 40 * GiB, available: 60 * GiB, use: 40 },
+    ] as unknown as Awaited<ReturnType<typeof si.fsSize>>);
+
+    try {
+      const { body } = await getOverview();
+      const row = body.find(n => n.id === localNode.id);
+      expect(row!.systemStats).toMatchObject({
+        cpu: { usage: null, cores: 2 },
+        memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+      });
+    } finally {
+      delete process.env.SENCHO_HOST_CGROUP_PATH;
+    }
   });
 });

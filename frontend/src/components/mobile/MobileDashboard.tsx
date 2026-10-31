@@ -13,6 +13,8 @@ import {
 } from '@/components/dashboard/useStackHealthScope';
 import { useStackHealthScopePreference } from '@/components/dashboard/useStackHealthScopePreference';
 import type { RowState } from '@/components/dashboard/classifyRow';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
+import { parseHostUsage } from '@/lib/hostUsage';
 import { Bar, Kicker, Masthead, MSparkline, StateDot } from './mobile-ui';
 import { NodeSwitcher } from '@/components/NodeSwitcher';
 
@@ -66,11 +68,12 @@ const ROW_STROKE: Record<RowState, string> = {
 };
 
 // One labeled metric cell inside the 3-up strip (memory / disk / network).
-function StripCell({ label, value, bar }: { label: string; value: string; bar?: ReactNode }) {
+function StripCell({ label, value, hint, bar }: { label: string; value: string; hint?: string; bar?: ReactNode }) {
   return (
     <div className="min-w-0 flex-1 px-[13px] py-3">
       <Kicker>{label}</Kicker>
       <div className="mt-1.5 font-mono tabular-nums text-[17px] leading-none text-stat-value truncate">{value}</div>
+      {hint ? <div className="mt-1 font-mono text-[10px] text-stat-subtitle truncate">{hint}</div> : null}
       {bar}
     </div>
   );
@@ -112,8 +115,12 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     [data.stats, data.systemStats, notifications],
   );
 
-  const cpuVal = parseFloat(data.systemStats?.cpu.usage || '0');
-  const ramVal = parseFloat(data.systemStats?.memory.effectiveUsagePercent ?? data.systemStats?.memory.usagePercent ?? '0');
+  // Null usage means the host cannot be measured from this container (no
+  // cgroup mount): it reads `--`, never 0%.
+  const cpuVal = parseHostUsage(data.systemStats?.cpu.usage);
+  const cpuUnknown = data.systemStats !== null && cpuVal === null;
+  const ramVal = parseHostUsage(data.systemStats?.memory.effectiveUsagePercent ?? data.systemStats?.memory.usagePercent);
+  const ramUnknown = data.systemStats !== null && ramVal === null;
   const diskVal = parseFloat(data.systemStats?.disk?.usagePercent || '0');
   const netPerSec = (data.systemStats?.network?.rxSec ?? 0) + (data.systemStats?.network?.txSec ?? 0);
 
@@ -137,7 +144,12 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   const downCount = healthRows.filter((r) => r.status === 'exited').length;
   const syncLabel = data.lastSyncAt ? `sync ${formatAgo(now - data.lastSyncAt)}` : 'connecting…';
 
-  const cpuSub = cpuHistory.length > 0
+  const cpuSub: ReactNode = cpuUnknown ? (
+    <span className="inline-flex flex-wrap items-center gap-x-1.5">
+      <span>usage unknown</span>
+      <ShowUsageLink />
+    </span>
+  ) : cpuHistory.length > 0
     ? `avg ${cpuAvg.toFixed(0)}% last 10m · peak ${cpuPeak.toFixed(0)}%${cpuPeakLabel ? ` @ ${cpuPeakLabel}` : ''}`
     : 'collecting metrics…';
 
@@ -249,7 +261,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
           <div className="flex items-start justify-between gap-3">
             <Kicker>{`cpu${data.systemStats ? ` · ${data.systemStats.cpu.cores} cores` : ''}`}</Kicker>
             <span className="font-mono tabular-nums text-[30px] leading-none tracking-[-0.02em] text-stat-value">
-              {data.systemStats ? `${cpuVal.toFixed(0)}%` : '--'}
+              {cpuVal !== null ? `${cpuVal.toFixed(0)}%` : '--'}
             </span>
           </div>
           <div className="mx-[-3px] mb-1 mt-1.5">
@@ -262,8 +274,9 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
         <div className="flex items-stretch divide-x divide-hairline overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
           <StripCell
             label="mem"
-            value={data.systemStats ? `${ramVal.toFixed(0)}%` : '--'}
-            bar={data.systemStats ? <Bar pct={ramVal} /> : undefined}
+            value={ramVal !== null ? `${ramVal.toFixed(0)}%` : '--'}
+            hint={ramUnknown ? 'usage unknown' : undefined}
+            bar={ramVal !== null ? <Bar pct={ramVal} /> : undefined}
           />
           <StripCell
             label="disk"
@@ -275,6 +288,12 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
             value={data.systemStats?.network ? `${formatBytes(netPerSec)}/s` : '--'}
           />
         </div>
+
+        {ramUnknown ? (
+          <div className="flex items-center justify-end gap-2">
+            <ShowUsageLink />
+          </div>
+        ) : null}
 
         {/* stack health */}
         <div>

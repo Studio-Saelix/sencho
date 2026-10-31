@@ -82,6 +82,8 @@ Pilot mode narrows the operator surface in a couple of places where parity with 
 | **Operator role** | Admin on the control instance. The Settings → Nodes panel is admin-only. |
 | **License tier** | None. Pilot Agent is Community-tier core surface. |
 
+Running the agent inside an LXC container needs one extra read-only mount so the node's CPU and memory usage is measured from the Docker host instead of the outer machine. See [Docker hosts inside an LXC or another container](/getting-started/configuration#docker-hosts-inside-an-lxc-or-another-container).
+
 ### The control instance's public URL
 
 When the enrollment dialog generates the agent's compose file, it bakes the control instance's URL into `SENCHO_PRIMARY_URL` by reading the Host header on the admin's request. That works on a LAN, but it breaks when the pilot lives on a different network (a public cloud VPS, for example) and the admin happened to open the dialog at `http://127.0.0.1:1852` or a LAN address: the baked-in URL is then unreachable from the pilot.

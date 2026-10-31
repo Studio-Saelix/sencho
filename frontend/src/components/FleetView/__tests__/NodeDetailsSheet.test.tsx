@@ -275,3 +275,26 @@ describe('NodeDetailsSheet', () => {
     });
   });
 });
+
+describe('NodeDetailsSheet host usage unknown', () => {
+  const unknownNode = fleetNode({
+    systemStats: {
+      cpu: { usage: null, cores: 2 },
+      memory: { total: 4 * 1024 ** 3, used: null, free: null, usagePercent: null },
+      disk: { total: 100, used: 30, free: 70, usagePercent: '30.0' },
+    },
+  });
+
+  it('shows the capacity, placeholders, and the docs link', () => {
+    render(<NodeDetailsSheet {...baseProps({ node: unknownNode })} />);
+    expect(screen.getByText('CPU · 2 cores')).toBeInTheDocument();
+    expect(screen.getByText('4 GB total')).toBeInTheDocument();
+    expect(screen.getAllByText('--')).toHaveLength(1);
+    expect(screen.getAllByText('Show usage…')).toHaveLength(2);
+  });
+
+  it('does not invent a zero percentage', () => {
+    render(<NodeDetailsSheet {...baseProps({ node: unknownNode })} />);
+    expect(screen.queryByText('0%')).not.toBeInTheDocument();
+  });
+});
