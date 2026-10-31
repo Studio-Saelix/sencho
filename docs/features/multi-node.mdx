@@ -150,7 +150,7 @@ A page waits a few seconds for the selected node before it gives up, so a remote
 - the dashboard headline reads **Unknown** rather than the last health level, so stale numbers are never presented as current;
 - data you already had stays on screen only where that surface already marks it stale, such as the stack-health rows and the **metrics stale** chip.
 
-Long-running work keeps its own lifetime: deploys, updates, image pulls, restores, downloads, log streams, and the live terminals are never cut short by the page's read wait.
+Reads that the codebase knows are slow (disk usage, the volume browser, the full resources inventory) get a longer wait before they are called silent, and a response that has started is bounded by a stall timeout rather than a total-time cap. Deploys, updates, image pulls, restores, downloads, log streams, and the live terminals are never cut short by the page's read wait.
 
 ## What top-level views show when a remote node is active
 

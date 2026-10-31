@@ -224,8 +224,8 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     <div className="flex h-full min-h-0 flex-col">
       <Masthead
         kickerSlot={<NodeSwitcher compact onManageNodes={onManageNodes} />}
-        state={LEVEL_LABEL[level]}
-        stateTone={LEVEL_TONE[level]}
+        state={data.metricsUnreadable ? 'Unknown' : LEVEL_LABEL[level]}
+        stateTone={data.metricsUnreadable ? 'warning' : LEVEL_TONE[level]}
         live={level !== 'healthy' || data.metricsStale}
         meta={
           <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">

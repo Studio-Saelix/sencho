@@ -10,7 +10,7 @@ import { LockCard } from '@/components/ui/LockCard';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
-import { classifyRemoteReadFailure, remoteReadFailureMessage, type RemoteReadFailure } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadError, classifyRemoteReadFailure, remoteReadFailureMessage, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -193,7 +193,10 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       } catch (error) {
         if (!stale && !(error instanceof DOMException && error.name === 'AbortError')) {
           console.error('[Networking] Failed to load overview:', error);
-          setLoadFailure('error');
+          // A thrown error can still carry an answer: apiFetch throws on 401
+          // before the caller sees the response. Classify it so the page names
+          // the cause instead of generic transport copy.
+          setLoadFailure(classifyRemoteReadError(error));
         }
       } finally {
         if (!stale) setLoading(false);

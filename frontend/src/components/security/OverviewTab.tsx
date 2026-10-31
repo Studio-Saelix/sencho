@@ -37,7 +37,7 @@ interface OverviewTabProps {
    * answer at all; 'unauthorized' = the operator's grants, not the node;
    * 'failed' = a real error.
    */
-  loadError: 'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'failed' | null;
+  loadError: 'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null;
   /** Retry the overview read (the surface's only recovery path when it fails). */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
@@ -60,13 +60,13 @@ interface OverviewTabProps {
  * "the node did not answer", "the node is unreachable", and "you cannot read
  * this here" send the operator to different places.
  */
-const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'failed', {
+const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed', {
   title: string;
   body: string;
 }> = {
   timeout: {
     title: 'This node did not answer',
-    body: 'The security overview did not arrive in time. The node is unreachable or still starting, so nothing is shown rather than an empty result.',
+    body: 'The security overview did not arrive in time, so nothing is shown rather than an empty result.',
   },
   unreachable: {
     title: 'This node is unreachable',
@@ -75,6 +75,14 @@ const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'fai
   unauthorized: {
     title: 'No access to this overview',
     body: 'Your account cannot read the security overview on this node. Ask an administrator for access.',
+  },
+  'node-credential': {
+    title: 'This node rejected the hub credential',
+    body: "The stored API token for this node was rejected. Update the node's token in Settings → Nodes.",
+  },
+  unverified: {
+    title: 'Permissions could not be verified',
+    body: "This node's permission model could not be verified. Try again once the node is healthy.",
   },
   failed: {
     title: "Couldn't load the overview",

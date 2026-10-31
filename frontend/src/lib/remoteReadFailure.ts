@@ -5,15 +5,25 @@
  * accepts the connection and then goes silent now answers 504 with a marker
  * header instead of holding the page. That answer has to stay distinguishable
  * from every other way a read can fail, because the pages treat them
- * differently: a timeout is retryable and says the node is not answering, an
- * authorization failure is the operator's permissions, a 404 from an older node
- * means the surface does not exist there, and a confirmed empty answer is not a
- * failure at all.
+ * differently: a timeout is retryable and says the node did not answer in time,
+ * an authorization failure is the operator's grants, a rejected node credential
+ * is the hub's stored token rather than the operator's session, a 404 from an
+ * older node means the surface does not exist there, and a confirmed empty
+ * answer is not a failure at all.
+ *
+ * The gateway marks the cause it established on answers whose status alone
+ * would mislead (a 503 for a node that answered but could not be verified). A
+ * marked cause is used as-is; unmarked answers fall back to the status.
  */
 export type RemoteReadFailure =
   | 'timeout'
   | 'unreachable'
   | 'unauthorized'
+  | 'node-credential'
+  | 'unverified'
+  | 'not-configured'
+  | 'pilot-disconnected'
+  | 'refused'
   | 'unsupported'
   | 'http'
   | 'error';
@@ -25,10 +35,34 @@ export type RemoteReadFailure =
  */
 export const REMOTE_READ_TIMEOUT_HEADER = 'x-sencho-read-timeout';
 
+/**
+ * Set by the gateway on a synthesized answer whose status alone would name the
+ * wrong cause. Kept in sync with `REMOTE_READ_FAILURE_HEADER` in
+ * `backend/src/proxy/interactiveRemoteRead.ts`.
+ */
+export const REMOTE_READ_FAILURE_HEADER = 'x-sencho-read-failure';
+
+const MARKED_FAILURES: ReadonlySet<string> = new Set<RemoteReadFailure>([
+  'timeout',
+  'unreachable',
+  'unauthorized',
+  'node-credential',
+  'unverified',
+  'not-configured',
+  'pilot-disconnected',
+  'refused',
+  'unsupported',
+]);
+
 /** Classify a failed read, or return null when the response is a success. */
 export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | null {
   if (res.ok) return null;
   if (res.status === 504 && res.headers.get(REMOTE_READ_TIMEOUT_HEADER) === '1') return 'timeout';
+  const marked = res.headers.get(REMOTE_READ_FAILURE_HEADER);
+  if (marked !== null && MARKED_FAILURES.has(marked)) return marked as RemoteReadFailure;
+  // A 401 forwarded from a remote carries the proxy sentinel: the remote
+  // rejected the hub's stored node token, not the operator's own session.
+  if (res.status === 401 && res.headers.get('x-sencho-proxy') === '1') return 'node-credential';
   if (res.status === 502 || res.status === 503) return 'unreachable';
   if (res.status === 401 || res.status === 403) return 'unauthorized';
   if (res.status === 404) return 'unsupported';
@@ -58,21 +92,34 @@ export function classifyRemoteReadError(error: unknown): RemoteReadFailure {
 
 /**
  * One plain sentence for a failed read, naming the node the operator selected.
- * `http` keeps the status so an unexpected answer is still visible; every other
- * kind is a state the operator can act on.
+ * Each cause gets the fix it actually needs: a timeout states only that the
+ * read did not answer in time, a rejected node credential points at the stored
+ * token, and an unverified capability does not claim the node was silent.
+ * `http` keeps the status so an unexpected answer is still visible.
  */
 export function remoteReadFailureMessage(
   failure: RemoteReadFailure,
   options: { nodeName?: string | null; status?: number } = {},
 ): string {
   const name = options.nodeName?.trim();
+  const subject = name ? `"${name}"` : 'This node';
   switch (failure) {
     case 'timeout':
-      return `${name ? `"${name}"` : 'This node'} did not answer in time. It is unreachable or still starting.`;
+      return `${subject} did not answer in time. Try again in a moment.`;
     case 'unreachable':
-      return `${name ? `"${name}"` : 'This node'} is unreachable. Check that Sencho is running on that host.`;
+      return `${subject} is unreachable. Check that Sencho is running on that host.`;
     case 'unauthorized':
       return `You do not have access to this data on ${name ? `"${name}"` : 'this node'}.`;
+    case 'node-credential':
+      return `The stored credential for ${subject} was rejected. Update the node's API token in Settings → Nodes.`;
+    case 'unverified':
+      return `${subject}'s permission model could not be verified. Try again shortly.`;
+    case 'not-configured':
+      return `${subject} has no API URL or token configured. Update it in Settings → Nodes.`;
+    case 'pilot-disconnected':
+      return `The Pilot tunnel to ${subject} is disconnected. It resumes when the agent reconnects.`;
+    case 'refused':
+      return `The hub refused ${subject}'s address. Check the node's API URL.`;
     case 'unsupported':
       return 'This node does not serve this data. Update the node to see it.';
     case 'http':

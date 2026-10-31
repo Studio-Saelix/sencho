@@ -482,4 +482,18 @@ describe('OverviewTab unavailable states', () => {
     expect(screen.getByText(/no access to this overview/i)).toBeInTheDocument();
     expect(screen.queryByText(/did not answer/i)).toBeNull();
   });
+
+  it('names a rejected node credential instead of the operator’s access', () => {
+    renderUnavailable('node-credential');
+    expect(screen.getByText(/rejected the hub credential/i)).toBeInTheDocument();
+    expect(screen.queryByText(/your account cannot read/i)).toBeNull();
+    expect(screen.queryByText(/unreachable/i)).toBeNull();
+  });
+
+  it('does not call a node silent when its permission model was unverified', () => {
+    renderUnavailable('unverified');
+    expect(screen.getByText(/permissions could not be verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/permission model could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/unreachable|did not answer/i)).toBeNull();
+  });
 });

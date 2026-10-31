@@ -85,6 +85,7 @@ export default function HomeDashboard({ notifications, unreportedNodeIds, onMark
         nodeCount={data.nodeCount}
         lastSyncAt={data.lastSyncAt}
         metricsStale={data.metricsStale}
+        metricsUnreadable={data.metricsUnreadable}
       />
 
       <ResourceGauges

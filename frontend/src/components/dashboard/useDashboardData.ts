@@ -113,6 +113,10 @@ export function useDashboardData(): DashboardData {
   const [stackStatusesFreshness, setStackStatusesFreshness] = useState<'current' | 'stale'>('current');
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [metricsStale, setMetricsStale] = useState(false);
+  // A node that did not answer at all is a different state from metrics that
+  // are stale for a known local reason (the Docker socket). Only the former
+  // reads as "Unknown"/"not answering"; the latter keeps the derived level.
+  const [metricsUnreadable, setMetricsUnreadable] = useState(false);
 
   // Keep a ref to the latest nodeId so async callbacks don't write stale data
   // after a node switch has already triggered a new effect cycle.
@@ -145,6 +149,13 @@ export function useDashboardData(): DashboardData {
   // successful response on the failing endpoint clears its own counter and,
   // when both are within the threshold, clears the indicator.
   const failureCountsRef = useRef({ stats: 0, sys: 0 });
+  // Last failure kind per endpoint, so the headline can distinguish "the node
+  // did not answer" from "the gauges are stale". Cleared by that endpoint's
+  // next success and on a node change.
+  const lastFailureRef = useRef<{ stats: RemoteReadFailure | null; sys: RemoteReadFailure | null }>({
+    stats: null,
+    sys: null,
+  });
 
   const fetchJson = useCallback(async <T>(
     endpoint: string,
@@ -168,16 +179,22 @@ export function useDashboardData(): DashboardData {
     const counts = failureCountsRef.current;
     if (outcome.ok) {
       counts[endpoint] = 0;
+      lastFailureRef.current[endpoint] = null;
     } else if (isUnreadableNode(outcome.failure)) {
       // A node that did not answer is not a transient hiccup: mark the numbers
       // stale on the first bounded failure instead of waiting out three polls,
       // so the dashboard never keeps showing zeros as if they were readings.
       counts[endpoint] = METRICS_STALE_THRESHOLD;
+      lastFailureRef.current[endpoint] = outcome.failure;
     } else {
       counts[endpoint] += 1;
+      lastFailureRef.current[endpoint] = outcome.failure;
     }
     const stale = counts.stats >= METRICS_STALE_THRESHOLD || counts.sys >= METRICS_STALE_THRESHOLD;
     setMetricsStale(stale);
+    setMetricsUnreadable(
+      isUnreadableNode(lastFailureRef.current.stats) || isUnreadableNode(lastFailureRef.current.sys),
+    );
   }, []);
 
   // Container stats: 5s polling, resets on node change
@@ -185,7 +202,9 @@ export function useDashboardData(): DashboardData {
     setStats(DEFAULT_STATS); // eslint-disable-line react-hooks/set-state-in-effect
     setLastSyncAt(null);
     failureCountsRef.current.stats = 0;
+    lastFailureRef.current.stats = null;
     setMetricsStale(failureCountsRef.current.sys >= METRICS_STALE_THRESHOLD);
+    setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.sys));
     const currentNodeId = nodeId;
     const fetchStats = async () => {
       if (nodeIdRef.current !== currentNodeId) return; // Stale effect
@@ -206,7 +225,9 @@ export function useDashboardData(): DashboardData {
   useEffect(() => {
     setSystemStats(null); // eslint-disable-line react-hooks/set-state-in-effect
     failureCountsRef.current.sys = 0;
+    lastFailureRef.current.sys = null;
     setMetricsStale(failureCountsRef.current.stats >= METRICS_STALE_THRESHOLD);
+    setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.stats));
     const currentNodeId = nodeId;
     const fetchSys = async () => {
       if (nodeIdRef.current !== currentNodeId) return;
@@ -516,5 +537,6 @@ export function useDashboardData(): DashboardData {
     netHistory,
     historyEndAt,
     metricsStale,
+    metricsUnreadable,
   };
 }

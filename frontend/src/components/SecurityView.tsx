@@ -79,7 +79,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
   const [overviewLoadError, setOverviewLoadError] = useState<
-    'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'failed' | null
+    'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null
   >(null);
   const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
   const [summariesLoading, setSummariesLoading] = useState(true);
@@ -231,7 +231,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           setOverviewLoadError(
             overviewRes.status === 404
               ? 'unsupported'
-              : readFailure === 'timeout' || readFailure === 'unreachable' || readFailure === 'unauthorized'
+              : readFailure === 'timeout'
+                || readFailure === 'unreachable'
+                || readFailure === 'unauthorized'
+                || readFailure === 'node-credential'
+                || readFailure === 'unverified'
                 ? readFailure
                 : 'failed',
           );
@@ -260,7 +264,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         setOverview(null);
         const thrown = classifyRemoteReadError(err);
         setOverviewLoadError(
-          thrown === 'timeout' || thrown === 'unreachable' || thrown === 'unauthorized' ? thrown : 'failed',
+          thrown === 'timeout'
+            || thrown === 'unreachable'
+            || thrown === 'unauthorized'
+            || thrown === 'node-credential'
+            || thrown === 'unverified'
+            ? thrown
+            : 'failed',
         );
         setSummaries({});
         setSummariesError(true);

@@ -15,6 +15,9 @@ interface HealthStatusBarProps {
   /** True when the metrics reads are not answering: several consecutive failures,
    *  or one bounded gateway timeout against a remote node. */
   metricsStale?: boolean;
+  /** True when the metrics stopped at a state where the node could not be read
+   *  (a bounded timeout or an unreachable node), as opposed to stale meters. */
+  metricsUnreadable?: boolean;
 }
 
 const healthConfig: Record<HealthLevel, { label: string; textClass: string; railClass: string; tintClass: string }> = {
@@ -83,12 +86,16 @@ export function HealthStatusBar({
   nodeCount,
   lastSyncAt,
   metricsStale = false,
+  metricsUnreadable = false,
 }: HealthStatusBarProps) {
   const { level, reasons } = useMemo(
     () => deriveHealth(stats, systemStats, notifications),
     [stats, systemStats, notifications],
   );
-  const config = metricsStale ? unavailableHealth : healthConfig[level];
+  // "Unknown" is reserved for a node that did not answer. Stale meters with a
+  // known local cause (the Docker socket, the metrics service) keep the derived
+  // level and the stale chip, so the copy does not blame the network for them.
+  const config = metricsUnreadable ? unavailableHealth : healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
@@ -96,7 +103,7 @@ export function HealthStatusBar({
   const memLabel = systemStats ? formatGib(systemStats.memory.effectiveUsed ?? systemStats.memory.used) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
-  const reasonsLine = metricsStale ? 'This node is not answering.' : reasons.join(' · ');
+  const reasonsLine = metricsUnreadable ? 'This node is not answering.' : reasons.join(' · ');
 
   return (
     <div

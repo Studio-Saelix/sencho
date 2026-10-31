@@ -121,6 +121,7 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsStale).toBe(false);
     await tickStats();
     expect(result.current.metricsStale).toBe(true);
+    expect(result.current.metricsUnreadable).toBe(false);
 
     // The first successful /stats poll resets the counter; with the
     // /system/stats endpoint still below threshold, the indicator clears.
@@ -198,11 +199,39 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsStale).toBe(true);
   });
 
+  it('marks metrics unreadable only when the node did not answer', async () => {
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ code: 'remote_read_timeout' }),
+          { status: 504, headers: { 'x-sencho-read-timeout': '1' } },
+        ));
+      }
+      if (requested === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (requested === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsStale).toBe(true);
+    expect(result.current.metricsUnreadable).toBe(true);
+
+    // A later success on the same endpoint clears the unreadable state; the
+    // node answered again.
+    setEndpointOutcome('/stats', true);
+    await tickStats();
+    expect(result.current.metricsUnreadable).toBe(false);
+  });
+
   it('does not treat an ordinary HTTP failure as an unavailable node', async () => {
     setEndpointOutcome('/stats', false);
     const { result } = renderHook(() => useDashboardData());
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(result.current.metricsStale).toBe(false);
+    expect(result.current.metricsUnreadable).toBe(false);
   });
 });

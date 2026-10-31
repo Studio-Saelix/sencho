@@ -31,6 +31,7 @@ import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
 import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
 import {
+    classifyRemoteReadError,
     classifyRemoteReadFailure,
     isUnreadableNode,
     remoteReadFailureMessage,
@@ -351,6 +352,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // only that one fails, the tab must say so rather than claim the node has
     // none.
     const [orphansState, setOrphansState] = useState<LoadState>('loading');
+    // The external read's own failure, so its tab names that read's cause
+    // rather than borrowing the inventory read's.
+    const [orphansFailure, setOrphansFailure] = useState<RemoteReadFailure | null>(null);
     const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
     const isLoading = inventoryState === 'loading';
     const [isActioning, setIsActioning] = useState(false);
@@ -414,6 +418,19 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
+    // A background failure keeps the external rows on screen, as the inventory
+    // tables do, and names its own cause on the tab. A foreground load ends on
+    // the error state so the tab can never keep its skeleton.
+    const failOrphans = (background: boolean, failure: RemoteReadFailure, notify = true) => {
+        setOrphansFailure(failure);
+        if (background) {
+            if (notify) toast.error('Failed to refresh external containers');
+            setOrphansState((state) => (state === 'loading' ? 'error' : state));
+        } else {
+            setOrphansState('error');
+        }
+    };
+
     const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
         const generation = ++inventoryGenerationRef.current;
         inventoryAbortRef.current?.abort();
@@ -423,6 +440,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             setInventoryState('loading');
             setInventoryFailure(null);
             setOrphansState('loading');
+            setOrphansFailure(null);
         }
         try {
             const signal = controller.signal;
@@ -454,10 +472,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (orphansData) {
                 setOrphans(orphansData);
                 setSelectedOrphans([]);
+                setOrphansFailure(null);
                 setOrphansState('ready');
             } else {
                 console.error('Failed to fetch external containers', orphansRes.status);
-                setOrphansState('error');
+                failOrphans(background, classifyRemoteReadFailure(orphansRes) ?? 'http');
             }
             if (summariesData) setScanSummaries(summariesData);
             setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
@@ -466,10 +485,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             console.error('Failed to fetch data', err);
             // The batch rejects as a whole when any one read throws (a remote
             // 401 is the common case), so the external-container slice has to be
-            // settled here too or that tab keeps its skeleton forever.
-            setOrphansState('error');
+            // settled here too or that tab keeps its skeleton forever. The
+            // inventory toast already reports the failed refresh, so the
+            // external slice only records its cause.
+            const failure = classifyRemoteReadError(err);
+            failOrphans(background, failure, false);
             if (!background) toast.error('Failed to load resources data');
-            failInventory(background, 'error');
+            failInventory(background, failure);
         }
     };
 
@@ -518,6 +540,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         setNetworks([]);
         setOrphans({});
         setOrphansState('loading');
+        setOrphansFailure(null);
         setSelectedOrphans([]);
         setRollbackGenerations([]);
         void loadInventory();
@@ -738,6 +761,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // 4xx/5xx keeps the existing short copy.
     const inventoryFailureReason = inventoryFailure !== null && isUnreadableNode(inventoryFailure)
         ? remoteReadFailureMessage(inventoryFailure, { nodeName: activeNode?.name })
+        : null;
+    // The external tab names its own read's cause, never the inventory read's.
+    const orphansFailureReason = orphansFailure !== null && isUnreadableNode(orphansFailure)
+        ? remoteReadFailureMessage(orphansFailure, { nodeName: activeNode?.name })
         : null;
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
 
@@ -1163,11 +1190,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
                         {totalOrphansCount === 0 && orphansState === 'loading' ? (
                             <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
-                        ) : orphansState === 'error' ? (
+                        ) : orphansState === 'error' && totalOrphansCount === 0 ? (
                             <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
                                 <span>Could not load external containers.</span>
-                                {inventoryFailureReason ? (
-                                    <span className="text-xs text-stat-subtitle">{inventoryFailureReason}</span>
+                                {orphansFailureReason ? (
+                                    <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
                                 ) : null}
                                 <Button variant="outline" size="sm" onClick={() => void loadInventory()}>Retry</Button>
                             </div>

@@ -83,4 +83,17 @@ describe('NetworkingView unavailable state', () => {
     expect(await screen.findByText(/not available on this node/i)).toBeInTheDocument();
     expect(screen.queryByText(/networking did not load/i)).toBeNull();
   });
+
+  it('classifies a thrown 401 instead of reporting a generic transport failure', async () => {
+    const unauthorized = Object.assign(new Error('Unauthorized'), {
+      response: new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    });
+    apiFetchMock.mockRejectedValue(unauthorized);
+
+    render(<NetworkingView />);
+
+    expect(await screen.findByText(/networking did not load/i)).toBeInTheDocument();
+    expect(screen.getByText(/do not have access to this data/i)).toBeInTheDocument();
+    expect(screen.queryByText(/failed before the node answered/i)).toBeNull();
+  });
 });

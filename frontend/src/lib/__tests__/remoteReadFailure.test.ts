@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  REMOTE_READ_FAILURE_HEADER,
   REMOTE_READ_TIMEOUT_HEADER,
   classifyRemoteReadError,
   classifyRemoteReadFailure,
@@ -17,6 +18,13 @@ function status(code: number, body: unknown = { error: 'nope' }): Response {
   return new Response(JSON.stringify(body), { status: code });
 }
 
+function marked(failure: string, code = 503): Response {
+  return new Response(JSON.stringify({ error: 'nope' }), {
+    status: code,
+    headers: { [REMOTE_READ_FAILURE_HEADER]: failure },
+  });
+}
+
 describe('classifyRemoteReadFailure', () => {
   it('reads a marked 504 as the gateway read deadline', () => {
     expect(classifyRemoteReadFailure(timedOut())).toBe('timeout');
@@ -29,6 +37,21 @@ describe('classifyRemoteReadFailure', () => {
   it('reads a gateway 502 or a disconnected-node 503 as unreachable', () => {
     expect(classifyRemoteReadFailure(status(502))).toBe('unreachable');
     expect(classifyRemoteReadFailure(status(503))).toBe('unreachable');
+  });
+
+  it('uses the cause the gateway marked when the status alone would mislead', () => {
+    expect(classifyRemoteReadFailure(marked('unverified'))).toBe('unverified');
+    expect(classifyRemoteReadFailure(marked('not-configured'))).toBe('not-configured');
+    expect(classifyRemoteReadFailure(marked('pilot-disconnected'))).toBe('pilot-disconnected');
+    expect(classifyRemoteReadFailure(marked('refused', 502))).toBe('refused');
+  });
+
+  it('treats a 401 forwarded by the proxy as a rejected node credential, not the session', () => {
+    const proxied = new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { 'x-sencho-proxy': '1' },
+    });
+    expect(classifyRemoteReadFailure(proxied)).toBe('node-credential');
   });
 
   it('keeps authorization, missing surface, and success distinct', () => {
@@ -65,6 +88,25 @@ describe('remoteReadFailureMessage', () => {
     expect(remoteReadFailureMessage('unauthorized')).toContain('do not have access');
     expect(remoteReadFailureMessage('unsupported')).toContain('does not serve this data');
     expect(remoteReadFailureMessage('http', { status: 500 })).toContain('500');
+  });
+
+  it('states only the missed deadline on a timeout, without claiming unreachable', () => {
+    const message = remoteReadFailureMessage('timeout', { nodeName: 'edge-1' });
+    expect(message).not.toMatch(/unreachable/i);
+    expect(message).not.toMatch(/still starting/i);
+  });
+
+  it('names a rejected node credential instead of the operator’s access', () => {
+    const message = remoteReadFailureMessage('node-credential', { nodeName: 'edge-1' });
+    expect(message).toMatch(/stored credential/i);
+    expect(message).toMatch(/API token/i);
+    expect(message).not.toMatch(/do not have access/i);
+  });
+
+  it('does not call a node silent when its permission model was unverified', () => {
+    const message = remoteReadFailureMessage('unverified', { nodeName: 'edge-1' });
+    expect(message).toMatch(/permission model could not be verified/i);
+    expect(message).not.toMatch(/did not answer|unreachable/i);
   });
 
   it('falls back to a neutral subject when the node is unnamed', () => {

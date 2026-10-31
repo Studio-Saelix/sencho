@@ -128,4 +128,6 @@ export interface DashboardData {
   historyEndAt: number | null;
   /** True after several consecutive `/stats` or `/system/stats` polls have failed; surfaces a "metrics paused" indicator. */
   metricsStale: boolean;
+  /** True when a metrics read stopped at a state where the node could not be read (a bounded timeout or an unreachable node). */
+  metricsUnreadable: boolean;
 }

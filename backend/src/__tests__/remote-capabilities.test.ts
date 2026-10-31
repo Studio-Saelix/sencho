@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import type { RemoteMeta } from '../services/CapabilityRegistry';
+import type { RemoteMeta, RemoteMetaProbe } from '../services/CapabilityRegistry';
 
 let remoteSupportsCrossNodeRbac: typeof import('../helpers/remoteCapabilities').remoteSupportsCrossNodeRbac;
 let remoteAdvertisesCapability: typeof import('../helpers/remoteCapabilities').remoteAdvertisesCapability;
@@ -117,6 +117,32 @@ describe('probeRemoteCapability', () => {
       .mockResolvedValue({ kind: 'ok', meta: { version: '0.97.1', capabilities: ['fleet', CAP], ...ONLINE } });
     await probeRemoteCapability(NODE_ID, CAP, controller.signal);
     expect(spy).toHaveBeenCalledWith(NODE_ID, controller.signal);
+  });
+
+  it('dedupes concurrent signal-free probes for the same node+capability', async () => {
+    let resolveProbe: (value: RemoteMetaProbe) => void = () => {};
+    const spy = vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta')
+      .mockImplementation(() => new Promise((resolve) => { resolveProbe = resolve; }));
+    const first = probeRemoteCapability(NODE_ID, CAP);
+    const second = probeRemoteCapability(NODE_ID, CAP);
+    resolveProbe({ kind: 'ok', meta: { version: '0.97.1', capabilities: [CAP], ...ONLINE } });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { kind: 'supported' },
+      { kind: 'supported' },
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let one caller\'s abort signal cancel another caller\'s probe', async () => {
+    const controller = new AbortController();
+    vi.spyOn(NodeRegistry.getInstance(), 'probeRemoteMeta')
+      .mockResolvedValue({ kind: 'ok', meta: { version: '0.97.1', capabilities: [CAP], ...ONLINE } });
+    const [shared, signalled] = await Promise.all([
+      probeRemoteCapability(NODE_ID, CAP),
+      probeRemoteCapability(NODE_ID, CAP, controller.signal),
+    ]);
+    expect(shared).toEqual({ kind: 'supported' });
+    expect(signalled).toEqual({ kind: 'supported' });
   });
 
   it('returns unsupported for a valid online metadata that does not advertise it', async () => {
