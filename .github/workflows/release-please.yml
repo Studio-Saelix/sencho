@@ -98,3 +98,30 @@ jobs:
             git commit -m "chore: credit external contributors in changelog"
             git push origin "HEAD:$RELEASE_BRANCH"
           fi
+      # release-please only emits commit subjects. Write a short plain-language
+      # overview at the top of the newest changelog section so the GitHub
+      # release, the in-app Changelog tab, and What's New have something an
+      # operator can read. It is reviewed in the Release PR diff before merge,
+      # and fails soft: a missing key or an API error ships no block, never a
+      # failed release. Runs after the credit step so it reads the final bullets.
+      - name: Write release highlights into changelog
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName || '' }}
+        run: |
+          if [ -z "$RELEASE_BRANCH" ]; then
+            echo "RELEASE_BRANCH is empty; aborting."
+            exit 1
+          fi
+          cp scripts/release-highlights.mjs scripts/credit-changelog-contributors.mjs "$RUNNER_TEMP/"
+          git fetch origin "$RELEASE_BRANCH"
+          git checkout "$RELEASE_BRANCH"
+          node "$RUNNER_TEMP/release-highlights.mjs"
+          if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
+            git config user.name "sencho-quartermaster[bot]"
+            git config user.email "275163604+sencho-quartermaster[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore: write release highlights in changelog"
+            git push origin "HEAD:$RELEASE_BRANCH"
+          fi

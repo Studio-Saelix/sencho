@@ -7,20 +7,14 @@ vi.mock('@/hooks/useWhatsNewPreference', () => ({
   useWhatsNewPreference: () => mockPreference(),
 }));
 
-// The committed entries.json is empty, which the trigger treats as "nothing to
-// announce". Every case below except the empty-file one needs an entry to exist.
-vi.mock('@/whats-new/entries', () => ({
-  whatsNewEntries: [{ id: 'entry-a', title: 'A feature', blurb: 'Does a thing.' }],
-}));
-
 import { WhatsNewTrigger } from '../WhatsNewTrigger';
 
-function givenPreference(enabled: boolean, hasUnseen: boolean) {
-  mockPreference.mockReturnValue({ enabled, hasUnseen, setEnabled: vi.fn(), markSeen: vi.fn() });
+function givenPreference(enabled: boolean, hasUnseen: boolean, version: string | null = '0.98.1') {
+  mockPreference.mockReturnValue({ enabled, hasUnseen, version, setEnabled: vi.fn(), markSeen: vi.fn() });
 }
 
 describe('WhatsNewTrigger', () => {
-  it('breathes when enabled and there are unseen entries', () => {
+  it('breathes when enabled and the running release has not been seen', () => {
     givenPreference(true, true);
     render(<WhatsNewTrigger onClick={vi.fn()} />);
     const icon = screen.getByRole('button', { name: "What's new" }).querySelector('svg');
@@ -29,6 +23,12 @@ describe('WhatsNewTrigger', () => {
 
   it('renders nothing at all when the preference is disabled', () => {
     givenPreference(false, true);
+    render(<WhatsNewTrigger onClick={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
+  });
+
+  it('renders nothing for a dev or preview build (no stable version)', () => {
+    givenPreference(true, false, null);
     render(<WhatsNewTrigger onClick={vi.fn()} />);
     expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
   });

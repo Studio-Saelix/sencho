@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { ExternalLink, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
-import { whatsNewEntries } from '@/whats-new/entries';
+import { Skeleton } from '@/components/ui/skeleton';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { apiFetch } from '@/lib/api';
+import { extractHighlights } from '@/lib/releaseHighlights';
+import { formatVersion } from '@/lib/version';
 import { useWhatsNewPreference } from '@/hooks/useWhatsNewPreference';
 
 interface WhatsNewModalProps {
@@ -12,71 +15,83 @@ interface WhatsNewModalProps {
   onViewChangelog: () => void;
 }
 
+type ReleaseNotesResult =
+  | { version: string; failed: false; highlights: string | null; htmlUrl: string | null }
+  | { version: string; failed: true };
+
 // font-sans/normal-case/tracking-normal reset ModalFooter's inherited kicker styling (font-mono uppercase tracking-[0.22em]) so the footer link reads as a link, not a label.
 const linkClassName = 'inline-flex items-center gap-1 text-xs text-brand hover:underline font-sans normal-case tracking-normal';
 
-// whatsNewEntries is authored oldest-first; the modal shows newest first.
-const entries = [...whatsNewEntries].reverse();
-
 export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewModalProps) {
-  const { markSeen, setEnabled } = useWhatsNewPreference();
-  // Screenshots are authored by hand alongside the entry, so a typo'd or
-  // not-yet-added filename is a realistic mistake. Drop the image instead of
-  // leaving the browser's broken-image placeholder in the card.
-  const [failedScreenshots, setFailedScreenshots] = useState<Set<string>>(new Set());
-  const [zoomedSrc, setZoomedSrc] = useState<string | null>(null);
-  const closeZoom = useCallback(() => setZoomedSrc(null), []);
+  const { version, markSeen, setEnabled } = useWhatsNewPreference();
+  // The last lookup, keyed by the version it answered. Anything that does not
+  // match the running version reads as loading, so reopening after a successful
+  // load shows the cached notes and a failed load is retried on the next open.
+  const [result, setResult] = useState<ReleaseNotesResult | null>(null);
 
   useEffect(() => {
     if (open) markSeen();
   }, [open, markSeen]);
 
-  // WhatsNewModal stays mounted for the app's lifetime (EditorLayout renders it
-  // with a controlled `open`), so without this reset a lightbox left open at
-  // close time would resurface on the next open.
+  const needsFetch = open && version !== null && !(result?.version === version && !result.failed);
   useEffect(() => {
-    if (!open) closeZoom();
-  }, [open, closeZoom]);
+    if (!needsFetch || version === null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/fleet/update-status/release-notes?version=${encodeURIComponent(version)}`, {
+          localOnly: true,
+        });
+        if (!res.ok) throw new Error(`Release notes request failed (${res.status})`);
+        const data = (await res.json()) as { releaseNotes: string | null; htmlUrl: string | null };
+        if (!cancelled) {
+          setResult({ version, failed: false, highlights: extractHighlights(data.releaseNotes), htmlUrl: data.htmlUrl });
+        }
+      } catch (error) {
+        console.error('[WhatsNew] Failed to load release notes:', error);
+        if (!cancelled) setResult({ version, failed: true });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [needsFetch, version]);
+
+  const current = result && result.version === version ? result : null;
 
   return (
-    // xl (max-w-xl w-[95vw]), not the md default (max-w-md): cards carry
-    // screenshots and need more width than the default confirm-dialog size.
-    // className bounds the dialog to 85dvh and makes it a flex column so
-    // ModalBody's `fill` (flex-1 min-h-0) can actually constrain the body to
-    // scroll while the header and footer stay pinned, matching the pattern
-    // ConfirmModal uses (flex max-h-[85dvh] flex-col).
-    <Modal open={open} onOpenChange={onOpenChange} size="xl" className="max-h-[85dvh] flex flex-col">
+    <Modal open={open} onOpenChange={onOpenChange} className="max-h-[85dvh] flex flex-col">
       <ModalHeader kicker="Sencho" title="What's New" />
-      <ModalBody fill className="space-y-6">
-        {entries.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nothing new to show yet.</p>
+      <ModalBody fill className="space-y-4">
+        {version && (
+          <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-stat-subtitle">
+            Release {formatVersion(version)}
+          </div>
+        )}
+        {current === null ? (
+          <div className="space-y-2" aria-busy="true">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-11/12" />
+            <Skeleton className="h-3 w-4/5" />
+          </div>
+        ) : current.failed ? (
+          <p className="text-sm text-muted-foreground">
+            The release notes could not be loaded. They are fetched from GitHub when this opens, so check that this
+            instance can reach it, then open this again.
+          </p>
+        ) : current.highlights ? (
+          <>
+            <MarkdownContent>{current.highlights}</MarkdownContent>
+            {current.htmlUrl && (
+              <a href={current.htmlUrl} target="_blank" rel="noopener noreferrer" className={linkClassName}>
+                View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+              </a>
+            )}
+          </>
         ) : (
-          entries.map((entry) => (
-            <div key={entry.id} className="space-y-2 border-b border-card-border/40 pb-6 last:border-b-0 last:pb-0">
-              <h3 className="text-sm font-medium text-stat-value">{entry.title}</h3>
-              <p className="text-sm leading-relaxed text-stat-subtitle">{entry.blurb}</p>
-              {entry.screenshot && !failedScreenshots.has(entry.id) && (
-                <button
-                  type="button"
-                  onClick={() => setZoomedSrc(`/whats-new/${entry.screenshot}`)}
-                  aria-label={`Zoom in on ${entry.title} screenshot`}
-                  className="block w-full cursor-zoom-in overflow-hidden rounded-md border border-card-border/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <img
-                    src={`/whats-new/${entry.screenshot}`}
-                    alt={entry.title}
-                    loading="lazy"
-                    onError={() => setFailedScreenshots((prev) => new Set(prev).add(entry.id))}
-                  />
-                </button>
-              )}
-              {entry.docUrl && (
-                <a href={entry.docUrl} target="_blank" rel="noopener noreferrer" className={linkClassName}>
-                  Learn more <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
-                </a>
-              )}
-            </div>
-          ))
+          <p className="text-sm text-muted-foreground">
+            This release has no highlights. The full list of changes is in the changelog.
+          </p>
         )}
       </ModalBody>
       <ModalFooter
@@ -105,54 +120,6 @@ export function WhatsNewModal({ open, onOpenChange, onViewChangelog }: WhatsNewM
           </Button>
         }
       />
-      {zoomedSrc && <ScreenshotLightbox src={zoomedSrc} onClose={closeZoom} />}
     </Modal>
-  );
-}
-
-interface ScreenshotLightboxProps {
-  src: string;
-  onClose: () => void;
-}
-
-function ScreenshotLightbox({ src, onClose }: ScreenshotLightboxProps) {
-  useEffect(() => {
-    // Capture phase, ahead of Radix's own document-level capture listener for
-    // the parent Dialog's Escape handling: stopping propagation here is what
-    // keeps Escape from also dismissing the whole modal while zoomed.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.stopPropagation();
-      onClose();
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Zoomed screenshot"
-      onClick={onClose}
-      // Radix sets an inline pointer-events: none on <body> while the parent
-      // Dialog is open (to keep interaction scoped to its own content); this
-      // portal renders as a body child too, so it needs an explicit inline
-      // override (a Tailwind class here would be inert: nothing overrides an
-      // ancestor's inline style except another inline style).
-      style={{ pointerEvents: 'auto' }}
-      className="fixed inset-0 z-[60] flex cursor-zoom-out items-center justify-center bg-[var(--scrim)] p-8 backdrop-blur-sm"
-    >
-      <img src={src} alt="" className="max-h-full max-w-full rounded-md object-contain" />
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close zoomed screenshot"
-        className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-popover/80 text-popover-foreground hover:bg-popover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <X className="h-4 w-4" strokeWidth={1.5} />
-      </button>
-    </div>,
-    document.body,
   );
 }

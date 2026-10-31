@@ -160,8 +160,8 @@ export interface SenchoRelease {
   html_url: string;
 }
 
-async function fetchReleaseDetails(): Promise<SenchoRelease> {
-  const res = await fetch('https://api.github.com/repos/studio-saelix/sencho/releases/latest', {
+async function fetchReleaseDetails(path: 'latest' | `tags/v${string}`): Promise<SenchoRelease> {
+  const res = await fetch(`https://api.github.com/repos/studio-saelix/sencho/releases/${path}`, {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Sencho' },
     signal: AbortSignal.timeout(10000),
   });
@@ -185,9 +185,33 @@ export async function getLatestRelease(forceRefresh = false): Promise<SenchoRele
     return await CacheService.getInstance().getOrFetch<SenchoRelease>(
       LATEST_RELEASE_CACHE_KEY,
       LATEST_VERSION_CACHE_TTL,
-      fetchReleaseDetails,
+      () => fetchReleaseDetails('latest'),
     );
   } catch {
+    return null;
+  }
+}
+
+/**
+ * Release notes for one published version, used by What's New for the version
+ * this instance is running. A release body is edited for a short while after
+ * publish (credits, highlights), so it shares the latest-release TTL instead of
+ * being cached forever. Returns null for an invalid version or a failed lookup.
+ */
+export async function getReleaseByVersion(version: string, forceRefresh = false): Promise<SenchoRelease | null> {
+  if (!semver.valid(version)) return null;
+  const cacheKey = `release:${version}`;
+  if (forceRefresh) {
+    CacheService.getInstance().invalidate(cacheKey);
+  }
+  try {
+    return await CacheService.getInstance().getOrFetch<SenchoRelease>(
+      cacheKey,
+      LATEST_VERSION_CACHE_TTL,
+      () => fetchReleaseDetails(`tags/v${version}`),
+    );
+  } catch (err) {
+    console.warn('[VersionCheck] Release lookup failed:', sanitizeForLog((err as Error).message));
     return null;
   }
 }

@@ -514,6 +514,32 @@ describe('GET /api/fleet/update-status/release-notes', () => {
     expect(res.body.releaseNotes).toBeNull();
     expect(res.body.htmlUrl).toBeNull();
   });
+
+  it('serves the release for ?version= from that tag, not the latest', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({
+        tag_name: 'v0.92.0',
+        body: '### Highlights\n\nThe overview.',
+        html_url: 'https://github.com/studio-saelix/sencho/releases/tag/v0.92.0',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const res = await request(app)
+      .get('/api/fleet/update-status/release-notes?version=0.92.0&recheck=true')
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    expect(res.body.version).toBe('0.92.0');
+    expect(res.body.releaseNotes).toContain('The overview.');
+    expect(String(fetchSpy.mock.calls[0][0])).toMatch(/\/releases\/tags\/v0\.92\.0$/);
+  });
+
+  it('rejects a malformed ?version= without calling GitHub', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await request(app)
+      .get('/api/fleet/update-status/release-notes?version=latest')
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('compose reapply status and concurrency', () => {

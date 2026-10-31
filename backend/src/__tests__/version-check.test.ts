@@ -17,6 +17,7 @@ import {
   fetchLatestSenchoVersion,
   fetchLatestSenchoVersionInfo,
   getLatestVersion,
+  getReleaseByVersion,
   isSenchoVersionPublished,
 } from '../utils/version-check';
 
@@ -145,5 +146,61 @@ describe('getLatestVersion cache', () => {
     mockGetRemoteDigestResult.mockResolvedValue({ ok: true, digest: 'sha256:abc' });
 
     await expect(fetchLatestSenchoVersion()).resolves.toBe('0.94.0');
+  });
+});
+
+describe('getReleaseByVersion', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    CacheService.getInstance().flush();
+  });
+
+  afterEach(() => {
+    CacheService.getInstance().flush();
+  });
+
+  function tagRelease(version: string, body: string) {
+    return {
+      ok: true,
+      json: async () => ({ tag_name: `v${version}`, body, html_url: `https://example.test/v${version}` }),
+    };
+  }
+
+  it('fetches the release for that tag and serves repeat reads from the cache', async () => {
+    mockFetch.mockResolvedValueOnce(tagRelease('0.98.1', '### Highlights\n\nShort overview.'));
+
+    const first = await getReleaseByVersion('0.98.1');
+    const second = await getReleaseByVersion('0.98.1');
+
+    expect(first?.body).toContain('Short overview.');
+    expect(second).toEqual(first);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(String(mockFetch.mock.calls[0][0])).toMatch(/\/releases\/tags\/v0\.98\.1$/);
+  });
+
+  it('refetches on forceRefresh', async () => {
+    mockFetch
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'old'))
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'new'));
+
+    await getReleaseByVersion('0.98.1');
+    const fresh = await getReleaseByVersion('0.98.1', true);
+
+    expect(fresh?.body).toBe('new');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns null without calling GitHub for an invalid version', async () => {
+    await expect(getReleaseByVersion('../latest')).resolves.toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns null and does not cache a failed lookup', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce(tagRelease('0.98.1', 'recovered'));
+
+    await expect(getReleaseByVersion('0.98.1')).resolves.toBeNull();
+    await expect(getReleaseByVersion('0.98.1')).resolves.toMatchObject({ body: 'recovered' });
   });
 });

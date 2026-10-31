@@ -354,6 +354,7 @@ jobs:
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/release-highlights.mjs
           node --check scripts/audit-with-vex.mjs
           node --check scripts/check-pr-title.mjs
           node --check scripts/check-version-transition.mjs
@@ -362,6 +363,7 @@ jobs:
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
           node --test scripts/check-version-transition.test.mjs
