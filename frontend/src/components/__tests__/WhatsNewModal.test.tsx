@@ -211,6 +211,8 @@ describe('WhatsNewModal', () => {
     });
     expect(screen.getByText('Cordon is here.')).toBeInTheDocument();
     expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+    // A stale rejection that overwrote the loaded result would trigger another lookup.
+    expect(mockApiFetch).toHaveBeenCalledTimes(2);
   });
 
   it('"Got it" closes the modal without disabling the feature', async () => {

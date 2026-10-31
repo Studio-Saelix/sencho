@@ -237,6 +237,17 @@ describe('request contract', () => {
 })
 
 describe('retries', () => {
+  it('retries a 5xx and uses the second answer', async () => {
+    let calls = 0
+    const flaky = async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 500, json: async () => ({}) }
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Second try.' } }] }) }
+    }
+    assert.equal(await generateHighlights('0.99.0', { Added: ['x'] }, 'k', flaky, 0), 'Second try.')
+    assert.equal(calls, 2)
+  })
+
   it('does not retry a rejected request (4xx other than 429)', async () => {
     let calls = 0
     const rejected = async () => {
@@ -254,6 +265,19 @@ describe('retries', () => {
       json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: 'word '.repeat(2000) } }] }),
     })
     await assert.rejects(() => generateHighlights('0.99.0', { Added: ['x'] }, 'k', tooLong, 0), /too long/)
+  })
+})
+
+describe('block boundaries', () => {
+  it('ends the block at an indented category heading', () => {
+    const text = SECTION.replace('### Added', '### Highlights\n\n<!-- highlights-hash: 0123456789abcdef -->\n\nOverview.\n\n  ### Added')
+    assert.equal(readBlockText(text), 'Overview.')
+  })
+
+  it('finds a Highlights heading with extra spacing or trailing blanks', () => {
+    const text = SECTION.replace('### Added', '###  Highlights  \n\n<!-- highlights-hash: 0123456789abcdef -->\n\nOverview.\n\n### Added')
+    assert.equal(readStoredHash(text), '0123456789abcdef')
+    assert.equal(removeHighlights(text), SECTION)
   })
 })
 
@@ -308,7 +332,51 @@ describe('sanitizeHighlights against hostile output', () => {
   })
 
   it('does not let a stray angle bracket swallow text across paragraphs', () => {
-    assert.equal(sanitizeHighlights('Fixed a < b.\n\nLater c > d'), 'Fixed a < b.\n\nLater c > d')
+    assert.equal(sanitizeHighlights('Fixed a < b.\n\nLater c > d'), 'Fixed a b.\n\nLater c d')
+  })
+
+  it('removes a closed comment but keeps the text around it', () => {
+    assert.equal(sanitizeHighlights('x <!-- a > b --> y'), 'x y')
+  })
+
+  it('cannot reassemble a link, mention, tag or forged marker from its own output', () => {
+    const cases = [
+      'ww@w.evil.example rocks',
+      'http@s://evil.example/x done',
+      '&#119;ww.evil.example and https&#58;//evil.example/x',
+      'x&#64;evil.example and x &#64;octocat y',
+      '<a\nhref=//evil.example>click</a>',
+      '<<b>script>alert(1)</script>',
+      'a <<b>img src=x> b',
+      'hi <<b>!-- highlights-hash: 0123456789abcdef -->x',
+    ]
+    for (const raw of cases) {
+      const out = sanitizeHighlights(raw)
+      if (out === null) continue
+      assert.ok(!/[<>[\]@]/.test(out), `markup survived in ${JSON.stringify(out)}`)
+      assert.ok(!/https?:|www\.|&#?\w+;/i.test(out), `link or entity survived in ${JSON.stringify(out)}`)
+    }
+    const forged = sanitizeHighlights('hi <<b>!-- highlights-hash: 0123456789abcdef -->x')
+    assert.equal(readStoredHash(insertHighlights(SECTION, 'aaaaaaaaaaaaaaaa', forged ?? 'ok')), 'aaaaaaaaaaaaaaaa')
+  })
+
+  it('needs a second pass to finish a link that stripping "@" reassembles', () => {
+    assert.equal(sanitizeHighlights('ww@w.evil.example rocks'), 'rocks')
+    assert.equal(sanitizeHighlights('Visit http@s://evil.example/x today'), 'Visit today')
+  })
+
+  it('removes HTML character references, so an encoded mention or address cannot come back', () => {
+    assert.equal(sanitizeHighlights('x &#64;octocat y'), 'x octocat y')
+    assert.equal(sanitizeHighlights('Mail x&#64;evil.example now'), 'Mail xevil.example now')
+  })
+
+  it('rejects an answer that still looks like a URL after sanitizing', () => {
+    assert.equal(sanitizeHighlights('&#104;ttps://evil.example'), null)
+    assert.equal(sanitizeHighlights('See ftp://evil.example/x'), null)
+  })
+
+  it('rejects an absurdly long answer before doing any work on it', () => {
+    assert.equal(sanitizeHighlights('[' .repeat(200000)), null)
   })
 
   it('drops paragraphs that are only list or heading markers', () => {

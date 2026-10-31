@@ -34,7 +34,7 @@ export function extractHighlights(body: string | null | undefined): string | nul
  * as literal text. A comment inside a sentence or a code span is left alone.
  */
 export function stripHtmlComments(markdown: string): string {
-  return markdown.replace(/^[ \t]*<!--.*?-->[ \t]*(?:\r?\n|$)/gm, '');
+  return markdown.replace(/^[ \t]*<!--(?:(?!-->).)*-->[ \t]*(?:\r?\n|$)/gm, '');
 }
 
 /**

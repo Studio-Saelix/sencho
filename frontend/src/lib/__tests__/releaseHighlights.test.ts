@@ -81,6 +81,11 @@ describe('stripHtmlComments', () => {
     );
   });
 
+  it('leaves a line with text between two comments alone', () => {
+    const text = '<!-- a --> kept text <!-- b -->';
+    expect(stripHtmlComments(text)).toBe(text);
+  });
+
   it('leaves a comment inside a sentence or a code span alone', () => {
     const text = 'fix `<!-- x -->` parsing\nand a <!-- y --> mid-line';
     expect(stripHtmlComments(text)).toBe(text);

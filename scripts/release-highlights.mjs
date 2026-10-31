@@ -195,35 +195,23 @@ export function insertHighlights(sectionText, hash, paragraphs) {
 // LLM output
 // ---------------------------------------------------------------------------
 
-/**
- * Reduce model output to plain paragraphs. Commit titles are untrusted input
- * that end up in a published release body, so structure and anything that
- * GitHub or the in-app renderer would turn into a link, image, mention, fence
- * or heading is removed or defused rather than trusted: complete HTML tags and
- * comments (an unclosed comment drops everything after it), every markdown
- * link or image (the text is kept, the target is dropped) and all square
- * brackets (so reference links and footnotes cannot form), bare and
- * protocol-relative URLs, the "@" of a mention, code fence lines, thematic
- * breaks, and heading, list and quote prefixes (stripped repeatedly, so
- * "- ### x" cannot leave a heading behind). Em dashes become commas. Inline
- * code and #123 references are left alone; a tag inside inline code is
- * stripped like any other.
- * @returns {string | null} null when nothing usable remains or the answer is
- *   longer than MAX_HIGHLIGHTS_CHARS
- */
-export function sanitizeHighlights(raw) {
-  if (typeof raw !== 'string') return null
+/** Anything left after sanitizing that could still render as markup, a link, or a mention. */
+const RESIDUE_RE = /[<>[\]@]|&(?:#\w+|[A-Za-z]\w*);|:\/\/|www\.|(?:^|\s)\/\//i
+const MAX_SANITIZE_PASSES = 5
+
+function sanitizeOnce(raw) {
   const PREFIX_RE = /^\s*(?:#{1,6}(?:\s+|$)|[*+-](?:\s+|$)|\d+[.)](?:\s+|$)|>\s*)/
   const paragraphs = raw
     .replace(/\r\n?/g, '\n')
+    .replace(/&(?:#\w+|[A-Za-z]\w*);/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<!--[\s\S]*$/, '')
     .replace(/<\/?[A-Za-z][^<>\n]*>/g, '')
     .replace(/!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)/g, '$1')
-    .replace(/[\[\]]/g, '')
+    .replace(/[<>[\]]/g, '')
     .replace(/(?:https?:\/\/|www\.)[^\s)]+/gi, '')
     .replace(/(^|[\s(])\/\/\S+/g, '$1')
-    .replace(/@(?=[A-Za-z0-9])/g, '')
+    .replace(/@/g, '')
     .split(/\n{2,}/)
     .map((p) =>
       p
@@ -238,9 +226,38 @@ export function sanitizeHighlights(raw) {
     )
     .map((p) => p.replace(/\s*\u2014\s*/g, ', ').replace(/\s+/g, ' ').trim())
     .filter(Boolean)
-  if (paragraphs.length === 0) return null
-  const joined = paragraphs.join('\n\n')
-  return joined.length > MAX_HIGHLIGHTS_CHARS ? null : joined
+  return paragraphs.join('\n\n')
+}
+
+/**
+ * Reduce model output to plain paragraphs. Commit titles are untrusted input
+ * that end up in a published release body, so anything that GitHub or the
+ * in-app renderer could turn into markup, a link, an image, a mention, a fence
+ * or a heading is removed: HTML tags and comments (an unclosed comment drops
+ * everything after it), HTML character references, every markdown link or
+ * image (the text is kept, the target is dropped), all angle and square
+ * brackets, bare and protocol-relative URLs, every "@", code fence lines,
+ * thematic breaks, and heading, list and quote prefixes (stripped repeatedly,
+ * so "- ### x" cannot leave a heading behind). Em dashes become commas. Inline
+ * code and #123 references are left alone.
+ *
+ * One pass can assemble what an earlier step removed (a stripped "@" joining
+ * "ww" and "w.host", a tag split across lines that the paragraph join puts back
+ * together), so the passes repeat until the text stops changing, and the result
+ * is rejected if anything markup-like is still there after a few passes.
+ * @returns {string | null} null when nothing usable remains, the answer is
+ *   longer than MAX_HIGHLIGHTS_CHARS, or it cannot be made plain
+ */
+export function sanitizeHighlights(raw) {
+  if (typeof raw !== 'string' || raw.length > MAX_HIGHLIGHTS_CHARS * 4) return null
+  let text = raw
+  for (let pass = 0; pass < MAX_SANITIZE_PASSES; pass++) {
+    const next = sanitizeOnce(text)
+    if (next === text) break
+    text = next
+  }
+  if (text === '' || text.length > MAX_HIGHLIGHTS_CHARS || RESIDUE_RE.test(text)) return null
+  return text
 }
 
 export async function generateHighlights(version, grouped, apiKey, fetchImpl = fetch, retryDelayMs = RETRY_DELAY_MS) {
