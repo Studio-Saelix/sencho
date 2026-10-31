@@ -1,0 +1,123 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+
+const apiFetchMock = vi.fn();
+vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
+
+import { DockerEndpointProtectedDialog } from '../DockerEndpointProtectedDialog';
+
+function option(payload: unknown) {
+  apiFetchMock.mockResolvedValue(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+}
+
+function renderDialog(over: Partial<React.ComponentProps<typeof DockerEndpointProtectedDialog>> = {}) {
+  const props = {
+    open: true,
+    onOpenChange: vi.fn(),
+    message: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+    nodeId: 4,
+    nodeName: 'edge-1',
+    canRecreate: true,
+    isSelfStackSelected: true,
+    onRecreate: vi.fn(),
+    ...over,
+  };
+  render(<DockerEndpointProtectedDialog {...props} />);
+  return props;
+}
+
+beforeEach(() => { apiFetchMock.mockReset(); });
+
+describe('DockerEndpointProtectedDialog', () => {
+  it('names the provider and opens the safe preview for the same node and service', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    const props = renderDialog();
+    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1 replaces only that container/)).toBeInTheDocument();
+    expect(screen.getByText('KEEPS Sencho running')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/ }));
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
+    expect(props.onRecreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers nothing when the protected service is not the node\'s Docker endpoint', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    const props = renderDialog({ service: 'some-labeled-service' });
+    expect(await screen.findByText(/recreating the Docker endpoint would not change it/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(props.onRecreate).not.toHaveBeenCalled();
+  });
+
+  it('offers nothing when the node can only replace the endpoint together with Sencho', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: false, project: 'stack' });
+    const props = renderDialog();
+    expect(await screen.findByText(/can only recreate its Docker endpoint together with Sencho/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(props.onRecreate).not.toHaveBeenCalled();
+  });
+
+  it('offers nothing for Sencho itself and points at the reapply path', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
+    const props = renderDialog({ reason: 'sencho', service: 'sencho' });
+    const note = await screen.findByText(/would stop the Sencho container itself/);
+    expect(note).toBeInTheDocument();
+    // The node is named inside the sentences that need it, never appended as a
+    // dangling fragment after a complete remedy.
+    expect(note.textContent).not.toContain('edge-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    expect(props.onRecreate).not.toHaveBeenCalled();
+  });
+
+  it('explains why an unavailable provider cannot be replaced', async () => {
+    option({ state: 'unavailable', service: 'docker-proxy', reason: 'It is not a service of Sencho\'s own Compose project.' });
+    renderDialog({ service: 'docker-proxy' });
+    expect(await screen.findByText(/cannot be recreated from here: It is not a service/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+  });
+
+  it('offers nothing to a caller who cannot reapply the node', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'c', providerOnly: true, project: 'stack' });
+    renderDialog({ canRecreate: false, onRecreate: undefined });
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalled());
+    expect(screen.getByText(/An admin who can reapply/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+  });
+
+  it('tells a non-admin that an admin may be able to recreate the endpoint when the option cannot be read', async () => {
+    // The endpoint option route is admin-only, so a non-admin sees no option.
+    apiFetchMock.mockResolvedValue(new Response('', { status: 403 }));
+    renderDialog({ canRecreate: false, onRecreate: undefined });
+    const note = await screen.findByText(/An admin who can reapply edge-1/);
+    expect(note.textContent).toContain('may be able');
+    expect(screen.queryByText(/would not change it/)).toBeNull();
+  });
+
+  it('does not promise an admin can recreate an endpoint it has not confirmed', async () => {
+    apiFetchMock.mockResolvedValue(new Response('', { status: 500 }));
+    renderDialog();
+    expect(await screen.findByText(/Sencho has not confirmed edge-1's Docker endpoint/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Recreate endpoint/ })).toBeNull();
+  });
+
+  it('offers nothing for a same-named service in another stack', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    renderDialog({ isSelfStackSelected: false });
+    expect(await screen.findByText(/recreating the Docker endpoint would not change it/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Recreate endpoint/ })).toBeNull();
+  });
+
+  it('matches the provider by its container name as well as its Compose service', async () => {
+    option({ state: 'available', service: 'socket-proxy', containerName: 'edge-socket-proxy-1', providerOnly: true, project: 'stack' });
+    const props = renderDialog({ service: 'edge-socket-proxy-1' });
+    expect(await screen.findByText(/Recreating socket-proxy in Compose project stack on edge-1/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Recreate endpoint/ }));
+    expect(props.onRecreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the guard\'s own message', () => {
+    option({ state: 'none' });
+    renderDialog({ message: 'Deploy refused: the proxy would be recreated.' });
+    expect(screen.getByText('Deploy refused: the proxy would be recreated.')).toBeInTheDocument();
+  });
+});

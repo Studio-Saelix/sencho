@@ -1,4 +1,5 @@
 import { apiFetch, withDeploySession } from './api';
+import { dockerEndpointRefusal, type DockerEndpointRefusal } from './stackUpdate';
 
 export interface RequestServiceUpdateParams {
     nodeId: number | null;
@@ -31,6 +32,8 @@ export interface ServiceUpdateFailure {
     mutationStage?: string;
     recoveryId?: string;
     status?: number;
+    /** The Docker endpoint guard's refusal, when that is why the request failed. */
+    endpointRefusal?: DockerEndpointRefusal;
 }
 
 export type ServiceUpdateResult = ServiceUpdateSuccess | ServiceUpdateFailure;
@@ -64,6 +67,7 @@ export async function requestServiceUpdate(params: RequestServiceUpdateParams): 
                 mutationStage: isRecord(body) && typeof body.mutationStage === 'string' ? body.mutationStage : undefined,
                 recoveryId: isRecord(body) && typeof body.recoveryId === 'string' ? body.recoveryId : undefined,
                 status: res.status,
+                endpointRefusal: dockerEndpointRefusal(JSON.stringify(body), res.status) ?? undefined,
             };
         }
         if (!isRecord(body) || typeof body.serviceName !== 'string') {
@@ -126,6 +130,7 @@ export async function requestServiceRestore(params: RequestServiceRestoreParams)
                 mutationStage: isRecord(body) && typeof body.mutationStage === 'string' ? body.mutationStage : undefined,
                 recoveryId: isRecord(body) && typeof body.recoveryId === 'string' ? body.recoveryId : undefined,
                 status: res.status,
+                endpointRefusal: dockerEndpointRefusal(JSON.stringify(body), res.status) ?? undefined,
             };
         }
         if (!isRecord(body) || typeof body.serviceName !== 'string') {

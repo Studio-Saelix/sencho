@@ -33,6 +33,7 @@ import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
+import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useStackUpdate } from '@/hooks/useStackUpdate';
 
@@ -1425,7 +1426,17 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           nodeId, stackName: stack, serviceName, mode: 'update', deploySessionId: ds,
         });
         if (!result.ok) {
-          toast.error(result.error);
+          if (result.endpointRefusal) {
+            const refusal = result.endpointRefusal;
+            toast.error(result.error, {
+              action: {
+                label: 'Open stack editor',
+                onClick: () => { openEndpointRefusalInEditor(nodeId, stack, refusal); },
+              },
+            });
+          } else {
+            toast.error(result.error);
+          }
           return { ok: false as const, errorMessage: result.error };
         }
         if (result.recheckWarning) toast.info(result.recheckWarning);

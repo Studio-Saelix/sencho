@@ -6,7 +6,7 @@ vi.mock('@/lib/api', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
-import { parsePolicyBlock, postStackUpdate } from '../stackUpdate';
+import { dockerEndpointRefusal, parsePolicyBlock, postStackUpdate } from '../stackUpdate';
 
 const json = (status: number, body: unknown): Response => ({
   ok: status >= 200 && status < 300,
@@ -23,6 +23,32 @@ const text = (status: number, body: string): Response => ({
 }) as Response;
 
 const policyBody = { error: 'blocked', policy: { id: 1, name: 'No criticals', maxSeverity: 'CRITICAL' }, violations: [] };
+
+describe('dockerEndpointRefusal', () => {
+  it('reads the guard refusal with its reason so the safe preview can be offered', () => {
+    const body = JSON.stringify({
+      error: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    });
+    expect(dockerEndpointRefusal(body, 409)).toEqual({
+      message: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      reason: 'provider',
+      service: null,
+    });
+  });
+
+  it('keeps an unknown reason as null instead of guessing', () => {
+    expect(dockerEndpointRefusal(JSON.stringify({ error: 'refused', code: 'docker_endpoint_protected', reason: 'other' }), 409))
+      .toEqual({ message: 'refused', reason: null, service: null });
+  });
+
+  it('ignores any other response', () => {
+    expect(dockerEndpointRefusal(JSON.stringify({ code: 'self_stack_protected' }), 409)).toBeNull();
+    expect(dockerEndpointRefusal(JSON.stringify({ code: 'docker_endpoint_protected' }), 500)).toBeNull();
+    expect(dockerEndpointRefusal('not json', 409)).toBeNull();
+  });
+});
 
 describe('postStackUpdate', () => {
   beforeEach(() => vi.mocked(apiFetch).mockReset());
@@ -52,6 +78,23 @@ describe('postStackUpdate', () => {
   it('classifies the protected self stack', async () => {
     vi.mocked(apiFetch).mockResolvedValue(json(409, { code: 'self_stack_protected' }));
     expect(await postStackUpdate({ nodeId: 1, stackName: 'sencho' })).toEqual({ kind: 'self-stack' });
+  });
+
+  it('classifies a Docker endpoint refusal for the safe handoff', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(json(409, {
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }));
+    expect(await postStackUpdate({ nodeId: 1, stackName: 'web' })).toEqual({
+      kind: 'docker-endpoint',
+      refusal: {
+        message: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+        reason: 'provider',
+        service: 'socket-proxy',
+      },
+    });
   });
 
   it('classifies a stack busy with another operation, naming who started it', async () => {

@@ -51,6 +51,8 @@ export const CAPABILITIES = [
   'users',
   'registries',
   'self-update',
+  'endpoint-provider-replace',
+  'endpoint-provider-only',
   'vulnerability-scanning',
   'compose-doctor',
   'update-guard',
@@ -259,6 +261,13 @@ export interface RemoteMeta {
    * older than this field or offline. Safe to expose (no private repository path).
    */
   imageChannel: 'community' | 'hardened' | 'unknown' | null;
+  /** True while the remote is still verifying a Docker endpoint replacement it ran during an update. */
+  endpointProviderPending?: boolean;
+  /**
+   * When the remote last verified a Docker endpoint replacement. A provider-only
+   * Reapply leaves the process running, so this is what changes on success.
+   */
+  endpointProviderCompletedAt?: number | null;
 }
 
 export type RemoteMetaTransportFailure =
@@ -422,6 +431,10 @@ export async function probeRemoteMeta(
       imagePinKind: parseImagePinKind(res.data.imagePinKind),
       updateBlocked: res.data.updateBlocked === true,
       imageChannel: parseImageChannel(res.data.imageChannel),
+      endpointProviderPending: res.data.endpointProviderPending === true,
+      endpointProviderCompletedAt: typeof res.data.endpointProviderCompletedAt === 'number'
+        ? res.data.endpointProviderCompletedAt
+        : null,
     };
     if (isDebugEnabled()) {
       // Diagnostic aid for "why is this feature gated?": log the resolved version

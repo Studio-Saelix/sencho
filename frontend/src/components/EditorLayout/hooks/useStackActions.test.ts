@@ -129,12 +129,14 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
+    openDockerEndpointProtected: vi.fn(),
     setComposeReapplyCapture: vi.fn(),
     composeReapplyCapture: null,
     setDiffPreview: vi.fn(),
     setMissingExternalNetworks: vi.fn(),
     deleteTarget: null,
     closeDeleteDialog: vi.fn(),
+    closeTakeDownDialog: vi.fn(),
     ...over,
   } as unknown as OverlayState;
 }
@@ -2566,6 +2568,101 @@ describe('useStackActions recovery records', () => {
   });
 });
 
+describe('useStackActions refusal target binding', () => {
+  const refusalBody = JSON.stringify({
+    error: 'This operation would stop socket-proxy, which carries Sencho\'s Docker connection.',
+    code: 'docker_endpoint_protected',
+    reason: 'provider',
+    service: 'socket-proxy',
+  });
+
+  it('binds a Delete refusal to the dialog target, not the selected file', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(refusalBody, { status: 409 }));
+    const { result, overlayState } = setup({
+      overlay: { deleteTarget: { name: 'other.yml', nodeId: 1 } },
+      stackList: {
+        selectedFile: 'selected.yml',
+        files: ['selected.yml', 'other.yml'],
+        stackStatuses: { 'other.yml': 'running' } as never,
+      },
+    });
+    await act(async () => { await result.current.deleteStack(false); });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'socket-proxy',
+      stackFile: 'other.yml',
+    }));
+    expect(overlayState.closeDeleteDialog).toHaveBeenCalled();
+  });
+
+  it('does not retarget a refused operation to the node active when the answer arrives', async () => {
+    vi.mocked(apiFetch).mockReset();
+    let resolveResponse!: (response: Response) => void;
+    vi.mocked(apiFetch).mockReturnValue(new Promise<Response>(resolve => { resolveResponse = resolve; }));
+    const { result, overlayState, rerender, activeNodeHolder } = setup({
+      overlay: { deleteTarget: { name: 'other.yml', nodeId: 1 } },
+      stackList: {
+        selectedFile: 'selected.yml',
+        files: ['selected.yml', 'other.yml'],
+        stackStatuses: { 'other.yml': 'running' } as never,
+      },
+    });
+    const pending = result.current.deleteStack(false);
+    // The operator moves to another node while the DELETE is in flight.
+    activeNodeHolder.current = { id: 2, name: 'Other', type: 'remote' } as ActiveNode;
+    rerender();
+    await act(async () => {
+      resolveResponse(new Response(refusalBody, { status: 409 }));
+      await pending;
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'other.yml',
+    }));
+  });
+
+  it('binds a Take down refusal to the dialog target, not the selected file', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(refusalBody, { status: 409 }));
+    const { result, overlayState } = setup({
+      overlay: { takeDownTarget: { name: 'other.yml', nodeId: 1 } },
+      stackList: {
+        selectedFile: 'selected.yml',
+        files: ['selected.yml', 'other.yml'],
+        stackStatuses: { 'other.yml': 'running' } as never,
+      },
+    });
+    await act(async () => { await result.current.takeDownStack(false); });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'socket-proxy',
+      stackFile: 'other.yml',
+    }));
+    expect(overlayState.closeTakeDownDialog).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['pull', () => 'pullStackImages'],
+    ['rollback', () => 'rollbackStack'],
+    ['service stop', () => 'serviceAction'],
+  ])('keeps the refused %s bound to the stack it ran on', async (_label, pick) => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(refusalBody, { status: 409 }));
+    const { result, overlayState } = setup({
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'], stackStatuses: { 'web.yml': 'running' } as never },
+    });
+    await act(async () => {
+      if (pick() === 'pullStackImages') await result.current.pullStackImages();
+      else if (pick() === 'rollbackStack') await result.current.rollbackStack();
+      else await result.current.serviceAction('stop', 'socket-proxy');
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      stackFile: 'web.yml',
+    }));
+  });
+});
+
 describe('useStackActions.getStackMenuVisibility', () => {
   it('gives a partial stack the running-stack lifecycle actions', () => {
     const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'partial' } as never } });
@@ -2610,6 +2707,98 @@ describe('useStackActions.getStackMenuVisibility', () => {
     await act(async () => { await result.current.updateStack(); });
     expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
     expect(stackListState.setStackAction).not.toHaveBeenCalled();
+  });
+
+  it('opens the Docker endpoint handoff instead of a plain error when the guard refuses a deploy', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({
+      stackList: { selectedFile: 'shared.yml', stackSelfFlags: { 'shared.yml': false } },
+    });
+    await act(async () => {
+      await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith({
+      message: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      reason: 'provider',
+      service: null,
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'shared.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+  });
+
+  it('opens the Docker endpoint handoff when a stack Update is refused', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This update would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({ stackList: { selectedFile: 'web.yml' } });
+    await act(async () => {
+      await result.current.updateStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith({
+      message: 'This update would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      reason: 'provider',
+      service: 'socket-proxy',
+      nodeId: 1,
+      nodeName: 'Local',
+      nodeType: 'local',
+      stackFile: 'web.yml',
+    });
+  });
+
+  it.each([
+    ['update', () => 'requestServiceUpdate'],
+    ['restore', () => 'requestServiceRestore'],
+  ])('opens the Docker endpoint handoff when a service %s is refused', async (_label, pick) => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'Service "socket-proxy" carries the Docker connection Sencho is using.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+      service: 'socket-proxy',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({ stackList: { selectedFile: 'web.yml' } });
+    await act(async () => {
+      if (pick() === 'requestServiceUpdate') {
+        await result.current.requestServiceUpdate('web.yml', 'socket-proxy');
+      } else {
+        await result.current.requestServiceRestore('web.yml', 'socket-proxy', 'rec-1');
+      }
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      service: 'socket-proxy',
+      nodeId: 1,
+      stackFile: 'web.yml',
+    }));
+  });
+
+  it('binds a sidebar action handoff to the stack that was refused, not the selected file', async () => {
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
+      error: 'This deploy would recreate socket-proxy, which carries Sencho\'s Docker connection.',
+      code: 'docker_endpoint_protected',
+      reason: 'provider',
+    }), { status: 409 }));
+    const { result, overlayState } = setup({
+      stackList: { selectedFile: 'selected.yml', stackStatuses: { 'other.yml': 'running' } as never },
+    });
+    await act(async () => {
+      await result.current.executeStackActionByFile('other.yml', 'deploy', 'deploy');
+    });
+    expect(overlayState.openDockerEndpointProtected).toHaveBeenCalledWith(expect.objectContaining({
+      stackFile: 'other.yml',
+    }));
   });
 
   it('opens reapply capture for eligible admin Save & Deploy on self-stack without posting deploy', async () => {
@@ -2798,6 +2987,9 @@ describe('useStackActions.getStackMenuVisibility', () => {
     const { result, overlayState } = setup();
     await act(async () => { await result.current.serviceAction('stop', 'web'); });
     expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    // The request carries the node captured at call time, so a switch before the
+    // refusal arrives cannot make the dialog describe another node.
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web/services/web/stop', { method: 'POST', nodeId: 1 });
   });
 });
 
