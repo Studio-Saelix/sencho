@@ -51,6 +51,10 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  // A node that can create and restore volume points. The hub reads the recovery
+  // descriptor for the detail; this flag keeps the shared registry identical on
+  // both sides so a gate can be expressed at all.
+  'volume-protection-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

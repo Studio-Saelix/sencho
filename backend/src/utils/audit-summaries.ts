@@ -173,6 +173,15 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /secrets/*/import-from-stack': 'Imported env into secret',
   'POST /secrets/*/push/preview': 'Previewed secret push',
   'POST /secrets/*/push': 'Pushed secret',
+
+  // Volume recovery points (node-local; the resource name is the point, volume
+  // or operation id, never a path, a key or captured data)
+  'POST /recovery/repository': 'Provisioned recovery repository',
+  'POST /recovery/storage/points': 'Created a recovery point',
+  'POST /recovery/points/*/verify': 'Verified recovery point',
+  'POST /recovery/points/*/restore': 'Restored recovery point',
+  'POST /recovery/operations/*/cancel': 'Cancelled recovery operation',
+  'POST /recovery/locks/release': 'Released a stale recovery lock',
 };
 
 // Pre-sorted at module load: most specific patterns (by segment count) first.

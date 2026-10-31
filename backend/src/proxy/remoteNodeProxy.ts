@@ -66,6 +66,7 @@ import {
   getRegistryDeliveryTotalBodyLimit,
 } from '../helpers/registryDeliveryBodyLimits';
 import { classifyRegistryDeliveryOp } from '../helpers/registryOpClassifier';
+import { preflightRecoveryRequest } from '../services/recovery/remoteSupport';
 import { augmentRemoteProxyWithRegistryDelivery, evaluateRegistryDeliveryProxyGate } from '../helpers/registryDeliveryProxy';
 
 /**
@@ -203,6 +204,10 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       if (req.user?.username) {
         proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
       }
+      // Recovery operations record this actor on the node, so a point or a restore
+      // says who asked for it, not "node-proxy". It is set the same way for every
+      // proxied request: the client's value is stripped first, so a caller cannot
+      // choose the name an operation is attributed to.
       // Scoped stack evidence: always strip client-supplied values, then
       // attach hub-built evidence when the gate stashed elevation for this hop.
       proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
@@ -523,6 +528,23 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
         if (!supported) {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
+          return;
+        }
+      }
+
+      // Recovery skew and reachability. Every `/api/recovery/*` request except
+      // the descriptor is refused here when the node cannot serve it, with the
+      // same resolution the hub's own descriptor read uses, so a node is never
+      // described one way and refused another. A node with the engine passes
+      // through and answers for itself, including `503` while boot is running.
+      if (isRecoveryProxyPath(req.path) && !isRecoveryDescriptorPath(req.path)) {
+        const preflight = await preflightRecoveryRequest(req.nodeId);
+        if (!preflight.ok) {
+          res.status(preflight.httpStatus).json({
+            error: preflight.message,
+            errorClass: preflight.errorClass,
+            code: preflight.code,
+          });
           return;
         }
       }
@@ -934,6 +956,19 @@ const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
  * True when the request configures a remote node's own settings and must run
  * the node-admin elevation check on the hop (path is post-/api strip).
  */
+/**
+ * A recovery request, as the proxy sees it: mounted at `/api/`, so `req.path`
+ * has lost that prefix.
+ */
+function isRecoveryProxyPath(path: string): boolean {
+  return /^\/recovery(?:\/|$)/i.test(path);
+}
+
+/** The descriptor route is the one recovery path that must always reach the node. */
+function isRecoveryDescriptorPath(path: string): boolean {
+  return /^\/recovery\/node\/?(?:\?|$)/i.test(path);
+}
+
 function isSettingsWrite(req: Request): boolean {
   if (req.method !== 'POST' && req.method !== 'PATCH') return false;
   if (/^\/settings\/?$/.test(req.path)) return true;
