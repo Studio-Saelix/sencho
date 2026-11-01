@@ -112,3 +112,43 @@ describe('deriveHealth', () => {
     expect(r.reasons).toContain('RAM 90%');
   });
 });
+
+// Unknown host usage (Sencho inside an LXC with no cgroup mount) is not 0%: it
+// must never move the verdict, and it must stay visible as a reason.
+const unknownSys = (over: Partial<SystemStats> = {}): SystemStats => ({
+  cpu: { usage: null, cores: 2 },
+  memory: { total: 4 * 1024 ** 3, used: null, free: null, usagePercent: null },
+  disk: { fs: '/', mount: '/', total: 100, used: 10, free: 90, usagePercent: '10' },
+  ...over,
+});
+
+describe('deriveHealth with unknown host usage', () => {
+  it('stays healthy and names both unknown dimensions', () => {
+    const r = deriveHealth(stats(), unknownSys(), []);
+    expect(r.level).toBe('healthy');
+    expect(r.reasons).toEqual(['CPU and memory usage unknown']);
+  });
+
+  it('names a single unknown dimension', () => {
+    expect(deriveHealth(stats(), unknownSys({ cpu: { usage: '12.0', cores: 2 } }), []).reasons)
+      .toEqual(['memory usage unknown']);
+    expect(deriveHealth(stats(), unknownSys({ memory: { total: 4, used: 1, free: 3, usagePercent: '25' } }), []).reasons)
+      .toEqual(['CPU usage unknown']);
+  });
+
+  it('never lets an unknown reading change the level', () => {
+    const healthy = deriveHealth(stats(), unknownSys(), []);
+    expect(healthy.level).toBe('healthy');
+    // A real breach elsewhere still escalates, regardless of the unknowns.
+    const diskHigh = deriveHealth(stats(), unknownSys({
+      disk: { fs: '/', mount: '/', total: 100, used: 95, free: 5, usagePercent: '95' },
+    }), []);
+    expect(diskHigh.level).toBe('critical');
+    expect(diskHigh.reasons).toContain('Disk 95%');
+    expect(diskHigh.reasons.join(' ')).not.toContain('usage unknown');
+  });
+
+  it('keeps the neutral verdict when the sample has not loaded yet', () => {
+    expect(deriveHealth(stats(), null, []).reasons).toEqual(['All systems nominal']);
+  });
+});

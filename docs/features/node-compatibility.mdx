@@ -106,6 +106,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `blueprint-digest-pins-v1` | Digest-pinned Blueprint rollouts |
 | `fleet-readiness-v1` | Per-node readiness evidence and the per-stack readiness rollup behind the Readiness tab |
 | `health-gate-observation-v1` | Health observation of a stack on a remote node, for health-gated rollouts and updates |
+| `host-usage-unknown-v1` | Nullable host CPU and memory usage (unknown when a nested container cannot read the Docker host's cgroup) |
 | `agent-observation-v1` | Read-only observation projections for MCP clients and other AI observers |
 
 <Note>
@@ -123,6 +124,7 @@ A handful of capabilities gate a smaller piece of behavior rather than a whole p
 - Nodes that do not advertise `update-guard` run manual updates directly, with no pre-update rollback-readiness dialog.
 - `cross-node-rbac` is a security boundary, not a convenience: the control instance refuses to forward a non-admin request, or a confirmed stop-by-label, to a remote node that does not advertise it. This stops a mixed-version fleet from letting a lower-privileged action escalate on an un-upgraded node.
 - `stack-delete-prune-volumes` is also a data-safety boundary: a node that does not advertise it cannot guarantee volumes survive a Delete, so the confirmation dialog states that up front and forwards the delete with removal already acknowledged, and the control instance refuses to forward an *unacknowledged* delete to such a node at all rather than risk it silently destroying volumes the operator meant to keep.
+- `host-usage-unknown-v1` is a wire-shape negotiation. A machine caller that can render unknown usage sends `x-sencho-host-usage-unknown: 1`, and a node answers with `null` host CPU and memory usage when a nested container cannot read the Docker host's cgroup. A browser session always can, so a current hub sends the header on its behalf when it forwards the session's request; for any other caller the hub forwards the header only when that caller sent it. An API token or a hub that does not advertise it receives the older numeric shape (the kernel view for a nested host) instead of a `null` its dashboard would render as `NaN%`; those numbers describe the outer machine when the node is nested, so a mixed-version fleet trades an obviously broken number for a plausible wrong one until the hub is upgraded. Upgrade hubs before the nodes they manage. A monitoring integration that wants unknown usage from either a node or the hub sends the header on its own requests.
 
 ## Handling nodes that do not advertise metadata
 

@@ -33,6 +33,14 @@ type StatDescriptor = { isFile: boolean; size: number };
 export interface ArcstatsFsMock {
   /** Serve `content` when `path` is read. */
   setRead(path: string, content: string): void;
+  /**
+   * Serve successive values on successive reads of `path` (the last value
+   * repeats once the list is exhausted). Used by the cgroup CPU counter, whose
+   * delta is only visible across two reads.
+   */
+  setReadSequence(path: string, contents: string[]): void;
+  /** How many times `path` has been read since the last clear(). */
+  readCount(path: string): number;
   /** Reject a read of `path` with `err` (e.g. an EACCES/EIO error). */
   setReadError(path: string, err: NodeJS.ErrnoException): void;
   /** Control `stat(path)` result (for override-path guard tests). */
@@ -53,12 +61,19 @@ export function installArcstatsFsMock(): ArcstatsFsMock {
   const realReadFile = fs.readFile.bind(fs);
   const realStat = fs.stat.bind(fs);
   const reads = new Map<string, string | NodeJS.ErrnoException>();
+  const sequences = new Map<string, string[]>();
+  const counts = new Map<string, number>();
   const stats = new Map<string, StatDescriptor | NodeJS.ErrnoException>();
   const isCandidatePath = (p: string): boolean =>
     ARC_CANDIDATE_PATHS.includes(p) || MEMINFO_CANDIDATE_PATHS.includes(p);
 
   vi.spyOn(fs, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
     const key = String(p);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (sequences.has(key)) {
+      const seq = sequences.get(key)!;
+      return seq.length > 1 ? seq.shift()! : seq[0];
+    }
     if (reads.has(key)) {
       const v = reads.get(key)!;
       if (v instanceof Error) throw v;
@@ -76,8 +91,8 @@ export function installArcstatsFsMock(): ArcstatsFsMock {
       return { isFile: () => v.isFile, size: v.size };
     }
     // A registered read with no explicit stat implies a small regular file.
-    if (reads.has(key)) {
-      const v = reads.get(key);
+    if (reads.has(key) || sequences.has(key)) {
+      const v = reads.get(key) ?? sequences.get(key)![0];
       const size = typeof v === 'string' ? Buffer.byteLength(v) : 0;
       return { isFile: () => true, size };
     }
@@ -87,9 +102,11 @@ export function installArcstatsFsMock(): ArcstatsFsMock {
 
   return {
     setRead: (path, content) => reads.set(path, content),
+    setReadSequence: (path, contents) => sequences.set(path, [...contents]),
+    readCount: (path) => counts.get(path) ?? 0,
     setReadError: (path, err) => reads.set(path, err),
     setStat: (path, descriptor) => stats.set(path, descriptor),
-    clear: () => { reads.clear(); stats.clear(); },
+    clear: () => { reads.clear(); sequences.clear(); counts.clear(); stats.clear(); },
   };
 }
 

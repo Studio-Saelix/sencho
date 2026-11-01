@@ -11,7 +11,12 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import type { ProxyTarget } from '../services/NodeRegistry';
+import si from 'systeminformation';
+import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
+import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
+import { _resetHostSampleStateForTests } from '../helpers/hostSample';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -52,7 +57,7 @@ beforeAll(async () => {
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+  const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '5m' });
   authHeader = `Bearer ${token}`;
 });
 
@@ -160,10 +165,20 @@ function healthyHandler(base: string): (url: string, init?: RequestInit) => Resp
   };
 }
 
-async function getOverview(): Promise<{ status: number; body: OverviewRow[]; elapsedMs: number }> {
+async function getOverview(
+  extraHeaders: Record<string, string> = {},
+): Promise<{ status: number; body: OverviewRow[]; elapsedMs: number }> {
   const started = Date.now();
-  const res = await request(app).get('/api/fleet/overview').set('Authorization', authHeader);
+  let req = request(app).get('/api/fleet/overview').set('Authorization', authHeader);
+  for (const [name, value] of Object.entries(extraHeaders)) req = req.set(name, value);
+  const res = await req;
   return { status: res.status, body: res.body as OverviewRow[], elapsedMs: Date.now() - started };
+}
+
+function addReadOnlyToken(name: string): string {
+  const admin = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME);
+  if (!admin?.id) throw new Error('expected the seeded admin');
+  return createTestApiToken({ db: DatabaseService, scope: 'read-only', userId: admin.id, name });
 }
 
 describe('GET /api/fleet/overview remote probe budget', () => {
@@ -457,5 +472,234 @@ describe('node-data fan-outs share the per-remote read budget', () => {
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number }[]).map(e => e.nodeId)).toContain(addedId);
     });
+  });
+});
+
+// Host scope parity across the three transports: the local sample is scoped to
+// the Docker host, and a remote that reports unknown usage passes it through
+// unchanged instead of being coerced to 0.
+describe('GET /api/fleet/overview host scope', () => {
+  const GiB = 1024 ** 3;
+  const UNKNOWN_STATS = {
+    cpu: { usage: null, cores: 2 },
+    memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+    disk: null,
+  };
+
+  it('passes a remote node\'s unknown usage through unchanged', async () => {
+    const nodeId = addProxyNode('nested-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    mockFetch((url) => {
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    const { status, body } = await getOverview();
+    expect(status).toBe(200);
+    const row = body.find(n => n.id === nodeId);
+    expect(row!.systemStats).toEqual(UNKNOWN_STATS);
+  });
+
+  it('advertises nullable host usage on the remote system-stats probe', async () => {
+    const nodeId = addProxyNode('capable-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) seenHeaders = init?.headers as Record<string, string> | undefined;
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    await getOverview();
+    expect((seenHeaders as Record<string, string>)[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
+  });
+
+  it('advertises nullable host usage on a pilot target with no token', async () => {
+    const nodeId = addProxyNode('pilot-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: '', trustedLoopback: true } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) seenHeaders = init?.headers as Record<string, string> | undefined;
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/system/stats`) return jsonResponse(UNKNOWN_STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    await getOverview();
+    expect(seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
+    expect(seenHeaders?.Authorization).toBeUndefined();
+  });
+
+  it('keeps a remote token caller on the numeric shape it did not opt out of', async () => {
+    const nodeId = addProxyNode('legacy-token-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) {
+        seenHeaders = init?.headers as Record<string, string> | undefined;
+        const unknown = seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER] === '1';
+        return jsonResponse(unknown ? UNKNOWN_STATS : SYSTEM_STATS);
+      }
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    const { status, body } = await getOverview({
+      Authorization: `Bearer ${addReadOnlyToken('legacy-fleet-token')}`,
+    });
+    expect(status).toBe(200);
+    // The hub must ask the remote for the shape its own caller can render,
+    // exactly as the proxy hop does, or a monitoring token gets `null`.
+    expect(seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER]).toBeUndefined();
+    expect(body.find(n => n.id === nodeId)!.systemStats).toEqual(SYSTEM_STATS);
+  });
+
+  it('passes a token caller\'s nullable-usage request through to the remote', async () => {
+    const nodeId = addProxyNode('capable-token-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) {
+        seenHeaders = init?.headers as Record<string, string> | undefined;
+        return jsonResponse(UNKNOWN_STATS);
+      }
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    const { status, body } = await getOverview({
+      Authorization: `Bearer ${addReadOnlyToken('capable-fleet-token')}`,
+      [HOST_USAGE_UNKNOWN_HEADER]: '1',
+    });
+    expect(status).toBe(200);
+    expect(seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER]).toBe('1');
+    expect(body.find(n => n.id === nodeId)!.systemStats).toEqual(UNKNOWN_STATS);
+  });
+
+  it('keeps a machine hub caller on the numeric shape when it sends no header', async () => {
+    const nodeId = addProxyNode('legacy-hub-remote', PROXY_BASE);
+    mockTargets({ [nodeId]: { apiUrl: PROXY_BASE, apiToken: 'test-token', trustedLoopback: false } });
+    let seenHeaders: Record<string, string> | undefined;
+    mockFetch((url, init) => {
+      if (url === `${PROXY_BASE}/api/system/stats`) {
+        seenHeaders = init?.headers as Record<string, string> | undefined;
+        const unknown = seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER] === '1';
+        return jsonResponse(unknown ? UNKNOWN_STATS : SYSTEM_STATS);
+      }
+      if (url === `${PROXY_BASE}/api/stats`) return jsonResponse(STATS);
+      if (url === `${PROXY_BASE}/api/stacks`) return jsonResponse(['web']);
+      return new Response('not found', { status: 404 });
+    });
+
+    const hubToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const { status, body } = await getOverview({ Authorization: `Bearer ${hubToken}` });
+    expect(status).toBe(200);
+    expect(seenHeaders?.[HOST_USAGE_UNKNOWN_HEADER]).toBeUndefined();
+    expect(body.find(n => n.id === nodeId)!.systemStats).toEqual(SYSTEM_STATS);
+  });
+
+  /**
+   * Stub a nested local host whose Docker capacity (2 cores, 4 GiB) disagrees
+   * with the kernel view (8 cores, 16 GiB). The container list must not hit the
+   * real socket in CI, and the cgroup path must not resolve so usage is unknown.
+   */
+  function stubNestedLocalHost(): number {
+    const db = DatabaseService.getInstance();
+    const localNode = db.getDefaultNode();
+    if (!localNode) throw new Error('expected a default local node');
+    CacheService.getInstance().flush();
+    _resetHostSampleStateForTests();
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getAllContainers: () => Promise.resolve([]),
+    } as unknown as DockerController);
+    process.env.SENCHO_HOST_CGROUP_PATH = '/nonexistent/fleet-overview-cgroup';
+    vi.spyOn(NodeRegistry.prototype, 'getDocker').mockReturnValue({
+      info: () => Promise.resolve({ NCPU: 2, MemTotal: 4 * GiB }),
+    } as unknown as ReturnType<typeof NodeRegistry.prototype.getDocker>);
+    vi.spyOn(si, 'currentLoad').mockResolvedValue({
+      currentLoad: 33,
+      cpus: Array.from({ length: 8 }, () => ({})),
+    } as unknown as Awaited<ReturnType<typeof si.currentLoad>>);
+    vi.spyOn(si, 'mem').mockResolvedValue({
+      total: 16 * GiB,
+      available: 12 * GiB,
+      active: 4 * GiB,
+      used: 4 * GiB,
+      free: 12 * GiB,
+      buffcache: 0,
+    } as unknown as Awaited<ReturnType<typeof si.mem>>);
+    vi.spyOn(si, 'fsSize').mockResolvedValue([
+      { fs: '/dev/sda1', mount: '/', size: 100 * GiB, used: 40 * GiB, available: 60 * GiB, use: 40 },
+    ] as unknown as Awaited<ReturnType<typeof si.fsSize>>);
+    return localNode.id;
+  }
+
+  it('reports Docker capacity for a local node whose kernel view is the outer machine', async () => {
+    const localNodeId = stubNestedLocalHost();
+    try {
+      const { body } = await getOverview();
+      const row = body.find(n => n.id === localNodeId);
+      expect(row!.systemStats).toMatchObject({
+        cpu: { usage: null, cores: 2 },
+        memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+      });
+    } finally {
+      delete process.env.SENCHO_HOST_CGROUP_PATH;
+    }
+  });
+
+  it('keeps a local token caller on the numeric shape it did not opt out of', async () => {
+    const localNodeId = stubNestedLocalHost();
+    try {
+      const { body } = await getOverview({
+        Authorization: `Bearer ${addReadOnlyToken('legacy-local-fleet-token')}`,
+      });
+      const row = body.find(n => n.id === localNodeId);
+      expect(row!.systemStats).toMatchObject({
+        cpu: { usage: '33.0', cores: 8 },
+        memory: { total: 16 * GiB, used: 4 * GiB, free: 12 * GiB, usagePercent: '25.0' },
+      });
+    } finally {
+      delete process.env.SENCHO_HOST_CGROUP_PATH;
+    }
+  });
+
+  it('keeps a local machine hub caller on the numeric shape when it sends no header', async () => {
+    const localNodeId = stubNestedLocalHost();
+    try {
+      const hubToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const { body } = await getOverview({ Authorization: `Bearer ${hubToken}` });
+      const row = body.find(n => n.id === localNodeId);
+      expect(row!.systemStats).toMatchObject({
+        cpu: { usage: '33.0', cores: 8 },
+        memory: { total: 16 * GiB, used: 4 * GiB, free: 12 * GiB, usagePercent: '25.0' },
+      });
+    } finally {
+      delete process.env.SENCHO_HOST_CGROUP_PATH;
+    }
+  });
+
+  it('gives a local token caller the nullable shape when it asks for it', async () => {
+    const localNodeId = stubNestedLocalHost();
+    try {
+      const { body } = await getOverview({
+        Authorization: `Bearer ${addReadOnlyToken('capable-local-fleet-token')}`,
+        [HOST_USAGE_UNKNOWN_HEADER]: '1',
+      });
+      const row = body.find(n => n.id === localNodeId);
+      expect(row!.systemStats).toMatchObject({
+        cpu: { usage: null, cores: 2 },
+        memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+      });
+    } finally {
+      delete process.env.SENCHO_HOST_CGROUP_PATH;
+    }
   });
 });

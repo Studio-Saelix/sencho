@@ -7,8 +7,10 @@ interface FleetMastheadProps {
   nodeCount: number;
   onlineCount: number;
   criticalCount: number;
-  totalCpuPercent: number;
-  totalMemUsed: number;
+  /** Null when every online node reports unknown CPU usage. */
+  totalCpuPercent: number | null;
+  /** Null when every online node reports unknown memory usage. */
+  totalMemUsed: number | null;
   activeContainers: number;
   totalContainers: number;
   lastSyncAt: number | null;
@@ -47,8 +49,8 @@ export function FleetMasthead(props: FleetMastheadProps) {
   ].filter((part): part is string => part !== null);
 
   const metadata: MastheadMetadataItem[] = [
-    { label: 'CPU', value: `${totalCpuPercent.toFixed(0)}%`, tone: totalCpuPercent >= 80 ? 'warn' : 'value' },
-    { label: 'MEM', value: formatBytes(totalMemUsed) },
+    { label: 'CPU', value: totalCpuPercent !== null ? `${totalCpuPercent.toFixed(0)}%` : '--', tone: (totalCpuPercent ?? 0) >= 80 ? 'warn' : 'value' },
+    { label: 'MEM', value: totalMemUsed !== null ? formatBytes(totalMemUsed) : '--' },
     { label: 'CONTAINERS', value: `${activeContainers}/${totalContainers}` },
   ];
 

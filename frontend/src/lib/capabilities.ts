@@ -53,6 +53,7 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  'host-usage-unknown-v1',
   'agent-observation-v1',
 ] as const;
 
