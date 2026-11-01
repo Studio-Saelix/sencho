@@ -151,7 +151,8 @@ export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInv
   // empty inventory; the caller shows its error state for a thrown payload.
   if (!inventory || !Array.isArray(inventory.services)
     || typeof inventory.stackName !== 'string'
-    || typeof inventory.renderable !== 'boolean') {
+    || typeof inventory.renderable !== 'boolean'
+    || typeof inventory.generatedAt !== 'number') {
     throw new Error('Unexpected label inventory payload');
   }
   return {

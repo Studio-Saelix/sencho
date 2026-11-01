@@ -261,6 +261,7 @@ test.describe('io.sencho.* labels on a deployed stack', () => {
     // Hiding is presentation only: a revealed helper keeps its lifecycle actions.
     const brokenCard = page.getByText('e2e-sencho-labels-live-broken-1')
       .locator('xpath=ancestor::div[.//button[@aria-label="Service actions"]][1]');
-    await expect(brokenCard.getByRole('button', { name: 'Service actions' })).toBeVisible();
+    await brokenCard.getByRole('button', { name: 'Service actions' }).click();
+    await expect(page.getByRole('menuitem', { name: 'Start service' })).toBeVisible();
   });
 });

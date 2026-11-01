@@ -105,6 +105,15 @@ describe('ComposeLabelsPanel', () => {
     render(<ComposeLabelsPanel stackName="demo" />);
     expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
     expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
+    cleanup();
+    // A truncated body that carries the required fields except the timestamp is still unreadable.
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ stackName: 'demo', renderable: true, services: [] }),
+    } as unknown as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
+    expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
   });
 
   it('shows "Runtime labels unavailable" for a replica whose inspect failed', async () => {
