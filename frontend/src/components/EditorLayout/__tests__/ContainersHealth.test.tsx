@@ -951,6 +951,8 @@ describe('io.sencho.* labels on the container list', () => {
   describe('hidden helper health', () => {
     it.each([
       ['stopped with a failure', { State: 'exited', Status: 'Exited (1) 2 minutes ago' }],
+      ['killed with SIGKILL while the stack runs', { State: 'exited', Status: 'Exited (137) 2 minutes ago' }],
+      ['terminated with SIGTERM while the stack runs', { State: 'exited', Status: 'Exited (143) 2 minutes ago' }],
       ['stopped without a recorded exit code', { State: 'exited', Status: '' }],
       ['unhealthy', { healthStatus: 'unhealthy' as const }],
       ['restarting', { State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }],
@@ -979,6 +981,40 @@ describe('io.sencho.* labels on the container list', () => {
     it('flags a hidden helper that has no container while the rest of the stack runs', () => {
       hiddenOnly([]);
       expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();
+      expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
+    });
+
+    it('stays quiet for every hidden helper when the whole stack was stopped', () => {
+      for (const status of ['Exited (137) 2 minutes ago', 'Exited (143) 2 minutes ago', 'Exited (1) 2 minutes ago']) {
+        renderStack(entryFor(resolution), [
+          box('web', { State: 'exited', Status: 'Exited (0)' }),
+          box('api', { State: 'exited', Status: 'Exited (0)' }),
+          box('redis', { State: 'exited', Status: status }),
+        ], specs());
+        expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
+        cleanup();
+      }
+      // A stopped stack also keeps quiet about a replica that is no longer there.
+      renderStack(entryFor(resolution), [
+        box('web', { State: 'exited', Status: 'Exited (0)' }),
+        box('api', { State: 'exited', Status: 'Exited (0)' }),
+      ], [svc('api'), svc('redis', { expectedReplicas: 2 }), svc('web')]);
+      expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
+    });
+
+    it('still flags an unhealthy or crash-looping helper while the rest of the stack is stopped', () => {
+      renderStack(entryFor(resolution), [
+        box('web', { State: 'exited', Status: 'Exited (0)' }),
+        box('api', { State: 'exited', Status: 'Exited (0)' }),
+        box('redis', { State: 'restarting', Status: 'Restarting (1) 5 seconds ago' }),
+      ], specs());
+      expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
+      cleanup();
+      renderStack(entryFor(resolution), [
+        box('web', { State: 'exited', Status: 'Exited (0)' }),
+        box('api', { State: 'exited', Status: 'Exited (0)' }),
+        box('redis', { healthStatus: 'unhealthy' as const }),
+      ], specs());
       expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
     });
 

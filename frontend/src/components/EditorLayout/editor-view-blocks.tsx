@@ -405,29 +405,40 @@ function portLinkOpensApplication(
     });
 }
 
-/** One container is worth a callout when it is unhealthy, or not running and not a clean exit. */
-function containerNeedsAttention(container: ContainerInfo): boolean {
+/**
+ * One container is worth a callout when it is unhealthy, when Docker is still
+ * trying to run it (restarting, dead, or created and never started), or when the
+ * stack is running and the container is down with a failure. A stop records a
+ * non-zero exit on a helper that ignores SIGTERM (137 for SIGKILL, 143 for the
+ * signal itself), so when every container is down the stack was stopped on
+ * purpose and the exit code says how it stopped, not that it failed.
+ */
+function containerNeedsAttention(container: ContainerInfo, stackIsRunning: boolean): boolean {
     if (container.healthStatus === 'unhealthy') return true;
     if (container.State === 'running') return false;
+    if (container.State === 'restarting' || container.State === 'dead' || container.State === 'created') return true;
+    if (!stackIsRunning) return false;
     return !(container.State === 'exited' && /^exited \(0\)/i.test(container.Status ?? ''));
 }
 
 /**
  * A hidden helper needs attention when one of its containers is unhealthy,
- * restarting, dead, or stopped with a failure, when only some of its replicas
- * exist, or when it has no container at all while the rest of the stack is
- * running. A helper that exited cleanly (a finished one-shot job), a helper that
- * declares no replicas, and a stopped stack do not count. A stopped stack still
- * lists its exited containers, so "running" means a container is up, not that
- * the list is nonempty.
+ * restarting, dead, or created but never started, when only some of its replicas
+ * exist while the rest of the stack runs, or when it has no container at all
+ * while the rest of the stack is running. A helper that exited cleanly (a
+ * finished one-shot job), a helper that declares no replicas, and every helper of
+ * a stopped stack do not count, whatever exit code the stop produced. A stopped
+ * stack still lists its exited containers, so "running" means a container is up,
+ * not that the list is nonempty.
  */
 function hiddenServiceNeedsAttention(
     group: readonly ContainerInfo[],
     expectedReplicas: number,
     stackIsRunning: boolean,
 ): boolean {
-    if (group.length === 0) return stackIsRunning && expectedReplicas > 0;
-    return group.length < expectedReplicas || group.some(containerNeedsAttention);
+    if (group.some(container => containerNeedsAttention(container, stackIsRunning))) return true;
+    if (!stackIsRunning) return false;
+    return group.length < expectedReplicas;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net

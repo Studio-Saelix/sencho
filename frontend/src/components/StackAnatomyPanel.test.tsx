@@ -5,7 +5,7 @@
  * the update did not take effect.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -854,5 +854,106 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(await screen.findByText(/review required/i)).toBeInTheDocument();
     expect(screen.getByText(/Major version bump/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+  });
+});
+
+describe('StackAnatomyPanel hidden helper chips', () => {
+  const COMPOSE = `services:
+  web:
+    image: nginx:1.25
+  api:
+    image: nginx:1.25
+  helper:
+    image: nginx:1.25
+`;
+
+  const entry = (
+    services: Record<string, { order: number | null; hidden: boolean }>,
+  ): import('@/lib/serviceUrlResolve').ServiceUrlEntry => ({
+    status: 'ready',
+    nodeId: 1,
+    stackName: 'web',
+    renderable: true,
+    serviceUrls: {},
+    serviceUrlEdit: {},
+    serviceUrlClear: {},
+    ports: {},
+    senchoLabels: {
+      renderable: true,
+      services: Object.fromEntries(
+        Object.entries(services).map(([name, over]) => [name, { links: [], unverifiedLinks: 0, ...over }]),
+      ),
+      entries: [],
+    },
+  });
+
+  const chipNames = () => {
+    const servicesRow = screen.getByText('services', { exact: true }).nextElementSibling as HTMLElement;
+    return Array.from(servicesRow.querySelectorAll('span')).map(el => el.textContent);
+  };
+
+  function renderPanel(serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry) {
+    return render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={COMPOSE}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={null}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit
+        applying={false}
+        serviceUrlEntry={serviceUrlEntry}
+      />,
+    );
+  }
+
+  it('collapses hidden services behind one toggle that reveals them in place', async () => {
+    renderPanel(entry({
+      web: { order: 20, hidden: false },
+      api: { order: 10, hidden: false },
+      helper: { order: null, hidden: true },
+    }));
+
+    // Order still applies among the visible chips; the hidden service has no chip.
+    expect(chipNames()).toEqual(['api', 'web']);
+    const toggle = screen.getByTestId('anatomy-hidden-services-toggle');
+    expect(toggle).toHaveTextContent('1 hidden');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    await userEvent.click(toggle);
+    expect(chipNames()).toEqual(['api', 'web', 'helper']);
+    expect(screen.getByText('helper')).toHaveAttribute('title', 'Hidden from default lists by io.sencho.hidden');
+    expect(screen.getByTestId('anatomy-hidden-services-toggle')).toHaveTextContent('hide hidden');
+
+    await userEvent.click(screen.getByTestId('anatomy-hidden-services-toggle'));
+    expect(chipNames()).toEqual(['api', 'web']);
+  });
+
+  it('never collapses every service, and offers no toggle when nothing is hidden', () => {
+    renderPanel(entry({
+      web: { order: null, hidden: true },
+      api: { order: null, hidden: true },
+      helper: { order: null, hidden: true },
+    }));
+    expect(chipNames()).toEqual(['api', 'helper', 'web']);
+    expect(screen.queryByTestId('anatomy-hidden-services-toggle')).toBeNull();
+    cleanup();
+
+    renderPanel(entry({
+      web: { order: null, hidden: false },
+      api: { order: null, hidden: false },
+      helper: { order: null, hidden: false },
+    }));
+    expect(chipNames()).toEqual(['api', 'helper', 'web']);
+    expect(screen.queryByTestId('anatomy-hidden-services-toggle')).toBeNull();
+  });
+
+  it('lists every service when the node does not report the contract', () => {
+    renderPanel(undefined);
+    expect(chipNames()).toEqual(['web', 'api', 'helper']);
+    expect(screen.queryByTestId('anatomy-hidden-services-toggle')).toBeNull();
   });
 });

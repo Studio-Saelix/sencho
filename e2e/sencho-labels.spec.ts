@@ -141,8 +141,15 @@ test.describe('io.sencho.* labels', () => {
   test('the stack view lists services in label order and marks each label status', async ({ page }) => {
     await openStack(page);
     const chips = page.getByText('services', { exact: true }).locator('xpath=following-sibling::*[1]').locator('span');
+    // The hidden helper has no chip; one toggle reveals it in place.
+    await expect(chips).toHaveText(['web', 'api']);
+    const hiddenToggle = page.getByTestId('anatomy-hidden-services-toggle');
+    await expect(hiddenToggle).toHaveText('1 hidden');
+    await hiddenToggle.click();
     await expect(chips).toHaveText(['web', 'api', 'helper']);
     await expect(page.getByTitle('Hidden from default lists by io.sencho.hidden')).toHaveText('helper');
+    await hiddenToggle.click();
+    await expect(chips).toHaveText(['web', 'api']);
 
     await page.getByRole('tab', { name: 'Compose Labels' }).click();
     const panel = page.getByTestId('compose-labels-panel');

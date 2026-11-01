@@ -177,6 +177,9 @@ export default function StackAnatomyPanel({
   const preflightFp = useMemo(() => preflightFingerprint(preflightFindings), [preflightFindings]);
   const { dismissed: doctorDismissed } = useStackDismiss('doctor', stackName, activeNode?.id, preflightFp);
   const [activeTab, setActiveTab] = useState('anatomy');
+  // Hidden helpers collapse out of the Anatomy chips too, behind one toggle that
+  // reveals them in place, matching the stack's container list.
+  const [showHiddenServices, setShowHiddenServices] = useState(false);
 
   useEffect(() => {
     if (requestedTab === 'networking' && networkingEnabled) setActiveTab('networking');
@@ -409,6 +412,10 @@ export default function StackAnatomyPanel({
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
   const servicePresentation = presentServices(anatomy?.services ?? [], senchoLabelsOf(serviceUrlEntry));
+  const hiddenServiceNames = servicePresentation.order.filter(s => servicePresentation.hidden.has(s));
+  const visibleServiceNames = showHiddenServices
+    ? servicePresentation.order
+    : servicePresentation.order.filter(s => !servicePresentation.hidden.has(s));
 
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
@@ -553,7 +560,7 @@ export default function StackAnatomyPanel({
                 <span className="text-stat-subtitle">none defined</span>
               ) : (
                 <div className="flex flex-wrap gap-1">
-                  {servicePresentation.order.map(s => (
+                  {visibleServiceNames.map(s => (
                     <span
                       key={s}
                       className={cn(
@@ -565,6 +572,18 @@ export default function StackAnatomyPanel({
                       {s}
                     </span>
                   ))}
+                  {hiddenServiceNames.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="anatomy-hidden-services-toggle"
+                      aria-pressed={showHiddenServices}
+                      onClick={() => setShowHiddenServices(prev => !prev)}
+                      title={showHiddenServices ? 'Hide services marked io.sencho.hidden' : 'Show services hidden by io.sencho.hidden'}
+                      className="rounded-md border border-hairline px-1.5 py-0.5 font-mono text-xs text-stat-subtitle transition-colors hover:text-foreground"
+                    >
+                      {showHiddenServices ? 'hide hidden' : `${hiddenServiceNames.length} hidden`}
+                    </button>
+                  )}
                 </div>
               )}
             </Row>

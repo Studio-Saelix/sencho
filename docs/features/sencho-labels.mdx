@@ -63,11 +63,11 @@ Services with a valid `io.sencho.order` come first, from the lowest number up. S
 
 ### Hidden helper services
 
-`io.sencho.hidden: "true"` collapses a noisy helper, such as a one-shot migration job or a sidecar, out of the container list. The list shows one row, **N hidden helper services**, with a **Show** button that reveals them in place. The row calls out how many of them need attention: a hidden service with a container that is unhealthy, restarting, or stopped with a failure, one that has only some of its replicas, or one with no container at all while the rest of the stack is running. A helper that finished cleanly (a one-shot job that exited with code 0), a helper that declares no replicas, and a stack that is stopped do not count, so a healthy setup stays quiet and a failed or missing helper is never invisible.
+`io.sencho.hidden: "true"` collapses a noisy helper, such as a one-shot migration job or a sidecar, out of the container list. The list shows one row, **N hidden helper services**, with a **Show** button that reveals them in place. The row calls out how many of them need attention: a hidden service with a container that is unhealthy, restarting, dead, or created but never started, one that is stopped with a failure while the rest of the stack runs, one that has only some of its replicas while the stack runs, or one with no container at all while the rest of the stack runs. A helper that finished cleanly (a one-shot job that exited with code 0), a helper that declares no replicas (so its missing container is not news), and a stack that is stopped do not count, whatever exit code stopping produced: a helper that ignores the stop signal exits 137 or 143, and that says how it was stopped, not that it failed. A healthy setup stays quiet and a failed or missing helper is never invisible.
 
-Hidden applies to the stack's container cards and its Anatomy service chips, and to nothing else. Every other surface keeps every service: logs service filters, Fleet views, Resources, the Dossier, health and status totals, notifications, security, drift, updates, and lifecycle actions. Sencho never collapses every service in a stack, so a stack whose services are all marked hidden shows them all.
+Hidden applies to the stack's container cards and its Anatomy service chips, and to nothing else. Both surfaces collapse the helpers behind one control that reveals them in place: the **N hidden helper services** row in the container list and the **N hidden** toggle beside the Anatomy services. Every other surface keeps every service: logs service filters, Fleet views, Resources, the Dossier, health and status totals, notifications, security, drift, updates, and lifecycle actions. Sencho never collapses every service in a stack, so a stack whose services are all marked hidden shows them all.
 
-The stack view has no service search, so to find a hidden service use the **Show** button on the collapsed row, the service filter in the [Compose Labels tab](#where-you-see-them), or the `io.sencho.hidden` label key in the Fleet [Docker Labels](/features/docker-label-audit) filter.
+The stack view has no service search, so to find a hidden service use the **Show** button on the collapsed row or the **N hidden** toggle in the Anatomy services, the service filter in the [Compose Labels tab](#where-you-see-them), or the `io.sencho.hidden` label key in the Fleet [Docker Labels](/features/docker-label-audit) filter.
 
 ### The protective label
 
@@ -122,7 +122,7 @@ A node advertises the `sencho-labels-v1` capability once it resolves these label
     Open the stack's **Compose Labels** tab and find the label. **Ignored** shows the reason, such as a missing `https://` or credentials in the address. **Inert** means the label is on the container or image but not in the Compose file. If the tab says the node does not apply `io.sencho.*` labels, update that node.
   </Accordion>
   <Accordion title="A service is missing from the container list">
-    It is probably marked `io.sencho.hidden: "true"`. Use **Show** on the **hidden helper services** row to reveal it. Remove the label to list it by default.
+    It is probably marked `io.sencho.hidden: "true"`. Use **Show** on the **hidden helper services** row, or the **N hidden** toggle beside the Anatomy services, to reveal it. Remove the label to list it by default.
   </Accordion>
   <Accordion title="The order did not change">
     The value must be a whole number such as `"10"`; `first` or `1.5` is ignored and listed as **Ignored**. Services without a valid order always sort after ordered ones.
