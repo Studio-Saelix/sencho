@@ -244,6 +244,27 @@ describe('remote capability gate', () => {
     }
   });
 
+  it('passes the node\'s own 401 through for HEAD on the node list path, which Express routes like GET', async () => {
+    // Same rule as above on the HEAD form the capability gate also covers: a
+    // rejected stored token must read as the node's uncoded 401 whichever verb the
+    // client used. HEAD on a named-stack path and mixed-case paths never get this
+    // far: the hub's stack-route classifier is exact-match and denies them with a
+    // 403 for every caller, so neither can reach a node.
+    const res = await request(app)
+      .head('/api/stacks/platform/observation')
+      .set('Authorization', `Bearer ${adminBearer}`)
+      .set('x-node-id', String(rejectingNodeId));
+    expect(res.status).toBe(401);
+    expect(res.headers['x-sencho-proxy']).toBe('1');
+
+    const named = await request(app)
+      .head('/api/stacks/web/observation/status')
+      .set('Authorization', `Bearer ${adminBearer}`)
+      .set('x-node-id', String(rejectingNodeId));
+    expect(named.status).toBe(403);
+    expect(named.headers['x-sencho-proxy']).toBeUndefined();
+  });
+
   it('keeps the 503 text to what the check can know: online and reachable, not "settings are valid"', async () => {
     const res = await request(app)
       .get('/api/stacks/web/observation/status')
