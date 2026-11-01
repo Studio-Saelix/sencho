@@ -237,6 +237,8 @@ function reconcileKeys(
   declared: Record<string, string>,
   runtime: Record<string, string>,
 ): { onlyInCompose: string[]; onlyOnContainer: string[]; inBoth: string[]; changed: string[] } {
+  // Rendered config writes a literal `$` as `$$`, while the container carries the
+  // single `$`, so compare the rendered value the container would carry.
   const runtimeKeys = new Set(Object.keys(runtime));
   const onlyInCompose: string[] = [];
   const onlyOnContainer: string[] = [];
@@ -244,7 +246,7 @@ function reconcileKeys(
   const changed: string[] = [];
   for (const k of Object.keys(declared)) {
     if (!runtimeKeys.has(k)) onlyInCompose.push(k);
-    else if (declared[k] === runtime[k]) inBoth.push(k);
+    else if (unescapeRenderedDollar(declared[k]) === runtime[k]) inBoth.push(k);
     else changed.push(k);
   }
   for (const k of runtimeKeys) {
