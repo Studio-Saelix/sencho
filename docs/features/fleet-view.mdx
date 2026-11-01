@@ -28,8 +28,8 @@ A single rail summarises the state of every registered node so you can read the 
 
 | Tile | What it shows |
 |------|---------------|
-| **CPU** | Average CPU across online nodes. The value tints amber once the average is at or above 80%. |
-| **MEM** | Total RAM used across online nodes. |
+| **CPU** | Average CPU across online nodes, leaving out any node that reports unknown usage. The value tints amber once the average is at or above 80%, and reads `--` when no online node can report it. |
+| **MEM** | Total RAM used across online nodes, leaving out any node that reports unknown usage. |
 | **CONTAINERS** | Running containers across online nodes as `<running>/<total>`. |
 
 ### Tabs
@@ -99,7 +99,7 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
 | **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. It stays on the card next to the **Offline** badge while the node is unreachable. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
-| **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
+| **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. A host that cannot measure CPU or memory usage (a Sencho or Pilot agent inside an LXC without the cgroup mount) shows `--` and a **Show usage…** link instead of a bar. |
 | **Update to v…** button | Admin-only outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
 | **Update dev build** button | Admin-only, brand-colored button that replaces **Update to v…** when the local node is pinned to `sencho-dev:dev` and a newer integration build has been published. Pulls and recreates without rewriting the pinned tag. |
 | **Stack details** trigger | Footer button that toggles the stack drill-down. The label carries the stack count for the node. |

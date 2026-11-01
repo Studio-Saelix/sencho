@@ -57,6 +57,7 @@ export const CAPABILITIES = [
   // descriptor for the detail; this flag keeps the shared registry identical on
   // both sides so a gate can be expressed at all.
   'volume-protection-v1',
+  'host-usage-unknown-v1',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

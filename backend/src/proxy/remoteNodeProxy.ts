@@ -33,6 +33,8 @@ import {
   SERVICE_SCOPED_UPDATE_CAPABILITY,
   SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
   SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+  HOST_USAGE_UNKNOWN_HEADER,
+  HOST_USAGE_UNKNOWN_HEADER_VALUE,
 } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
@@ -54,6 +56,7 @@ import {
 import type { PermissionAction } from '../middleware/permissions';
 import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { requestAcceptsUnknownHostUsage } from '../helpers/hostUsageNegotiation';
 import { RegistryDeliveryService } from '../services/RegistryDeliveryService';
 import {
   assertSafeOutboundUrl,
@@ -183,6 +186,19 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // state changes within one proxy call.
       const headers = LicenseService.getInstance().getProxyHeaders();
       proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
+      // Advertise nullable host usage only when this hop's caller can render
+      // it. A browser session always can (it runs this same build); a machine
+      // client (an API token, or a hub older than the capability) must send the
+      // header itself, or it keeps the numeric shape its dashboard and
+      // monitoring scripts expect. The remote decides from this header alone,
+      // so forwarding the caller's own negotiation is the whole contract:
+      // overriding it would turn a token caller's numeric shape into a `null`
+      // it never asked for. Strip first so a browser cannot choose the remote's
+      // shape and a caller's value is never trusted verbatim.
+      proxyReq.removeHeader(HOST_USAGE_UNKNOWN_HEADER);
+      if (requestAcceptsUnknownHostUsage(req)) {
+        proxyReq.setHeader(HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE);
+      }
       // Forward the signed-in user's role so the remote enforces their RBAC
       // rather than treating every proxied request as admin. Strip first so a
       // browser/API client cannot smuggle the header through the gateway, then
