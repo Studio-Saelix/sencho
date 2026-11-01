@@ -251,7 +251,7 @@ export async function reconcileRestoreIntentsAtStartup(
       labels = inspected.Labels ?? null;
     } catch (err) {
       if ((err as { statusCode?: number }).statusCode !== 404) {
-        console.warn('[Recovery] Could not inspect restore target %s:', intent.targetVolume, errorMessageForLog(err));
+        console.warn('[Recovery] Could not inspect restore target %s:', sanitizeForLog(intent.targetVolume), errorMessageForLog(err));
         store.advance(intent.id, 'completion_unknown', {}, now);
         unknown += 1;
         continue;
@@ -273,7 +273,7 @@ export async function reconcileRestoreIntentsAtStartup(
       store.advance(intent.id, 'rolled_back', {}, now);
       rolledBack += 1;
     } catch (err) {
-      console.warn('[Recovery] Could not remove the interrupted restore target %s:', intent.targetVolume, errorMessageForLog(err));
+      console.warn('[Recovery] Could not remove the interrupted restore target %s:', sanitizeForLog(intent.targetVolume), errorMessageForLog(err));
       store.advance(intent.id, 'completion_unknown', {}, now);
       unknown += 1;
     }

@@ -7,7 +7,7 @@
  * is ours and unused is removed, and one that is ours but in use stays and reads
  * `completion_unknown`. A target that is not ours is never touched.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import type Docker from 'dockerode';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
@@ -173,6 +173,55 @@ describe('restore intent reconciliation at boot', () => {
     const result = await intents.reconcileRestoreIntentsAtStartup(fake.docker);
     expect(result).toEqual({ rolledBack: 0, unknown: 0 });
     expect(fake.removed).toEqual([]);
+  });
+});
+
+describe('log lines that name a restore target', () => {
+  const NAME = 'vol\r\n[forged] entry';
+
+  function printed(spy: { mock: { calls: unknown[][] } }): string {
+    return spy.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+  }
+
+  it('strips control characters when a second live restore into the target is refused', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { operationId } = seedIntent(NAME, 'recorded');
+    // The unique index on live targets refuses the second record.
+    expect(() => intents.RestoreIntentStore.getInstance().record({
+      operationId, pointId: 'p', targetVolume: NAME, actor: 'admin', processEpoch: 'epoch',
+    })).toThrow();
+    expect(printed(warn)).toContain('vol[forged] entry');
+    expect(printed(warn)).not.toMatch(/[\x00-\x1F\x7F]/);
+    warn.mockRestore();
+  });
+
+  it('strips control characters when the target cannot be inspected at boot', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    seedIntent(NAME, 'staging');
+    const docker = {
+      listContainers: async () => [],
+      getVolume: () => ({ inspect: async () => { throw Object.assign(new Error('daemon down'), { statusCode: 500 }); } }),
+    } as unknown as Docker;
+    await intents.reconcileRestoreIntentsAtStartup(docker);
+    expect(printed(warn)).toContain('vol[forged] entry');
+    expect(printed(warn)).not.toMatch(/[\x00-\x1F\x7F]/);
+    warn.mockRestore();
+  });
+
+  it('strips control characters when the interrupted target cannot be removed at boot', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { intentId } = seedIntent(NAME, 'staging');
+    const docker = {
+      listContainers: async () => [],
+      getVolume: () => ({
+        inspect: async () => ({ Labels: { [LABEL]: intentId } }),
+        remove: async () => { throw new Error('busy'); },
+      }),
+    } as unknown as Docker;
+    await intents.reconcileRestoreIntentsAtStartup(docker);
+    expect(printed(warn)).toContain('vol[forged] entry');
+    expect(printed(warn)).not.toMatch(/[\x00-\x1F\x7F]/);
+    warn.mockRestore();
   });
 });
 

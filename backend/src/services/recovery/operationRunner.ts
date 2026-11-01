@@ -224,8 +224,10 @@ export class RecoveryEngineService {
   }
 
   /**
-   * A health check that opens the repository. Only callers that already hold the
-   * repository lock (boot, provisioning, and the end of an operation) run this.
+   * A health check that opens the repository, with `restic cat config --no-lock`.
+   * Provisioning and the end of an operation run it; it takes no lock itself. A
+   * confirming provision (`runRepositoryConfirm`) opens the repository the same
+   * way, without a lock.
    */
   async refreshHealthDeep(operationId: string): Promise<void> {
     const cheap = await this.computeCheapHealth();
@@ -1045,16 +1047,43 @@ export class RecoveryEngineService {
 
   /**
    * A plain provision of a repository that already has a fingerprint: open it
-   * and compare. A volume that is gone, empty, or holding another repository
-   * ends `failed` instead of `succeeded`, because nothing was repaired and the
-   * next capture would fail. Only `replace` makes a new repository.
+   * and compare. A volume that is gone or empty, a key that no longer opens it,
+   * a different repository id, or a helper image that cannot be had ends `failed`
+   * instead of `succeeded`, because nothing was repaired and the next capture
+   * would fail. Only `replace` makes a new repository.
+   *
+   * It holds no lock, so a replace can move the active pointer while it reads.
+   * It then refuses with `lock_held`, as an admission does, and leaves the health
+   * snapshot to the repository that is active now.
    */
   private async runRepositoryConfirm(operationId: string, repository: RepositoryDescriptor): Promise<void> {
     const signal = this.work.get(operationId)?.controller.signal;
+    const stillActive = (): boolean => this.repositories.getActive()?.id === repository.id;
+    const record = (health: LocalVolumeProtectionHealth, deep: boolean): void => {
+      if (!stillActive()) return;
+      this.healthSnapshot = {
+        health,
+        checkedAt: Date.now(),
+        lastDeepCheckAt: deep ? Date.now() : this.healthSnapshot?.lastDeepCheckAt ?? null,
+      };
+    };
     try {
+      // The one pull a plain provision may start, as for a first provision: a
+      // status read never downloads, and this is a request to make it work.
+      if (!await this.ensureHelperImage()) {
+        record({ state: 'unavailable', reason: 'helper_unavailable' }, false);
+        this.operations.finish(operationId, { state: 'failed', errorClass: 'capability_unavailable' });
+        return;
+      }
       const cheap = await this.computeCheapHealth();
+      // The cheap check reads the active repository, so its answer belongs to
+      // this one only while this one is still active.
+      if (!stillActive()) {
+        this.operations.finish(operationId, { state: 'failed', errorClass: 'lock_held' });
+        return;
+      }
       if (cheap.state === 'unavailable') {
-        this.healthSnapshot = { health: cheap, checkedAt: Date.now(), lastDeepCheckAt: this.healthSnapshot?.lastDeepCheckAt ?? null };
+        record(cheap, false);
         this.operations.finish(operationId, { state: 'failed', errorClass: errorClassForHealth(cheap.reason) });
         return;
       }
@@ -1065,12 +1094,25 @@ export class RecoveryEngineService {
         signal,
         operationId,
       });
-      // Another repository in the volume is as unusable as none: the points
-      // recorded against this one cannot be read from it.
-      const health = opened.kind === 'open' && opened.fingerprint !== repository.repositoryFingerprint
-        ? { state: 'unavailable' as const, reason: 'repository_unavailable' as const }
+      if (!stillActive()) {
+        this.operations.finish(operationId, { state: 'failed', errorClass: 'lock_held' });
+        return;
+      }
+      // An aborted read says nothing about the repository, so it records nothing.
+      if (opened.kind === 'failed' && opened.errorClass === 'interrupted') {
+        this.operations.finish(operationId, { state: 'failed', errorClass: 'interrupted' });
+        return;
+      }
+      // Another repository id under the same key is as unusable as none: the
+      // points recorded against this one cannot be read from it.
+      const mismatched = opened.kind === 'open' && opened.fingerprint !== repository.repositoryFingerprint;
+      if (mismatched) {
+        console.warn('[Recovery] Repository %s opened, but the volume holds a different repository than the one on record', repository.id);
+      }
+      const health: LocalVolumeProtectionHealth = mismatched
+        ? { state: 'unavailable', reason: 'repository_unavailable' }
         : healthForOpened(opened);
-      this.healthSnapshot = { health, checkedAt: Date.now(), lastDeepCheckAt: Date.now() };
+      record(health, true);
       if (health.state === 'available') {
         this.operations.finish(operationId, { state: 'succeeded' });
       } else {
@@ -1078,29 +1120,39 @@ export class RecoveryEngineService {
         this.operations.finish(operationId, { state: 'failed', errorClass });
       }
     } catch (err) {
+      const errorClass = classifyRecoveryError(err);
       console.error('[Recovery] Repository confirmation failed:', errorMessageForLog(err));
-      this.operations.finish(operationId, { state: 'failed', errorClass: classifyRecoveryError(err) });
+      record({ state: 'unavailable', reason: healthReasonFor(errorClass) }, false);
+      this.operations.finish(operationId, { state: 'failed', errorClass });
+    }
+  }
+
+  /**
+   * Make the pinned helper image present, pulling it when it is missing.
+   * Answers false, after logging, when no image is pinned or the pull fails.
+   */
+  private async ensureHelperImage(): Promise<boolean> {
+    const configured = resolveHelperImageRef();
+    if (configured.kind === 'unpinned') return false;
+    try {
+      const image = await inspectHelperImage(this.docker(), configured);
+      if (image.state !== 'present') {
+        const { pullHelperImage } = await import('./restic/helperImage');
+        await pullHelperImage(this.docker(), configured.ref);
+      }
+      return true;
+    } catch (err) {
+      console.error('[Recovery] Helper image pull failed:', errorMessageForLog(err));
+      return false;
     }
   }
 
   private async runRepositoryInit(operationId: string, replace: boolean, generation: number): Promise<void> {
     const docker = this.docker();
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, docker);
-    const configured = resolveHelperImageRef();
-    if (configured.kind === 'unpinned') {
-      this.settleFailed(operationId, 'capability_unavailable');
-      return;
-    }
-    try {
-      // A pull happens only here: provisioning is the one place a download is
-      // expected, so a status read never starts one.
-      const image = await inspectHelperImage(docker, configured);
-      if (image.state !== 'present') {
-        const { pullHelperImage } = await import('./restic/helperImage');
-        await pullHelperImage(docker, configured.ref);
-      }
-    } catch (err) {
-      console.error('[Recovery] Helper image pull failed:', errorMessageForLog(err));
+    // A pull happens only for a provision: it is the one place a download is
+    // expected, so a status read never starts one.
+    if (!await this.ensureHelperImage()) {
       this.settleFailed(operationId, 'capability_unavailable');
       return;
     }

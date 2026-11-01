@@ -608,7 +608,7 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 ## Volume protection says repository_not_initialized
 
-**Symptom:** `GET /api/recovery/node` reports `"reason": "repository_not_initialized"`, or a capture answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "repository_not_initialized"`. `GET /api/recovery/repository` reports `"health": "unavailable"` and either `"initialized": false` or, when the repository volume was emptied, `"initialized": true`.
+**Symptom:** `GET /api/recovery/node` reports `"reason": "repository_not_initialized"`, or a capture answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "repository_not_initialized"`. `GET /api/recovery/repository` reports `"health": "unavailable"` and either `"initialized": false` or, when the repository volume was emptied, `"initialized": true`. A node with an emptied volume reports this after a provision, capture, or check has opened the volume and found it empty; the routine status refresh does not open the volume, so within a minute the node can read `available` again until the next operation fails.
 
 **Cause:** Either the node has no active recovery repository yet (`"initialized": false`), because recovery points are stored in a repository that is provisioned explicitly, not created on first use; or the node has a repository on record but its volume no longer holds one (`"initialized": true`), for example after the volume's contents were deleted.
 
@@ -620,7 +620,7 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 **Symptom:** The node reports `"reason": "repository_unavailable"`, or an action fails with `repository_unavailable`. A restore of a point in a repository that was replaced answers `repository_unavailable` with `"reason": "repository_replaced"`; that repository is intact but no longer active.
 
-**Cause:** The active repository volume is missing or cannot be opened. The most common causes are a volume removed by a prune, a Docker data root that changed, and a repository whose files are damaged. A volume that still exists but whose contents were deleted is reported as `repository_not_initialized` instead; see the entry above.
+**Cause:** The active repository volume is missing or cannot be opened. The most common causes are a volume removed by a prune, a Docker data root that changed, and a repository whose files are damaged. A volume that still exists but whose contents were deleted is reported as `repository_not_initialized` after an operation opens it; see the entry above.
 
 **Fix:** Check that the repository volume still exists with `docker volume ls` (its name starts with `sencho-recovery-`). Restoring the volume from a host backup is the only way back to its points. If it is gone, provision a replacement repository with `"replace": true` and take new points; the old points cannot be read. A plain provision does not repair this: it ends `failed` with `repository_unavailable`.
 

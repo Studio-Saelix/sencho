@@ -437,22 +437,6 @@ describe('create point', () => {
   });
 });
 
-describe('the log line for a refused restore intent', () => {
-  it('carries no control character from the target volume name', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    // The operation row does not exist, so the insert is refused by a constraint,
-    // which is the branch that logs the target volume.
-    expect(() => intents.RestoreIntentStore.getInstance().record({
-      operationId: 'no-such-operation', pointId: 'no-such-point', targetVolume: 'vol\r\n[forged] entry',
-      actor: 'alice', processEpoch: 'epoch-1',
-    })).toThrow();
-    const printed = warn.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
-    expect(printed).toContain('vol[forged] entry');
-    expect(printed).not.toMatch(/[\x00-\x1F\x7F]/);
-    warn.mockRestore();
-  });
-});
-
 describe('repository provisioning', () => {
   const HELPER_PIN = 'SENCHO_RECOVERY_HELPER_IMAGE';
   let previousPin: string | undefined;
@@ -492,6 +476,10 @@ describe('repository provisioning', () => {
   describe('a plain provision succeeds only for a repository that opens', () => {
     const LOCATOR = 'sencho-recovery-test-g1';
 
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     async function plainProvision(
       key: string,
       options: { volumes?: FakeVolumeState[]; answer: { exitCode: number; id?: string } },
@@ -525,7 +513,7 @@ describe('repository provisioning', () => {
       expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
     });
 
-    it('answers failed repository_unavailable when another repository sits in the volume', async () => {
+    it('answers failed repository_unavailable when the volume opens with this key but holds a different repository id', async () => {
       const { stored } = await plainProvision('plain-other', { answer: { exitCode: 0, id: 'a'.repeat(32) } });
       expect(stored).toMatchObject({ state: 'failed', errorClass: 'repository_unavailable' });
       expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
@@ -556,6 +544,166 @@ describe('repository provisioning', () => {
       expect(service().health()).toEqual({ state: 'available' });
     });
 
+    it('does not record a repeated key twice and runs one helper', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
+      await seedProtectableVolume();
+      const helper = configRunner({ exitCode: 0 });
+      helperOverride = helper.helper;
+      service().markReadyForTests();
+      const request = { actor: 'alice', idempotencyKey: 'plain-twice', replace: false, transport: 'local' as const };
+      const first = await service().admitRepositoryInit(request);
+      await service().whenIdleForTests();
+      const second = await service().admitRepositoryInit(request);
+      await service().whenIdleForTests();
+      expect(second).toMatchObject({ replayed: true });
+      expect(second.operation.id).toBe(first.operation.id);
+      expect(helper.runs).toEqual(['config']);
+    });
+
+    it('pulls the pinned helper image when it is missing, then confirms', async () => {
+      process.env[HELPER_PIN] = `registry.example/helper@sha256:${'c'.repeat(64)}`;
+      const fake = fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] });
+      let pulled = false;
+      const base = fake.docker as unknown as Record<string, unknown>;
+      base.getImage = () => ({
+        inspect: async () => {
+          if (!pulled) throw Object.assign(new Error('no such image'), { statusCode: 404 });
+          return { Id: 'sha256:helper' };
+        },
+      });
+      base.pull = (_ref: string, cb: (err: Error | null, stream: unknown) => void) => cb(null, {});
+      base.modem = { followProgress: (_stream: unknown, done: (err: Error | null) => void) => { pulled = true; done(null); } };
+      stubDocker(fake);
+      await seedProtectableVolume();
+      helperOverride = configRunner({ exitCode: 0 }).helper;
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-pulls', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(pulled).toBe(true);
+      expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+    });
+
+    it('answers failed capability_unavailable when the helper image is missing and cannot be pulled', async () => {
+      // An image id cannot be pulled, so a missing one on this pin is a failed pull.
+      const fake = fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] });
+      (fake.docker as unknown as Record<string, unknown>).getImage = () => ({
+        inspect: async () => { throw Object.assign(new Error('no such image'), { statusCode: 404 }); },
+      });
+      stubDocker(fake);
+      await seedProtectableVolume();
+      const helper = configRunner({ exitCode: 0 });
+      helperOverride = helper.helper;
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-no-pull', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+        .toMatchObject({ state: 'failed', errorClass: 'capability_unavailable' });
+      expect(helper.runs).toEqual([]);
+      expect(service().health()).toEqual({ state: 'unavailable', reason: 'helper_unavailable' });
+    });
+
+    it('records nothing about the repository when the read is aborted', async () => {
+      stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
+      await seedProtectableVolume();
+      helperOverride = {
+        run: async () => ({ exitCode: null, stderrTail: '', aborted: true, killed: false }),
+        removeForeignEpochHelpers: async () => 0,
+        countForeignEpochHelpers: async () => 0,
+      } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-aborted', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+        .toMatchObject({ state: 'failed', errorClass: 'interrupted' });
+      expect(service().health()).toEqual({ state: 'available' });
+    });
+
+    it('ends failed, and marks the node unavailable, when the daemon errors while checking the volume', async () => {
+      const fake = fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] });
+      (fake.docker as unknown as Record<string, unknown>).getVolume = () => ({
+        inspect: async () => { throw Object.assign(new Error('daemon unreachable'), { statusCode: 500 }); },
+      });
+      stubDocker(fake);
+      await seedProtectableVolume();
+      helperOverride = configRunner({ exitCode: 0 }).helper;
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-daemon-error', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('failed');
+      expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
+    });
+
+    describe.each(['before the helper runs', 'while the helper reads'] as const)(
+      'when a replace moves the active repository %s', (when) => {
+        it('refuses with lock_held and leaves the node health alone', async () => {
+          stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
+          await seedProtectableVolume();
+          const moveActive = (): void => {
+            const store = repositoryStore.RecoveryRepositoryStore.getInstance();
+            const replacement = store.register({
+              ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: 'sencho-recovery-test-g2', failureDomain: 'same_failure_domain',
+            });
+            store.storeSecret(replacement.id, 'password-2');
+            store.setFingerprint(replacement.id, 'e'.repeat(32));
+            store.setActive(replacement.id);
+          };
+          helperOverride = {
+            // The old repository answers empty, which would mark the node unavailable.
+            run: async () => {
+              if (when === 'while the helper reads') moveActive();
+              return { exitCode: 10, stderrTail: '', aborted: false, killed: false };
+            },
+            removeForeignEpochHelpers: async () => 0,
+            countForeignEpochHelpers: async () => 0,
+          } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
+          service().markReadyForTests();
+          const admitted = await service().admitRepositoryInit({
+            actor: 'alice', idempotencyKey: `plain-races-replace-${when}`, replace: false, transport: 'local',
+          });
+          if (when === 'before the helper runs') moveActive();
+          await service().whenIdleForTests();
+          expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id))
+            .toMatchObject({ state: 'failed', errorClass: 'lock_held' });
+          expect(service().health()).toEqual({ state: 'available' });
+        });
+      },
+    );
+
+    it('still resumes a repository a crash left without a fingerprint, under the repository lock', async () => {
+      const localRepository = await import('../services/recovery/localRepository');
+      stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
+      const store = repositoryStore.RecoveryRepositoryStore.getInstance();
+      const half = store.register({
+        ownerNodeKey: ENGINE_KEY, kind: 'local_volume', locator: LOCATOR, failureDomain: 'same_failure_domain',
+      });
+      store.storeSecret(half.id, 'password-1');
+      store.setActive(half.id);
+      const helper = configRunner({ exitCode: 0 });
+      helperOverride = helper.helper;
+      const spy = vi.spyOn(localRepository.RepositoryProvisioner.prototype, 'provision')
+        .mockImplementation(async (deps) => {
+          deps.acquireLock?.(half.id);
+          return { repository: half, created: false };
+        });
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-resume', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ replace: false, generation: 1 }));
+      // The confirm path did not run: it is the only one that reads the config here.
+      expect(helper.runs).toEqual([]);
+      expect(operations.RecoveryOperationStore.getInstance().get(admitted.operation.id)?.state).toBe('succeeded');
+    });
+
     it('a replace still repairs the empty volume', async () => {
       const localRepository = await import('../services/recovery/localRepository');
       stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
@@ -569,7 +717,6 @@ describe('repository provisioning', () => {
       await service().whenIdleForTests();
       expect(spy).toHaveBeenCalledOnce();
       expect(operations.RecoveryOperationStore.getInstance().get(replaced.operation.id)?.state).toBe('succeeded');
-      vi.restoreAllMocks();
     });
   });
 
@@ -874,7 +1021,8 @@ describe('repository provisioning', () => {
     it('lets a repeated provision confirm the working repository while a capture holds it', async () => {
       stubDocker(fakeDocker({ volumes: [{ name: 'sencho-recovery-test-g1', labels: {} }] }));
       const seeded = await seedProtectableVolume();
-      helperOverride = configRunner({ exitCode: 0 }).helper;
+      const helper = configRunner({ exitCode: 0 });
+      helperOverride = helper.helper;
       service().markReadyForTests();
       holdActiveRepository(seeded.repositoryId, 'create_point');
 
@@ -882,6 +1030,8 @@ describe('repository provisioning', () => {
         actor: 'alice', idempotencyKey: 'provision-during-capture', replace: false, transport: 'local',
       });
       await service().whenIdleForTests();
+      // It opened the repository beside the capture, not only read the row.
+      expect(helper.runs).toEqual(['config']);
       expect(operations.RecoveryOperationStore.getInstance().get(again.operation.id)?.state).toBe('succeeded');
     });
   });
