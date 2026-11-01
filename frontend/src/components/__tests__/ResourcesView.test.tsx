@@ -1005,6 +1005,7 @@ describe('ResourcesView', () => {
         expect(screen.getByRole('checkbox', { name: 'Select web' })).not.toBeChecked();
         expect(screen.getByRole('button', { name: 'Purge selected (0)' })).toBeDisabled();
       });
+      expect(mockedFetch.mock.calls.filter(([url]) => url === '/system/orphans').length).toBeGreaterThan(1);
 
       // A deliberate selection on the refreshed list is what the purge carries.
       await user.click(screen.getByRole('checkbox', { name: 'Select web' }));
@@ -1012,8 +1013,34 @@ describe('ResourcesView', () => {
       await user.click(await screen.findByRole('button', { name: 'Purge' }));
       await waitFor(() => {
         const purgeCall = mockedFetch.mock.calls.find(([url]) => url === '/system/prune/orphans');
+        expect(purgeCall).toBeDefined();
         expect(JSON.parse(String((purgeCall?.[1] as RequestInit).body))).toEqual({ containerIds: ['c1'] });
       });
+    });
+
+    it('clears the external-container selection when the node changes', async () => {
+      const orphans = {
+        'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+      };
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/orphans') return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      const { rerender } = render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /external/i }));
+      await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+      expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
+
+      nodesState.activeNode = { id: 2 };
+      rerender(<ResourcesView />);
+
+      // The new node's read lists the same container id; the selection was
+      // made on the previous node's list and must not follow it.
+      expect(await screen.findByRole('checkbox', { name: 'Select web' })).not.toBeChecked();
+      expect(screen.getByRole('button', { name: 'Purge selected (0)' })).toBeDisabled();
     });
 
     describe('purging external containers', () => {
