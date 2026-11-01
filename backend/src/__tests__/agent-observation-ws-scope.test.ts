@@ -9,25 +9,24 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import WebSocket from 'ws';
-import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let server: import('http').Server;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 
 function createToken(scope: string): string {
-  const raw = generateApiToken();
   const db = DatabaseService.getInstance();
-  db.addApiToken({
-    token_hash: crypto.createHash('sha256').update(raw).digest('hex'),
-    name: `ws-${scope}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    scope: scope as never,
-    user_id: db.getUserByUsername('testadmin')!.id,
-    created_at: Date.now(),
-    expires_at: Date.now() + 60_000,
+  const name = `ws-${scope || 'empty'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const raw = createTestApiToken({
+    db: DatabaseService,
+    scope: 'read-only',
+    userId: db.getUserByUsername('testadmin')!.id,
+    name,
+    expiresAt: Date.now() + 60_000,
   });
+  db.getDb().prepare('UPDATE api_tokens SET scope = ? WHERE name = ?').run(scope, name);
   return raw;
 }
 

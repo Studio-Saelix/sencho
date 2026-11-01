@@ -10,9 +10,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import http from 'http';
-import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
-import { generateApiToken } from '../utils/apiTokenFormat';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -21,18 +20,24 @@ let authCookie: string;
 let server: http.Server;
 let serverPort: number;
 
-/** Insert a token row directly, including a scope value no build should issue. */
+/**
+ * Mint a token through the shared fixture, then set its stored scope.
+ *
+ * The scope column is free TEXT, so writing it directly is how a value no build
+ * issues is reached. Going through the fixture keeps the hashing in one place
+ * instead of repeating it per test file.
+ */
 function createToken(scope: string, expiresAt: number | null = Date.now() + 60_000): string {
-  const raw = generateApiToken();
   const db = DatabaseService.getInstance();
-  db.addApiToken({
-    token_hash: crypto.createHash('sha256').update(raw).digest('hex'),
-    name: `obs-test-${scope}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    scope: scope as never,
-    user_id: db.getUserByUsername('testadmin')!.id,
-    created_at: Date.now(),
-    expires_at: expiresAt,
+  const name = `obs-test-${scope || 'empty'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const raw = createTestApiToken({
+    db: DatabaseService,
+    scope: 'read-only',
+    userId: db.getUserByUsername('testadmin')!.id,
+    name,
+    expiresAt,
   });
+  db.getDb().prepare('UPDATE api_tokens SET scope = ? WHERE name = ?').run(scope, name);
   return raw;
 }
 
