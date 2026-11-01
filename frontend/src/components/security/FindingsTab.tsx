@@ -12,6 +12,8 @@ interface FindingsTabProps {
   loading: boolean;
   /** True when the summaries fetch failed; render an error state, never a false "no findings". */
   error?: boolean;
+  /** Why the summaries read failed, when the cause is worth naming. */
+  errorReason?: string | null;
   onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
 }
 
@@ -42,7 +44,7 @@ const COPY: Record<FindingsKind, {
 
 /** Index of images/stacks that carry findings of the given kind. Rows open the
  *  existing scan sheet on the matching detail tab. */
-export function FindingsTab({ kind, summaries, loading, error, onInspect }: FindingsTabProps) {
+export function FindingsTab({ kind, summaries, loading, error, errorReason, onInspect }: FindingsTabProps) {
   const copy = COPY[kind];
   const Icon = copy.icon;
   const rows = useMemo(
@@ -60,7 +62,9 @@ export function FindingsTab({ kind, summaries, loading, error, onInspect }: Find
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertTriangle className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
         <h3 className="text-lg font-medium mb-1">Couldn't load scan results</h3>
-        <p className="text-sm text-muted-foreground max-w-md">Scan results failed to load for this node. Try again shortly.</p>
+        <p className="text-sm text-muted-foreground max-w-md">
+          {errorReason ?? 'Scan results failed to load for this node. Try again shortly.'}
+        </p>
       </div>
     );
   }

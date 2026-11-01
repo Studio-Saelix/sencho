@@ -6,7 +6,9 @@ import {
   classifyRemoteReadError,
   classifyRemoteReadFailure,
   isUnreadableNode,
+  remoteReadFailureMessage,
   type RemoteReadFailure,
+  type UnreadableNodeFailure,
 } from '@/lib/remoteReadFailure';
 import { visibilityInterval } from '@/lib/utils';
 import type {
@@ -99,6 +101,18 @@ export function buildNetHistory(
 // is chosen so a single transient hiccup does not trip the indicator.
 const METRICS_STALE_THRESHOLD = 3;
 
+/** The first cause that means the hub has no readable path to the node, in the
+ *  order the dashboard should name it: a route-level deadline, then the two
+ *  metrics endpoints. */
+function firstUnreadableCause(
+  ...failures: Array<RemoteReadFailure | null | undefined>
+): UnreadableNodeFailure | null {
+  for (const failure of failures) {
+    if (isUnreadableNode(failure)) return failure;
+  }
+  return null;
+}
+
 
 export function useDashboardData(): DashboardData {
   const { activeNode, nodes } = useNodes();
@@ -115,8 +129,10 @@ export function useDashboardData(): DashboardData {
   const [metricsStale, setMetricsStale] = useState(false);
   // A node that did not answer at all is a different state from metrics that
   // are stale for a known local reason (the Docker socket). Only the former
-  // reads as "Unknown"/"not answering"; the latter keeps the derived level.
-  const [metricsUnreadable, setMetricsUnreadable] = useState(false);
+  // reads as "Unknown"; the latter keeps the derived level. The cause travels
+  // with the state so the headline can name a disconnected Pilot or an
+  // unconfigured node instead of calling every cause "not answering".
+  const [unreadableCause, setUnreadableCause] = useState<UnreadableNodeFailure | null>(null);
   // The read the headline depends on may be queued behind other node reads in
   // the browser's six-connection limit. Until one of the metrics endpoints has
   // settled there is no reading to report, so the headline must not claim the
@@ -127,6 +143,11 @@ export function useDashboardData(): DashboardData {
   // after a node switch has already triggered a new effect cycle.
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
+  // The node's display name for failure copy. Held in a ref so the fetch
+  // callbacks keep a stable identity across renders (they drive the polling
+  // effects) while still naming the node the read actually targeted.
+  const nodeNameRef = useRef(activeNode?.name);
+  useEffect(() => { nodeNameRef.current = activeNode?.name; }, [activeNode?.name]);
 
   // Whether the last committed success held a non-empty map. Soft poll failures
   // keep the prior map only in that case; a confirmed-empty fleet must surface a
@@ -172,23 +193,24 @@ export function useDashboardData(): DashboardData {
 
   const publishNodeHealth = useCallback(() => {
     const counts = failureCountsRef.current;
-    const nodeReadUnreadable = isUnreadableNode(nodeReadFailureRef.current);
+    const cause = firstUnreadableCause(
+      nodeReadFailureRef.current,
+      lastFailureRef.current.stats,
+      lastFailureRef.current.sys,
+    );
     setMetricsStale(
       counts.stats >= METRICS_STALE_THRESHOLD
       || counts.sys >= METRICS_STALE_THRESHOLD
-      || nodeReadUnreadable,
+      || cause !== null,
     );
-    setMetricsUnreadable(
-      isUnreadableNode(lastFailureRef.current.stats)
-      || isUnreadableNode(lastFailureRef.current.sys)
-      || nodeReadUnreadable,
-    );
+    setUnreadableCause(cause);
   }, []);
 
   const recordNodeReadFailure = useCallback((failure: RemoteReadFailure) => {
-    // Only a bounded deadline or an unreachable node means the node itself
-    // could not be read. An authorization or HTTP answer came from the node, so
-    // it proves nothing about silence and must not change the headline.
+    // Only a cause that leaves the hub with no readable path to the node (a
+    // deadline, an unreachable node, a disconnected Pilot, an unconfigured
+    // target, a refused address) changes the headline. An authorization or
+    // HTTP answer came from the node, so it proves nothing about that.
     if (!isUnreadableNode(failure)) return;
     // A metrics endpoint has already answered this node since the switch, so
     // this is one route failing, not a silent node; the next metrics poll would
@@ -227,9 +249,9 @@ export function useDashboardData(): DashboardData {
       // stack-statuses read was about that route, not a silent node.
       nodeReadFailureRef.current = null;
     } else if (isUnreadableNode(outcome.failure)) {
-      // A node that did not answer is not a transient hiccup: mark the numbers
-      // stale on the first bounded failure instead of waiting out three polls,
-      // so the dashboard never keeps showing zeros as if they were readings.
+      // A node the hub cannot read is not a transient hiccup: mark the numbers
+      // stale on the first such failure instead of waiting out three polls, so
+      // the dashboard never keeps showing zeros as if they were readings.
       counts[endpoint] = METRICS_STALE_THRESHOLD;
       lastFailureRef.current[endpoint] = outcome.failure;
     } else {
@@ -249,7 +271,7 @@ export function useDashboardData(): DashboardData {
     failureCountsRef.current.stats = 0;
     lastFailureRef.current.stats = null;
     setMetricsStale(failureCountsRef.current.sys >= METRICS_STALE_THRESHOLD);
-    setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.sys));
+    setUnreadableCause(firstUnreadableCause(lastFailureRef.current.sys));
     const currentNodeId = nodeId;
     const controller = new AbortController();
     const fetchStats = async () => {
@@ -278,7 +300,7 @@ export function useDashboardData(): DashboardData {
     failureCountsRef.current.sys = 0;
     lastFailureRef.current.sys = null;
     setMetricsStale(failureCountsRef.current.stats >= METRICS_STALE_THRESHOLD);
-    setMetricsUnreadable(isUnreadableNode(lastFailureRef.current.stats));
+    setUnreadableCause(firstUnreadableCause(lastFailureRef.current.stats));
     const currentNodeId = nodeId;
     const controller = new AbortController();
     const fetchSys = async () => {
@@ -388,23 +410,19 @@ export function useDashboardData(): DashboardData {
         return;
       }
       if (!result.ok) {
-        if (result.failure === 'timeout' || result.failure === 'unreachable') {
-          // The earliest node-scoped read to fail is often this one, because
-          // the metrics endpoints are queued behind the same browser
-          // connection limit. Let it name the outage now instead of leaving
-          // the headline on a healthy default until the metrics answer.
-          recordNodeReadFailure(result.failure);
-        }
-        const timeoutMsg = result.failure === 'timeout'
-          ? 'Stack health request timed out.'
-          : result.failure === 'unreachable'
-            ? 'Could not reach this node for stack health.'
-            : `Could not load stack health (${result.status}).`;
+        // The earliest node-scoped read to fail is often this one, because
+        // the metrics endpoints are queued behind the same browser connection
+        // limit. Let it name the outage now instead of leaving the headline on
+        // a healthy default until the metrics answer.
+        if (result.failure !== undefined) recordNodeReadFailure(result.failure);
+        const failureMsg = result.failure !== undefined && isUnreadableNode(result.failure)
+          ? remoteReadFailureMessage(result.failure, { nodeName: nodeNameRef.current, status: result.status })
+          : `Could not load stack health (${result.status}).`;
         commitStackStatusesFailure(
           currentNodeId,
           generation,
           mode,
-          timeoutMsg,
+          failureMsg,
         );
         return;
       }
@@ -607,7 +625,8 @@ export function useDashboardData(): DashboardData {
     netHistory,
     historyEndAt,
     metricsStale,
-    metricsUnreadable,
+    metricsUnreadable: unreadableCause !== null,
+    unreadableCause,
     metricsSettled,
   };
 }

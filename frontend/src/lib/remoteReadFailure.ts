@@ -74,12 +74,56 @@ export function classifyRemoteReadFailure(res: Response): RemoteReadFailure | nu
 }
 
 /**
- * A failure that means the node itself could not be read: it missed the
- * gateway deadline or could not be reached. These are the two causes a page
- * names outright and retries, as opposed to an answer the node did give.
+ * A failure that means the hub has no readable path to the node: it missed the
+ * gateway deadline, could not be reached, its Pilot tunnel is down, it has no
+ * target configured, or the hub refused its address. These are the causes a
+ * page names outright and retries, as opposed to an answer the node did give.
+ *
+ * Every surface that reports whether a node is readable asks this one question,
+ * so a new cause cannot be named on one page and collapsed to a status code on
+ * the next. `unverified` is deliberately absent: that node answered, and its
+ * permission model is the thing that could not be read.
  */
-export function isUnreadableNode(failure: RemoteReadFailure | 'auth-abort' | undefined | null): boolean {
-  return failure === 'timeout' || failure === 'unreachable';
+export type UnreadableNodeFailure =
+  | 'timeout'
+  | 'unreachable'
+  | 'pilot-disconnected'
+  | 'not-configured'
+  | 'refused';
+
+export function isUnreadableNode(
+  failure: RemoteReadFailure | 'auth-abort' | undefined | null,
+): failure is UnreadableNodeFailure {
+  return failure === 'timeout'
+    || failure === 'unreachable'
+    || failure === 'pilot-disconnected'
+    || failure === 'not-configured'
+    || failure === 'refused';
+}
+
+/** A cause that has its own operator-facing copy, as opposed to the two
+ *  catch-alls (`http` and `error`) that fall back to a status or a retry line. */
+export function isNamedReadFailure(
+  failure: RemoteReadFailure | null | undefined,
+): failure is Exclude<RemoteReadFailure, 'http' | 'error'> {
+  return failure != null && failure !== 'http' && failure !== 'error';
+}
+
+/**
+ * One line for a Home headline that has no health to report. The two silent
+ * causes keep the dashboard's own sentence, which is what the phone and desktop
+ * bars already promise; every other cause the gateway established about the
+ * node gets its own copy, so a disconnected Pilot or an unconfigured node is
+ * never described as a node that did not answer.
+ */
+export function unreadableNodeHeadline(
+  failure: RemoteReadFailure | null | undefined,
+  nodeName?: string | null,
+): string {
+  if (failure == null || failure === 'timeout' || failure === 'unreachable') {
+    return 'This node is not answering.';
+  }
+  return remoteReadFailureMessage(failure, { nodeName });
 }
 
 /**
@@ -107,6 +151,8 @@ export function remoteReadFailureMessage(
 ): string {
   const name = options.nodeName?.trim();
   const subject = name ? `"${name}"` : 'This node';
+  // Mid-sentence copy cannot start with a capital when the node is unnamed.
+  const target = name ? `"${name}"` : 'this node';
   switch (failure) {
     case 'timeout':
       return `${subject} did not answer in time. Try again in a moment.`;
@@ -121,9 +167,9 @@ export function remoteReadFailureMessage(
     case 'not-configured':
       return `${subject} has no API URL or token configured. Update it in Settings → Nodes.`;
     case 'pilot-disconnected':
-      return `The Pilot tunnel to ${subject} is disconnected. It resumes when the agent reconnects.`;
+      return `The Pilot tunnel to ${target} is disconnected. It resumes when the agent reconnects.`;
     case 'refused':
-      return `The hub refused ${subject}'s address. Check the node's API URL.`;
+      return `The hub refused ${target}'s address. Check the node's API URL.`;
     case 'unsupported':
       return 'This node does not serve this data. Update the node to see it.';
     case 'http':

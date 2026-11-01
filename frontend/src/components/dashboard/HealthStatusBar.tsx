@@ -4,6 +4,7 @@ import { MastheadRail } from '@/components/ui/MastheadRail';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
 import { countVisibleUnread } from '@/lib/notificationVisibility';
+import { unreadableNodeHeadline, type UnreadableNodeFailure } from '@/lib/remoteReadFailure';
 
 interface HealthStatusBarProps {
   stats: Stats;
@@ -15,9 +16,12 @@ interface HealthStatusBarProps {
   /** True when the metrics reads are not answering: several consecutive failures,
    *  or one bounded gateway timeout against a remote node. */
   metricsStale?: boolean;
-  /** True when the metrics stopped at a state where the node could not be read
-   *  (a bounded timeout or an unreachable node), as opposed to stale meters. */
+  /** True when a read stopped at a state where the hub has no readable path to
+   *  the node, as opposed to stale meters. */
   metricsUnreadable?: boolean;
+  /** Why the node is unreadable, so the bar names a disconnected Pilot or an
+   *  unconfigured node instead of calling every cause "not answering". */
+  unreadableCause?: UnreadableNodeFailure | null;
   /** True until the first metrics read for the active node settles. The headline
    *  must not claim the default (healthy) level while that read is still queued. */
   metricsPending?: boolean;
@@ -101,6 +105,7 @@ export function HealthStatusBar({
   lastSyncAt,
   metricsStale = false,
   metricsUnreadable = false,
+  unreadableCause = null,
   metricsPending = false,
 }: HealthStatusBarProps) {
   const { level, reasons } = useMemo(
@@ -119,7 +124,7 @@ export function HealthStatusBar({
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
   const reasonsLine = metricsUnreadable
-    ? 'This node is not answering.'
+    ? unreadableNodeHeadline(unreadableCause, activeNodeName)
     : metricsPending
       ? 'Reading this node…'
       : reasons.join(' · ');

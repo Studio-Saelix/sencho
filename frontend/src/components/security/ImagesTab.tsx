@@ -174,6 +174,8 @@ interface ImagesTabProps {
   loading: boolean;
   /** True when the summaries fetch failed; render an error state, never a false "clean". */
   error?: boolean;
+  /** Why the summaries read failed, when the cause is worth naming. */
+  errorReason?: string | null;
   onInspect: (scanId: number, initialTab?: ScanDetailTab, driverVulnerabilityIds?: string[]) => void;
   /** Admin on a node with a ready scanner; gates the scan Actions column. */
   canScan: boolean;
@@ -199,6 +201,7 @@ export function ImagesTab({
   summaries,
   loading,
   error,
+  errorReason,
   onInspect,
   canScan,
   scanningRef,
@@ -300,7 +303,9 @@ export function ImagesTab({
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <AlertTriangle className="w-12 h-12 text-warning/60 mb-4" strokeWidth={1.5} />
         <h3 className="text-lg font-medium mb-1">Couldn't load scan results</h3>
-        <p className="text-sm text-muted-foreground">Scan results failed to load for this node. Try again shortly.</p>
+        <p className="text-sm text-muted-foreground">
+          {errorReason ?? 'Scan results failed to load for this node. Try again shortly.'}
+        </p>
       </div>
     );
   }

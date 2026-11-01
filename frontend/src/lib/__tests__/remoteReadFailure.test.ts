@@ -4,7 +4,10 @@ import {
   REMOTE_READ_TIMEOUT_HEADER,
   classifyRemoteReadError,
   classifyRemoteReadFailure,
+  isNamedReadFailure,
+  isUnreadableNode,
   remoteReadFailureMessage,
+  unreadableNodeHeadline,
 } from '../remoteReadFailure';
 
 function timedOut(): Response {
@@ -124,5 +127,56 @@ describe('remoteReadFailureMessage', () => {
 
   it('falls back to a neutral subject when the node is unnamed', () => {
     expect(remoteReadFailureMessage('timeout')).toContain('This node');
+  });
+});
+
+describe('isUnreadableNode', () => {
+  it('covers every cause where the hub has no readable path to the node', () => {
+    for (const cause of ['timeout', 'unreachable', 'pilot-disconnected', 'not-configured', 'refused'] as const) {
+      expect(isUnreadableNode(cause)).toBe(true);
+    }
+  });
+
+  it('does not claim a node is unreadable when it answered', () => {
+    for (const cause of [
+      'unauthorized',
+      'node-credential',
+      'unverified',
+      'unsupported',
+      'http',
+      'error',
+      'auth-abort',
+      null,
+      undefined,
+    ] as const) {
+      expect(isUnreadableNode(cause)).toBe(false);
+    }
+  });
+});
+
+describe('isNamedReadFailure', () => {
+  it('keeps every marked cause and drops only the two catch-alls', () => {
+    expect(isNamedReadFailure('pilot-disconnected')).toBe(true);
+    expect(isNamedReadFailure('not-configured')).toBe(true);
+    expect(isNamedReadFailure('refused')).toBe(true);
+    expect(isNamedReadFailure('unverified')).toBe(true);
+    expect(isNamedReadFailure('http')).toBe(false);
+    expect(isNamedReadFailure('error')).toBe(false);
+    expect(isNamedReadFailure(null)).toBe(false);
+  });
+});
+
+describe('unreadableNodeHeadline', () => {
+  it('keeps the dashboard sentence for the two silent causes', () => {
+    expect(unreadableNodeHeadline('timeout', 'edge-1')).toBe('This node is not answering.');
+    expect(unreadableNodeHeadline('unreachable', 'edge-1')).toBe('This node is not answering.');
+    expect(unreadableNodeHeadline(null, 'edge-1')).toBe('This node is not answering.');
+  });
+
+  it('names a disconnected Pilot, an unconfigured target, and a refused address', () => {
+    expect(unreadableNodeHeadline('pilot-disconnected', 'edge-1')).toMatch(/Pilot tunnel to "edge-1" is disconnected/i);
+    expect(unreadableNodeHeadline('not-configured', 'edge-1')).toMatch(/no API URL or token configured/i);
+    expect(unreadableNodeHeadline('refused', 'edge-1')).toMatch(/refused "edge-1"'s address/i);
+    expect(unreadableNodeHeadline('pilot-disconnected', 'edge-1')).not.toMatch(/not answering/i);
   });
 });

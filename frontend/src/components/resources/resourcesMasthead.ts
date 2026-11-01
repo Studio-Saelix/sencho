@@ -1,5 +1,10 @@
 import type { MastheadMetadataItem, MastheadTone } from '@/components/ui/PageMasthead';
 import { formatBytes } from '@/lib/utils';
+import {
+    isUnreadableNode,
+    remoteReadFailureMessage,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 
 export interface UsageData {
     reclaimableImages: number;
@@ -16,10 +21,12 @@ export interface UsageData {
 
 export type LoadState = 'loading' | 'ready' | 'error';
 
-/** Disk usage as the page holds it: figures exist only when they were read. */
+/** Disk usage as the page holds it: figures exist only when they were read.
+ *  An error carries the cause when one is worth naming, so the card says a
+ *  disconnected Pilot instead of only "could not read". */
 export type UsageLoad =
     | { status: 'loading' }
-    | { status: 'error' }
+    | { status: 'error'; failure?: RemoteReadFailure }
     | { status: 'ready'; data: UsageData };
 
 export interface ResourcesMastheadModel {
@@ -55,7 +62,9 @@ export function deriveResourcesMastheadState(load: UsageLoad): ResourcesMasthead
         return {
             state: 'Disk usage unknown',
             tone: 'warn',
-            subtitle: 'Could not read disk usage from this node.',
+            subtitle: load.failure !== undefined && isUnreadableNode(load.failure)
+                ? remoteReadFailureMessage(load.failure)
+                : 'Could not read disk usage from this node.',
             metadata: UNKNOWN_METADATA,
             reclaimableBytes: 0,
             reclaimableItems: 0,

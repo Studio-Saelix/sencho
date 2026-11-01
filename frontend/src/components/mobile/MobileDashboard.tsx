@@ -5,6 +5,7 @@ import { deriveHealth } from '@/components/dashboard/deriveHealth';
 import { useGitOpsSourceStates } from '@/components/dashboard/useGitOpsSourceStates';
 import GitOpsBadge from '@/components/gitops/GitOpsBadge';
 import type { HealthLevel, NotificationItem } from '@/components/dashboard/types';
+import { unreadableNodeHeadline } from '@/lib/remoteReadFailure';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import {
   STACK_HEALTH_COLLAPSE_SIZE,
@@ -251,7 +252,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
       />
       {data.metricsUnreadable ? (
         <p className="border-b border-hairline px-4 pb-[15px] font-mono text-[11px] text-stat-subtitle">
-          This node is not answering.
+          {unreadableNodeHeadline(data.unreadableCause, activeNodeName)}
         </p>
       ) : null}
 

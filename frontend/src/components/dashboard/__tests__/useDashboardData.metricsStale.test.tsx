@@ -226,6 +226,59 @@ describe('useDashboardData metricsStale threshold', () => {
     expect(result.current.metricsUnreadable).toBe(false);
   });
 
+  it('names a disconnected Pilot from the first failed metrics read, not a healthy level', async () => {
+    // A Pilot agent that is stopped answers instantly with a marked 503. That
+    // is the hub having no readable path to the node, so the headline must not
+    // wait for three polls and must not call it "not answering".
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stats') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+        ));
+      }
+      if (requested === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (requested === '/stacks/statuses') return Promise.resolve(okJson({}));
+      if (requested === '/metrics/historical') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('pilot-disconnected');
+    expect(result.current.metricsStale).toBe(true);
+  });
+
+  it('carries a disconnected Pilot from the stack-statuses read before the metrics answer', async () => {
+    apiFetchMock.mockImplementation((requested: string) => {
+      if (requested === '/stacks/statuses') {
+        return Promise.resolve(new Response(
+          JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+          { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+        ));
+      }
+      return new Promise<Response>(() => {});
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.metricsSettled).toBe(false);
+    expect(result.current.metricsUnreadable).toBe(true);
+    expect(result.current.unreadableCause).toBe('pilot-disconnected');
+  });
+
+  it('clears the cause when the node answers again', async () => {
+    setEndpointOutcome('/stats', true);
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.unreadableCause).toBeNull();
+    expect(result.current.metricsUnreadable).toBe(false);
+  });
+
   it('does not treat an ordinary HTTP failure as an unavailable node', async () => {
     setEndpointOutcome('/stats', false);
     const { result } = renderHook(() => useDashboardData());

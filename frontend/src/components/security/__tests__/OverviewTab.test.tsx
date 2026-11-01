@@ -490,6 +490,22 @@ describe('OverviewTab unavailable states', () => {
     expect(screen.queryByText(/unreachable/i)).toBeNull();
   });
 
+  it('names a disconnected Pilot, an unconfigured target, and a refused address', () => {
+    renderUnavailable('pilot-disconnected');
+    expect(screen.getByText(/Pilot tunnel is disconnected/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer|unreachable/i)).toBeNull();
+    cleanup();
+
+    renderUnavailable('not-configured');
+    expect(screen.getByText(/no target configured/i)).toBeInTheDocument();
+    expect(screen.getByText(/no API URL or token configured/i)).toBeInTheDocument();
+    cleanup();
+
+    renderUnavailable('refused');
+    expect(screen.getByText(/refused this node’s address/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not answer|unreachable/i)).toBeNull();
+  });
+
   it('does not call a node silent when its permission model was unverified', () => {
     renderUnavailable('unverified');
     expect(screen.getByText(/permissions could not be verified/i)).toBeInTheDocument();

@@ -46,6 +46,28 @@ import { useTableSort } from '@/hooks/useTableSort';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
+/**
+ * One node-scoped read in the Resources inventory batch, settled on its own.
+ * The batch mixes the slow inventory read (the gateway gives it a 30 second
+ * budget) with reads on the interactive budget, so the page must be able to
+ * react to each one as it answers instead of waiting for the slowest.
+ */
+type SettledRead<T> =
+    | { ok: true; data: T }
+    | { ok: false; failure: RemoteReadFailure; status: number };
+
+async function readJson<T>(url: string, signal: AbortSignal): Promise<SettledRead<T>> {
+    try {
+        const res = await apiFetch(url, { signal });
+        if (!res.ok) {
+            return { ok: false, failure: classifyRemoteReadFailure(res) ?? 'http', status: res.status };
+        }
+        return { ok: true, data: await res.json() as T };
+    } catch (error) {
+        return { ok: false, failure: classifyRemoteReadError(error), status: 0 };
+    }
+}
+
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
 interface DockerImage {
@@ -447,55 +469,84 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             setOrphansState('loading');
             setOrphansFailure(null);
         }
-        try {
-            const signal = controller.signal;
-            const [resourcesRes, orphansRes, summariesRes, rollbackRes] = await Promise.all([
-                apiFetch('/system/resources', { signal }),
-                apiFetch('/system/orphans', { signal }),
-                apiFetch('/security/image-summaries', { signal }).catch(() => null),
-                apiFetch('/system/rollback/generations', { signal }).catch(() => null),
-            ]);
+        const signal = controller.signal;
+        const isCurrent = () => inventoryGenerationRef.current === generation && !signal.aborted;
 
-            // Resolve every body before the staleness check so a stale
-            // generation cannot write any subset of the resource slices.
-            const resourcesData = resourcesRes.ok ? await resourcesRes.json() : null;
-            const orphansData = orphansRes.ok ? await orphansRes.json() : null;
-            const summariesData = summariesRes && summariesRes.ok ? await summariesRes.json() : null;
-            const rollbackData = rollbackRes && rollbackRes.ok ? await rollbackRes.json() : null;
+        // The inventory read is slow by design, but the rest of this batch
+        // answers on the interactive budget. A node that is not answering is
+        // established by the first of those reads to fail, exactly as Home
+        // reads its headline from the earliest failed node-scoped read. Waiting
+        // for the slow read would leave the tables on a bare skeleton for its
+        // whole budget.
+        let inventorySettled = false;
+        let settledFromSibling = false;
+        const settleFromSibling = (failure: RemoteReadFailure): void => {
+            // A background refresh has rows on screen and no skeleton to end,
+            // so it keeps the soft-failure behaviour and waits for its own reads.
+            if (background || inventorySettled || settledFromSibling) return;
+            if (!isUnreadableNode(failure) || !isCurrent()) return;
+            settledFromSibling = true;
+            failInventory(false, failure);
+            // Disk usage is on the same slow budget; the page-level statement
+            // is the same, and a later usage answer replaces it.
+            setUsageLoad((state) => (state.status === 'ready' ? state : { status: 'error', failure }));
+        };
 
-            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
+        const resourcesPromise = readJson<{
+            images?: DockerImage[];
+            volumes?: DockerVolume[];
+            networks?: DockerNetwork[];
+        }>('/system/resources', signal);
+        const orphansPromise = readJson<Record<string, UnmanagedContainer[]>>('/system/orphans', signal);
+        const summariesPromise = readJson<Record<string, ScanSummary>>('/security/image-summaries', signal);
+        const rollbackPromise = readJson<RollbackGeneration[]>('/system/rollback/generations', signal);
 
-            if (resourcesData) {
-                setImages(resourcesData.images ?? []);
-                setVolumes(resourcesData.volumes ?? []);
-                setNetworks(resourcesData.networks ?? []);
-                setInventoryState('ready');
-            } else {
-                console.error('Failed to fetch resources', resourcesRes.status);
-                failInventory(background, classifyRemoteReadFailure(resourcesRes) ?? 'http');
-            }
-            if (orphansData) {
-                setOrphans(orphansData);
+        // Each slice commits as its own read answers. The staleness check runs
+        // per handler, so a superseded generation cannot write any of them.
+        void orphansPromise.then((outcome) => {
+            if (!isCurrent()) return;
+            if (outcome.ok) {
+                setOrphans(outcome.data);
                 setSelectedOrphans([]);
                 setOrphansFailure(null);
                 setOrphansState('ready');
-            } else {
-                console.error('Failed to fetch external containers', orphansRes.status);
-                failOrphans(background, classifyRemoteReadFailure(orphansRes) ?? 'http');
+                return;
             }
-            if (summariesData) setScanSummaries(summariesData);
-            setRollbackGenerations(Array.isArray(rollbackData) ? rollbackData : []);
-        } catch (err) {
-            if (inventoryGenerationRef.current !== generation || controller.signal.aborted) return;
-            console.error('Failed to fetch data', err);
-            // The batch rejects as a whole when any one read throws (a remote
-            // 401 is the common case), so the external-container slice has to be
-            // settled here too or that tab keeps its skeleton forever. The
-            // inventory toast already reports the failed refresh, so the
-            // external slice only records its cause.
-            const failure = classifyRemoteReadError(err);
-            failOrphans(background, failure, false);
-            if (!background) toast.error('Failed to load resources data');
+            console.error('Failed to fetch external containers', outcome.status);
+            failOrphans(background, outcome.failure);
+            settleFromSibling(outcome.failure);
+        });
+        void summariesPromise.then((outcome) => {
+            if (!isCurrent()) return;
+            if (outcome.ok) {
+                setScanSummaries(outcome.data);
+                return;
+            }
+            settleFromSibling(outcome.failure);
+        });
+        void rollbackPromise.then((outcome) => {
+            if (!isCurrent()) return;
+            if (outcome.ok) {
+                setRollbackGenerations(Array.isArray(outcome.data) ? outcome.data : []);
+                return;
+            }
+            settleFromSibling(outcome.failure);
+        });
+
+        const resources = await resourcesPromise;
+        if (!isCurrent()) return;
+        inventorySettled = true;
+        if (resources.ok && resources.data) {
+            setImages(resources.data.images ?? []);
+            setVolumes(resources.data.volumes ?? []);
+            setNetworks(resources.data.networks ?? []);
+            // A sibling read may have ended the loading state early; the slow
+            // read landing is the authoritative answer and replaces it.
+            setInventoryFailure(null);
+            setInventoryState('ready');
+        } else {
+            const failure: RemoteReadFailure = resources.ok ? 'http' : resources.failure;
+            console.error('Failed to fetch resources', resources.ok ? 200 : resources.status);
             failInventory(background, failure);
         }
     };
@@ -503,9 +554,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // A failed usage load drops the figures rather than keeping stale ones: the
     // masthead then reads "Disk usage unknown" with a Retry instead of a number
     // that may already be out of date.
-    const failUsage = (reason: unknown) => {
+    const failUsage = (reason: unknown, failure?: RemoteReadFailure) => {
         console.error('Failed to fetch disk usage', reason);
-        setUsageLoad({ status: 'error' });
+        setUsageLoad({ status: 'error', failure });
     };
 
     const loadUsage = async ({ background = false }: { background?: boolean } = {}) => {
@@ -521,12 +572,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (data) {
                 setUsageLoad({ status: 'ready', data });
             } else {
-                failUsage(res.status);
+                failUsage(res.status, classifyRemoteReadFailure(res) ?? undefined);
             }
         } catch (err) {
             if (usageGenerationRef.current !== generation) return;
             if (controller.signal.aborted) return;
-            failUsage(err);
+            failUsage(err, classifyRemoteReadError(err));
         }
     };
 

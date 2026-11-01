@@ -412,6 +412,24 @@ describe('useStackActions.saveFile', () => {
     expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
   });
 
+  it('names the read cause when opening a stack on a node the hub cannot read', async () => {
+    // The stack list can succeed and the file read fail a moment later when the
+    // node goes silent. The card must name the cause the gateway marked, not
+    // tell the operator to check their own connection.
+    vi.mocked(apiFetch).mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+    ));
+    const { result } = setup({ stackList: { selectedFile: null } });
+    let loaded: { ok: boolean; error?: string } = { ok: true };
+    await act(async () => {
+      loaded = await result.current.loadFileForRoute('linked.yml');
+    });
+    expect(loaded.ok).toBe(false);
+    expect(loaded.error).toMatch(/Pilot tunnel to "Local" is disconnected/i);
+    expect(vi.mocked(toast.error).mock.calls.some(([message]) => String(message).includes('connection'))).toBe(false);
+  });
+
   it('refreshes service URLs only when the open stack is reloaded', async () => {
     const onStackFilesChanged = vi.fn();
     vi.mocked(apiFetch).mockImplementation((url: string) => {

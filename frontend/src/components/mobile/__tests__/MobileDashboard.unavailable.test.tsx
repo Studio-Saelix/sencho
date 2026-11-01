@@ -11,6 +11,7 @@ const dataState = vi.hoisted(() => ({
   metricsStale: false,
   metricsUnreadable: false,
   metricsSettled: true,
+  unreadableCause: null as string | null,
 }));
 
 const localNode = {
@@ -47,6 +48,7 @@ vi.mock('@/components/dashboard', () => ({
     lastSyncAt: null,
     metricsStale: dataState.metricsStale,
     metricsUnreadable: dataState.metricsUnreadable,
+    unreadableCause: dataState.unreadableCause,
     metricsSettled: dataState.metricsSettled,
     metrics: [],
     nodeCount: 1,
@@ -87,6 +89,7 @@ describe('MobileDashboard unavailable state', () => {
     dataState.metricsStale = false;
     dataState.metricsUnreadable = false;
     dataState.metricsSettled = true;
+    dataState.unreadableCause = null;
   });
 
   it('reads Unknown when the node did not answer, not a derived health level', () => {
@@ -99,6 +102,19 @@ describe('MobileDashboard unavailable state', () => {
     // The phone headline must carry the same sentence as the desktop bar for a
     // silent node.
     expect(screen.getByText('This node is not answering.')).toBeInTheDocument();
+  });
+
+  it('names a disconnected Pilot on the phone instead of the silent-node sentence', () => {
+    dataState.metricsStale = true;
+    dataState.metricsUnreadable = true;
+    dataState.unreadableCause = 'pilot-disconnected';
+    renderDashboard();
+
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(
+      screen.getByText('The Pilot tunnel to "Local" is disconnected. It resumes when the agent reconnects.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('This node is not answering.')).toBeNull();
   });
 
   it('does not claim a health level before the first metrics read settles', () => {

@@ -277,6 +277,19 @@ describe('fetchStackStatusesShared timeout and auth abort', () => {
     expect(result.status).toBe(504);
   });
 
+  it('carries a marked cause instead of collapsing it into a bare HTTP failure', async () => {
+    // A disconnected Pilot is not a generic 503: the dashboard headline and the
+    // sidebar card name it, so the shared helper must not drop the cause.
+    apiFetchSpy.mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: 'Pilot tunnel disconnected.' }),
+      { status: 503, headers: { 'x-sencho-read-failure': 'pilot-disconnected' } },
+    ));
+    const result = await fetchStackStatusesShared(2);
+    expect(result.ok).toBe(false);
+    expect(result.failure).toBe('pilot-disconnected');
+    expect(result.status).toBe(503);
+  });
+
   it('reports an unreachable node separately from a timeout', async () => {
     apiFetchSpy.mockResolvedValueOnce(jsonResponse({ error: 'Remote node is unreachable.' }, { status: 502 }));
     const result = await fetchStackStatusesShared(2);

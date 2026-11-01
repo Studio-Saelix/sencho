@@ -726,6 +726,59 @@ describe('useStackListState stale callback node targeting', () => {
     expect(result.current.actionsReady).toBe(true);
   });
 
+  it('names a disconnected Pilot on the stack list instead of printing a 503', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'Pilot tunnel disconnected.' }), {
+          status: 503,
+          headers: { 'x-sencho-read-failure': 'pilot-disconnected' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+
+    expect(result.current.stacksLoadStatus).toBe('error');
+    expect(result.current.stacksLoadError).toMatch(/Pilot tunnel to "Local" is disconnected/i);
+    expect(result.current.stacksLoadError).not.toMatch(/503/);
+  });
+
+  it('names a disconnected Pilot from the stack-statuses read, not a generic status', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(okJson(['demo.yml']));
+      }
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'Pilot tunnel disconnected.' }), {
+          status: 503,
+          headers: { 'x-sencho-read-failure': 'pilot-disconnected' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() => useStackListState());
+      await act(async () => {
+        await result.current.refreshStacks();
+      });
+
+      expect(result.current.files).toEqual(['demo.yml']);
+      expect(result.current.hydrationDisplay).toBe('error');
+      // The list card falls back to the hydration copy; the status read's own
+      // cause is what the diagnostic carries. Assert the cause survived the
+      // transport instead of collapsing into "status 503".
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/Pilot tunnel to "Local" is disconnected/i));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('names a missed read deadline on the stack list instead of printing a 504', async () => {
     apiFetchMock.mockImplementation((endpoint: string) => {
       if (endpoint === '/stacks') {

@@ -500,3 +500,16 @@ it('shows a clearable zero-match note and keeps the full list', () => {
   expect(screen.getByText('a:1')).toBeInTheDocument();
   expect(screen.getByText('b:1')).toBeInTheDocument();
 });
+
+it('names the read cause on the error state instead of a generic failure', () => {
+  render(
+    <ImagesTab
+      {...base}
+      error
+      errorReason='This node has no API URL or token configured. Update it in Settings → Nodes.'
+      summaries={{}}
+    />,
+  );
+  expect(screen.getByText(/no API URL or token configured/i)).toBeInTheDocument();
+  expect(screen.queryByText(/failed to load for this node/i)).toBeNull();
+});

@@ -6,7 +6,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
-import { classifyRemoteReadError, classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
+import {
+  classifyRemoteReadError,
+  classifyRemoteReadFailure,
+  isNamedReadFailure,
+  remoteReadFailureMessage,
+  type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -23,7 +29,7 @@ import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoi
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
-import { OverviewTab } from './security/OverviewTab';
+import { OverviewTab, type OverviewLoadError } from './security/OverviewTab';
 import { useSecurityReasons } from './security/useSecurityReasons';
 import {
   type ImagesTargetingInput,
@@ -78,12 +84,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [overviewNodeId, setOverviewNodeId] = useState<number | undefined>(undefined);
   // 'unsupported' = the node has no overview endpoint (e.g. an older remote, 404);
   // 'failed' = a genuine error (5xx, network, malformed body) that must not read as benign.
-  const [overviewLoadError, setOverviewLoadError] = useState<
-    'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null
-  >(null);
+  const [overviewLoadError, setOverviewLoadError] = useState<OverviewLoadError | null>(null);
   const [summaries, setSummaries] = useState<Record<string, ScanSummary>>({});
   const [summariesLoading, setSummariesLoading] = useState(true);
-  const [summariesError, setSummariesError] = useState(false);
+  // The summaries read's own cause, so the scan-result tabs name a disconnected
+  // Pilot instead of saying the scan results "failed to load".
+  const [summariesFailure, setSummariesFailure] = useState<RemoteReadFailure | null>(null);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
   const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
   // True when the exploit-intel query hit its row cap: the list shows the
@@ -194,7 +200,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     (async () => {
       setSummariesLoading(true);
       setOverviewLoadError(null);
-      setSummariesError(false);
+      setSummariesFailure(null);
       // The trend chart is non-critical: isolate its fetch entirely (transport
       // failure included, not just a non-OK/malformed body) so it can never
       // poison the overview/summaries error state. It degrades to an empty chart
@@ -225,17 +231,15 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           setOverviewNodeId(fetchedNodeId);
         } else {
           setOverview(null);
-          // A node that missed its read deadline is an unavailable node, not a
-          // server error: the operator gets copy they can act on.
+          // A node the hub could not read, or that rejected the hub's access,
+          // is not a server error: the operator gets copy they can act on.
+          // Every cause the gateway marked has its own copy, so no hand-written
+          // list can drop one.
           const readFailure = classifyRemoteReadFailure(overviewRes);
           setOverviewLoadError(
             overviewRes.status === 404
               ? 'unsupported'
-              : readFailure === 'timeout'
-                || readFailure === 'unreachable'
-                || readFailure === 'unauthorized'
-                || readFailure === 'node-credential'
-                || readFailure === 'unverified'
+              : isNamedReadFailure(readFailure)
                 ? readFailure
                 : 'failed',
           );
@@ -250,12 +254,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           } else {
             // A 200 with an unexpected shape must not read as "no findings".
             setSummaries({});
-            setSummariesError(true);
+            setSummariesFailure('error');
             console.warn('[Security] image-summaries returned an unexpected shape');
           }
         } else {
           setSummaries({});
-          setSummariesError(true);
+          setSummariesFailure(classifyRemoteReadFailure(summariesRes) ?? 'http');
           console.warn('[Security] image-summaries request failed:', summariesRes.status);
         }
       } catch (err) {
@@ -263,17 +267,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         console.warn('[Security] failed to load security data:', err);
         setOverview(null);
         const thrown = classifyRemoteReadError(err);
-        setOverviewLoadError(
-          thrown === 'timeout'
-            || thrown === 'unreachable'
-            || thrown === 'unauthorized'
-            || thrown === 'node-credential'
-            || thrown === 'unverified'
-            ? thrown
-            : 'failed',
-        );
+        setOverviewLoadError(isNamedReadFailure(thrown) ? thrown : 'failed');
         setSummaries({});
-        setSummariesError(true);
+        setSummariesFailure(thrown);
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
@@ -403,7 +399,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             <ImagesTab
               summaries={summaries}
               loading={summariesLoading}
-              error={summariesError}
+              error={summariesFailure !== null}
+              errorReason={summariesFailure ? remoteReadFailureMessage(summariesFailure, { nodeName: activeNode?.name }) : null}
               onInspect={onInspect}
               canScan={canScanImages}
               scanningRef={scanningRef}
@@ -420,13 +417,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
         <TabsContent value="compose">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
+            <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesFailure !== null} errorReason={summariesFailure ? remoteReadFailureMessage(summariesFailure, { nodeName: activeNode?.name }) : null} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 
         <TabsContent value="secrets">
           <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
-            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
+            <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesFailure !== null} errorReason={summariesFailure ? remoteReadFailureMessage(summariesFailure, { nodeName: activeNode?.name }) : null} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 

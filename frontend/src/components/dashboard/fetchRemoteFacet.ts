@@ -23,15 +23,10 @@ export async function fetchRemoteFacet(
   try {
     const res = await apiFetch(path, { nodeId, signal });
     if (!res.ok) {
-      // Timeout, unreachable, authorization, and an older node that does not
-      // serve the route keep their own names; everything else is a plain HTTP
-      // failure.
-      const classified = classifyRemoteReadFailure(res);
-      if (classified === 'timeout' || classified === 'unreachable'
-        || classified === 'unauthorized' || classified === 'unsupported') {
-        return { ok: false, failure: classified, status: res.status };
-      }
-      return { ok: false, failure: 'http', status: res.status };
+      // Keep every cause the classifier established. A hand-written list here
+      // is how a disconnected Pilot became a bare HTTP failure in the fleet
+      // facet reads.
+      return { ok: false, failure: classifyRemoteReadFailure(res) ?? 'http', status: res.status };
     }
     return { ok: true, body: await res.json() };
   } catch (error) {

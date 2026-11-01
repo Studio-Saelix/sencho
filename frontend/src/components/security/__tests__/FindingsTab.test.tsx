@@ -61,3 +61,18 @@ it('shows an empty state when there are no findings of the kind', () => {
   render(<FindingsTab kind="secret" summaries={{}} loading={false} onInspect={vi.fn()} />);
   expect(screen.getByText('No secret findings')).toBeInTheDocument();
 });
+
+it('names the read cause on the error state instead of a generic failure', () => {
+  render(
+    <FindingsTab
+      kind="secret"
+      summaries={{}}
+      loading={false}
+      error
+      errorReason='The Pilot tunnel to "edge-2" is disconnected. It resumes when the agent reconnects.'
+      onInspect={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/Pilot tunnel to "edge-2" is disconnected/i)).toBeInTheDocument();
+  expect(screen.queryByText(/failed to load for this node/i)).toBeNull();
+});

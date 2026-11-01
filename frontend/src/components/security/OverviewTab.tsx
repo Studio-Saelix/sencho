@@ -29,15 +29,33 @@ type NavigateFn = (
   targeting?: ImagesTargetingInput,
 ) => void;
 
+/**
+ * Why the overview is not on screen. Every cause the gateway established gets
+ * its own kind, so a disconnected Pilot or an unconfigured node is never
+ * described as a node that did not answer.
+ */
+export type OverviewLoadError =
+  | 'unsupported'
+  | 'timeout'
+  | 'unreachable'
+  | 'unauthorized'
+  | 'node-credential'
+  | 'unverified'
+  | 'not-configured'
+  | 'pilot-disconnected'
+  | 'refused'
+  | 'failed';
+
 interface OverviewTabProps {
   overview: SecurityOverview | null;
   /**
    * 'unsupported' = node has no overview endpoint (benign); 'timeout' = the node
    * missed its read deadline and may answer on a retry; 'unreachable' = no
    * answer at all; 'unauthorized' = the operator's grants, not the node;
-   * 'failed' = a real error.
+   * 'pilot-disconnected' / 'not-configured' / 'refused' = the hub has no
+   * readable path to the node; 'failed' = a real error.
    */
-  loadError: 'unsupported' | 'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed' | null;
+  loadError: OverviewLoadError | null;
   /** Retry the overview read (the surface's only recovery path when it fails). */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
@@ -60,7 +78,7 @@ interface OverviewTabProps {
  * "the node did not answer", "the node is unreachable", and "you cannot read
  * this here" send the operator to different places.
  */
-const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'node-credential' | 'unverified' | 'failed', {
+const UNAVAILABLE_COPY: Record<Exclude<OverviewLoadError, 'unsupported'>, {
   title: string;
   body: string;
 }> = {
@@ -83,6 +101,18 @@ const UNAVAILABLE_COPY: Record<'timeout' | 'unreachable' | 'unauthorized' | 'nod
   unverified: {
     title: 'Permissions could not be verified',
     body: "This node's permission model could not be verified. Try again once the node is healthy.",
+  },
+  'pilot-disconnected': {
+    title: 'The Pilot tunnel is disconnected',
+    body: 'The Pilot tunnel to this node is disconnected. It resumes when the agent reconnects.',
+  },
+  'not-configured': {
+    title: 'This node has no target configured',
+    body: 'This node has no API URL or token configured. Update it in Settings → Nodes.',
+  },
+  refused: {
+    title: 'The hub refused this node’s address',
+    body: "The hub refused this node's address. Check the node's API URL.",
   },
   failed: {
     title: "Couldn't load the overview",
@@ -218,8 +248,8 @@ export function OverviewTab({
   }
 
   if (loadError !== null) {
-    // 'unsupported' returned above, so this is a timeout, an unreachable node,
-    // an authorization failure, or a real error.
+    // 'unsupported' returned above, so this is a cause the hub established
+    // about the node, an authorization failure, or a real error.
     const copy = UNAVAILABLE_COPY[loadError];
 
     return (

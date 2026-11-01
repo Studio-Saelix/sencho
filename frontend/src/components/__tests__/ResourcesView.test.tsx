@@ -1207,6 +1207,83 @@ describe('ResourcesView', () => {
     expect(screen.queryByText('No external containers')).toBeNull();
   });
 
+  it('names a disconnected Pilot on the tables and on the disk-usage card', async () => {
+    const marked = {
+      ok: false,
+      status: 503,
+      headers: new Headers({ 'x-sencho-read-failure': 'pilot-disconnected' }),
+      json: async () => ({ error: 'Pilot tunnel disconnected.' }),
+    } as unknown as Response;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return Promise.resolve(marked);
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/503/)).toBeNull();
+    expect(await screen.findByText('Disk usage unknown')).toBeInTheDocument();
+    // One copy on the table, one under the masthead answer.
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('names a silent node from the first read that answers, without waiting for the slow inventory read', async () => {
+    // The full resources inventory is on the gateway's 30 second budget, but
+    // the rest of the batch answers on the interactive one. A node that is not
+    // answering must be named by the first of those reads, not after the slow
+    // read's whole budget.
+    let releaseResources: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources') {
+        return new Promise<Response>((resolve) => { releaseResources = resolve; });
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve({
+          ok: false,
+          status: 504,
+          headers: new Headers({ 'x-sencho-read-timeout': '1' }),
+          json: async () => ({ code: 'remote_read_timeout' }),
+        } as unknown as Response);
+      }
+      // Disk usage is on the same slow budget; it has not answered either.
+      return new Promise<Response>(() => {});
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    // One copy on the table, one under the disk-usage answer.
+    expect(screen.getAllByText(/did not answer in time/i).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('Disk usage unknown')).toBeInTheDocument();
+
+    // The slow read landing is authoritative and replaces the early failure.
+    releaseResources!(jsonResponse({ images: [image('slow:but-ok')], volumes: [], networks: [] }));
+    expect(await screen.findByText('slow:but-ok')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load images.')).toBeNull();
+  });
+
+  it('settles the page from a marked cause on the scan-summaries read too', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/resources' || url === '/system/docker-df') return new Promise<Response>(() => {});
+      if (url === '/security/image-summaries') {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          headers: new Headers({ 'x-sencho-read-failure': 'pilot-disconnected' }),
+          json: async () => ({ error: 'Pilot tunnel disconnected.' }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    render(<ResourcesView />);
+
+    expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
+    expect(screen.getAllByText(/Pilot tunnel to this node is disconnected/i).length).toBeGreaterThan(0);
+  });
+
   it('aborts the previous node’s inventory reads on a node switch and ignores their results', async () => {
     const resourcesSignals: AbortSignal[] = [];
     const resourcesResolvers: Array<(r: Response) => void> = [];

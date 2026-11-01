@@ -1,5 +1,5 @@
 import { apiFetch } from '@/lib/api';
-import { classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
+import { classifyRemoteReadFailure, type RemoteReadFailure } from '@/lib/remoteReadFailure';
 
 /**
  * Bound for the in-flight owner so a hung remote cannot occupy the coalescer
@@ -9,7 +9,14 @@ import { classifyRemoteReadFailure } from '@/lib/remoteReadFailure';
  */
 export const STACK_STATUSES_OWNER_TIMEOUT_MS = 8000;
 
-export type StackStatusesFetchFailure = 'http' | 'timeout' | 'unreachable' | 'auth-abort';
+/** Every cause the classifier establishes, plus the coalescer's own abort.
+ *  The helper must not narrow this: a caller that only knows `timeout` and
+ *  `unreachable` is how a disconnected Pilot reached Home and the sidebar as a
+ *  bare 503. */
+export type StackStatusesFetchFailure = RemoteReadFailure | 'auth-abort';
+
+/** The two failures the coalescer synthesizes itself (no HTTP status). */
+type AbortFailure = 'timeout' | 'auth-abort';
 
 /**
  * Raw transport result for GET /stacks/statuses. Callers keep all
@@ -42,12 +49,12 @@ function nodeKey(nodeId: number | null): NodeKey {
   return nodeId === null ? 'local' : String(nodeId);
 }
 
-function failureFromAbort(reason: unknown): Exclude<StackStatusesFetchFailure, 'http'> {
+function failureFromAbort(reason: unknown): AbortFailure {
   return reason === 'timeout' ? 'timeout' : 'auth-abort';
 }
 
 function abortedResult(
-  failure: Exclude<StackStatusesFetchFailure, 'http'>,
+  failure: AbortFailure,
   coalesced: boolean,
 ): StackStatusesFetchResult {
   return {
@@ -70,15 +77,12 @@ async function requestStackStatuses(
   if (res.ok) {
     body = await res.json();
   }
-  // A gateway read deadline and an unreachable node are failures the operator
-  // can act on, so they keep their own names instead of collapsing into the
-  // generic HTTP status.
-  const classified = classifyRemoteReadFailure(res);
+  // Every cause the classifier established keeps its own name. A caller that
+  // needs the cause (the dashboard headline, the sidebar card, the fleet stack
+  // health) must be able to tell a disconnected Pilot from a bare 503.
   const failure: StackStatusesFetchFailure | undefined = res.ok
     ? undefined
-    : classified === 'timeout' || classified === 'unreachable'
-      ? classified
-      : 'http';
+    : classifyRemoteReadFailure(res) ?? 'http';
   return {
     ok: res.ok,
     status: res.status,
