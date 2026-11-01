@@ -147,6 +147,13 @@ function readLabelValues(labels: LabelValue[]): LabelValue[] {
 
 /** A stack inventory with every `behavior` read defensively. The stack route is proxied to the node unchecked. */
 export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInventory {
+  // A proxied body that does not carry the inventory shape is a failed read, not an
+  // empty inventory; the caller shows its error state for a thrown payload.
+  if (!inventory || !Array.isArray(inventory.services)
+    || typeof inventory.stackName !== 'string'
+    || typeof inventory.renderable !== 'boolean') {
+    throw new Error('Unexpected label inventory payload');
+  }
   return {
     ...inventory,
     services: inventory.services.map(svc => ({

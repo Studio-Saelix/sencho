@@ -969,9 +969,18 @@ describe('io.sencho.* labels on the container list', () => {
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
     });
 
-    it('flags a helper with no container while the stack runs, but not when the whole stack is stopped', () => {
+    it('flags a helper with no container while the stack runs, but not when the stack is stopped', () => {
       hiddenOnly([]);
       expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
+      cleanup();
+      // A stopped stack still lists its exited containers; none is up, so a helper
+      // with no container is not reported as missing.
+      renderStack(entryFor(resolution), [
+        box('web', { State: 'exited', Status: 'Exited (0) 2 hours ago' }),
+        box('api', { State: 'exited', Status: 'Exited (0) 2 hours ago' }),
+      ], specs());
+      expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();
+      expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
       cleanup();
       renderStack(entryFor(resolution), [], specs());
       expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();

@@ -410,7 +410,9 @@ function portLinkOpensApplication(
  * restarting, dead, or stopped with a failure, when only some of its replicas
  * exist, or when it has no container at all while the rest of the stack is
  * running. A helper that exited cleanly (a finished one-shot job), a helper that
- * declares no replicas, and a stopped stack do not count.
+ * declares no replicas, and a stopped stack do not count. A stopped stack still
+ * lists its exited containers, so "running" means a container is up, not that
+ * the list is nonempty.
  */
 function containerNeedsAttention(container: ContainerInfo): boolean {
     if (container.healthStatus === 'unhealthy') return true;
@@ -421,9 +423,9 @@ function containerNeedsAttention(container: ContainerInfo): boolean {
 function hiddenServiceNeedsAttention(
     group: readonly ContainerInfo[],
     expectedReplicas: number,
-    stackHasContainers: boolean,
+    stackIsRunning: boolean,
 ): boolean {
-    if (group.length === 0) return stackHasContainers && expectedReplicas > 0;
+    if (group.length === 0) return stackIsRunning && expectedReplicas > 0;
     return group.length < expectedReplicas || group.some(containerNeedsAttention);
 }
 
@@ -479,7 +481,7 @@ export function ContainersHealth({
         hiddenServiceNeedsAttention(
             safeContainers.filter(c => c.Service === spec.name),
             spec.expectedReplicas,
-            safeContainers.length > 0,
+            safeContainers.some(c => c.State === 'running'),
         ),
     ).length;
     // Summary strip + density/expand toggles: multi-container stacks only,

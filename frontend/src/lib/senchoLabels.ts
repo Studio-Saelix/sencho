@@ -94,7 +94,10 @@ function readService(value: unknown): SenchoServiceLabels | null {
   if (!links) return null;
   // The node's fields must match the contract exactly: an absent, fractional, or
   // wrongly typed field means the answer is not usable, so no part of it is applied.
-  const order = typeof value.order === 'number' && Number.isInteger(value.order) ? value.order : null;
+  // The order also stays within the nine digits the registry accepts.
+  const order = typeof value.order === 'number' && Number.isInteger(value.order) && Math.abs(value.order) < 1_000_000_000
+    ? value.order
+    : null;
   if (value.order !== null && order === null) return null;
   if (typeof value.hidden !== 'boolean') return null;
   return {

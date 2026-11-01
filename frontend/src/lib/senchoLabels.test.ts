@@ -108,6 +108,11 @@ describe('readSenchoLabels', () => {
     })).toBeNull();
     expect(readSenchoLabels({
       renderable: true,
+      services: { web: { links: [], order: 1_000_000_000, hidden: false } },
+      entries: [],
+    })).toBeNull();
+    expect(readSenchoLabels({
+      renderable: true,
       services: { web: { links: [], hidden: false } },
       entries: [],
     })).toBeNull();

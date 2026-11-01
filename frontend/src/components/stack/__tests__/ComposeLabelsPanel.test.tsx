@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ComposeLabelsPanel from '../ComposeLabelsPanel';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
@@ -92,6 +92,15 @@ describe('ComposeLabelsPanel', () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       json: async () => ({ stackName: 'demo', services: 'not-an-array' }),
+    } as unknown as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
+    expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
+    cleanup();
+    // A body that has the right lists but none of the required fields is unreadable too.
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ services: [] }),
     } as unknown as Response);
     render(<ComposeLabelsPanel stackName="demo" />);
     expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();

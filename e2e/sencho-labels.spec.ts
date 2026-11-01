@@ -258,5 +258,9 @@ test.describe('io.sencho.* labels on a deployed stack', () => {
     await row.getByRole('button', { name: 'Show' }).click();
     await expect(page.getByText('e2e-sencho-labels-live-broken-1')).toBeVisible();
     await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toBeVisible();
+    // Hiding is presentation only: a revealed helper keeps its lifecycle actions.
+    const brokenCard = page.getByText('e2e-sencho-labels-live-broken-1')
+      .locator('xpath=ancestor::div[.//button[@aria-label="Service actions"]][1]');
+    await expect(brokenCard.getByRole('button', { name: 'Service actions' })).toBeVisible();
   });
 });
