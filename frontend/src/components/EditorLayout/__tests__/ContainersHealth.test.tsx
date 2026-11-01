@@ -961,14 +961,19 @@ describe('io.sencho.* labels on the container list', () => {
       expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
     });
 
-    it('does not flag a one-shot helper that finished cleanly, a running one, or a service with no containers', () => {
+    it('does not flag a one-shot helper that finished cleanly or a running one', () => {
       hiddenOnly([box('redis', { State: 'exited', Status: 'Exited (0) 3 hours ago' })]);
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
       cleanup();
       hiddenOnly([box('redis')]);
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
-      cleanup();
+    });
+
+    it('flags a helper with no container while the stack runs, but not when the whole stack is stopped', () => {
       hiddenOnly([]);
+      expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
+      cleanup();
+      renderStack(entryFor(resolution), [], specs());
       expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
     });

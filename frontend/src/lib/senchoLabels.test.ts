@@ -90,14 +90,35 @@ describe('readSenchoLabels', () => {
     expect(unverifiedLinkCount(r, 'web')).toBe(5);
   });
 
-  it('reads a non-numeric order or hidden as unset and a state from a newer node as unsupported', () => {
+  it('rejects an answer whose presentation fields do not match the contract, instead of applying part of it', () => {
+    expect(readSenchoLabels({
+      renderable: true,
+      services: { web: { links: [], order: '3', hidden: false } },
+      entries: [],
+    })).toBeNull();
+    expect(readSenchoLabels({
+      renderable: true,
+      services: { web: { links: [], order: 1.5, hidden: false } },
+      entries: [],
+    })).toBeNull();
+    expect(readSenchoLabels({
+      renderable: true,
+      services: { web: { links: [], order: null, hidden: 'true' } },
+      entries: [],
+    })).toBeNull();
+    expect(readSenchoLabels({
+      renderable: true,
+      services: { web: { links: [], hidden: false } },
+      entries: [],
+    })).toBeNull();
+  });
+
+  it('reads a state from a newer node as unsupported so the ignored count does not under-report', () => {
     const r = readSenchoLabels({
       renderable: true,
-      services: { web: { links: [], order: '3', hidden: 'true' } },
+      services: { web: { links: [], order: null, hidden: false } },
       entries: [{ service: 'web', key: 'k', state: 'weird' }, { service: 'web', key: 'j', state: 'invalid', reason: 7 }],
     });
-    expect(r && r.renderable ? r.services.web : null).toMatchObject({ order: null, hidden: false });
-    // Not dropped, so the ignored count does not under-report.
     expect(ignoredLabels(r, 'web')).toEqual([
       { service: 'web', key: 'k', state: 'unsupported', reason: expect.stringContaining('cannot read') },
       { service: 'web', key: 'j', state: 'invalid' },

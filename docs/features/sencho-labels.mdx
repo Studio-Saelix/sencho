@@ -60,7 +60,7 @@ Services with a valid `io.sencho.order` come first, from the lowest number up. S
 
 ### Hidden helper services
 
-`io.sencho.hidden: "true"` collapses a noisy helper, such as a one-shot migration job or a sidecar, out of the container list. The list shows one row, **N hidden helper services**, with a **Show** button that reveals them in place. The row calls out how many of them need attention: a hidden service with a container that is unhealthy, restarting, or stopped with a failure, or one that has only some of its replicas. A helper that finished cleanly (a one-shot job that exited with code 0) and a stack that is stopped do not count, so a healthy setup stays quiet and a failed helper is never invisible.
+`io.sencho.hidden: "true"` collapses a noisy helper, such as a one-shot migration job or a sidecar, out of the container list. The list shows one row, **N hidden helper services**, with a **Show** button that reveals them in place. The row calls out how many of them need attention: a hidden service with a container that is unhealthy, restarting, or stopped with a failure, one that has only some of its replicas, or one with no container at all while the rest of the stack is running. A helper that finished cleanly (a one-shot job that exited with code 0) and a stack that is stopped do not count, so a healthy setup stays quiet and a failed or missing helper is never invisible.
 
 Hidden is presentation only. A hidden service still counts toward the stack's health and container totals, and is still included in drift, security scans, image updates, policies, the Dossier, and every stack action. Sencho never collapses every service in a stack, so a stack whose services are all marked hidden shows them all.
 

@@ -407,9 +407,10 @@ function portLinkOpensApplication(
 
 /**
  * A hidden helper needs attention when one of its containers is unhealthy,
- * restarting, dead, or stopped with a failure, or when only some of its
- * replicas exist. A helper that exited cleanly (a finished one-shot job) and a
- * service with no containers at all (a stopped stack) do not count.
+ * restarting, dead, or stopped with a failure, when only some of its replicas
+ * exist, or when it has no container at all while the rest of the stack is
+ * running. A helper that exited cleanly (a finished one-shot job), a helper that
+ * declares no replicas, and a stopped stack do not count.
  */
 function containerNeedsAttention(container: ContainerInfo): boolean {
     if (container.healthStatus === 'unhealthy') return true;
@@ -417,8 +418,12 @@ function containerNeedsAttention(container: ContainerInfo): boolean {
     return !(container.State === 'exited' && /^exited \(0\)/i.test(container.Status ?? ''));
 }
 
-function hiddenServiceNeedsAttention(group: readonly ContainerInfo[], expectedReplicas: number): boolean {
-    if (group.length === 0) return false;
+function hiddenServiceNeedsAttention(
+    group: readonly ContainerInfo[],
+    expectedReplicas: number,
+    stackHasContainers: boolean,
+): boolean {
+    if (group.length === 0) return stackHasContainers && expectedReplicas > 0;
     return group.length < expectedReplicas || group.some(containerNeedsAttention);
 }
 
@@ -471,7 +476,11 @@ export function ContainersHealth({
     const hiddenSpecs = orderedSpecs.filter(spec => presentation.hidden.has(spec.name));
     const visibleSpecs = showHidden ? orderedSpecs : orderedSpecs.filter(spec => !presentation.hidden.has(spec.name));
     const hiddenNeedingAttention = hiddenSpecs.filter(spec =>
-        hiddenServiceNeedsAttention(safeContainers.filter(c => c.Service === spec.name), spec.expectedReplicas),
+        hiddenServiceNeedsAttention(
+            safeContainers.filter(c => c.Service === spec.name),
+            spec.expectedReplicas,
+            safeContainers.length > 0,
+        ),
     ).length;
     // Summary strip + density/expand toggles: multi-container stacks only,
     // whether the body is flat or grouped by declared service.

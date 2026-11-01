@@ -106,6 +106,8 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
       }
       setInventory(withReadBehaviors(await res.json() as StackLabelInventory));
     } catch (err) {
+      // A body the panel cannot read is a failed load, not an empty inventory.
+      setLoadError(true);
       toast.error(err instanceof Error ? err.message : 'Failed to load Compose label inventory');
       setInventory(null);
     } finally {

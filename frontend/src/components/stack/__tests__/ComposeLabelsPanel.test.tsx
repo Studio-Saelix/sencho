@@ -88,6 +88,16 @@ describe('ComposeLabelsPanel', () => {
     expect(await screen.findByTestId('mismatch-changed')).toBeInTheDocument();
   });
 
+  it('shows a load error, not an empty inventory, when the body cannot be read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ stackName: 'demo', services: 'not-an-array' }),
+    } as unknown as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
+    expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
+  });
+
   it('shows "Runtime labels unavailable" for a replica whose inspect failed', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,

@@ -144,6 +144,34 @@ test.describe('io.sencho.* labels', () => {
     const docsRow = panel.getByTestId('compose-label-row').filter({ hasText: 'io.sencho.url.docs' }).filter({ hasText: 'docs.example.com/api' });
     await expect(docsRow.getByTestId('label-behavior')).toHaveText('Active');
   });
+
+  test('an older node that reports no resolution applies none of the contract', async ({ page }) => {
+    // The wire shape a node that predates the contract returns: the dossier facts
+    // and the generated service URLs, with no io.sencho.* resolution at all.
+    await page.route(`**/api/stacks/${STACK}/effective-anatomy`, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        renderable: true,
+        services: ['helper', 'api', 'web'],
+        ports: {},
+        volumes: {},
+        networks: [],
+        restart: null,
+        serviceUrls: {},
+        serviceUrlEdit: {},
+        serviceUrlClear: {},
+      }),
+    }));
+    await openStack(page);
+    // The node's own service order is kept: no order, link, or hidden state is applied.
+    const chips = page.getByText('services', { exact: true }).locator('xpath=following-sibling::*[1]').locator('span');
+    await expect(chips).toHaveText(['web', 'api', 'helper']);
+    await expect(page.getByTitle('Hidden from default lists by io.sencho.hidden')).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'docs', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('service-sencho-links')).toHaveCount(0);
+    await expect(page.getByTestId('service-sencho-ignored')).toHaveCount(0);
+  });
 });
 
 const DEPLOYED_STACK = 'e2e-sencho-labels-live';
@@ -218,6 +246,8 @@ test.describe('io.sencho.* labels on a deployed stack', () => {
     await expect(row).toContainText('2 hidden helper services', { timeout: 30_000 });
     await expect(page.getByTestId('hidden-services-attention')).toHaveText('1 needs attention');
     await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toHaveCount(0);
+    // Collapsing is presentation only: the totals still count every container, hidden or not.
+    await expect(page.getByText('4 containers', { exact: false })).toBeVisible();
 
     // The service runs two replicas, and its interpolated named link shows once on the service header.
     const docs = page.getByRole('link', { name: 'docs', exact: true });
