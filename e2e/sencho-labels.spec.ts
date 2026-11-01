@@ -276,6 +276,9 @@ test.describe('io.sencho.* labels on a deployed stack', () => {
     await expect(page.getByTestId('hidden-services-attention')).toHaveText('1 needs attention');
     await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toHaveCount(0);
 
+    // Hidden helpers are presentation only: the totals still count every container, collapsed or not.
+    await expect(page.getByText('4 containers', { exact: true })).toBeVisible();
+
     // The service runs two replicas, and its interpolated named link shows once on the service header.
     const docs = page.getByRole('link', { name: 'docs', exact: true });
     await expect(docs).toHaveCount(1);
@@ -285,6 +288,12 @@ test.describe('io.sencho.* labels on a deployed stack', () => {
     await row.getByRole('button', { name: 'Show' }).click();
     await expect(page.getByText('e2e-sencho-labels-live-broken-1')).toBeVisible();
     await expect(page.getByText('e2e-sencho-labels-live-seed-1')).toBeVisible();
+
+    // Hidden helpers are presentation only: a revealed one keeps its Service actions menu (Start service for a stopped helper).
+    const brokenCard = page.getByText('e2e-sencho-labels-live-broken-1')
+      .locator('xpath=ancestor::div[.//button[@aria-label="Service actions"]][1]');
+    await brokenCard.getByRole('button', { name: 'Service actions' }).click();
+    await expect(page.getByRole('menuitem', { name: 'Start service' })).toBeVisible();
   });
 
   test('applies nothing from the contract on a node that predates it, and says so', async ({ page }) => {

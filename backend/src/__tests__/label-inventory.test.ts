@@ -524,6 +524,23 @@ describe('io.sencho.* behavior annotations', () => {
     expect(runtime['io.sencho.url'].source).toBe('compose');
     expect(runtime['io.sencho.url'].behavior?.state).toBe('active');
     expect(runtime['other.label'].source).toBe('compose');
+    // Reconciliation compares the value the container carries, not the rendered $$.
+    const replica = inv.services.find(s => s.service === 'web')?.replicas[0];
+    expect(replica?.inBoth).toEqual(['io.sencho.url', 'other.label']);
+    expect(replica?.changed).toEqual([]);
+  });
+
+  it('still reports a container value that differs from the rendered one as changed, including a literal $$', async () => {
+    writeStack('sl5b', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender({ web: { 'stale.label': 'a$$b', 'other.label': 'a$$b', 'same.label': 'plain' } });
+    stubDockerList([
+      { id: 'c1', name: 'sl5b-web-1', state: 'running', stack: 'sl5b', service: 'web', imageId: 'img1', labels: { 'stale.label': 'a$$b', 'other.label': 'a$c', 'same.label': 'plain' } },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl5b');
+    const replica = inv.services.find(s => s.service === 'web')?.replicas[0];
+    // A container that carries `$$` itself does not match a rendered `$$`, which stands for a single `$`.
+    expect(replica?.inBoth).toEqual(['same.label']);
+    expect(replica?.changed).toEqual(['other.label', 'stale.label']);
   });
 
   it('names an unrenderable stack as the reason for every io.sencho.* label and never activates one', async () => {
