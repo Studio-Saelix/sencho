@@ -9,12 +9,14 @@ export interface FleetNodeStats {
 }
 
 export interface FleetNodeSystemStats {
-    cpu: { usage: string; cores: number };
+    /** Null when the node cannot measure host usage without leaking the outer machine. */
+    cpu: { usage: string | null; cores: number };
     memory: {
         total: number;
-        used: number;
-        free: number;
-        usagePercent: string;
+        /** Null together with `free` and `usagePercent` when host usage is unknown. */
+        used: number | null;
+        free: number | null;
+        usagePercent: string | null;
         arcReclaimable?: number;
         ballooned?: number;
         effectiveTotal?: number;

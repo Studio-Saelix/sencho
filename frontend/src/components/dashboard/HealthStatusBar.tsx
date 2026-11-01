@@ -4,6 +4,7 @@ import { MastheadRail } from '@/components/ui/MastheadRail';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
 import { countVisibleUnread } from '@/lib/notificationVisibility';
+import { parseHostUsage } from '@/lib/hostUsage';
 
 interface HealthStatusBarProps {
   stats: Stats;
@@ -79,8 +80,11 @@ export function HealthStatusBar({
   const now = useTicker(SYNC_LABEL_TICK_MS);
   const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
-  const cpuLabel = systemStats ? `${parseFloat(systemStats.cpu.usage).toFixed(0)}%` : '--';
-  const memLabel = systemStats ? formatGib(systemStats.memory.effectiveUsed ?? systemStats.memory.used) : '--';
+  // Null usage (nested container, no cgroup mount) reads `--`, never 0%.
+  const cpuReading = parseHostUsage(systemStats?.cpu.usage);
+  const memReading = systemStats?.memory.effectiveUsed ?? systemStats?.memory.used ?? null;
+  const cpuLabel = cpuReading !== null ? `${cpuReading.toFixed(0)}%` : '--';
+  const memLabel = memReading !== null ? formatGib(memReading) : '--';
   const lastSyncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
   const metaLine = `${activeNodeName} · ${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'} · ${lastSyncLabel}`;
   const reasonsLine = reasons.join(' · ');
@@ -117,7 +121,7 @@ export function HealthStatusBar({
         {/* Stats column */}
         <div className="hidden items-stretch justify-end gap-0 md:flex">
           <StatTile label="RUNNING" value={running} tone="value" />
-          <StatTile label="CPU" value={cpuLabel} tone={parseFloat(systemStats?.cpu.usage || '0') >= 80 ? 'warn' : 'value'} divider />
+          <StatTile label="CPU" value={cpuLabel} tone={(cpuReading ?? 0) >= 80 ? 'warn' : 'value'} divider />
           <StatTile label="MEM" value={memLabel} tone="value" divider />
         </div>
 

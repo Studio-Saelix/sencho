@@ -370,3 +370,67 @@ describe('MobileFleet crowded node row', () => {
     expect(meta).toContainElement(screen.getByText(pin));
   });
 });
+
+// A node inside an LXC with no cgroup mount reports capacity with null usage.
+// It must read `--`, and it must be left out of the fleet aggregates rather
+// than counted as an idle node.
+describe('MobileFleet host usage unknown', () => {
+  const known = makeNode({
+    id: 1,
+    name: 'Known',
+    type: 'remote',
+    systemStats: {
+      cpu: { usage: '30.0', cores: 4 },
+      memory: { total: 100, used: 25, free: 75, usagePercent: '25.0' },
+      disk: { total: 100, used: 10, free: 90, usagePercent: '10.0' },
+    },
+  });
+  const nested = makeNode({
+    id: 2,
+    name: 'Nested',
+    type: 'remote',
+    systemStats: {
+      cpu: { usage: null, cores: 2 },
+      memory: { total: 400, used: null, free: null, usagePercent: null },
+      disk: null,
+    },
+  });
+
+  /** The masthead band's own cell value for `cpu` / `mem` (first in the DOM). */
+  function mastheadValue(label: 'cpu' | 'mem'): string {
+    const cells = screen.getAllByText(label);
+    return cells[0].parentElement?.parentElement?.textContent ?? '';
+  }
+
+  it('shows placeholders for the unknown node and excludes it from the aggregates', async () => {
+    setupFetch([known, nested], [
+      makeUpdateStatus({ nodeId: 1, name: 'Known', type: 'remote' }),
+      makeUpdateStatus({ nodeId: 2, name: 'Nested', type: 'remote' }),
+    ]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    await screen.findByText('Nested');
+    expect(screen.getAllByText('--')).toHaveLength(2);
+    // Known-only averages: CPU 30%, memory 25 / 100. Counting the unknown node
+    // as 0% would give 15% and 5%.
+    expect(mastheadValue('cpu')).toContain('30%');
+    expect(mastheadValue('mem')).toContain('25%');
+  });
+
+  it('marks the unknown dimensions in the node detail without a zero bar', async () => {
+    // The detail screen mounts NodeDetailsSheet, which reads nodeMeta from the node context.
+    useNodesMock.mockReturnValue({ nodes: [], activeNode: null, nodeMeta: new Map(), hasCapability: vi.fn(() => false) });
+    setupFetch([known, nested], [
+      makeUpdateStatus({ nodeId: 1, name: 'Known', type: 'remote' }),
+      makeUpdateStatus({ nodeId: 2, name: 'Nested', type: 'remote' }),
+    ]);
+    render(<MobileFleet headerActions={null} onInspectNode={vi.fn()} onInspectStack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Nested/ }));
+    expect(await screen.findByText('resources')).toBeInTheDocument();
+    // CPU has no measurable value; memory keeps its known total.
+    expect(screen.getByText('--')).toBeInTheDocument();
+    expect(screen.getByText('400 Bytes total')).toBeInTheDocument();
+    expect(screen.getAllByText('Show usage…')).toHaveLength(2);
+  });
+});

@@ -8,7 +8,8 @@ import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { BusyButton } from '@/components/ui/busy-button';
 import { cn, formatBytes } from '@/lib/utils';
-import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { getNodeCpuUsage, getNodeMemUsage, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { ShowUsageLink } from '@/components/ui/show-usage-link';
 import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from '@/components/FleetView/LocalUpdateConfirmDialog';
 import { ReconnectingOverlay } from '@/components/FleetView/ReconnectingOverlay';
@@ -114,6 +115,9 @@ function nodeExceptions(node: FleetNode): NodeException[] {
 
 function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNode; mode: string | undefined; isActive: boolean; isDevImage: boolean; onOpen: () => void }) {
   const tone = nodeTone(node);
+  const cardOnline = node.status === 'online';
+  const cardCpu = cardOnline ? getNodeCpuUsage(node) : null;
+  const cardMem = cardOnline ? getNodeMemUsage(node) : null;
   const local = node.type === 'local';
   const exceptions = nodeExceptions(node);
   return (
@@ -165,8 +169,8 @@ function NodeCard({ node, mode, isActive, isDevImage, onOpen }: { node: FleetNod
       </div>
       <div className="flex items-stretch divide-x divide-hairline border-t border-hairline">
         <StatCell label="stacks" value={`${node.stacks?.length ?? 0}`} />
-        <StatCell label="cpu" value={node.status === 'online' && node.systemStats ? `${getNodeCpu(node).toFixed(0)}%` : '--'} />
-        <StatCell label="mem" value={node.status === 'online' && node.systemStats ? `${getNodeMem(node).toFixed(0)}%` : '--'} />
+        <StatCell label="cpu" value={cardCpu !== null ? `${cardCpu.toFixed(0)}%` : '--'} />
+        <StatCell label="mem" value={cardMem !== null ? `${cardMem.toFixed(0)}%` : '--'} />
       </div>
     </button>
   );
@@ -192,15 +196,16 @@ function DevBuildUpdateAction({ nodeId, onUpdate, updating }: { nodeId: number; 
   );
 }
 
-// One labeled resource bar in the node detail.
-function ResourceRow({ label, pct, detail }: { label: string; pct: number; detail: string }) {
+// One labeled resource bar in the node detail. A null percent is an unknown
+// reading (a nested host with no cgroup mount): no bar and no threshold tone.
+function ResourceRow({ label, pct, detail }: { label: string; pct: number | null; detail: string }) {
   return (
     <div className="py-2">
       <div className="flex items-baseline justify-between">
         <Kicker>{label}</Kicker>
         <span className="font-mono tabular-nums text-[12px] text-stat-subtitle">{detail}</span>
       </div>
-      <Bar pct={pct} />
+      {pct !== null ? <Bar pct={pct} /> : <div className="mt-1.5"><ShowUsageLink /></div>}
     </div>
   );
 }
@@ -232,6 +237,13 @@ function NodeDetail({
   const online = node.status === 'online';
   const lastSeen = node.last_successful_contact ?? node.pilot_last_seen ?? null;
   const stacks = node.stacks ?? [];
+  const cpuUsage = getNodeCpuUsage(node);
+  const cpuDetail = cpuUsage !== null ? `${cpuUsage.toFixed(0)}%` : '--';
+  const memUsed = getNodeMemUsed(node);
+  const memTotal = getNodeMemTotal(node);
+  const memDetail = memUsed !== null && memTotal !== null
+    ? `${formatBytes(memUsed, 1)} / ${formatBytes(memTotal, 1)}`
+    : memTotal !== null ? `${formatBytes(memTotal, 1)} total` : '--';
 
   const handleCordon = async () => {
     setSubmitting(true);
@@ -283,11 +295,11 @@ function NodeDetail({
         {online && node.systemStats ? (
           <div className="mt-[14px]">
             <SectionHead right="cpu · mem · disk">resources</SectionHead>
-            <ResourceRow label="cpu" pct={getNodeCpu(node)} detail={`${getNodeCpu(node).toFixed(0)}%`} />
+            <ResourceRow label="cpu" pct={cpuUsage} detail={cpuDetail} />
             <ResourceRow
               label="mem"
-              pct={getNodeMem(node)}
-              detail={`${formatBytes(getNodeMemUsed(node), 1)} / ${formatBytes(getNodeMemTotal(node), 1)}`}
+              pct={getNodeMemUsage(node)}
+              detail={memDetail}
             />
             {node.systemStats.disk ? (
               <ResourceRow
@@ -432,10 +444,18 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
 
   const totalStacks = nodes.reduce((sum, n) => sum + (n.stacks?.length ?? 0), 0);
   const running = nodes.reduce((sum, n) => sum + (n.stats?.active ?? 0), 0);
-  const avgCpu = onlineNodes.length > 0 ? onlineNodes.reduce((s, n) => s + getNodeCpu(n), 0) / onlineNodes.length : 0;
-  const memUsed = onlineNodes.reduce((s, n) => s + getNodeMemUsed(n), 0);
-  const memTotal = onlineNodes.reduce((s, n) => s + getNodeMemTotal(n), 0);
-  const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
+  // A node whose usage is unknown is left out of both the numerator and the
+  // denominator: counting it as 0% would report a fleet load nobody measured.
+  const cpuReadings = onlineNodes.map(getNodeCpuUsage).filter((v): v is number => v !== null);
+  const avgCpu = cpuReadings.length > 0 ? cpuReadings.reduce((s, v) => s + v, 0) / cpuReadings.length : null;
+  // Used and total come from the same nodes: dividing measured bytes by a
+  // total that includes an unmeasured node would understate the fleet percent.
+  const memReadings = onlineNodes
+    .map((n) => ({ used: getNodeMemUsed(n), total: getNodeMemTotal(n) }))
+    .filter((r): r is { used: number; total: number } => r.used !== null && r.total !== null);
+  const memUsed = memReadings.reduce((s, r) => s + r.used, 0);
+  const memTotal = memReadings.reduce((s, r) => s + r.total, 0);
+  const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : null;
   const syncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
 
   return (
@@ -453,8 +473,8 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
         <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px] [&>*+*]:mt-[14px]">
           <div className="flex items-stretch divide-x divide-hairline overflow-hidden rounded-[12px] border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
             <StatCell label="running" value={`${running}`} />
-            <StatCell label="cpu" value={onlineNodes.length > 0 ? `${avgCpu.toFixed(0)}%` : '--'} />
-            <StatCell label="mem" value={memTotal > 0 ? `${memPct.toFixed(0)}%` : '--'} />
+            <StatCell label="cpu" value={avgCpu !== null ? `${avgCpu.toFixed(0)}%` : '--'} />
+            <StatCell label="mem" value={memPct !== null ? `${memPct.toFixed(0)}%` : '--'} />
           </div>
 
           {loading && nodes.length === 0 ? (

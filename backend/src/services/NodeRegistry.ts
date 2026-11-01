@@ -2,7 +2,7 @@ import Docker from 'dockerode';
 import axios from 'axios';
 import { EventEmitter } from 'events';
 import { DatabaseService, Node } from './DatabaseService';
-import { fetchRemoteMeta, OFFLINE_META, probeRemoteMeta as probeRemoteMetaRaw, type RemoteMeta, type RemoteMetaProbe } from './CapabilityRegistry';
+import { fetchRemoteMeta, OFFLINE_META, probeRemoteMeta as probeRemoteMetaRaw, HOST_USAGE_UNKNOWN_HEADER, HOST_USAGE_UNKNOWN_HEADER_VALUE, type RemoteMeta, type RemoteMetaProbe } from './CapabilityRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
 import { assertSafeOutboundUrl, safeAxiosTransport } from '../utils/outboundTarget';
 
@@ -254,7 +254,11 @@ export class NodeRegistry extends EventEmitter {
         }
 
         const baseUrl = node.api_url.replace(/\/$/, '');
-        const headers = { Authorization: `Bearer ${node.api_token}` };
+        const headers = {
+            Authorization: `Bearer ${node.api_token}`,
+            // This instance renders null host usage; ask a newer remote for it.
+            [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE,
+        };
         const requestConfig = {
             ...safeAxiosTransport(false),
             headers,
