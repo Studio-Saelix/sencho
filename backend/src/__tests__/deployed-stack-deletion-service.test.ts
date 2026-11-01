@@ -252,6 +252,45 @@ describe('DeployedStackDeletionService when the Docker endpoint guard refuses th
     prune.mockRestore();
   });
 
+  it('cancels a prepared prune deletion that the node refuses at startup, keeping the stack and not retrying', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stackName = 'resume-repo-volume';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    const now = Date.now();
+    const intentId = randomUUID();
+    db().insertCleanupPending({
+      id: intentId,
+      node_id: NODE,
+      stack_name: stackName,
+      status: 'prepared',
+      target_kind: 'local_socket',
+      rollback_tags_json: '[]',
+      override_paths_json: '[]',
+      prune_volumes_requested: 1,
+      required_blueprint_id: null,
+      created_at: now,
+      updated_at: now,
+    });
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new RecoveryVolumeProtectedError('declares a recovery repository volume'),
+    );
+
+    await DeployedStackDeletionService.getInstance().reconcileAtStartup();
+
+    expect(down).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+    expect(db().getDeletionIntentById(intentId)?.status).toBe('cancelled');
+    expect(db().hasBlockingDeletionIntent(NODE, stackName)).toBe(false);
+
+    await DeployedStackDeletionService.getInstance().reconcileAtStartup();
+    expect(down).toHaveBeenCalledTimes(1);
+    down.mockRestore();
+  });
+
   it('still carries on to delete the files when the teardown merely failed', async () => {
     const { ComposeService } = await import('../services/ComposeService');
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);

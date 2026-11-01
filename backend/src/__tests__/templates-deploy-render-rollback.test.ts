@@ -119,6 +119,42 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
   });
 });
 
+describe('POST /api/templates/deploy rolled back through the real teardown', () => {
+  it('still removes the files of a stack Compose cannot render, so the same name can be retried', async () => {
+    vi.restoreAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'evaluateDockerEndpoint').mockResolvedValue(null);
+    // Compose rejects the project, as it does for the malformed file that failed the deploy.
+    vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
+      rendered: null, stderr: 'yaml: line 4', code: 15, timedOut: false,
+    });
+    const execute = vi.spyOn(ComposeService.prototype as unknown as { execute: () => Promise<void> }, 'execute')
+      .mockResolvedValue(undefined);
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'real-teardown',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'real-teardown', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(true);
+    // The teardown ran with its volumes, which is what a stack that rendered would get.
+    expect(execute.mock.calls.some((call) => (call as unknown[])[1] instanceof Array
+      && ((call as unknown[])[1] as string[]).includes('--volumes'))).toBe(true);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('real-teardown');
+  });
+});
+
 describe('POST /api/templates/deploy when the rollback would remove a recovery repository volume', () => {
   it('keeps the stack files and reports no rollback, like any other refused teardown', async () => {
     const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');

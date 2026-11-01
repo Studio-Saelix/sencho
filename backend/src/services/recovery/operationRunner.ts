@@ -423,8 +423,10 @@ export class RecoveryEngineService {
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, docker);
     const knownStackNames = await knownStacksFor(this.nodeId);
 
-    // A volume that is unknown or ineligible has no dependents to check, so the
-    // caller is held to the node-wide access before being told which it is.
+    // A volume that does not exist has no dependents to check, so the caller is
+    // held to the node-wide access before being told so. One that exists but cannot
+    // be protected is authorized against its dependents like any other, so a caller
+    // who may protect its stack still gets the specific refusal.
     const described = await describeVolumeLocator({
       docker,
       ownerNodeKey,
@@ -433,10 +435,6 @@ export class RecoveryEngineService {
       if (classifyRecoveryError(err) === 'invalid_request') this.requireNodeWideAccess(input.authorize);
       throw err;
     });
-    if (!described.eligible) {
-      this.requireNodeWideAccess(input.authorize);
-      throw new RecoveryError('invalid_request');
-    }
     const resolution = await resolveVolumeDependents({
       nodeId: this.nodeId,
       ownerNodeKey,
@@ -453,6 +451,7 @@ export class RecoveryEngineService {
     if (!input.authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
       throw new RecoveryError('permission_denied');
     }
+    if (!described.eligible) throw new RecoveryError('invalid_request');
 
     const generationToken = await probeGenerationToken({
       runner: this.helperRunner(),
@@ -525,7 +524,8 @@ export class RecoveryEngineService {
     const point = this.points.get(input.pointId);
     const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
     // Access first: an unknown point, one in a state this cannot act on, and one
-    // with no storage record are only reported to a caller the storage admits.
+    // with no storage record are only reported to a caller the storage admits (the
+    // node-wide access when there is no storage to ask).
     await this.requireStorageAccess(storage, input.authorize);
     if (!point) throw new RecoveryError('invalid_request');
     if (point.status !== 'succeeded' && point.status !== 'partial') throw new RecoveryError('invalid_request');

@@ -9,6 +9,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 vi.mock('../services/ComposeService', () => ({
@@ -68,13 +70,13 @@ async function registerEngine(): Promise<void> {
 }
 
 /** A Docker controller with the named volumes and no containers. */
-async function stubDocker(volumeNames: string[] = []): Promise<void> {
+async function stubDocker(volumeNames: string[] = [], labels: Record<string, Record<string, string>> = {}): Promise<void> {
   const DockerController = (await import('../services/DockerController')).default;
   const createdAt = new Date().toISOString();
   vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
     info: async () => ({ ID: 'engine-routes' }),
     listVolumes: async () => ({
-      Volumes: volumeNames.map((Name) => ({ Name, Driver: 'local', Labels: {}, CreatedAt: createdAt })),
+      Volumes: volumeNames.map((Name) => ({ Name, Driver: 'local', Labels: labels[Name] ?? {}, CreatedAt: createdAt })),
     }),
     listContainers: async () => [],
     getVolume: (name: string) => ({
@@ -82,7 +84,7 @@ async function stubDocker(volumeNames: string[] = []): Promise<void> {
         if (!volumeNames.includes(name)) {
           throw Object.assign(new Error('no such volume'), { statusCode: 404 });
         }
-        return { Name: name, Driver: 'local', Labels: {}, CreatedAt: createdAt };
+        return { Name: name, Driver: 'local', Labels: labels[name] ?? {}, CreatedAt: createdAt };
       },
     }),
     getImage: () => ({ inspect: async () => ({ Id: 'sha256:helper' }) }),
@@ -134,6 +136,20 @@ beforeEach(async () => {
   }
   db.prepare("DELETE FROM system_state WHERE key = 'recovery_active_repository_id'").run();
 });
+
+/** A signed-in cookie for a new user holding `role` globally. */
+async function loginNewUser(username: string, role: 'viewer' | 'node-admin'): Promise<{ cookie: string; userId: number }> {
+  const bcrypt = (await import('bcrypt')).default;
+  const db = DatabaseService.getInstance();
+  db.addUser({ username, password_hash: await bcrypt.hash('scoped-pass-123', 1), role });
+  const login = await request(app).post('/api/auth/login').send({ username, password: 'scoped-pass-123' });
+  expect(login.status).toBe(200);
+  const cookies = login.headers['set-cookie'];
+  return {
+    cookie: Array.isArray(cookies) ? cookies.join('; ') : String(cookies ?? ''),
+    userId: db.getUserByUsername(username)!.id,
+  };
+}
 
 function seedRepository(): string {
   const repository = repositories.RecoveryRepositoryStore.getInstance().register({
@@ -540,13 +556,30 @@ describe('an id or state is not reported to a caller who may not act on it', () 
     expect(adminMissing.body.reason).toBeUndefined();
   });
 
-  it('answers the same 403 for a known and an unknown storage id when listing points', async () => {
+  it('holds a caller with stack:edit but not system:settings to configure for repository and unknown operations', async () => {
+    // Without system:settings this caller could be told apart from an administrator
+    // by the answer for an id no record has, because a repository operation needs it.
+    const editor = await loginNewUser('editor-no-settings', 'node-admin');
+    const operationId = repositoryOperation();
+    const send = (id: string, cookie: string) => request(app)
+      .post(`/api/recovery/operations/${id}/cancel`).set('Cookie', cookie);
+    const existing = await send(operationId, editor.cookie);
+    const missing = await send(unknown(), editor.cookie);
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(missing.body).toEqual(existing.body);
+    const read = await request(app).get(`/api/recovery/operations/${unknown()}`).set('Cookie', editor.cookie);
+    expect(read.status).toBe(403);
+    expect((await send(unknown(), adminCookie)).status).toBe(400);
+  });
+
+  it('lets a caller who can read every stack tell a known storage id from an unknown one', async () => {
     const pointId = pendingPointId();
     const storageId = points.RecoveryPointStore.getInstance().get(pointId)!.storageId;
     const existing = await request(app).get(`/api/recovery/storage/${storageId}/points`).set('Cookie', viewerCookie);
     const missing = await request(app).get(`/api/recovery/storage/${unknown()}/points`).set('Cookie', viewerCookie);
-    // The viewer reads every stack, so the known storage is readable; the unknown one is not distinguishable
-    // from a denial only when the caller could not have read it either.
+    // The viewer reads every stack, so it may learn that an id is unknown; the next
+    // case removes that access and shows the two answers merge.
     expect(existing.status).toBe(200);
     expect(missing.status).toBe(400);
   });
@@ -607,7 +640,9 @@ describe('an id or state is not reported to a caller who may not act on it', () 
   it('answers the same 403 for an unknown, an ineligible and an eligible volume on create-point', async () => {
     service().markReadyForTests();
     seedRepository();
-    await stubDocker(['app_data']);
+    // The reserved volume exists, so it is the ineligible-but-present case; the
+    // other two reach the lookup that finds no volume at all.
+    await stubDocker(['app_data', 'sencho-recovery-abc-g1']);
     const send = (volumeName: string, cookie: string) => request(app).post('/api/recovery/storage/points')
       .set('Cookie', cookie).send({ volumeName, idempotencyKey: randomUUID() });
     const eligible = await send('app_data', viewerCookie);
@@ -617,6 +652,28 @@ describe('an id or state is not reported to a caller who may not act on it', () 
     expect(missing.body).toEqual(eligible.body);
     expect(reserved.body).toEqual(eligible.body);
     expect((await send('no_such_volume', adminCookie)).status).toBe(400);
+    expect((await send('sencho-recovery-abc-g1', adminCookie)).status).toBe(400);
+  });
+
+  it('keeps the specific 400 for a caller who may protect the stack that uses an ineligible volume', async () => {
+    service().markReadyForTests();
+    seedRepository();
+    const stackDir = path.join(process.env.COMPOSE_DIR!, 'alpha');
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    const ineligible = 'sencho-recovery-alpha-scoped-g1';
+    await stubDocker([ineligible], { [ineligible]: { 'com.docker.compose.project': 'alpha' } });
+    const scoped = await loginNewUser('scoped-alpha', 'viewer');
+    DatabaseService.getInstance().addRoleAssignment({
+      user_id: scoped.userId, role: 'node-admin', resource_type: 'stack', resource_id: 'alpha', node_id: nodeId,
+    });
+    const send = (cookie: string) => request(app).post('/api/recovery/storage/points')
+      .set('Cookie', cookie).send({ volumeName: ineligible, idempotencyKey: randomUUID() });
+
+    const scopedRes = await send(scoped.cookie);
+    expect(scopedRes.status).toBe(400);
+    expect(scopedRes.body.errorClass).toBe('invalid_request');
+    expect((await send(viewerCookie)).status).toBe(403);
   });
 
   it('answers the same 403 for a known and an unknown storage key when releasing a stale lock', async () => {

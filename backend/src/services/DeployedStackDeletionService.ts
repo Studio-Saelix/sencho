@@ -310,8 +310,8 @@ export class DeployedStackDeletionService {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'docker_endpoint_protected', error: downErr.message };
         }
-        // Same for a refused volume removal: nothing was torn down, and the
-        // volumes that would have gone include the recovery repository.
+        // Same for a refused volume removal (the stack declares the recovery
+        // repository, or its volumes could not be checked): nothing was torn down.
         if (isRecoveryVolumeProtectedError(downErr)) {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'recovery_volume_protected', error: downErr.message };

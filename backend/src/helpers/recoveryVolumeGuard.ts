@@ -9,7 +9,8 @@ import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
  * disappears: Compose removes every non-external volume the stack declares, by
  * name, so a stack that declares the repository volume would take every recovery
  * point with it. Compose cannot be told to skip one volume, so the whole removal
- * is refused and the stack can still be taken down or deleted without it.
+ * is refused and the stack can still be taken down or deleted without it. The
+ * same refusal covers a stack whose volumes could not be read at all.
  */
 export const RECOVERY_VOLUME_PROTECTED_CODE = 'recovery_volume_protected';
 
@@ -52,7 +53,8 @@ export function recoveryVolumeRefusalMessage(): string {
 
 /** The refusal text when the stack's volumes could not be read, so nothing can be promised. */
 export function recoveryVolumeUnverifiedMessage(): string {
-  return 'Sencho could not read this stack\'s volumes to check that none is a recovery repository volume, so volumes were not removed.';
+  return 'Sencho could not read this stack\'s volumes to check that none is a recovery repository volume, so volumes were not removed. '
+    + 'Run the operation without removing volumes, or retry once the stack\'s compose configuration renders again.';
 }
 
 /** Answers 423 with the refusal's code when `error` is one. Returns false for any other error. */

@@ -372,18 +372,34 @@ export class ComposeService {
   /**
    * Refuse a `down --volumes` of a stack that declares a recovery repository
    * volume. Compose removes every non-external volume a stack declares, so the
-   * repository would go with it; see `RecoveryVolumeProtectedError`. A render that
-   * cannot be read refuses too: removing what cannot be seen is not a pass. Runs
-   * on the node that owns the volume, so a hub request relayed over the node
-   * proxy or a Pilot tunnel reaches the same check.
+   * repository would go with it; see `RecoveryVolumeProtectedError`. An external
+   * declaration is refused too, which is stricter than Compose needs and fails
+   * safe. Runs on the node that owns the volume, so a hub request relayed over the
+   * node proxy or a Pilot tunnel reaches the same check.
+   *
+   * A render Compose itself rejects (a non-zero exit: broken YAML, a required
+   * variable with no value) lets the removal through, because `down --volumes`
+   * loads the same project, fails the same way and removes nothing; refusing there
+   * would also strand a stack that cannot be rendered. A render that did not finish
+   * (timeout, size cap, spawn failure) or that is not a model refuses: `down` could
+   * still succeed there, and removing what cannot be seen is not a pass.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declared: string[] | null = null;
     try {
       const result = await this.renderConfig(stackName);
       if (result.rendered !== null) {
-        const model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
-        declared = Object.values(model.volumes).map((volume) => volume.name);
+        const parsed: unknown = JSON.parse(result.rendered);
+        // The model parser tolerates anything and returns an empty model, which
+        // would read as "declares nothing"; only an object is a model.
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
+        }
+      } else if (!result.timedOut && typeof result.code === 'number' && result.code !== 0) {
+        console.warn('[ComposeService] Compose rejected the project of %s (exit %d); the volume removal is left to Compose, which cannot load it either.', sanitizeForLog(stackName), result.code);
+        return;
+      } else {
+        console.warn('[ComposeService] The render of %s did not finish for the recovery repository check (timed out: %s, exit: %s).', sanitizeForLog(stackName), result.timedOut, String(result.code));
       }
     } catch (error) {
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));

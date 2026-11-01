@@ -688,10 +688,6 @@ blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Pr
             res.status(409).json({ error: result.error, code: result.code });
             return;
         }
-        if (result.code === 'recovery_volume_protected') {
-            res.status(423).json({ error: result.error, code: result.code });
-            return;
-        }
         res.status(500).json({ error: result.error });
     } catch (error) {
         console.error('[Blueprints] withdraw-local error:', sanitizeForLog(getErrorMessage(error, 'withdraw failed')));

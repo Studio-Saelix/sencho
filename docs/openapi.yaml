@@ -1831,7 +1831,7 @@ paths:
       operationId: deleteStack
       tags: [Stacks]
       summary: Delete stack
-      description: Permanently deletes the stack directory and all its files. Requires `stack:delete` permission. With `pruneVolumes=true` the stack's volumes are removed too, unless the stack declares a recovery repository volume (or its volumes cannot be read), in which case the delete is refused with `423` and nothing is stopped or removed.
+      description: Permanently deletes the stack directory and all its files. Requires `stack:delete` permission. With `pruneVolumes=true` the stack's volumes are removed too, unless the stack declares a recovery repository volume (or a check of its volumes did not finish), in which case the delete is refused with `423` and nothing is stopped or removed.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
@@ -1847,11 +1847,18 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "423":
-          description: Refused because `pruneVolumes=true` would remove a recovery repository volume. The `code` is `recovery_volume_protected`.
+          description: Refused because `pruneVolumes=true` would remove a recovery repository volume, or a check of the stack's volumes did not finish. The `code` is `recovery_volume_protected`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                type: object
+                required: [error, code]
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [recovery_volume_protected]
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -2374,7 +2381,7 @@ paths:
       operationId: downStack
       tags: [Stacks]
       summary: Tear down stack
-      description: Runs `docker compose down` for the stack, removing containers and networks. The stack definition remains on disk. Requires `stack:deploy` permission. Pass `removeVolumes=true` to also remove compose volumes when the node advertises the `stack-down-remove-volumes` capability. A volume removal is refused with `423` when the stack declares a recovery repository volume, or when Sencho cannot read the stack's volumes to check; nothing is stopped.
+      description: Runs `docker compose down` for the stack, removing containers and networks. The stack definition remains on disk. Requires `stack:deploy` permission. Pass `removeVolumes=true` to also remove compose volumes when the node advertises the `stack-down-remove-volumes` capability. A volume removal is refused with `423` when the stack declares a recovery repository volume, or when a check of its volumes did not finish; nothing is stopped.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
@@ -2405,11 +2412,18 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "423":
-          description: Volume removal refused because the stack declares a recovery repository volume, or its volumes could not be read. The `code` is `recovery_volume_protected`.
+          description: Volume removal refused because the stack declares a recovery repository volume, or a check of its volumes did not finish. The `code` is `recovery_volume_protected`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                type: object
+                required: [error, code]
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [recovery_volume_protected]
         "500":
           $ref: "#/components/responses/InternalError"
 
