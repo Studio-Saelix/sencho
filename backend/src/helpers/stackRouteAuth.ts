@@ -21,6 +21,9 @@ const STATIC_STACK_PATHS = new Set([
   // classifier would read `platform` as a stack called `platform` and demand an
   // exact `stack:read` grant on it.
   '/stacks/platform/docker-context',
+  // Read-only projection of the node's stack list for AI observers. Reuses the
+  // reserved `platform` first segment, so no stack name is newly withheld.
+  '/stacks/platform/observation',
 ]);
 
 /**
@@ -41,6 +44,8 @@ const EXACT_SUFFIX_RULES: readonly SuffixRule[] = [
   { method: 'GET', suffix: '/services', action: 'stack:read' },
   { method: 'GET', suffix: '/runtime-artifact-identity', action: 'stack:read' },
   { method: 'GET', suffix: '/health-observation', action: 'stack:read' },
+  { method: 'GET', suffix: '/observation/status', action: 'stack:read' },
+  { method: 'GET', suffix: '/observation/readiness', action: 'stack:read' },
   { method: 'GET', suffix: '/effective-artifact-context', action: 'stack:read' },
   { method: 'GET', suffix: '/drift', action: 'stack:read' },
   { method: 'GET', suffix: '/preflight', action: 'stack:read' },

@@ -283,7 +283,7 @@ HTTP 409 Conflict. The response body is parseable JSON so CI pipelines can branc
 
 ### Bypassing a block
 
-Admins can bypass the gate on a per-deploy basis by passing `?ignorePolicy=true` on the deploy URL. The flag is only honored when the calling session resolves to an admin user; API tokens with read-only or deploy-only scope cannot bypass a policy.
+Admins can bypass the gate on a per-deploy basis by passing `?ignorePolicy=true` on the deploy URL. The flag is only honored when the calling session resolves to an admin user; API tokens with observe-only, read-only, or deploy-only scope cannot bypass a policy.
 
 ```bash
 curl -X POST "https://your-sencho-instance:1852/api/stacks/myapp/deploy?ignorePolicy=true" \

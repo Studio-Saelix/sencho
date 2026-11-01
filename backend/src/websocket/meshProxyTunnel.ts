@@ -26,7 +26,8 @@ import { startWsHeartbeat } from '../utils/wsHeartbeat';
  *
  * Auth + scope gating happens in `upgradeHandler.ts` before this handler
  * runs: it accepts node_proxy and full-admin api_token, and rejects
- * session cookies plus restricted api_token scopes. The handler itself
+ * session cookies plus every other api_token scope (read-only, deploy-only,
+ * observe-only, and anything unrecognized). The handler itself
  * trusts the upgrade; the WS credential is the only trust boundary.
  *
  * Bidirectional: when the tunnel opens, the handler registers itself as

@@ -13,7 +13,8 @@ import { rejectUpgrade as reject } from './reject';
  * rejected via isProxyToken), and any unknown future scope must not skip the
  * session admin check.
  *
- * - api_token: restricted scopes blocked upstream for /ws
+ * - api_token: only full-admin survives the upstream scope gate for /ws;
+ *   observe-only has no WebSocket surface at all
  * - console_session: path + one-time jti consumed upstream
  * - pilot_tunnel: machine credential for agent loopback; no further path gate
  *   (must stay allowed so hub-forwarded /ws still works on pilot agents)

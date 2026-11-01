@@ -64,6 +64,8 @@ tags:
     description: Manage local and remote Sencho nodes
   - name: Fleet
     description: Multi-node fleet overview and snapshots
+  - name: Observation
+    description: Read-only projections for MCP clients and other AI observers, reached with an Observe Only token
   - name: Scheduled Tasks
     description: Configure recurring automated operations (admin role required)
   - name: Registries
@@ -77,7 +79,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: API token generated from Settings > API Tokens. Scopes — `read-only`, `deploy-only`, or `full-admin`.
+      description: API token generated from Settings > API Tokens. Scopes are `observe-only`, `read-only`, `deploy-only`, or `full-admin`.
     webhookSignature:
       type: apiKey
       in: header
@@ -227,6 +229,24 @@ components:
           description: Redacted to `[redacted]` for secret-like keys unless the caller is an admin and passes `reveal=1`.
         source: { $ref: "#/components/schemas/LabelSource" }
         redacted: { type: boolean }
+        behavior: { $ref: "#/components/schemas/LabelBehavior" }
+
+    LabelBehavior:
+      type: object
+      required: [state]
+      description: Whether Sencho acts on an `io.sencho.*` label. Present only on labels in that namespace.
+      properties:
+        state:
+          type: string
+          enum: [active, invalid, unsupported, inert]
+          description: >-
+            `active` is declared in the rendered Compose file and valid. `invalid` is declared but ignored, which
+            includes a key Sencho reserves for containers it creates. `unsupported` is an `io.sencho.*` key Sencho
+            does not define. `inert` comes from an image, the running container, or an unrendered model, so it never
+            changes behavior. A deployed copy of `io.sencho.infrastructure` is `active` or `invalid`, because the
+            Docker endpoint guard reads it there too.
+        reason: { type: string, description: Fixed explanation that never repeats the label value. }
+        summary: { type: string, description: What the label does when active. }
 
     LabelIndexContainerRef:
       type: object
@@ -248,6 +268,7 @@ components:
         value: { type: string }
         source: { $ref: "#/components/schemas/LabelSource" }
         redacted: { type: boolean }
+        behavior: { $ref: "#/components/schemas/LabelBehavior" }
         containers:
           type: array
           items: { $ref: "#/components/schemas/LabelIndexContainerRef" }
@@ -492,7 +513,7 @@ components:
           type: string
         scope:
           type: string
-          enum: [read-only, deploy-only, full-admin]
+          enum: [observe-only, read-only, deploy-only, full-admin]
         user_id:
           type: integer
         created_at:
@@ -1062,6 +1083,291 @@ components:
           items:
             $ref: "#/components/schemas/FleetReadinessNode"
 
+    ObservationNode:
+      type: object
+      required: [id, name, type, transport, status, lastContactAt, cordoned]
+      description: |
+        One node as an observer may see it. The node URL, compose directory,
+        enrollment credential, and cordon reason are withheld.
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+          enum: [local, remote]
+        transport:
+          type: string
+          enum: [local, proxy, pilot]
+        status:
+          type: string
+          enum: [online, offline, unknown]
+        lastContactAt:
+          type: ["integer", "null"]
+          description: >
+            Epoch ms of the last contact this hub can vouch for, or null. The unit
+            is the same for local, proxy, and Pilot nodes.
+        cordoned:
+          type: boolean
+
+    ObservationStackSummary:
+      type: object
+      required: [name, status, running, total, source, isSelf]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [running, exited, partial, unknown]
+        running:
+          type: ["integer", "null"]
+          description: Running container count, or null when the node could not report it.
+        total:
+          type: ["integer", "null"]
+          description: Total container count, or null when the node could not report it.
+        source:
+          type: string
+          enum: [local, git]
+        isSelf:
+          type: boolean
+          description: True when the stack is the instance serving the request.
+
+    ObservationStackListData:
+      type: object
+      required: [degraded, total, nextCursor, stacks]
+      properties:
+        degraded:
+          type: boolean
+          description: True when the underlying status evidence was incomplete.
+        total:
+          type: integer
+          description: >
+            Total listed stacks on the node, across every page. A directory whose
+            name has characters outside letters, digits, `_`, and `-` is not
+            listed and is not counted.
+        nextCursor:
+          type: ["string", "null"]
+          description: Name of the last stack on this page when more stacks exist, otherwise null.
+        stacks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservationStackSummary"
+
+    ObservationContainer:
+      type: object
+      required: [name, service, state, health, restartCount, exitCode, startedAt]
+      properties:
+        name:
+          type: string
+        service:
+          type: ["string", "null"]
+        state:
+          type: string
+          enum: [created, running, paused, restarting, removing, exited, dead, other]
+        health:
+          type: ["string", "null"]
+          enum: [healthy, unhealthy, starting, none, null]
+        restartCount:
+          type: integer
+        exitCode:
+          type: ["integer", "null"]
+        startedAt:
+          type: ["string", "null"]
+          description: ISO 8601 start time, or null when Docker does not report one.
+
+    ObservationStackStatusData:
+      type: object
+      required: [stack, outcome, containers, truncated]
+      properties:
+        stack:
+          type: string
+        outcome:
+          type: string
+          enum: [ok, unavailable]
+          description: |
+            `unavailable` means the node could not read its own containers at that
+            moment. It is a successful response carrying no container list, not an error.
+        containers:
+          type: array
+          description: >
+            At most 100 containers. Containers that are not running or are
+            unhealthy come first, then those still starting, then the rest, each
+            group ordered by name, so the cap drops healthy containers before it
+            drops a problem one.
+          items:
+            $ref: "#/components/schemas/ObservationContainer"
+        truncated:
+          type: boolean
+          description: True when the stack has more containers than the response carries.
+
+    ObservationStackReadinessData:
+      type: object
+      required: [stack, update, rollback, unavailableReason]
+      properties:
+        stack:
+          type: string
+        update:
+          type: ["object", "null"]
+          description: The canonical update readiness verdict, or null when it was never evaluated.
+          properties:
+            verdict:
+              type: string
+              enum: [ready, ready_with_warnings, review_required, blocked, unknown]
+            topReasonId:
+              type: ["string", "null"]
+            hasUpdate:
+              type: boolean
+            computedAt:
+              type: integer
+        rollback:
+          type: ["object", "null"]
+          description: The canonical rollback readiness verdict, or null when it was never evaluated.
+          properties:
+            overall:
+              type: string
+              enum: [ready, partial, not_ready]
+            topReasonId:
+              type: ["string", "null"]
+            computedAt:
+              type: integer
+        unavailableReason:
+          oneOf:
+            - type: string
+              enum: [summary_truncated, domain_error]
+            - type: "null"
+          description: Set only when both `update` and `rollback` are null.
+
+    ObservationFleetCell:
+      type: object
+      required: [state, reasonCode, evidenceAgeMs, source]
+      properties:
+        state:
+          $ref: "#/components/schemas/ReadinessDomainState"
+        reasonCode:
+          oneOf:
+            - $ref: "#/components/schemas/ReadinessReasonCode"
+            - type: "null"
+          description: Null when, and only when, `state` is `healthy`.
+        evidenceAgeMs:
+          type: ["integer", "null"]
+          description: Age of the evidence behind this cell, or null when it is not knowable.
+        source:
+          type: string
+          enum: [live, stored]
+          description: Whether this request's own read produced the answer, or the hub answered from stored evidence.
+
+    ObservationFleetNode:
+      type: object
+      required: [id, name, transport, state, reachability, cells, stackCount]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        transport:
+          type: string
+          enum: [local, pilot, proxy, unreachable]
+        state:
+          $ref: "#/components/schemas/ReadinessDomainState"
+          description: The worst state among this node's cells.
+        reachability:
+          type: object
+          required: [status, contactAt, probedLive, latencyMs]
+          properties:
+            status:
+              type: string
+              enum: [online, offline, unknown]
+            contactAt:
+              type: ["integer", "null"]
+              description: Epoch ms of the last contact this hub can vouch for.
+            probedLive:
+              type: boolean
+            latencyMs:
+              type: ["integer", "null"]
+        cells:
+          type: object
+          description: |
+            Keys are the subset of `domains` that apply to this node. A missing key
+            means the domain does not apply, never that it is healthy.
+          additionalProperties:
+            $ref: "#/components/schemas/ObservationFleetCell"
+        stackCount:
+          type: ["integer", "null"]
+
+    ObservationFleetFinding:
+      type: object
+      required: [id, domain, nodeId, stack, code, severity, count]
+      description: |
+        A finding with its free-text explanation and target withheld. The client
+        reads `code`, and `severity` is never `healthy`.
+      properties:
+        id:
+          type: string
+        domain:
+          $ref: "#/components/schemas/ReadinessDomainKey"
+        nodeId:
+          type: integer
+        stack:
+          type: ["string", "null"]
+        code:
+          $ref: "#/components/schemas/ReadinessReasonCode"
+        severity:
+          $ref: "#/components/schemas/ReadinessDomainState"
+          description: The state of the concern that produced this row; never `healthy`.
+        count:
+          type: integer
+
+    ObservationFleetHealthData:
+      type: object
+      required: [stale, domains, domainsOmitted, summary, nodes, findings, findingsTruncated]
+      properties:
+        stale:
+          type: boolean
+          description: True when the cache served an expired aggregate after a failed refresh.
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReadinessDomainKey"
+        domainsOmitted:
+          type: array
+          description: Domains withheld from the observation surface. Today this is only `control`.
+          items:
+            $ref: "#/components/schemas/ReadinessDomainKey"
+        summary:
+          type: object
+          required: [nodes, findings]
+          properties:
+            nodes:
+              type: object
+              description: Nodes whose worst domain state is each value.
+              properties:
+                attention: { type: integer }
+                degraded: { type: integer }
+                unavailable: { type: integer }
+                unknown: { type: integer }
+                healthy: { type: integer }
+            findings:
+              type: object
+              description: Findings across the fleet, by severity.
+              properties:
+                attention: { type: integer }
+                degraded: { type: integer }
+                unavailable: { type: integer }
+                unknown: { type: integer }
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservationFleetNode"
+        findings:
+          type: array
+          description: Worst severity first, capped at 50 rows.
+          items:
+            $ref: "#/components/schemas/ObservationFleetFinding"
+        findingsTruncated:
+          type: boolean
+          description: True when more than 50 findings exist.
+
     StackReadinessRow:
       type: object
       required: [stack, update, rollback, unavailableReason]
@@ -1407,6 +1713,89 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/platform/observation:
+    get:
+      operationId: listObservationStacks
+      tags: [Observation]
+      summary: List stacks for an AI observer
+      description: |
+        Returns one page of the stacks on a node, projected for an Observe Only
+        token: name, status, running and total container counts, source, and whether
+        the stack is this instance. Stacks are ordered by name; the cursor is the
+        name of the last stack on the previous page, so a stack deleted between two
+        pages does not shift the rest of the list. A directory whose name has
+        characters outside letters, digits, `_`, and `-` is not listed, because
+        no per-stack route accepts it. `degraded` reports that the
+        underlying status evidence was incomplete. This is one of the five paths an
+        Observe Only token may reach. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+        - name: cursor
+          in: query
+          required: false
+          description: Name of the last stack on the previous page. Omit for the first page.
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]+$'
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 100 and accepts 1 to 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          description: One page of stacks wrapped in the observation envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, generatedAt, data]
+                properties:
+                  schemaVersion:
+                    type: integer
+                    enum: [1]
+                  generatedAt:
+                    type: integer
+                    description: Epoch ms of the evidence behind the answer.
+                  data:
+                    $ref: "#/components/schemas/ObservationStackListData"
+        "400":
+          description: Invalid cursor or limit (`INVALID_CURSOR` or `INVALID_LIMIT`), or `capability_unavailable` when a targeted remote does not advertise `agent-observation-v1`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: >
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1903,6 +2292,150 @@ paths:
                 example: ["web", "db", "redis"]
         "400":
           description: Invalid stack name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/observation/status:
+    get:
+      operationId: getObservationStackStatus
+      tags: [Observation]
+      summary: Stack container status for an AI observer
+      description: |
+        Returns one stack's containers projected for an Observe Only token: name,
+        service, state, health, restart count, exit code, and start time. The
+        response carries at most 100 containers and sets `truncated` when the stack
+        has more. An `outcome` of `unavailable` is a successful response meaning the
+        node could not read its own containers at that moment; the container list is
+        empty and a later call may succeed. This is one of the five paths an Observe
+        Only token may reach. Requires `stack:read` permission for the named stack.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Container facts wrapped in the observation envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, generatedAt, data]
+                properties:
+                  schemaVersion:
+                    type: integer
+                    enum: [1]
+                  generatedAt:
+                    type: integer
+                    description: Epoch ms of the evidence behind the answer.
+                  data:
+                    $ref: "#/components/schemas/ObservationStackStatusData"
+        "400":
+          description: Invalid stack name, or `capability_unavailable` when a targeted remote does not advertise `agent-observation-v1`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The stack does not exist on the node (`STACK_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: >
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/observation/readiness:
+    get:
+      operationId: getObservationStackReadiness
+      tags: [Observation]
+      summary: Stack update and rollback readiness for an AI observer
+      description: |
+        Returns one stack's canonical update and rollback readiness verdicts,
+        projected for an Observe Only token. Each verdict slot carries the verdict,
+        the id of its strongest reason, and when it was computed; the free-text
+        description behind the verdict is withheld. `unavailableReason` is set to
+        `summary_truncated` or `domain_error` only when both slots are null. This is
+        one of the five paths an Observe Only token may reach. Requires `stack:read`
+        permission for the named stack.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Readiness verdicts wrapped in the observation envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, generatedAt, data]
+                properties:
+                  schemaVersion:
+                    type: integer
+                    enum: [1]
+                  generatedAt:
+                    type: integer
+                    description: Epoch ms of the evidence behind the answer.
+                  data:
+                    $ref: "#/components/schemas/ObservationStackReadinessData"
+        "400":
+          description: Invalid stack name, or `capability_unavailable` when a targeted remote does not advertise `agent-observation-v1`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The stack does not exist on the node (`STACK_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: >
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
           content:
             application/json:
               schema:
@@ -2986,13 +3519,14 @@ paths:
                   type: string
                   description: |
                     Permission scope:
-                    - `read-only` — GET requests only
-                    - `deploy-only` — Read + stack deploy/stop/restart operations
-                    - `full-admin` — All operations (except license, user, and token management)
-                  enum: [read-only, deploy-only, full-admin]
+                    - `observe-only` - exactly five read-only observation endpoints; requires an expiry
+                    - `read-only` - GET requests only
+                    - `deploy-only` - Read + stack deploy/stop/restart operations
+                    - `full-admin` - All operations (except license, user, and token management)
+                  enum: [observe-only, read-only, deploy-only, full-admin]
                 expires_in:
                   type: ["integer", "null"]
-                  description: Token lifetime in days. Use `null` for no expiry.
+                  description: Token lifetime in days. Use `null` for no expiry. Required when `scope` is `observe-only`, where `null` is rejected.
                   enum: [30, 60, 90, 365, null]
                   example: 90
     get:
@@ -3592,6 +4126,85 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/fleet/observation/nodes:
+    get:
+      operationId: getObservationNodes
+      tags: [Observation]
+      summary: List nodes for an AI observer
+      description: |
+        Returns every node this hub knows, projected for an Observe Only token.
+        Each row carries the node's type, the transport the hub would use to reach
+        it, its status, the last contact this hub can vouch for, and whether it is
+        cordoned. Node URLs, compose directories, enrollment credentials, and cordon
+        reasons are withheld. This endpoint is answered by the hub the caller is
+        signed into and is one of the five paths an Observe Only token may reach.
+        Requires `node:read` permission.
+      responses:
+        "200":
+          description: Node list wrapped in the observation envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, generatedAt, data]
+                properties:
+                  schemaVersion:
+                    type: integer
+                    enum: [1]
+                  generatedAt:
+                    type: integer
+                    description: Epoch ms of the evidence behind the answer.
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ObservationNode"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/fleet/observation/health:
+    get:
+      operationId: getObservationFleetHealth
+      tags: [Observation]
+      summary: Fleet readiness for an AI observer
+      description: |
+        Returns the fleet readiness aggregate projected for an Observe Only token:
+        per-node domain cells, the findings behind them, state and severity counts,
+        and a staleness flag. Findings are capped at 50, worst first. The `control`
+        domain is withheld from this surface and named in `domainsOmitted`. The
+        aggregate is cached for up to 15 seconds and shared across callers, so
+        `generatedAt` and each cell's `evidenceAgeMs` describe the age of the
+        evidence, not of the request. Dismissals applied in the Fleet Readiness view
+        are not read here, because reading them would mutate dismissal state. This is
+        one of the five paths an Observe Only token may reach. Requires `node:read`
+        permission.
+      responses:
+        "200":
+          description: Fleet readiness wrapped in the observation envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, generatedAt, data]
+                properties:
+                  schemaVersion:
+                    type: integer
+                    enum: [1]
+                  generatedAt:
+                    type: integer
+                    description: Epoch ms of the evidence behind the answer.
+                  data:
+                    $ref: "#/components/schemas/ObservationFleetHealthData"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

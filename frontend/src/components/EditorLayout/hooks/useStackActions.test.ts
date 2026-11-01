@@ -28,6 +28,9 @@ import {
 } from '@/__tests__/gitopsFixtures';
 import { toast } from '@/components/ui/toast-store';
 
+/** A current node's io.sencho.* answer for a stack with no labels. Nodes without one are unsupported as a whole. */
+const CONTRACT = { renderable: true, services: {}, entries: [] };
+
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
@@ -3016,6 +3019,7 @@ describe('useStackActions.openStackApp', () => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
       renderable: true,
+      senchoLabels: CONTRACT,
       serviceUrls: {},
       ports: {},
       services: [],
@@ -3080,6 +3084,7 @@ describe('useStackActions.openStackApp', () => {
   it('audit F02: opens the runtime owner URL when another service declares the assigned port', async () => {
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
       renderable: true,
+      senchoLabels: CONTRACT,
       serviceUrls: { app: 'https://app.example.com', stopped: 'https://stopped.example.com' },
       ports: {
         app: [{ host: '0', container: '80', proto: 'tcp' }],
@@ -3110,6 +3115,7 @@ describe('useStackActions.openStackApp', () => {
       order.push('fetch');
       return Promise.resolve(new Response(JSON.stringify({
         renderable: true,
+        senchoLabels: CONTRACT,
         serviceUrls: {},
         ports: {},
       }), { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -3142,6 +3148,7 @@ describe('useStackActions.openStackApp', () => {
     };
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({
       renderable: true,
+      senchoLabels: CONTRACT,
       serviceUrls: { web: 'https://web.example.com' },
       ports: { web: [{ host: '8989', proto: 'tcp' }] },
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
@@ -3176,6 +3183,7 @@ describe('useStackActions.openStackApp', () => {
       await act(async () => {
         resolveAnatomy?.(new Response(JSON.stringify({
           renderable: true,
+          senchoLabels: CONTRACT,
           serviceUrls: { web: 'https://app.example.com' },
           ports: {},
         }), { status: 200, headers: { 'content-type': 'application/json' } }));

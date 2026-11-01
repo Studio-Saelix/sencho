@@ -29,6 +29,10 @@ type NavigateFn = (
   targeting?: ImagesTargetingInput,
 ) => void;
 
+/** Loading ownership of a secondary chart region: a chart still in flight is
+ *  not an empty chart, and a failed read is not "no history yet". */
+export type ChartLoadState = 'loading' | 'ready' | 'unavailable';
+
 /**
  * Why the overview is not on screen. Every cause the gateway established gets
  * its own kind, so a disconnected Pilot or an unconfigured node is never
@@ -59,8 +63,12 @@ interface OverviewTabProps {
   /** Retry the overview read (the surface's only recovery path when it fails). */
   onReload: () => void;
   trend: SecurityRiskTrendPoint[];
+  /** Where the risk-trend read stands; independent of the overview read. */
+  trendState: ChartLoadState;
   /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
   exploitIntel: ExploitIntelFinding[];
+  /** Where the exploit-intel read stands; independent of the overview read. */
+  exploitIntelState: ChartLoadState;
   /** True when the exploit-intel set hit its row cap (highest-risk shown, not all). */
   exploitTruncated: boolean;
   onNavigate: NavigateFn;
@@ -175,6 +183,21 @@ function ReasonRow({ reason, reasons }: { reason: PostureReason; reasons: Securi
   );
 }
 
+/** Placeholder that distinguishes a chart still loading from one whose read failed. */
+function ChartPending({ state, noun }: { state: ChartLoadState; noun: string }) {
+  if (state === 'loading') {
+    return <Skeleton className="h-[220px] w-full rounded-md" />;
+  }
+  if (state === 'unavailable') {
+    return (
+      <p className="flex h-[220px] items-center justify-center text-sm text-stat-subtitle">
+        {noun} unavailable right now.
+      </p>
+    );
+  }
+  return null;
+}
+
 function ReviewQueueCard({
   allReasons,
   reasons,
@@ -224,7 +247,9 @@ export function OverviewTab({
   overview,
   loadError,
   trend,
+  trendState,
   exploitIntel,
+  exploitIntelState,
   exploitTruncated,
   onNavigate,
   onInspect,
@@ -333,7 +358,7 @@ export function OverviewTab({
           answer "what should I act on first?" from posture + exploit intel. */}
       <div className="grid gap-4 lg:grid-cols-3">
         <ChartCard title="Risk trend · 30 days · critical + high" className="lg:col-span-2">
-          <RiskTrendChart trend={trend} />
+          {trendState === 'ready' ? <RiskTrendChart trend={trend} /> : <ChartPending state={trendState} noun="Risk trend" />}
         </ChartCard>
         <ChartCard title="Action posture">
           <ActionPostureChart overview={overview} />
@@ -341,9 +366,15 @@ export function OverviewTab({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <TopExploitRiskList items={exploitIntel} truncated={exploitTruncated} onInspect={onInspect} />
+        {exploitIntelState === 'ready' ? (
+          <TopExploitRiskList items={exploitIntel} truncated={exploitTruncated} onInspect={onInspect} />
+        ) : (
+          <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 h-full">
+            <ChartPending state={exploitIntelState} noun="Exploit intelligence" />
+          </div>
+        )}
         <ChartCard title="Severity × exploitability">
-          <CvssEpssQuadrantChart items={exploitIntel} />
+          {exploitIntelState === 'ready' ? <CvssEpssQuadrantChart items={exploitIntel} /> : <ChartPending state={exploitIntelState} noun="Exploit intelligence" />}
         </ChartCard>
       </div>
 

@@ -116,7 +116,7 @@ describe('resolveManagedMeshAttachment', () => {
 
     expect(isManaged(runtimeContainer(), 'sencho_mesh')).toBe(false);
     expect(warn).toHaveBeenCalledWith(
-      '[NetworkDrift] Could not verify Mesh opt-in state for %s:',
+      '[Mesh] Could not verify Mesh opt-in state for %s:',
       'app',
       'database unavailable',
     );

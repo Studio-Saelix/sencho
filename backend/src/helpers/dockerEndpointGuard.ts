@@ -10,6 +10,7 @@ import {
 import { getRuntimeContainerIdCandidates, matchesContainerId, workingDirMatchesStack } from './selfStackGuard';
 import { normalizeComposeVersion } from './composeVersionSkew';
 import { getErrorMessage } from '../utils/errors';
+import { SENCHO_INFRASTRUCTURE_LABEL as INFRASTRUCTURE_LABEL } from './senchoLabels';
 import type { DockerEndpointRefusal } from './dockerEndpointError';
 
 /*
@@ -84,8 +85,8 @@ export {
   type EndpointRefusalReason,
 } from './dockerEndpointError';
 
-/** Label that marks a service as carrying this node's Docker connection when detection misses it. */
-export const INFRASTRUCTURE_LABEL = 'io.sencho.infrastructure';
+/** Label that marks a service as carrying this node's Docker connection when detection misses it. Registered in `senchoLabels.ts`. */
+export { INFRASTRUCTURE_LABEL };
 
 export type EndpointMutation =
   /**

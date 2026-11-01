@@ -298,6 +298,7 @@ export function allTargetingExposureContexts(
       stackName: t.stackName,
       serviceName: t.serviceName,
       exposureReason: t.exposureReason ?? null,
+      ...(t.tunnel ? { tunnel: t.tunnel } : {}),
       exposureIntent: t.exposureIntent,
       intentStatus: t.intentStatus ?? 'unavailable',
       intentConflict: t.intentConflict,

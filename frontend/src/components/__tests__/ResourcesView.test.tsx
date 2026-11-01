@@ -15,7 +15,7 @@
  *    admin-only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -261,9 +261,163 @@ describe('ResourcesView', () => {
 
     // The refresh is still pending: the row stays and no skeleton replaces it.
     expect(screen.getByText('keep:me')).toBeInTheDocument();
+    // The prune stays busy (dialog open, confirm disabled) until that refreshed
+    // payload lands, so the stale row cannot be pruned again.
+    const pruneDialog = screen.getByRole('alertdialog');
+    expect(within(pruneDialog).getByRole('button', { name: /Prun/ })).toBeDisabled();
 
     releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
     await waitFor(() => expect(screen.queryByText('keep:me')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a delete busy until the refreshed inventory drops the removed image', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('unused:v1')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/images/delete' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('unused:v1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Delete image unused:v1' }));
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The delete answered, but the row still names the removed image: the
+    // action stays busy until the refresh replaces it, so a second click cannot
+    // send the stale id and collect "Image not found".
+    expect(screen.getAllByText('unused:v1').length).toBeGreaterThan(0);
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('unused:v1')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a purge busy until the refreshed external list drops the purged containers', async () => {
+    const orphans = {
+      'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+    };
+    let orphansCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        if (orphansCalls === 1) return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/prune/orphans') {
+        return Promise.resolve(jsonResponse({ results: [{ id: 'c1', success: true }] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+    await user.click(screen.getByRole('button', { name: 'Purge selected (1)' }));
+    await user.click(await screen.findByRole('button', { name: 'Purge' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The purge answered, but the list still shows the container and the
+    // selection still names its id: the dialog stays busy until the refreshed
+    // list lands instead of allowing an immediate second purge of that id.
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Purge' })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({}));
+    await waitFor(() => expect(screen.queryByText('web')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a reclaim busy until the refreshed inventory drops the removed items', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('old:v1')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1500, outcomes: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('old:v1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Reclaim' }));
+    await user.click(await screen.findByRole('button', { name: /Reclaim/ }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    expect(screen.getByText('old:v1')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: /Reclaim/ })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('old:v1')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a rollback release busy until the refreshed generations drop the released one', async () => {
+    let rollbackCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/rollback/generations') {
+        rollbackCalls += 1;
+        if (rollbackCalls === 1) {
+          return Promise.resolve(jsonResponse([{
+            id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active',
+            isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: true,
+          }]));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/rollback/generations/gen-1/release' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, message: 'Rollback protection released' }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+    expect(await screen.findByText('abc123456789')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Release rollback protection for abc123456789' }));
+    await user.click(await screen.findByRole('button', { name: 'Release' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The released generation is still listed until its own refresh lands, so
+    // the dialog stays busy instead of allowing a second release of that id.
+    expect(screen.getByText('abc123456789')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: /Releas/ })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse([]));
+    await waitFor(() => expect(screen.queryByText('abc123456789')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
   });
 
   it('shows an error with Retry when the inventory fails to load, not an empty table', async () => {
@@ -283,6 +437,8 @@ describe('ResourcesView', () => {
 
     expect(await screen.findByText('Could not load images.')).toBeInTheDocument();
     expect(screen.queryByText('No images found.')).not.toBeInTheDocument();
+    // A first read that fails has no rows to keep: its own Retry row reports it.
+    expect(toast.error).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('back:again')).toBeInTheDocument();
@@ -342,6 +498,46 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
     expect(screen.getByText('still:here')).toBeInTheDocument();
     expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+  });
+
+  it('reports one warning when several regions fail in the same refresh', async () => {
+    let refreshStarted = false;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        refreshStarted = true;
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(refreshStarted
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ images: [image('still:here')], volumes: [], networks: [] }));
+      }
+      if (url === '/system/orphans') {
+        return Promise.resolve(refreshStarted
+          ? jsonResponse({ error: 'boom' }, { ok: false, status: 500 })
+          : jsonResponse({ 'project': [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('still:here')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Prune unused' }));
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+
+    // Both the inventory and the external-container refresh fail; the operator
+    // gets one notice, not one per region.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
+    await waitFor(() => expect(mockedFetch.mock.calls.filter(([u]) => u === '/system/orphans').length).toBeGreaterThan(1));
+    const refreshWarnings = (toast.error as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([message]) => message === 'Failed to refresh resources');
+    expect(refreshWarnings).toHaveLength(1);
+    expect(screen.getByText('still:here')).toBeInTheDocument();
   });
 
   it('drops the previous node usage when a node switch loads, and ignores its late usage response', async () => {
@@ -445,10 +641,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
-      '/system/resources',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    ));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
@@ -495,10 +688,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
-      '/system/resources',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    ));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
 
     const extraRef = await screen.findByText('ghcr.io/example/very-long-app-name:latest');
@@ -523,10 +713,7 @@ describe('ResourcesView', () => {
 
     const user = userEvent.setup();
     render(<ResourcesView />);
-    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
-      '/system/resources',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    ));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources', expect.objectContaining({ signal: expect.anything() })));
 
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await waitFor(() => expect(screen.getByText(/old:v1/)).toBeInTheDocument());
@@ -963,6 +1150,88 @@ describe('ResourcesView', () => {
       expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
     });
 
+    it('clears the external-container selection when a refresh re-lists the same ids', async () => {
+      // The prune refreshes every region, and the external-container read that
+      // comes back lists the same container. Only the payload identity tells
+      // the page the selection was made against a read it no longer owns.
+      const orphans = {
+        'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+      };
+      // Every read hands back a fresh body, as a real response does, so the
+      // refresh is a new payload even though it lists the same container.
+      mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/system/orphans') return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('old:v1')], volumes: [], networks: [] }));
+        if (url === '/system/prune/plan' && opts?.method === 'POST') {
+          return Promise.resolve(jsonResponse(samplePrunePlan({
+            scope: 'managed',
+            targets: ['networks'],
+            items: [{ target: 'networks', id: 'n1', name: 'old_net', managed: true, reason: 'Network has no attached containers', network: {} }],
+            reclaimableBytes: 0,
+          })));
+        }
+        if (url === '/system/prune/system' && opts?.method === 'POST') {
+          return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 0, outcomes: [] }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /external/i }));
+      await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+      expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
+
+      await user.click(screen.getByRole('button', { name: 'More cleanup actions' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Prune unused networks' }));
+      await user.click(await screen.findByRole('button', { name: 'Prune' }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalled());
+
+      // Waits for the refreshed read to land: until it does the old payload is
+      // still the one on screen, and with it the old selection.
+      await waitFor(() => {
+        expect(screen.getByRole('checkbox', { name: 'Select web' })).not.toBeChecked();
+        expect(screen.getByRole('button', { name: 'Purge selected (0)' })).toBeDisabled();
+      });
+      expect(mockedFetch.mock.calls.filter(([url]) => url === '/system/orphans').length).toBeGreaterThan(1);
+
+      // A deliberate selection on the refreshed list is what the purge carries.
+      await user.click(screen.getByRole('checkbox', { name: 'Select web' }));
+      await user.click(screen.getByRole('button', { name: 'Purge selected (1)' }));
+      await user.click(await screen.findByRole('button', { name: 'Purge' }));
+      await waitFor(() => {
+        const purgeCall = mockedFetch.mock.calls.find(([url]) => url === '/system/prune/orphans');
+        expect(purgeCall).toBeDefined();
+        expect(JSON.parse(String((purgeCall?.[1] as RequestInit).body))).toEqual({ containerIds: ['c1'] });
+      });
+    });
+
+    it('clears the external-container selection when the node changes', async () => {
+      const orphans = {
+        'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+      };
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/orphans') return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      const { rerender } = render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /external/i }));
+      await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+      expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
+
+      nodesState.activeNode = { id: 2 };
+      rerender(<ResourcesView />);
+
+      // The new node's read lists the same container id; the selection was
+      // made on the previous node's list and must not follow it.
+      expect(await screen.findByRole('checkbox', { name: 'Select web' })).not.toBeChecked();
+      expect(screen.getByRole('button', { name: 'Purge selected (0)' })).toBeDisabled();
+    });
+
     describe('purging external containers', () => {
       const orphans = {
         'legacy-app': [
@@ -1167,13 +1436,13 @@ describe('ResourcesView', () => {
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await user.click(await screen.findByRole('button', { name: /Prune/ }));
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh external containers'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
     await user.click(await screen.findByRole('tab', { name: /external/i }));
     expect(await screen.findByText('web')).toBeInTheDocument();
     expect(screen.queryByText('Could not load external containers.')).toBeNull();
   });
 
-  it('does not claim an empty host when a background refresh of the external read fails', async () => {
+  it('keeps a confirmed-empty external list and warns when its background refresh fails', async () => {
     let orphansCalls = 0;
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
       if (url === '/system/prune/plan' && opts?.method === 'POST') {
@@ -1201,10 +1470,13 @@ describe('ResourcesView', () => {
     await user.click(screen.getByRole('button', { name: 'Prune unused' }));
     await user.click(await screen.findByRole('button', { name: /Prune/ }));
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh external containers'));
+    // The first read confirmed an empty list, which is the last good payload: a
+    // failed refresh keeps it and reports the failure once, instead of
+    // replacing a confirmed answer with an error surface.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to refresh resources'));
     await user.click(await screen.findByRole('tab', { name: /external/i }));
-    expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
-    expect(screen.queryByText('No external containers')).toBeNull();
+    expect(await screen.findByText('No external containers')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load external containers.')).toBeNull();
   });
 
   it('names a disconnected Pilot on the tables and on the disk-usage card', async () => {
@@ -1312,5 +1584,128 @@ describe('ResourcesView', () => {
     resourcesResolvers[0](jsonResponse({ images: [image('node1-img:latest')], volumes: [], networks: [] }));
     await waitFor(() => expect(screen.getByText('node2-img:latest')).toBeInTheDocument());
     expect(screen.queryByText('node1-img:latest')).not.toBeInTheDocument();
+  });
+
+  describe('progressive hydration', () => {
+    it('renders the images and their count while rollback, usage, and scan summaries are still pending', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('fast:latest')], volumes: [], networks: [] }));
+        }
+        if (url === '/system/docker-df' || url === '/system/rollback/generations' || url === '/security/image-summaries') {
+          // Never settles during this test: these regions are still reading.
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      render(<ResourcesView />);
+
+      expect(await screen.findByText('fast:latest')).toBeInTheDocument();
+      // The Images count is known; Rollback's source has not answered, so its
+      // tab shows no number at all rather than an implied zero.
+      expect(screen.getByRole('tab', { name: 'Images1' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Rollback' })).toBeInTheDocument();
+      expect(screen.getByText('Measuring disk')).toBeInTheDocument();
+    });
+
+    it('shows rollback generations as soon as they arrive, without waiting on usage or scan summaries', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/rollback/generations') {
+          return Promise.resolve(jsonResponse([{
+            id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active',
+            isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: false,
+          }]));
+        }
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        }
+        if (url === '/system/docker-df' || url === '/security/image-summaries') {
+          return new Promise<Response>(() => {});
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+
+      expect(await screen.findByText('seerr')).toBeInTheDocument();
+      // The Rollback count appears with its data, not before it.
+      expect(screen.getByRole('tab', { name: 'Rollback1' })).toBeInTheDocument();
+    });
+
+    it('keeps the image table usable when the scan-summary read fails', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('keep:latest')], volumes: [], networks: [] }));
+        }
+        if (url === '/security/image-summaries') {
+          return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      render(<ResourcesView />);
+
+      expect(await screen.findByText('keep:latest')).toBeInTheDocument();
+      expect(screen.queryByText('Could not load images.')).not.toBeInTheDocument();
+    });
+
+    it('gives a failed external-container read its own Retry, not a confirmed-empty state', async () => {
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [image('images:fine')], volumes: [], networks: [] }));
+        }
+        if (url === '/system/orphans') {
+          return Promise.resolve(jsonResponse({ error: 'boom' }, { ok: false, status: 500 }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      expect(await screen.findByText('images:fine')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('tab', { name: /external/i }));
+
+      expect(await screen.findByText('Could not load external containers.')).toBeInTheDocument();
+      expect(screen.queryByText('No external containers')).not.toBeInTheDocument();
+    });
+
+    it('drops a late rollback response from the node the operator left', async () => {
+      const rollbackResolvers: Array<(r: Response) => void> = [];
+      mockedFetch.mockImplementation((url: string) => {
+        if (url === '/system/rollback/generations') {
+          return new Promise<Response>((resolve) => rollbackResolvers.push(resolve));
+        }
+        if (url === '/system/resources') {
+          return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const { rerender } = render(<ResourcesView />);
+      await waitFor(() => expect(rollbackResolvers).toHaveLength(1));
+
+      nodesState.activeNode = { id: 2 };
+      rerender(<ResourcesView />);
+      await waitFor(() => expect(rollbackResolvers).toHaveLength(2));
+
+      const generation = (stackName: string) => jsonResponse([{
+        id: `gen-${stackName}`, shortId: 'abc123456789', stackName, status: 'active',
+        isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: false,
+      }]);
+
+      rollbackResolvers[1](generation('node-2-stack'));
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+      expect(await screen.findByText('node-2-stack')).toBeInTheDocument();
+
+      // Node 1's read answers after the switch; it must not appear under node 2.
+      rollbackResolvers[0](generation('ghost-stack'));
+      await waitFor(() => expect(screen.getByText('node-2-stack')).toBeInTheDocument());
+      expect(screen.queryByText('ghost-stack')).not.toBeInTheDocument();
+    });
   });
 });

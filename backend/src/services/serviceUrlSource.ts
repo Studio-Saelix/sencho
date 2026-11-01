@@ -1,6 +1,6 @@
 /**
  * Which compose file in a stack's authored chain supplies each service's
- * `sencho.service.url` label, expressed as an editability state for the file the
+ * `io.sencho.url` label, expressed as an editability state for the file the
  * editor has open (the resolved main compose file).
  *
  * Compose merges label maps per key in file order, last file wins, and a file's
@@ -96,8 +96,8 @@ function hasCustomTag(doc: Parameters<typeof visit>[0]): boolean {
 function labelsSetUrl(labels: unknown): boolean {
   if (Array.isArray(labels)) {
     const prefix = `${SERVICE_URL_LABEL}=`;
-    // A bare `sencho.service.url` item sets the key to an empty value, exactly
-    // like `sencho.service.url=`, and shadows earlier files just the same. An
+    // A bare `io.sencho.url` item sets the key to an empty value, exactly
+    // like `io.sencho.url=`, and shadows earlier files just the same. An
     // interpolated key can never equal either literal; `labelsKeyInterpolated`
     // records that uncertainty instead.
     return labels.some(item => typeof item === 'string' && (item === SERVICE_URL_LABEL || item.startsWith(prefix)));
@@ -124,7 +124,7 @@ function labelKeyInterpolated(item: string): boolean {
 
 /**
  * True when any list label's key is interpolated (`- "${URL_LABEL}=https://x"`),
- * so this file may set `sencho.service.url` without naming it. Compose resolves
+ * so this file may set `io.sencho.url` without naming it. Compose resolves
  * the key against the render environment, which this module does not read, so
  * the service's contribution is unverifiable rather than absent. A literal key
  * with an interpolated value stays a known set: the key decides the label.

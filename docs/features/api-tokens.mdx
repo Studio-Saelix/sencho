@@ -16,10 +16,11 @@ API tokens sit alongside two other credential types in the Sencho auth pipeline:
 
 ## Mental model
 
-An API token is an opaque secret value (not a JWT), 56 characters long, that Sencho recognises by its `sen_sk_` prefix. It is owned by exactly one Sencho user, lives in the local SQLite database as a SHA-256 hash, and authorises every request it accompanies under one of three scopes.
+An API token is an opaque secret value (not a JWT), 56 characters long, that Sencho recognises by its `sen_sk_` prefix. It is owned by exactly one Sencho user, lives in the local SQLite database as a SHA-256 hash, and authorises every request it accompanies under one of four scopes.
 
-The three scopes form a ladder:
+The four scopes form a ladder:
 
+- **Observe Only** reaches exactly five read-only observation endpoints, built for MCP clients and other AI observers.
 - **Read Only** authorises every `GET` request the underlying API exposes.
 - **Deploy Only** adds the eight stack-lifecycle POSTs: deploy, down, restart, stop, start, update, plus per-service update and restore.
 - **Full Admin** adds every other read and write on the underlying API.
@@ -30,11 +31,11 @@ Finally, scope-enforced API tokens compose with the fleet. When a request carrie
 
 ## Key capabilities
 
-**Scoped automation for CI/CD.** Three scopes let a token grant exactly what a pipeline needs and nothing more. A deploy pipeline takes Deploy Only; a Prometheus exporter takes Read Only; a fleet-wide rotation script takes Full Admin.
+**Scoped automation for CI/CD.** Four scopes let a token grant exactly what a pipeline needs and nothing more. A deploy pipeline takes Deploy Only; a Prometheus exporter takes Read Only; an MCP client takes Observe Only; a fleet-wide rotation script takes Full Admin.
 
 **Fleet-wide programmatic control from a single token.** One token authenticated against the hub can target any enrolled node by ID. The hub re-signs the request with the target node's credential transparently, so the automation does not need to hold a separate secret per node.
 
-**Long-lived bearer auth with optional expiry.** Tokens stay valid until revoked or expired. Expiry is opt-in at 30, 60, 90, or 365 days; tokens with no expiry must be revoked manually.
+**Long-lived bearer auth with expiry.** Tokens stay valid until revoked or expired. Expiry is opt-in at 30, 60, 90, or 365 days for Read Only, Deploy Only, and Full Admin. Observe Only is the exception: it must have an expiry. Tokens with no expiry must be revoked manually.
 
 **Per-token rate budget.** Each token gets its own rate-limit budget keyed by a hash of the token itself, so one chatty automation never starves another.
 
@@ -42,7 +43,7 @@ Finally, scope-enforced API tokens compose with the fleet. When a request carrie
 
 **Live audit attribution.** Every mutating call made with a token is recorded in the [Audit Log](/features/audit-log) under the username of the user who created the token, with the target node ID when the call was proxied.
 
-**WebSocket support.** The same Bearer header authenticates WebSocket upgrades, so a token can subscribe to stack log streams and notification events, not just REST endpoints.
+**WebSocket support.** The same Bearer header authenticates WebSocket upgrades for Read Only, Deploy Only, and Full Admin tokens, so a token can subscribe to stack log streams and notification events, not just REST endpoints. Observe Only tokens cannot open any WebSocket.
 
 ## Prerequisites
 
@@ -66,7 +67,7 @@ Finally, scope-enforced API tokens compose with the fleet. When a request carrie
   <Step title="Name the token, pick a scope, pick an expiry">
     Use a name that says who or what holds the token (`ci-deploy-pipeline`, `monitoring-readonly`). Names must be unique among your active tokens.
 
-    <Frame caption="Create form. Name accepts up to 100 characters; scope is one of three; expiration is 30 / 60 / 90 / 365 days or none.">
+    <Frame caption="Create form. Name accepts up to 100 characters; scope is one of four; expiration is 30 / 60 / 90 / 365 days, or none for every scope except Observe Only.">
       <img src="/images/api-tokens/api-tokens-create-form.png" alt="API token create form filled in with name, scope, and expiration" />
     </Frame>
   </Step>
@@ -139,6 +140,22 @@ The default `WebSocket` constructor in browsers cannot set headers, so browser-s
 
 ## Permission scopes in detail
 
+### Observe Only
+
+Reaches exactly five read-only endpoints, each a field-limited projection rather than a general read:
+
+| Method | Path | What it returns |
+|--------|------|-----------------|
+| `GET` | `/api/fleet/observation/nodes` | Every node in the fleet: type, transport, status, last contact, cordoned. |
+| `GET` | `/api/stacks/platform/observation` | One page of stacks on a node: status, running and total containers, source, self flag. |
+| `GET` | `/api/stacks/:stackName/observation/status` | One stack's containers: state, health, restart count, exit code, start time. |
+| `GET` | `/api/stacks/:stackName/observation/readiness` | One stack's update and rollback verdicts, with the id of the strongest reason behind each. |
+| `GET` | `/api/fleet/observation/health` | Fleet readiness aggregate: per-node domain cells, findings, counts, staleness. |
+
+Any other path, including a `GET` that a Read Only token would allow, returns `403 SCOPE_DENIED`. The scope has no WebSocket surface. It must have an expiry: 30, 60, 90, or 365 days, with no non-expiring option.
+
+The intended consumer is an [MCP client](/features/mcp) or another AI observer. The projections never carry Compose contents, environment values, secrets, labels, logs, paths, node URLs, or free-text reasons.
+
 ### Read Only
 
 Authorises **every** `GET` against the API. Representative uses: list stacks, fetch container metrics, read stack files, query fleet topology, fetch the audit log, read system stats.
@@ -166,14 +183,14 @@ Authorises every read and every write the API exposes, **except** the universal 
 
 ### WebSocket scope matrix
 
-| Endpoint | Read Only | Deploy Only | Full Admin |
-|----------|-----------|-------------|------------|
-| `/api/stacks/:stack/logs` (stack log stream) | yes | yes | yes |
-| `/ws/notifications` (notification stream) | yes | yes | yes |
-| `/ws` (generic exec / stats) | no | no | yes |
-| `/api/system/host-console` (host shell) | no | no | no |
+| Endpoint | Observe Only | Read Only | Deploy Only | Full Admin |
+|----------|--------------|-----------|-------------|------------|
+| `/api/stacks/:stack/logs` (stack log stream) | no | yes | yes | yes |
+| `/ws/notifications` (notification stream) | no | yes | yes | yes |
+| `/ws` (generic exec / stats) | no | no | no | yes |
+| `/api/system/host-console` (host shell) | no | no | no | no |
 
-A Read Only or Deploy Only token attempting an out-of-scope WebSocket upgrade is rejected with `403 Forbidden` before any frames flow.
+An Observe Only token cannot open any WebSocket: observation is an HTTP-only surface, and no stream carries a projection. A Read Only or Deploy Only token attempting an out-of-scope WebSocket upgrade is rejected with `403 Forbidden` before any frames flow.
 
 ## Universal restrictions
 
@@ -217,8 +234,8 @@ Managing tokens is the exception: creating, listing, and revoking tokens always 
 
 The Settings → API Tokens tab lists every active token you own as a card.
 
-<Frame caption="Settings → Access → API Tokens. Each card carries the token name, a scope badge (Read Only · Deploy Only · Full Admin), the created date, last-used relative time, and the expiration date when one is set.">
-  <img src="/images/api-tokens/api-tokens-populated.png" alt="API Tokens settings tab listing three tokens, one of each scope" />
+<Frame caption="Settings → Access → API Tokens. Each card carries the token name, a scope badge (Observe Only · Read Only · Deploy Only · Full Admin), the created date, last-used relative time, and the expiration date when one is set.">
+  <img src="/images/api-tokens/api-tokens-populated.png" alt="API Tokens settings tab listing tokens with their scope badges" />
 </Frame>
 
 The masthead `TOKENS` counter is the number of your active tokens; you can hold up to 25.
@@ -259,18 +276,18 @@ API tokens are issued and revoked on the hub that authenticates the call. When y
 - **Checksum.** The checksum lets Sencho reject typoed or malformed values without touching the database. Malformed values, unknown hashes, expired tokens, and revoked tokens all return the same `401 Invalid or expired token` body so the response cannot be used as a token-existence oracle.
 - **Hashed storage.** Only the SHA-256 hash lives in the database. The raw value exists in memory exactly long enough to render the reveal banner.
 - **Scanner-friendly prefix.** GitHub Advanced Security, TruffleHog, and GitGuardian recognise the `sen_sk_` prefix and flag accidental commits.
-- **Middleware-enforced scope ladder.** The Read Only / Deploy Only / Full Admin gate runs in middleware before any route handler executes, so the same rules cover every HTTP method on every route. The universal-restriction list is layered on top per-route, so each restricted endpoint declares its rejection explicitly.
+- **Middleware-enforced scope ladder.** The Observe Only / Read Only / Deploy Only / Full Admin gate runs in middleware before any route handler executes, so the same rules cover every HTTP method on every route. The universal-restriction list is layered on top per-route, so each restricted endpoint declares its rejection explicitly.
 - **Bearer preferred over cookie.** When both a Bearer header and a session cookie are present, the Bearer wins. An old session cookie sitting in a shared HTTP client will not silently elevate or override an API token call.
 
 ## Limitations and non-goals
 
-- **No per-stack or per-node scoping.** Scope is global to the instance. A Deploy Only token can deploy any stack on any node it can reach via the proxy. Per-resource scoping is not a v1 capability.
+- **No per-stack or per-node scoping.** Scope is global to the instance. A Deploy Only token can deploy any stack on any node it can reach via the proxy. An Observe Only token can read every node and stack the hub knows, and its reach cannot be narrowed to a subset. Per-resource scoping is not a v1 capability.
 - **No automatic rotation.** Tokens stay valid until you revoke them or they expire. Rotation is a procedural concern; pair it with your secret manager.
 - **No intermediate granularity between Deploy Only and Full Admin.** A token that needs to call any non-lifecycle write (creating a stack, editing a Compose file, triggering an arbitrary action) needs Full Admin.
 - **One owner per token.** Tokens are not shareable across users at the data model; only the creating user can revoke a token through the UI.
 - **Owner deletion breaks the token.** If the user who created a token is deleted, subsequent calls with that token return `401` because the auth path requires the creator to still exist. Rotate before deleting accounts.
 - **No token introspection endpoint.** There is no `GET /api/me` for an API token; client code must know its own scope.
-- **WebSocket scope restrictions.** Read Only and Deploy Only tokens cannot reach the generic `/ws` exec/stats endpoint or the host console. Full Admin can reach `/ws` (container exec / stats) but not Host Console; Host Console always requires a signed-in browser session.
+- **WebSocket scope restrictions.** Observe Only tokens cannot open any WebSocket. Read Only and Deploy Only tokens cannot reach the generic `/ws` exec/stats endpoint or the host console. Full Admin can reach `/ws` (container exec / stats) but not Host Console; Host Console always requires a signed-in browser session.
 
 ## Common workflows
 
@@ -342,12 +359,17 @@ Read Only is sufficient for the notification stream.
     The scope does not authorise the method or path you called. Either widen the scope by issuing a new token, or change the call. Common cases:
 
     - Read Only attempting a `POST` of any kind.
+    - Observe Only attempting anything outside the five observation endpoints, including a `GET` that Read Only would allow.
     - Deploy Only attempting a write that is not one of the eight lifecycle actions (`deploy`, `down`, `restart`, `stop`, `start`, `update`, and the per-service `update`/`restore`).
     - Any scope attempting a [universal restriction](#universal-restrictions) (user management, SSO, MFA, license, registries, console, node management, cloud backup, image channel management, API-token self-management).
   </Accordion>
 
   <Accordion title="`400 Maximum of 25 active API tokens per user`">
     Each user holds at most 25 active tokens. Revoke one in Settings → API Tokens before issuing another. The cap is per user, not per instance.
+  </Accordion>
+
+  <Accordion title="`400 An Observe Only token must expire`">
+    The Observe Only scope has no non-expiring option. Pick 30, 60, or 90 days, or 1 year, when you create the token. Every other scope can be issued without an expiry.
   </Accordion>
 
   <Accordion title="`409 An active token with this name already exists`">
@@ -430,8 +452,11 @@ Read Only is sufficient for the notification stream.
   <Card title="Fleet view" icon="layout-grid" href="/features/fleet-view">
     The hub-side console for the nodes your tokens target.
   </Card>
+  <Card title="MCP server" icon="plug" href="/features/mcp">
+    A read-only adapter that hands an MCP client the five observation endpoints under an Observe Only token.
+  </Card>
   <Card title="RBAC" icon="users" href="/features/rbac">
-    The role mapping the three token scopes inherit from.
+    The role mapping the four token scopes inherit from.
   </Card>
   <Card title="SSO and LDAP" icon="key" href="/features/sso">
     How human operators authenticate, for contrast.

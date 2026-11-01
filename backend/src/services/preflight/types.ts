@@ -160,6 +160,9 @@ export interface PreflightContext {
   exposureAvailable: boolean;
   /** True when this stack is the running Sencho instance on the node. */
   isSelfStack: boolean;
+  /** True when the stack is opted into Sencho Mesh, so its services join the
+   *  Mesh network at deploy (the rendered model does not show that network). */
+  meshManaged: boolean;
   /**
    * Per-service effective healthcheck evidence (Compose, runtime, local image).
    * Empty when the model is null. Structural facts only; never Test command text.

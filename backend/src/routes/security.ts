@@ -33,10 +33,11 @@ const OUTCOME_FIELDS = ['scannerUnavailable', 'scanFailure', 'candidateUnproven'
 const EVIDENCE_POLICY_BODY_KEYS: ReadonlySet<string> = new Set<string>([...OUTCOME_FIELDS]);
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
-import { buildExposedImageMap, type StackExposure } from '../services/preflight/exposure';
+import { buildExposedImageMap } from '../services/preflight/exposure';
 import {
   buildImageExposureContextRows,
   packageExposureContextsByImage,
+  readSettledExposures,
   type PackagedImageExposureContexts,
 } from '../services/securityExposureTargets';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -679,12 +680,7 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   }
   // Attach the exposure status for the scan sheet badge (tri-state:
   // true = public, false = internal, absent = no descriptor cached).
-  const exposures = db.getStackExposures(req.nodeId);
-  const exposedMap = buildExposedImageMap(
-    exposures.map((r) => {
-      try { return JSON.parse(r.descriptor); } catch { return null; }
-    }).filter(Boolean),
-  );
+  const exposedMap = buildExposedImageMap(readSettledExposures(req.nodeId, db.getStackExposures(req.nodeId)));
   const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
   // The banner verdict is recomputed against current policies/suppressions so it
   // matches the deploy gate; the list endpoint keeps the stored snapshot.
@@ -797,10 +793,7 @@ securityRouter.get('/image-summaries', authMiddleware, (req: Request, res: Respo
     let exposedMap: Map<string, boolean> | null = null;
     let packagedByImage: Map<string, PackagedImageExposureContexts> | null = null;
     try {
-      const exposures = db.getStackExposures(req.nodeId);
-      const parsed = exposures.map((r) => {
-        try { return JSON.parse(r.descriptor) as StackExposure; } catch { return null; }
-      }).filter((e): e is StackExposure => e !== null);
+      const parsed = readSettledExposures(req.nodeId, db.getStackExposures(req.nodeId));
       exposedMap = buildExposedImageMap(parsed);
       const exposedRefs = new Set(
         [...exposedMap].filter(([, exposed]) => exposed).map(([ref]) => ref),

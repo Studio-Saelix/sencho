@@ -26,13 +26,16 @@ API tokens are 56-character opaque strings that begin with `sen_sk_`, for exampl
 
 ### Token scopes
 
-Every token is created with one of three permission levels:
+Every token is created with one of four permission levels:
 
 | Scope | Allowed actions |
 |-------|----------------|
-| **Read Only** | `GET` requests only — view stacks, containers, and fleet status |
+| **Observe Only** | Five read-only observation endpoints for MCP clients and other AI observers; every other path is refused |
+| **Read Only** | `GET` requests only, so you can view stacks, containers, and fleet status |
 | **Deploy Only** | Everything in Read Only, plus stack operations: deploy, down, restart, stop, start, update |
-| **Full Admin** | Full stack, container, and node management — all read and write operations |
+| **Full Admin** | Full stack, container, and node management, all read and write operations |
+
+Observe Only is the narrowest scope and the only one that must have an expiry (30, 60, 90, or 365 days). See [MCP Server](/features/mcp) for its five endpoints and the adapter that uses them.
 
 Regardless of scope, all API tokens are blocked from managing other tokens, users, licenses, and SSO configuration.
 
@@ -163,7 +166,7 @@ Open an interactive shell session inside a running container.
 
 **URL:** `wss://your-sencho-instance:1852/ws`
 
-**Authentication:** Cookie-based JWT only. API tokens with `read-only` or `deploy-only` scope are blocked.
+**Authentication:** Cookie-based JWT only. API tokens with `observe-only`, `read-only`, or `deploy-only` scope are blocked.
 
 <CodeGroup>
 
@@ -199,5 +202,5 @@ ws.send(JSON.stringify({ type: "resize", cols: 120, rows: 40 }));
 </CodeGroup>
 
 <Warning>
-  Container exec requires an **admin** role. API tokens with `read-only` or `deploy-only` scope are blocked, as are node proxy tokens.
+  Container exec requires an **admin** role. API tokens with `observe-only`, `read-only`, or `deploy-only` scope are blocked, as are node proxy tokens.
 </Warning>

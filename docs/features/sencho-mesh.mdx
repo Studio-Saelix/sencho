@@ -181,7 +181,7 @@ Sencho re-checks the mesh data plane every 10 seconds and updates `/api/health` 
 
 ## Security and trust boundaries
 
-**Authentication.** Cross-node traffic rides an authenticated WebSocket between Sencho instances. Pilot Agent nodes authenticate with the long-lived JWT issued at enrollment (stored at `/app/data/pilot.jwt` on the agent). Distributed API Proxy nodes authenticate with the [Node Token](/features/multi-node#add-a-remote-node-distributed-api-proxy) generated on the remote. Restricted API token scopes (read-only, deploy-only) cannot carry mesh traffic; only a full-admin Node Token can.
+**Authentication.** Cross-node traffic rides an authenticated WebSocket between Sencho instances. Pilot Agent nodes authenticate with the long-lived JWT issued at enrollment (stored at `/app/data/pilot.jwt` on the agent). Distributed API Proxy nodes authenticate with the [Node Token](/features/multi-node#add-a-remote-node-distributed-api-proxy) generated on the remote. Restricted API token scopes (observe-only, read-only, deploy-only) cannot carry mesh traffic; only a full-admin Node Token can.
 
 **Inbound exposure.** Sencho listens for mesh traffic only on its own `sencho_mesh` address, so containers on other networks Sencho is attached to (for example a reverse proxy's network) cannot reach meshed services through it. Mesh adds no new inbound port to central. A Pilot Agent node's outbound tunnel carries mesh traffic in both directions. A Distributed API Proxy node only needs the inbound port Sencho already listens on for fleet operations (so it can be dialed by central). Aliases themselves are not internet-reachable; they only resolve inside the `sencho_mesh` Docker bridge on each participating node.
 

@@ -11,9 +11,9 @@ Networking follows whichever node is selected in the top bar. Remote nodes load 
 
 ## Overview
 
-The overview masthead summarizes the node at a glance and derives its posture from findings: action needed, review, contained, partial networking data, or runtime unavailable. Stat cards break down network counts by ownership (Sencho-managed, external dependency, system) alongside exposed stacks, unknown exposure, missing externals, and name collisions; each links to the relevant inventory or findings view.
+The overview masthead summarizes the node at a glance and derives its posture from findings: action needed, review, contained, partial networking data, or runtime unavailable. Stat cards break down network counts by ownership (Sencho-managed, external dependency, system) alongside exposed stacks (published ports, host networking, or a service a tunnel connector reaches), unknown exposure, missing externals, and name collisions; each links to the relevant inventory or findings view. The Fleet view reports a stack whose effective Compose inputs cannot be fully read as unknown rather than counting it as not exposed; a node on an older version does not report that, so its unreadable stacks are not flagged.
 
-The **operator attention** list ranks the top findings needing review. Each row shows the same actions as the Findings tab and the list links to it. Three Compose-first sections round out the page: external network dependencies, networks shared across stacks, and services publishing without a classified exposure intent. The activity band below shows recent node-wide stack work, linked back to the owning stack.
+The **operator attention** list ranks the top findings needing review. Each row shows the same actions as the Findings tab and the list links to it. Three Compose-first sections round out the page: external network dependencies, networks shared across stacks, and networks carrying exposed services (published ports, or reached by a tunnel connector) without a classified exposure intent. The activity band below shows recent node-wide stack work, linked back to the owning stack.
 
 Use **Refresh** to re-fetch live Docker state and Compose facts in one pass.
 
@@ -40,7 +40,7 @@ Admins can open **Create network** from the page header. The dialog matches the 
 
 ## Findings
 
-The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered. Missing external findings only offer create actions when the declaration is a safe default bridge network.
+The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, tunnel connectors (Cloudflare Tunnel, Tailscale, WireGuard) and the services they reach, and stacks whose model could not be rendered. Missing external findings only offer create actions when the declaration is a safe default bridge network.
 
 Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. A Doctor finding you have acknowledged moves to the dismissed list below instead of the active list.
 

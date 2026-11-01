@@ -14,17 +14,25 @@
  * (no cached descriptor). It is an escalation input for the Security
  * posture, never an auto-suppression.
  */
-import type { EffectiveModel } from './effectiveModel';
+import type { EffectiveModel, EffPortSpec } from './effectiveModel';
 import { isLoopback, isHostNetwork } from '../network/normalize';
+import { detectTunnels, tunnelExposureByService, type ServiceTunnelExposure } from '../network/tunnelDetection';
+
+/** Why a service counts as network exposed. */
+export type ExposureReason = 'published-port' | 'host-network' | 'tunnel';
 
 export interface ServiceExposure {
   service: string;
   /** Join key to vulnerability_scans.image_ref. Absent for build-only services. */
   image: string | null;
   publiclyExposed: boolean;
-  reason: 'published-port' | 'host-network' | null;
+  /** Host network wins, then a non-loopback published port, then a tunnel
+   *  connector that reaches the service. */
+  reason: ExposureReason | null;
   /** Host-side binding strings, e.g. "0.0.0.0:8080/tcp". */
   bindings: string[];
+  /** The strongest tunnel path reaching the service, when one does (whatever the reason). */
+  tunnel?: ServiceTunnelExposure;
 }
 
 export interface StackExposure {
@@ -33,9 +41,10 @@ export interface StackExposure {
   computedAt: number;
 }
 
-/** Build a port-range label: "8080" for a single port, "8080-8090" for a range. */
-function portLabel(startPort: number, endPort: number): string {
-  return startPort === endPort ? `${startPort}` : `${startPort}-${endPort}`;
+/** Build a port label: "8080" for a single port, "8080-8090" for a range, "auto" for a port Docker assigns. */
+function portLabel(port: EffPortSpec): string {
+  if (port.dynamic) return 'auto';
+  return port.startPort === port.endPort ? `${port.startPort}` : `${port.startPort}-${port.endPort}`;
 }
 
 /**
@@ -47,17 +56,21 @@ export function deriveStackExposure(
   stackName: string,
   now: number,
 ): StackExposure {
+  const tunnels = tunnelExposureByService(detectTunnels(model));
   const services: ServiceExposure[] = model.services.map((svc) => {
     // Publicly exposed when any published port binds to a non-loopback address,
-    // or when network_mode is host (every container port is published on the host).
+    // when network_mode is host (every container port is published on the host),
+    // or when a tunnel connector reaches it (even with its routing unverified).
     const nonLoopbackPorts = svc.ports.filter((p) => !isLoopback(p.hostIp));
     const hostNetwork = isHostNetwork(svc.networkMode);
+    const tunnel = tunnels.get(svc.name);
 
-    const publiclyExposed = nonLoopbackPorts.length > 0 || hostNetwork;
+    const publiclyExposed = nonLoopbackPorts.length > 0 || hostNetwork || tunnel !== undefined;
 
-    const bindings = nonLoopbackPorts.map(
-      (p) => `${p.hostIp || '0.0.0.0'}:${portLabel(p.startPort, p.endPort)}/${p.protocol}`,
-    );
+    // Several auto-assigned ports of one protocol read the same, so list each binding once.
+    const bindings = [...new Set(nonLoopbackPorts.map(
+      (p) => `${p.hostIp || '0.0.0.0'}:${portLabel(p)}/${p.protocol}`,
+    ))];
 
     return {
       service: svc.name,
@@ -67,8 +80,11 @@ export function deriveStackExposure(
         ? 'host-network'
         : nonLoopbackPorts.length > 0
           ? 'published-port'
-          : null,
+          : tunnel
+            ? 'tunnel'
+            : null,
       bindings,
+      ...(tunnel ? { tunnel } : {}),
     };
   });
 

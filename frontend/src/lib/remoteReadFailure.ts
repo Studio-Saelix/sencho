@@ -139,6 +139,36 @@ export function classifyRemoteReadError(error: unknown): RemoteReadFailure {
 }
 
 /**
+ * A node-scoped read that answered with a non-2xx status, carrying the cause
+ * the gateway established. A region loader throws this so the page that owns
+ * the region can name why the read failed instead of only that it did.
+ */
+export class RemoteReadHttpError extends Error {
+  readonly endpoint: string;
+  readonly status: number;
+  readonly failure: RemoteReadFailure;
+
+  constructor(endpoint: string, status: number, failure: RemoteReadFailure) {
+    super(`${endpoint} responded ${status}`);
+    this.name = 'RemoteReadHttpError';
+    this.endpoint = endpoint;
+    this.status = status;
+    this.failure = failure;
+  }
+}
+
+/** Throw a `RemoteReadHttpError` for a non-2xx answer; return for a success. */
+export function assertReadOk(res: Response, endpoint: string): void {
+  if (res.ok) return;
+  throw new RemoteReadHttpError(endpoint, res.status, classifyRemoteReadFailure(res) ?? 'http');
+}
+
+/** The cause behind any error a node-scoped read rejected with. */
+export function remoteReadFailureOf(error: unknown): RemoteReadFailure {
+  return error instanceof RemoteReadHttpError ? error.failure : classifyRemoteReadError(error);
+}
+
+/**
  * One plain sentence for a failed read, naming the node the operator selected.
  * Each cause gets the fix it actually needs: a timeout states only that the
  * read did not answer in time, a rejected node credential points at the stored

@@ -29,44 +29,25 @@ import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatBytes } from '@/lib/utils';
 import { ResourcesActions } from './resources/ResourcesActions';
-import { deriveResourcesMastheadState, type LoadState, type UsageLoad } from './resources/resourcesMasthead';
-import {
-    classifyRemoteReadError,
-    classifyRemoteReadFailure,
-    isUnreadableNode,
-    remoteReadFailureMessage,
-    type RemoteReadFailure,
-} from '@/lib/remoteReadFailure';
+import { deriveResourcesMastheadState, type UsageLoad } from './resources/resourcesMasthead';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { RollbackGenerationsTab, type RollbackGeneration } from './resources/RollbackGenerationsTab';
 import { TableSkeleton, TableLoadError } from './resources/TableSkeleton';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
+import { useRegionData } from '@/hooks/useRegionData';
+import {
+    assertReadOk,
+    classifyRemoteReadError,
+    classifyRemoteReadFailure,
+    isUnreadableNode,
+    remoteReadFailureMessage,
+    remoteReadFailureOf,
+    type RemoteReadFailure,
+} from '@/lib/remoteReadFailure';
 import { SortableTableHead } from '@/components/ui/sortable-table';
 import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
-
-/**
- * One node-scoped read in the Resources inventory batch, settled on its own.
- * The batch mixes the slow inventory read (the gateway gives it a 30 second
- * budget) with reads on the interactive budget, so the page must be able to
- * react to each one as it answers instead of waiting for the slowest.
- */
-type SettledRead<T> =
-    | { ok: true; data: T }
-    | { ok: false; failure: RemoteReadFailure; status: number };
-
-async function readJson<T>(url: string, signal: AbortSignal): Promise<SettledRead<T>> {
-    try {
-        const res = await apiFetch(url, { signal });
-        if (!res.ok) {
-            return { ok: false, failure: classifyRemoteReadFailure(res) ?? 'http', status: res.status };
-        }
-        return { ok: true, data: await res.json() as T };
-    } catch (error) {
-        return { ok: false, failure: classifyRemoteReadError(error), status: 0 };
-    }
-}
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -358,27 +339,69 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const canDeployResources = can('stack:deploy');
     const canEditSecurityPolicy = can('stack:edit');
     const { activeNode } = useNodes();
-    const [images, setImages] = useState<DockerImage[]>([]);
-    const [volumes, setVolumes] = useState<DockerVolume[]>([]);
-    const [networks, setNetworks] = useState<DockerNetwork[]>([]);
-    const [orphans, setOrphans] = useState<Record<string, UnmanagedContainer[]>>({});
-    const [rollbackGenerations, setRollbackGenerations] = useState<RollbackGeneration[]>([]);
 
-    // Inventory (tables) and disk usage load as separate requests on separate
-    // clocks, so the tables never wait on the usage figures.
-    const [inventoryState, setInventoryState] = useState<LoadState>('loading');
-    // Why the inventory read failed, when it is a reason worth naming: a node
-    // that missed its read deadline is not the same as an empty node.
-    const [inventoryFailure, setInventoryFailure] = useState<RemoteReadFailure | null>(null);
-    // The external containers are their own read inside the inventory batch: if
-    // only that one fails, the tab must say so rather than claim the node has
-    // none.
-    const [orphansState, setOrphansState] = useState<LoadState>('loading');
-    // The external read's own failure, so its tab names that read's cause
-    // rather than borrowing the inventory read's.
-    const [orphansFailure, setOrphansFailure] = useState<RemoteReadFailure | null>(null);
-    const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
-    const isLoading = inventoryState === 'loading';
+    // Loading ownership follows data ownership. The inventory tables, the
+    // external-container list, rollback generations, and scan summaries each
+    // hydrate from their own request, so a slow or failed read in one region
+    // cannot hold, or fail, the others. Disk usage keeps its own loader below
+    // because its figures are deliberately dropped when a read fails.
+    const nodeScope = activeNode?.id;
+
+    // One warning covers a failed background refresh, whichever region failed:
+    // the rows stay on screen, so the failure is reported once here instead of
+    // replacing trusted data with an error surface or stacking one toast per
+    // region. A first read that fails has no rows to keep and shows its own
+    // Retry row instead, so it does not also toast.
+    const refreshWarnedRef = useRef(false);
+    const notifyRefreshFailed = (_error: unknown, hadData: boolean) => {
+        if (!hadData || refreshWarnedRef.current) return;
+        refreshWarnedRef.current = true;
+        toast.error('Failed to refresh resources');
+    };
+
+    const inventoryRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/resources', { signal });
+        assertReadOk(res, '/system/resources');
+        const body = await res.json() as {
+            images?: DockerImage[];
+            volumes?: DockerVolume[];
+            networks?: DockerNetwork[];
+        };
+        return {
+            images: body.images ?? [],
+            volumes: body.volumes ?? [],
+            networks: body.networks ?? [],
+        };
+    }, 0, { onError: notifyRefreshFailed });
+
+    const orphansRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/orphans', { signal });
+        assertReadOk(res, '/system/orphans');
+        return await res.json() as Record<string, UnmanagedContainer[]>;
+    }, 0, { onError: notifyRefreshFailed });
+
+    const rollbackRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/system/rollback/generations', { signal });
+        assertReadOk(res, '/system/rollback/generations');
+        const body: unknown = await res.json();
+        if (!Array.isArray(body)) throw new Error('/system/rollback/generations returned a malformed body');
+        return body as RollbackGeneration[];
+    }, 0, { onError: notifyRefreshFailed });
+
+    const scanSummariesRegion = useRegionData(nodeScope, async (signal) => {
+        const res = await apiFetch('/security/image-summaries', { signal });
+        assertReadOk(res, '/security/image-summaries');
+        const body: unknown = await res.json();
+        return (body ?? {}) as Record<string, ScanSummary>;
+    }, 0, { onError: notifyRefreshFailed });
+
+    const images = inventoryRegion.data?.images ?? [];
+    const volumes = inventoryRegion.data?.volumes ?? [];
+    const networks = inventoryRegion.data?.networks ?? [];
+    const orphans = orphansRegion.data ?? {};
+    const rollbackGenerations = rollbackRegion.data ?? [];
+    const scanSummaries = scanSummariesRegion.data ?? {};
+
     const [isActioning, setIsActioning] = useState(false);
 
     // Filter state
@@ -403,153 +426,33 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [inspectImage, setInspectImage] = useState<(DockerImage & { nodeId: string | number }) | null>(null);
     const [browseVolume, setBrowseVolume] = useState<string | null>(null);
 
-    // External (unmanaged) container state
-    const [selectedOrphans, setSelectedOrphans] = useState<string[]>([]);
+    // External (unmanaged) container state. A selection belongs to the read it
+    // was made on: `list` is that read's payload, so a fresh read (or another
+    // node's list) starts with nothing selected instead of carrying the old ids
+    // over. Derived at render, so no effect copies the list back into state.
+    const [orphanSelection, setOrphanSelection] = useState<{
+        list: Record<string, UnmanagedContainer[]> | null;
+        ids: string[];
+    }>({ list: null, ids: [] });
     const [bulkPurgeConfirm, setBulkPurgeConfirm] = useState(false);
 
     // Vulnerability scanning state
     const { status: trivy } = useTrivyStatus();
-    const [scanSummaries, setScanSummaries] = useState<Record<string, ScanSummary>>({});
     const [inspectScanId, setInspectScanId] = useState<number | null>(null);
     const { scanningRef: scanningImageRef, scanImage, cancelScan } = useImageScan({
         onComplete: setInspectScanId,
-        onSummaries: setScanSummaries,
+        onSummaries: scanSummariesRegion.apply,
     });
 
-    // Generation counters so a slow fetch for a previously-active node cannot
-    // stomp the visible resources after the user switches nodes. Each call
-    // claims a generation; only the latest call is allowed to write state.
-    const inventoryGenerationRef = useRef(0);
+    // Disk usage loads on its own clock, separate from the tables, so the
+    // inventory never waits on `docker system df`.
+    const [usageLoad, setUsageLoad] = useState<UsageLoad>({ status: 'loading' });
+    // Generation counter so a slow fetch for a previously-active node cannot
+    // stomp the visible figures after the user switches nodes.
     const usageGenerationRef = useRef(0);
-    // A node switch abandons the reads started for the previous node, so the
+    // A node switch abandons the read started for the previous node, so the
     // backend stops working on an answer nobody will read.
-    const inventoryAbortRef = useRef<AbortController | null>(null);
     const usageAbortRef = useRef<AbortController | null>(null);
-
-    // `background` refreshes keep the current rows on screen (after a prune or
-    // delete); a foreground load (mount, node switch, Retry) shows skeletons.
-    // A background failure still ends a superseded foreground load, so the
-    // tables can never stay on skeletons.
-    const failInventory = (background: boolean, failure: RemoteReadFailure) => {
-        setInventoryFailure(failure);
-        if (background) {
-            toast.error('Failed to refresh resources');
-            setInventoryState((state) => (state === 'loading' ? 'error' : state));
-        } else {
-            setInventoryState('error');
-        }
-    };
-
-    // A background failure keeps the external rows on screen, as the inventory
-    // tables do, and names its own cause on the tab. A foreground load ends on
-    // the error state so the tab can never keep its skeleton.
-    const failOrphans = (background: boolean, failure: RemoteReadFailure, notify = true) => {
-        setOrphansFailure(failure);
-        // A background refresh only keeps the tab populated when it had rows to
-        // keep. With none on screen, a failed refresh is not a confirmed empty
-        // host, so it must read as unavailable rather than "No external
-        // containers".
-        const hasRows = Object.values(orphans).some((containers) => containers.length > 0);
-        if (background) {
-            if (notify) toast.error('Failed to refresh external containers');
-            setOrphansState(hasRows ? 'ready' : 'error');
-        } else {
-            setOrphansState('error');
-        }
-    };
-
-    const loadInventory = async ({ background = false }: { background?: boolean } = {}) => {
-        const generation = ++inventoryGenerationRef.current;
-        inventoryAbortRef.current?.abort();
-        const controller = new AbortController();
-        inventoryAbortRef.current = controller;
-        if (!background) {
-            setInventoryState('loading');
-            setInventoryFailure(null);
-            setOrphansState('loading');
-            setOrphansFailure(null);
-        }
-        const signal = controller.signal;
-        const isCurrent = () => inventoryGenerationRef.current === generation && !signal.aborted;
-
-        // The inventory read is slow by design, but the rest of this batch
-        // answers on the interactive budget. A node that is not answering is
-        // established by the first of those reads to fail, exactly as Home
-        // reads its headline from the earliest failed node-scoped read. Waiting
-        // for the slow read would leave the tables on a bare skeleton for its
-        // whole budget.
-        let inventorySettled = false;
-        let settledFromSibling = false;
-        const settleFromSibling = (failure: RemoteReadFailure): void => {
-            // A background refresh has rows on screen and no skeleton to end,
-            // so it keeps the soft-failure behaviour and waits for its own reads.
-            if (background || inventorySettled || settledFromSibling) return;
-            if (!isUnreadableNode(failure) || !isCurrent()) return;
-            settledFromSibling = true;
-            failInventory(false, failure);
-            // Disk usage is on the same slow budget; the page-level statement
-            // is the same, and a later usage answer replaces it.
-            setUsageLoad((state) => (state.status === 'ready' ? state : { status: 'error', failure }));
-        };
-
-        const resourcesPromise = readJson<{
-            images?: DockerImage[];
-            volumes?: DockerVolume[];
-            networks?: DockerNetwork[];
-        }>('/system/resources', signal);
-        const orphansPromise = readJson<Record<string, UnmanagedContainer[]>>('/system/orphans', signal);
-        const summariesPromise = readJson<Record<string, ScanSummary>>('/security/image-summaries', signal);
-        const rollbackPromise = readJson<RollbackGeneration[]>('/system/rollback/generations', signal);
-
-        // Each slice commits as its own read answers. The staleness check runs
-        // per handler, so a superseded generation cannot write any of them.
-        void orphansPromise.then((outcome) => {
-            if (!isCurrent()) return;
-            if (outcome.ok) {
-                setOrphans(outcome.data);
-                setSelectedOrphans([]);
-                setOrphansFailure(null);
-                setOrphansState('ready');
-                return;
-            }
-            console.error('Failed to fetch external containers', outcome.status);
-            failOrphans(background, outcome.failure);
-            settleFromSibling(outcome.failure);
-        });
-        void summariesPromise.then((outcome) => {
-            if (!isCurrent()) return;
-            if (outcome.ok) {
-                setScanSummaries(outcome.data);
-                return;
-            }
-            settleFromSibling(outcome.failure);
-        });
-        void rollbackPromise.then((outcome) => {
-            if (!isCurrent()) return;
-            if (outcome.ok) {
-                setRollbackGenerations(Array.isArray(outcome.data) ? outcome.data : []);
-                return;
-            }
-            settleFromSibling(outcome.failure);
-        });
-
-        const resources = await resourcesPromise;
-        if (!isCurrent()) return;
-        inventorySettled = true;
-        if (resources.ok && resources.data) {
-            setImages(resources.data.images ?? []);
-            setVolumes(resources.data.volumes ?? []);
-            setNetworks(resources.data.networks ?? []);
-            // A sibling read may have ended the loading state early; the slow
-            // read landing is the authoritative answer and replaces it.
-            setInventoryFailure(null);
-            setInventoryState('ready');
-        } else {
-            const failure: RemoteReadFailure = resources.ok ? 'http' : resources.failure;
-            console.error('Failed to fetch resources', resources.ok ? 200 : resources.status);
-            failInventory(background, failure);
-        }
-    };
 
     // A failed usage load drops the figures rather than keeping stale ones: the
     // masthead then reads "Disk usage unknown" with a Retry instead of a number
@@ -575,42 +478,35 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 failUsage(res.status, classifyRemoteReadFailure(res) ?? undefined);
             }
         } catch (err) {
-            if (usageGenerationRef.current !== generation) return;
-            if (controller.signal.aborted) return;
+            if (usageGenerationRef.current !== generation || controller.signal.aborted) return;
             failUsage(err, classifyRemoteReadError(err));
         }
     };
 
-    /** After a mutation: refresh the tables (awaited) and the usage figures (not awaited; the tables should not wait on them). */
+    /** After a mutation: refresh every region. The tables keep their current rows
+     *  until each response lands, so the page never drops back to a cold skeleton;
+     *  disk usage is not awaited, because the tables must not wait on it. The
+     *  table regions are awaited so a mutation stays busy until the payload that
+     *  still lists the removed rows is replaced: a second click on a control that
+     *  targets them must not reach the server ("no such container"). The warning
+     *  flag resets so each refresh reports at most one failure. */
     const refreshAll = async () => {
+        refreshWarnedRef.current = false;
         void loadUsage({ background: true });
-        await loadInventory({ background: true });
-    };
-
-    /**
-     * The recovery action behind a table's Retry. The inventory and disk usage
-     * are independent reads, but they failed together on the same node, so one
-     * Retry must recover the whole page: retrying only the inventory left the
-     * header on "Disk usage unknown" beside a loaded table.
-     */
-    const retryInventory = () => {
-        void loadInventory();
-        if (usageLoad.status === 'error') void loadUsage();
+        await Promise.all([
+            inventoryRegion.refresh(),
+            orphansRegion.refresh(),
+            rollbackRegion.refresh(),
+            scanSummariesRegion.refresh(),
+        ]);
     };
 
     useEffect(() => {
         // Nothing from the previous node may show under the new one while its
-        // data loads, including when that load fails.
+        // data loads, including when that load fails. The inventory, external,
+        // rollback, and scan-summary regions are scope-bound and reset
+        // themselves; disk usage owns its own figures.
         setUsageLoad({ status: 'loading' });
-        setImages([]);
-        setVolumes([]);
-        setNetworks([]);
-        setOrphans({});
-        setOrphansState('loading');
-        setOrphansFailure(null);
-        setSelectedOrphans([]);
-        setRollbackGenerations([]);
-        void loadInventory();
         void loadUsage();
     }, [activeNode]);
 
@@ -623,12 +519,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // the node it started on (the hook also stops it on unmount).
     useEffect(() => cancelScan, [activeNode?.id, cancelScan]);
 
-    // Bump the fetch generations on unmount so a fetch that resolves after the
-    // view is gone cannot run state setters or surface a load-error toast.
+    // Bump the usage generation on unmount so a fetch that resolves after the
+    // view is gone cannot run state setters.
     useEffect(() => () => {
-        inventoryGenerationRef.current += 1;
         usageGenerationRef.current += 1;
-        inventoryAbortRef.current?.abort();
         usageAbortRef.current?.abort();
     }, []);
 
@@ -762,13 +656,29 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
-    const toggleOrphan = (id: string) =>
-        setSelectedOrphans(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-
     const totalOrphansCount = Object.values(orphans).flat().length;
+    // The selection is valid only for the read it was made on: a different
+    // payload (a refresh, or another node's list) reads as empty even when it
+    // re-lists the same ids, and only ids this payload holds can be selected,
+    // so a purge never carries one the operator cannot see.
+    const orphanIdSet = new Set(Object.values(orphans).flat().map(c => c.Id));
+    const selectedOrphans = orphanSelection.list === orphansRegion.data
+        ? orphanSelection.ids.filter(id => orphanIdSet.has(id))
+        : [];
+    const toggleOrphan = (id: string) =>
+        setOrphanSelection(prev => {
+            const ids = prev.list === orphansRegion.data ? prev.ids : [];
+            return {
+                list: orphansRegion.data,
+                ids: ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id],
+            };
+        });
     const selectAllOrphans = () => {
-        const allIds = Object.values(orphans).flat().map(c => c.Id);
-        setSelectedOrphans(selectedOrphans.length === allIds.length ? [] : allIds);
+        const allIds = [...orphanIdSet];
+        setOrphanSelection({
+            list: orphansRegion.data,
+            ids: selectedOrphans.length === allIds.length ? [] : allIds,
+        });
     };
 
     const handlePurgeOrphans = async () => {
@@ -823,17 +733,75 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const imageSort = useTableSort(filteredImages, IMAGE_COMPARATORS, 'repo');
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
 
-    const mastheadModel = deriveResourcesMastheadState(usageLoad);
+    // The inventory read is slow by design (the gateway gives it a 30 second
+    // budget) while the other regions answer on the interactive budget. A node
+    // that is not answering is established by the first of those reads to
+    // fail, so the tables and the usage card name it from that read instead of
+    // sitting on a skeleton for the slow read's whole budget. The slow read's
+    // own answer replaces it if it lands.
+    const siblingRegions = [orphansRegion, rollbackRegion, scanSummariesRegion];
+    let siblingUnreadable: RemoteReadFailure | null = null;
+    for (const region of siblingRegions) {
+        if (region.data !== null || region.status !== 'failed') continue;
+        const failure = remoteReadFailureOf(region.error);
+        if (isUnreadableNode(failure)) {
+            siblingUnreadable = failure;
+            break;
+        }
+    }
+    const inventoryFailure: RemoteReadFailure | null = inventoryRegion.data !== null
+        ? null
+        : inventoryRegion.status === 'failed'
+            ? remoteReadFailureOf(inventoryRegion.error)
+            : siblingUnreadable;
+    const inventoryUnavailable = inventoryFailure !== null;
+    const inventoryLoading = inventoryRegion.data === null && !inventoryUnavailable;
     // Only the failures whose cause the operator can act on are named; a plain
     // 4xx/5xx keeps the existing short copy.
-    const inventoryFailureReason = inventoryFailure !== null && isUnreadableNode(inventoryFailure)
-        ? remoteReadFailureMessage(inventoryFailure, { nodeName: activeNode?.name })
-        : null;
+    const nodeName = activeNode?.name;
+    const reasonFor = (failure: RemoteReadFailure | null): string | null => (
+        failure !== null && isUnreadableNode(failure)
+            ? remoteReadFailureMessage(failure, { nodeName })
+            : null
+    );
+    const inventoryFailureReason = reasonFor(inventoryFailure);
     // The external tab names its own read's cause, never the inventory read's.
-    const orphansFailureReason = orphansFailure !== null && isUnreadableNode(orphansFailure)
-        ? remoteReadFailureMessage(orphansFailure, { nodeName: activeNode?.name })
-        : null;
+    const orphansFailureReason = reasonFor(
+        orphansRegion.data === null && orphansRegion.status === 'failed' ? remoteReadFailureOf(orphansRegion.error) : null,
+    );
+    // The usage figures settle from the same sibling read; a usage answer of its
+    // own, success or failure, takes precedence.
+    const usage: UsageLoad = usageLoad.status === 'ready' || (usageLoad.status === 'error' && usageLoad.failure)
+        ? usageLoad
+        : siblingUnreadable !== null
+            ? { status: 'error', failure: siblingUnreadable }
+            : usageLoad;
+
+    /**
+     * The recovery action behind a Retry. The regions and disk usage are
+     * independent reads, but they fail together on the same node, so one Retry
+     * must recover everything that is unavailable: retrying only the table left
+     * the header on "Disk usage unknown" beside a loaded table. A region that
+     * already has rows is left alone.
+     */
+    const retryPage = () => {
+        if (inventoryRegion.data === null) void inventoryRegion.refresh();
+        for (const region of siblingRegions) {
+            if (region.data === null && region.status === 'failed') void region.refresh();
+        }
+        if (usage.status === 'error') void loadUsage();
+    };
+
+    const mastheadModel = deriveResourcesMastheadState(usage);
     const totalReclaimableBytes = mastheadModel.reclaimableBytes;
+
+    // The phone masthead restates the inventory; an unread inventory says so
+    // rather than reporting zero images, volumes, and networks.
+    const inventoryMeta = inventoryRegion.data !== null
+        ? `${images.length} images · ${volumes.length} volumes · ${networks.length} networks`
+        : inventoryUnavailable
+            ? 'Resource inventory unavailable'
+            : 'Reading resource inventory';
 
     // Reclaim frees everything the masthead advertises. Order matters:
     // volumes first, while stopped containers still hold a reference to their
@@ -883,9 +851,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         <ResourcesActions
             isAdmin={isAdmin}
             canReclaim={mastheadModel.reclaimableItems > 0}
-            reclaimDisabled={isLoading}
-            usageFailed={usageLoad.status === 'error'}
-            onRetryUsage={() => void loadUsage()}
+            reclaimDisabled={usage.status === 'loading'}
+            usageFailed={usage.status === 'error'}
+            onRetryUsage={retryPage}
             onReclaim={() => setConfirmReclaim(true)}
             onPrune={(target) => setConfirmPrune({ target, scope: 'managed' })}
         />
@@ -907,10 +875,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         active={resourceTab}
                         onSelect={setResourceTab}
                         tabs={[
-                            { value: 'images', label: 'Images', count: images.length },
-                            { value: 'volumes', label: 'Volumes', count: volumes.length },
-                            { value: 'unmanaged', label: 'External', count: totalOrphansCount },
-                            { value: 'rollback', label: 'Rollback', count: rollbackGenerations.length },
+                            { value: 'images', label: 'Images', count: inventoryRegion.data === null ? undefined : images.length },
+                            { value: 'volumes', label: 'Volumes', count: inventoryRegion.data === null ? undefined : volumes.length },
+                            { value: 'unmanaged', label: 'External', count: orphansRegion.data === null ? undefined : totalOrphansCount },
+                            { value: 'rollback', label: 'Rollback', count: rollbackRegion.data === null ? undefined : rollbackGenerations.length },
                         ]}
                     />
                     </>
@@ -922,22 +890,28 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 <TabsHighlightItem key={tab} value={tab}>
                                     <TabsTrigger value={tab}>
                                         {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
-                                            {tab === 'images' ? images.length : volumes.length}
-                                        </span>
+                                        {inventoryRegion.data !== null && (
+                                            <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
+                                                {tab === 'images' ? images.length : volumes.length}
+                                            </span>
+                                        )}
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             ))}
                             <TabsHighlightItem value="unmanaged">
                                 <TabsTrigger value="unmanaged" className="relative">
                                     External
-                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
+                                    {orphansRegion.data !== null && (
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
+                                    )}
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <TabsHighlightItem value="rollback">
                                 <TabsTrigger value="rollback" className="relative">
                                     Rollback
-                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{rollbackGenerations.length}</span>
+                                    {rollbackRegion.data !== null && (
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{rollbackGenerations.length}</span>
+                                    )}
                                 </TabsTrigger>
                             </TabsHighlightItem>
                         </TabsHighlight>
@@ -997,8 +971,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={retryInventory} />
+                            {inventoryLoading ? <TableSkeleton cols={5} /> : inventoryUnavailable ? (
+                                <TableLoadError cols={5} noun="images" reason={inventoryFailureReason} onRetry={retryPage} />
                             ) : (
                                 <TableBody>
                                     {imageSort.sorted.length === 0 ? (
@@ -1104,6 +1078,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                             size="icon"
                                                                             className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
                                                                             disabled={img.isSencho}
+                                                                            aria-label={`Delete image ${img.RepoTags?.[0] || img.Id.substring(0, 12)}`}
                                                                             onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
                                                                         >
                                                                             <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -1158,8 +1133,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
-                            {isLoading ? <TableSkeleton cols={5} /> : inventoryState === 'error' ? (
-                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={retryInventory} />
+                            {inventoryLoading ? <TableSkeleton cols={5} /> : inventoryUnavailable ? (
+                                <TableLoadError cols={5} noun="volumes" reason={inventoryFailureReason} onRetry={retryPage} />
                             ) : (
                                 <TableBody>
                                     {volumeSort.sorted.length === 0 ? (
@@ -1209,6 +1184,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                             size="icon"
                                                                             className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
                                                                             disabled={vol.isSencho}
+                                                                            aria-label={`Delete volume ${vol.Name}`}
                                                                             onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
                                                                         >
                                                                             <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -1255,17 +1231,19 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </Button>}
                         </div>
 
-                        {totalOrphansCount === 0 && orphansState === 'loading' ? (
-                            <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
-                        ) : orphansState === 'error' && totalOrphansCount === 0 ? (
-                            <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
-                                <span>Could not load external containers.</span>
-                                {orphansFailureReason ? (
-                                    <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
-                                ) : null}
-                                <Button variant="outline" size="sm" className="text-stat-title" onClick={retryInventory}>Retry</Button>
-                            </div>
-                        ) : totalOrphansCount === 0 && orphansState === 'ready' ? (
+                        {orphansRegion.data === null ? (
+                            orphansRegion.status === 'failed' ? (
+                                <div className="flex flex-col items-center gap-3 p-12 text-sm text-muted-foreground">
+                                    <span>Could not load external containers.</span>
+                                    {orphansFailureReason ? (
+                                        <span className="text-xs text-stat-subtitle">{orphansFailureReason}</span>
+                                    ) : null}
+                                    <Button variant="outline" size="sm" className="text-stat-title" onClick={retryPage}>Retry</Button>
+                                </div>
+                            ) : (
+                                <div className="p-4"><Skeleton className="h-24 w-full rounded-md" /></div>
+                            )
+                        ) : totalOrphansCount === 0 ? (
                             <div className="flex-1 flex flex-col items-center justify-center p-12 text-muted-foreground animate-in fade-in-0 duration-300">
                                 <div className="w-12 h-12 rounded-full bg-success-muted flex items-center justify-center mb-3">
                                     <ShieldCheck className="w-6 h-6 text-success" />
@@ -1326,7 +1304,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     <TabsContent value="rollback" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <RollbackGenerationsTab
                             generations={rollbackGenerations}
-                            isLoading={isLoading}
+                            isLoading={rollbackRegion.data === null && rollbackRegion.status !== 'failed'}
+                            loadError={rollbackRegion.data === null && rollbackRegion.status === 'failed'}
+                            onRetry={rollbackRegion.refresh}
                             isAdmin={isAdmin}
                             nodeId={activeNode?.id}
                             onReleased={refreshAll}
@@ -1492,7 +1472,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     state={mastheadModel.state}
                     stateTone={MOBILE_STATE_TONE[mastheadModel.tone]}
                     live={false}
-                    meta={`${images.length} images · ${volumes.length} volumes · ${networks.length} networks`}
+                    meta={inventoryMeta}
                     right={headerActions}
                 />
                 <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4 [&_[data-radix-scroll-area-viewport]>div]:!block [&_table]:min-w-[640px]">

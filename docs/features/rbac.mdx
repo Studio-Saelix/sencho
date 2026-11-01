@@ -202,7 +202,7 @@ To configure a provider, see [SSO Authentication](/features/sso). The tier split
 
 ## API tokens for automation
 
-Users are for humans; **API tokens** are for machines. Sencho issues opaque tokens with the `sen_sk_` prefix and three scopes (Read Only, Deploy Only, Full Admin) that can authenticate CI pipelines, monitoring loops, or deployment scripts without going through the user table at all. Tokens cannot reach the user-management endpoints regardless of scope.
+Users are for humans; **API tokens** are for machines. Sencho issues opaque tokens with the `sen_sk_` prefix and four scopes (Observe Only, Read Only, Deploy Only, Full Admin) that can authenticate CI pipelines, monitoring loops, or deployment scripts without going through the user table at all. Tokens cannot reach the user-management endpoints regardless of scope.
 
 See [API Tokens](/features/api-tokens) for the full reference.
 
