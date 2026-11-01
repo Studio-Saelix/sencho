@@ -561,7 +561,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         if (capability.kind !== 'supported') {
           res.status(503).json({
-            error: `Remote node "${node.name}" did not give a usable answer, so its observation data cannot be read right now. Check that the node is online and reachable at its API URL, then try again.`,
+            error: `Remote node "${node.name}" did not give a usable answer, so its observation data cannot be read right now. Check that the node is online and reachable, then try again.`,
             code: 'node_unreachable',
           });
           return;

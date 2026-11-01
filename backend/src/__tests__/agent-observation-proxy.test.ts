@@ -12,6 +12,7 @@ import http from 'http';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -215,15 +216,29 @@ describe('remote capability gate', () => {
     ['/api/stacks/platform/observation/'],
   ])('passes the node\'s own 401 through, uncoded, when it rejects the stored token: %s', async (path) => {
     // The capability check cannot see a rejected credential (/api/meta is public),
-    // so this is the one "connection settings" failure that is not node_unreachable.
+    // so a node that answers but rejects the stored token is the one failure here
+    // that comes back as the node's own 401 instead of node_unreachable.
     // The docs and OpenAPI say so; this pins the behavior they describe.
-    for (const bearer of [adminBearer, viewerBearer]) {
+    // The hub's own auth gate answers a bad bearer with the same body, so the
+    // proxy's sentinel header is what proves the 401 came from the node.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const name = `obs-proxy-observe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const observeToken = createTestApiToken({
+      db: DatabaseService, scope: 'read-only', userId: db.getUserByUsername(TEST_USERNAME)!.id, name,
+    });
+    db.getDb().prepare('UPDATE api_tokens SET scope = ? WHERE name = ?').run('observe-only', name);
+
+    // The Observe Only scope allows the five exact paths, so it takes no trailing slash.
+    const bearers = path.endsWith('/') ? [adminBearer, viewerBearer] : [adminBearer, viewerBearer, observeToken];
+    for (const bearer of bearers) {
       const res = await request(app)
         .get(path)
         .set('Authorization', `Bearer ${bearer}`)
         .set('x-node-id', String(rejectingNodeId));
 
       expect(res.status).toBe(401);
+      expect(res.headers['x-sencho-proxy']).toBe('1');
       expect(res.body.error).toBe('Invalid or expired token');
       expect(res.body.code).toBeUndefined();
     }
@@ -236,7 +251,7 @@ describe('remote capability gate', () => {
       .set('x-node-id', String(downNodeId));
 
     expect(res.status).toBe(503);
-    expect(res.body.error).toMatch(/online and reachable at its API URL/);
+    expect(res.body.error).toMatch(/online and reachable, then try again/);
     expect(res.body.error).not.toMatch(/settings are valid|credential|token/i);
   });
 

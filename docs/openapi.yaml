@@ -1759,12 +1759,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           description: >
-            The targeted remote node is down or did not give a usable answer at
-            its API URL to the capability check (`node_unreachable`). A
-            disconnected Pilot tunnel or a node with no API URL configured also
-            answers 503, without a code. A node that answers the check but
-            rejects the API token stored for it answers 401 without a code, not
-            503.
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
           content:
             application/json:
               schema:
@@ -2323,12 +2323,12 @@ paths:
                 $ref: "#/components/schemas/Error"
         "503":
           description: >
-            The targeted remote node is down or did not give a usable answer at
-            its API URL to the capability check (`node_unreachable`). A
-            disconnected Pilot tunnel or a node with no API URL configured also
-            answers 503, without a code. A node that answers the check but
-            rejects the API token stored for it answers 401 without a code, not
-            503.
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
           content:
             application/json:
               schema:
@@ -2387,12 +2387,12 @@ paths:
                 $ref: "#/components/schemas/Error"
         "503":
           description: >
-            The targeted remote node is down or did not give a usable answer at
-            its API URL to the capability check (`node_unreachable`). A
-            disconnected Pilot tunnel or a node with no API URL configured also
-            answers 503, without a code. A node that answers the check but
-            rejects the API token stored for it answers 401 without a code, not
-            503.
+            The targeted remote node is down or did not give a usable answer to
+            the capability check (`node_unreachable`). A disconnected Pilot
+            tunnel or a node with no API URL or token configured also answers
+            503, without a code. A Distributed API Proxy node that answers the
+            check but rejects the API token stored for it answers 401 without a
+            code, not 503.
           content:
             application/json:
               schema:
