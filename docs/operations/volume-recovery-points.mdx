@@ -6,7 +6,7 @@ description: Capture, verify, and restore the data inside one named Docker volum
 A volume recovery point is a snapshot of the bytes inside one named Docker volume, stored in a recovery repository on the node that holds that volume. Sencho creates points, checks their integrity, and restores them into a new volume. This page covers the storage rules behind those actions and the HTTP calls that drive them.
 
 <Note>
-  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing.
+  Volume recovery points are managed through Sencho's API. The examples on this page use an API token created in **Settings > API Tokens**. See [API Overview](/api-reference/overview) for the token scopes, the base URL, and node routing. Reading status, points, and operations works with any token scope. Every call that changes something (provision the repository, capture, verify, restore, cancel, release a lock) needs a **Full Admin** token: a Read Only or Deploy Only token is refused with `403 SCOPE_DENIED`, so a backup job cannot use a Deploy Only token.
 </Note>
 
 ## Configuration recovery and data recovery are separate
@@ -307,7 +307,7 @@ Reading points requires read access to the stacks that use the volume. Capturing
 
 ## The HTTP surface
 
-Every request below takes a Bearer token and, for a remote node, the usual node routing. The capture, verify, restore, and repository calls require an `idempotencyKey` of 1 to 200 characters. A new request answers `202`; a replay of the same key answers `200` with the operation it already created. Reusing a key for a different request is refused.
+Every request below takes a Bearer token and, for a remote node, the usual node routing. The `GET` calls accept a token of any scope; the `POST` calls (repository, capture, verify, restore, cancel, and lock release) need a Full Admin token, and any other scope gets `403 SCOPE_DENIED` before the request reaches the route. The capture, verify, restore, and repository calls require an `idempotencyKey` of 1 to 200 characters. A new request answers `202`; a replay of the same key answers `200` with the operation it already created. Reusing a key for a different request is refused.
 
 ### Read this node's recovery status
 

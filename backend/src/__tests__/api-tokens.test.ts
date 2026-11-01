@@ -108,6 +108,53 @@ describe('enforceApiTokenScope', () => {
   });
 });
 
+// --- Recovery API scope matrix ---
+// docs/operations/volume-recovery-points.mdx and docs/openapi.yaml state that
+// reads take any scope and every write needs Full Admin. This pins that table.
+
+const RECOVERY_READS = [
+  '/api/recovery/node',
+  '/api/recovery/repository',
+  '/api/recovery/storage',
+  '/api/recovery/storage/some-storage-id/points',
+  '/api/recovery/operations/some-operation-id',
+];
+
+const RECOVERY_WRITES = [
+  '/api/recovery/repository',
+  '/api/recovery/storage/points',
+  '/api/recovery/points/some-point-id/verify',
+  '/api/recovery/points/some-point-id/restore',
+  '/api/recovery/operations/some-operation-id/cancel',
+  '/api/recovery/locks/release',
+];
+
+describe('API token scope on the recovery routes', () => {
+  // One token per scope: each user is limited to 25 active tokens.
+  const tokens = {} as Record<'read-only' | 'deploy-only' | 'full-admin', string>;
+  beforeAll(() => {
+    for (const scope of ['read-only', 'deploy-only', 'full-admin'] as const) tokens[scope] = createTestApiToken(scope);
+  });
+
+  describe.each(['read-only', 'deploy-only'] as const)('%s token', (scope) => {
+    it.each(RECOVERY_READS)('GET %s is not refused by the scope gate', async (path) => {
+      const res = await request(app).get(path).set('Authorization', `Bearer ${tokens[scope]}`);
+      expect(res.body.code).not.toBe('SCOPE_DENIED');
+    });
+
+    it.each(RECOVERY_WRITES)('POST %s answers 403 SCOPE_DENIED', async (path) => {
+      const res = await request(app).post(path).set('Authorization', `Bearer ${tokens[scope]}`).send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('SCOPE_DENIED');
+    });
+  });
+
+  it.each(RECOVERY_WRITES)('full-admin token POST %s passes the scope gate', async (path) => {
+    const res = await request(app).post(path).set('Authorization', `Bearer ${tokens['full-admin']}`).send({});
+    expect(res.body.code).not.toBe('SCOPE_DENIED');
+  });
+});
+
 // --- Blocked Endpoints (human-session-only) ---
 
 describe('API token blocked endpoints', () => {
