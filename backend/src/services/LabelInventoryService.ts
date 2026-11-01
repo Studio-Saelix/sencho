@@ -237,8 +237,8 @@ function reconcileKeys(
   declared: Record<string, string>,
   runtime: Record<string, string>,
 ): { onlyInCompose: string[]; onlyOnContainer: string[]; inBoth: string[]; changed: string[] } {
-  // Rendered config writes a literal `$` as `$$`, while the container carries the
-  // single `$`, so compare the rendered value the container would carry.
+  // Declared values come from rendered config, which writes a literal `$` as `$$`.
+  // Undo that before comparing with the container's own label value.
   const runtimeKeys = new Set(Object.keys(runtime));
   const onlyInCompose: string[] = [];
   const onlyOnContainer: string[] = [];
