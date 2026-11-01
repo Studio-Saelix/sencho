@@ -892,10 +892,13 @@ describe('StackAnatomyPanel hidden helper chips', () => {
     return Array.from(servicesRow.querySelectorAll('span')).map(el => el.textContent);
   };
 
-  function renderPanel(serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry) {
-    return render(
+  function panelElement(
+    serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry,
+    stackName = 'web',
+  ) {
+    return (
       <StackAnatomyPanel
-        stackName="web"
+        stackName={stackName}
         content={COMPOSE}
         envContent=""
         selectedEnvFile=".env"
@@ -906,8 +909,15 @@ describe('StackAnatomyPanel hidden helper chips', () => {
         canEdit
         applying={false}
         serviceUrlEntry={serviceUrlEntry}
-      />,
+      />
     );
+  }
+
+  function renderPanel(
+    serviceUrlEntry?: import('@/lib/serviceUrlResolve').ServiceUrlEntry,
+    stackName = 'web',
+  ) {
+    return render(panelElement(serviceUrlEntry, stackName));
   }
 
   it('collapses hidden services behind one toggle that reveals them in place', async () => {
@@ -955,5 +965,36 @@ describe('StackAnatomyPanel hidden helper chips', () => {
     renderPanel(undefined);
     expect(chipNames()).toEqual(['web', 'api', 'helper']);
     expect(screen.queryByTestId('anatomy-hidden-services-toggle')).toBeNull();
+  });
+
+  it('collapses the reveal again when another stack or node is selected', async () => {
+    const labels = entry({
+      web: { order: 20, hidden: false },
+      api: { order: 10, hidden: false },
+      helper: { order: null, hidden: true },
+    });
+    const { rerender } = renderPanel(labels, 'web');
+    await userEvent.click(screen.getByTestId('anatomy-hidden-services-toggle'));
+    expect(chipNames()).toEqual(['api', 'web', 'helper']);
+
+    // The panel stays mounted across a stack switch, like the container list's
+    // Show row, which resets because the list remounts per stack.
+    rerender(panelElement(labels, 'other'));
+    expect(chipNames()).toEqual(['api', 'web']);
+    expect(screen.getByTestId('anatomy-hidden-services-toggle')).toHaveTextContent('1 hidden');
+    expect(screen.getByTestId('anatomy-hidden-services-toggle')).toHaveAttribute('aria-pressed', 'false');
+
+    // Returning to the first stack does not restore the reveal either.
+    rerender(panelElement(labels, 'web'));
+    expect(chipNames()).toEqual(['api', 'web']);
+
+    // Same stack name on another node is a different selection, so it is
+    // collapsed there too.
+    await userEvent.click(screen.getByTestId('anatomy-hidden-services-toggle'));
+    expect(chipNames()).toEqual(['api', 'web', 'helper']);
+    nodeState.activeNode = { id: 2 };
+    rerender(panelElement(labels, 'web'));
+    expect(chipNames()).toEqual(['api', 'web']);
+    expect(screen.getByTestId('anatomy-hidden-services-toggle')).toHaveTextContent('1 hidden');
   });
 });

@@ -178,8 +178,18 @@ export default function StackAnatomyPanel({
   const { dismissed: doctorDismissed } = useStackDismiss('doctor', stackName, activeNode?.id, preflightFp);
   const [activeTab, setActiveTab] = useState('anatomy');
   // Hidden helpers collapse out of the Anatomy chips too, behind one toggle that
-  // reveals them in place, matching the stack's container list.
+  // reveals them in place, matching the stack's container list. That reveal is
+  // per selection: this panel stays mounted when the operator opens another
+  // stack or node, while the container list remounts per stack (its Show state
+  // dies with it), so the reveal collapses when either part of the selection
+  // changes. Adjusting during render means the next stack never paints revealed.
+  const revealIdentity = `${activeNode?.id ?? 'local'}:${stackName}`;
   const [showHiddenServices, setShowHiddenServices] = useState(false);
+  const [revealIdentitySeen, setRevealIdentitySeen] = useState(revealIdentity);
+  if (revealIdentitySeen !== revealIdentity) {
+    setRevealIdentitySeen(revealIdentity);
+    setShowHiddenServices(false);
+  }
 
   useEffect(() => {
     if (requestedTab === 'networking' && networkingEnabled) setActiveTab('networking');
