@@ -88,7 +88,7 @@ import {
 } from '../helpers/fleetPrune';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
-import { describeFleetReadFailure, fleetReadSignal, withinFleetReadBudget } from '../helpers/fleetReadBudget';
+import { describeFleetReadFailure, fleetReadSignal, withinLocalFleetReadBudget } from '../helpers/fleetReadBudget';
 import { readLocalLabelInventory } from '../helpers/localLabelInventory';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
@@ -811,12 +811,18 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
 
 /**
  * One node's dependency graph as a merge-ready result. The hub builds its own
- * in-process; a remote is read through its auth-only per-node route within the
- * shared fleet-read budget. Every failure degrades to an error result for that node.
+ * in-process under the local Fleet deadline, because that work grows with the
+ * host's container and stack count; a remote is read through its auth-only
+ * per-node route within the flat fleet-read budget. Every failure degrades to
+ * an error result for that node.
  */
 async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
   if (node.type === 'local') {
-    const graph = await withinFleetReadBudget(buildLocalGraph(node.id, node.name), 'dependency graph');
+    const graph = await withinLocalFleetReadBudget(
+      'dependency graph',
+      () => DockerController.getInstance(node.id).ping(),
+      () => buildLocalGraph(node.id, node.name),
+    );
     return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
   }
 
@@ -1099,7 +1105,14 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
     const results = await Promise.allSettled(
       nodes.map(async (node: Node): Promise<FleetNetworkingSummaryNode> => {
         if (node.type === 'local') {
-          const summary = await withinFleetReadBudget(computeNodeNetworkingSummary(node.id), 'networking summary');
+          // The hub's own snapshot scales with its stack and container count,
+          // so it runs under the local deadline; remotes stay on the flat
+          // transport budget below.
+          const summary = await withinLocalFleetReadBudget(
+            'networking summary',
+            () => DockerController.getInstance(node.id).ping(),
+            () => computeNodeNetworkingSummary(node.id),
+          );
           return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
         }
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);

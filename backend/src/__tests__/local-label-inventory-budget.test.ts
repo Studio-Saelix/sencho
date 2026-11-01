@@ -3,13 +3,18 @@ import DockerController, { type LabelInventoryRow } from '../services/DockerCont
 import {
   FLEET_READ_BUDGET_MS,
   FleetReadTimeoutError,
-  LOCAL_LABEL_INVENTORY_DEADLINE_MS,
+  LOCAL_FLEET_READ_DEADLINE_MS,
 } from '../helpers/fleetReadBudget';
-import { readLocalLabelInventory, type LocalLabelInventoryBudget } from '../helpers/localLabelInventory';
+import {
+  _resetLocalLabelInventoryShareForTests,
+  LOCAL_LABEL_INVENTORY_SHARE_TTL_MS,
+  readLocalLabelInventory,
+  type LocalLabelInventoryBudget,
+} from '../helpers/localLabelInventory';
 
 /**
  * Scaled-down version of one overall deadline: 100 ms for the liveness check
- * inside a 400 ms deadline for the whole read. The 3:1 ping-to-deadline ratio
+ * inside a 400 ms deadline for the whole read. The 4:1 ping-to-deadline ratio
  * mirrors the production 5 s check inside an 18 s deadline; the build delays
  * below are chosen against that deadline, not against a separate ceiling.
  */
@@ -17,6 +22,7 @@ const TEST_BUDGET: LocalLabelInventoryBudget = { livenessBudgetMs: 100, deadline
 
 afterEach(() => {
   vi.restoreAllMocks();
+  _resetLocalLabelInventoryShareForTests();
 });
 
 function row(index: number): LabelInventoryRow {
@@ -79,9 +85,9 @@ describe('local label inventory budget', () => {
   it('keeps the one deadline inside the tab timeout', () => {
     // The Docker Labels tab abandons a node after 20 s. The deadline is the
     // whole read, so the 5 s daemon check is spent inside it, not added to it.
-    expect(LOCAL_LABEL_INVENTORY_DEADLINE_MS).toBe(18_000);
-    expect(FLEET_READ_BUDGET_MS).toBeLessThan(LOCAL_LABEL_INVENTORY_DEADLINE_MS);
-    expect(LOCAL_LABEL_INVENTORY_DEADLINE_MS).toBeLessThan(20_000);
+    expect(LOCAL_FLEET_READ_DEADLINE_MS).toBe(18_000);
+    expect(FLEET_READ_BUDGET_MS).toBeLessThan(LOCAL_FLEET_READ_DEADLINE_MS);
+    expect(LOCAL_FLEET_READ_DEADLINE_MS).toBeLessThan(20_000);
   });
 });
 
@@ -167,5 +173,72 @@ describe('readLocalLabelInventory', () => {
     expect(error).not.toBeInstanceOf(FleetReadTimeoutError);
     expect((error as Error).message).toContain('ECONNREFUSED');
     expect(docker.listContainersForLabelInventory).not.toHaveBeenCalled();
+  });
+});
+
+describe('readLocalLabelInventory sharing', () => {
+  it('shares one hub build between concurrent readers', async () => {
+    const docker = stubDocker({ containerCount: 458, buildDelayMs: 80 });
+
+    const [first, second] = await Promise.all([
+      readLocalLabelInventory(1, {}, TEST_BUDGET),
+      readLocalLabelInventory(1, {}, TEST_BUDGET),
+    ]);
+
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    expect(first.containers).toHaveLength(458);
+    expect(second.containers).toHaveLength(458);
+  });
+
+  it('serves a just-completed build to a retry without listing again', async () => {
+    const docker = stubDocker({ containerCount: 3 });
+
+    const first = await readLocalLabelInventory(1, {}, TEST_BUDGET);
+    const retry = await readLocalLabelInventory(1, {}, TEST_BUDGET);
+
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    expect(retry.generatedAt).toBe(first.generatedAt);
+    expect(retry.containers).toHaveLength(3);
+  });
+
+  it('leaves a timed-out build running for the retry that follows it', async () => {
+    // The tab's retry arrives after the first request was cut at its deadline.
+    // It must join the build the first request left behind, not list the hub
+    // again from the start.
+    const docker = stubDocker({ containerCount: 4, buildDelayMs: 150 });
+
+    const firstError = await readLocalLabelInventory(
+      1,
+      {},
+      { livenessBudgetMs: 100, deadlineMs: 50 },
+    ).catch((err: unknown) => err);
+    expect(firstError).toBeInstanceOf(FleetReadTimeoutError);
+
+    const retry = await readLocalLabelInventory(1, {}, TEST_BUDGET);
+
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    expect(retry.containers).toHaveLength(4);
+  });
+
+  it('does not share a plain inventory with a reveal read', async () => {
+    const docker = stubDocker({ containerCount: 1, buildDelayMs: 10 });
+
+    await readLocalLabelInventory(1, {}, TEST_BUDGET);
+    await readLocalLabelInventory(1, { revealSecrets: true }, TEST_BUDGET);
+
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);
+  });
+
+  it('rebuilds after the completed-build share expires', async () => {
+    const docker = stubDocker({ containerCount: 1 });
+    const now = vi.spyOn(Date, 'now');
+    let clock = 1_000_000;
+    now.mockImplementation(() => clock);
+
+    await readLocalLabelInventory(1, {}, TEST_BUDGET);
+    clock += LOCAL_LABEL_INVENTORY_SHARE_TTL_MS + 1;
+    await readLocalLabelInventory(1, {}, TEST_BUDGET);
+
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);
   });
 });

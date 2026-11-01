@@ -291,6 +291,8 @@ A summary strip above the map counts four kinds of issue, and the affected eleme
 
 The map is fleet-wide: the control instance gathers each node's view and merges them. Nodes are read a few at a time and each one is drawn as soon as it answers, with `n of N nodes` beside **Refresh** while the rest are pending, so a slow node never holds back the others. If a node is offline or unreachable, a banner names it with the reason (for example `Timed out after 5s` or `Timed out reading this node`) and the rest of the fleet still draws. **Retry** in the banner reloads only the nodes that failed. Reopening the tab shows the last map at once and refreshes it in the background once it is a minute old.
 
+Remote nodes stay on the 5 second transport budget. The hub builds its own graph and networking summary in process, where the work grows with its container and stack count, so those reads get an 18 second local deadline with a 5 second daemon check inside it. A large hub is not cut off at the remote budget, and a Docker socket that stalls still ends the read before the tab's 20 second per-node timeout.
+
 ## Node Updates
 
 Click **Node Update** in the Overview tab's toolbar to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).

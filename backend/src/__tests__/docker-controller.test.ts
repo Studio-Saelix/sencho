@@ -2038,6 +2038,51 @@ describe('DockerController - inspectContainerLabelsAndImage', () => {
   });
 });
 
+describe('DockerController - listContainersForLabelInventory', () => {
+  it('builds a large inventory from the container list without inspecting every container', async () => {
+    // At 458 containers the old path issued one inspect per container, which
+    // pushed the hub's own label read into the tab's client timeout. The list
+    // response already carries the same labels and image ID.
+    mockDocker.listContainers.mockResolvedValue(Array.from({ length: 458 }, (_, i) => ({
+      Id: `container-${i}`,
+      Names: [`/container-${i}`],
+      State: 'running',
+      Labels: { 'com.docker.compose.project': 'demo', 'com.docker.compose.service': 'web', 'traefik.enable': 'true' },
+      ImageID: 'sha256:image',
+    })));
+    const dc = DockerController.getInstance(1);
+
+    const rows = await dc.listContainersForLabelInventory();
+
+    expect(rows).toHaveLength(458);
+    expect(rows[0]).toMatchObject({
+      id: 'container-0',
+      name: 'container-0',
+      state: 'running',
+      service: 'web',
+      imageId: 'sha256:image',
+      inspectFailed: false,
+    });
+    expect(rows[0].labels['traefik.enable']).toBe('true');
+    expect(mockDocker.getContainer).not.toHaveBeenCalled();
+  });
+
+  it('falls back to an inspect only when the list omits the label field', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'c1', Names: ['/c1'], State: 'running', ImageID: 'sha256:listed' },
+    ]);
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { 'traefik.enable': 'true' } }, Image: 'sha256:inspected' }),
+    });
+    const dc = DockerController.getInstance(1);
+
+    const rows = await dc.listContainersForLabelInventory();
+
+    expect(mockDocker.getContainer).toHaveBeenCalledWith('c1');
+    expect(rows[0]).toMatchObject({ labels: { 'traefik.enable': 'true' }, imageId: 'sha256:inspected', inspectFailed: false });
+  });
+});
+
 // --- createNetwork validation --------------------------------------------------
 
 describe('createNetwork', () => {

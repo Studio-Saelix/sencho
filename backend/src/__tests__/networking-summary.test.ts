@@ -22,6 +22,7 @@ const STACK = 'netsummary';
 
 function stubSnapshot() {
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    ping: vi.fn().mockResolvedValue(undefined),
     getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
   } as unknown as DockerController);
 }

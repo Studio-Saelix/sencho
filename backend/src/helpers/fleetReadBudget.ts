@@ -17,9 +17,9 @@ import { getErrorMessage } from '../utils/errors';
  * healthy nodes to shave two seconds off the one bad node. 5 s also matches the
  * cap the fleet image-update reads already used, so one number replaces the
  * 8 s the map and networking summary carried and the 30 s the Docker Labels
- * inventory carried. The hub's own label inventory also caps its cheap daemon
- * check with it, but the whole read runs under
- * {@link LOCAL_LABEL_INVENTORY_DEADLINE_MS}, because that read does work per
+ * inventory carried. The hub's own reads also cap their cheap daemon check
+ * with it, but the whole read runs under
+ * {@link LOCAL_FLEET_READ_DEADLINE_MS}, because those reads do work per
  * container rather than one round trip.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
@@ -34,16 +34,17 @@ import { getErrorMessage } from '../utils/errors';
 export const FLEET_READ_BUDGET_MS = 5_000;
 
 /**
- * Deadline for the hub's own label inventory, measured from the start of the
- * read.
+ * Deadline for an interactive Fleet read the hub builds on its own host,
+ * measured from the start of the read.
  *
- * The hub's own read is different from a remote: it lists and inspects every
- * container on the host, so its cost grows with the node, and a host with a few
- * hundred containers needs several seconds even when Docker answers every call.
- * The listing cannot be used to size that budget, because it is the slow part
- * and would have to run under the flat transport budget first. A fixed deadline
- * is independent of the read: it sits inside the Docker Labels tab's 20 s
- * per-node client timeout (`LABELS_NODE_TIMEOUT_MS`), with room for the
+ * A local read is different from a remote: the hub lists and inspects every
+ * container, stack and network on the host, so its cost grows with the node,
+ * and a host with a few hundred containers needs several seconds even when
+ * Docker answers every call. The listing cannot be used to size that budget,
+ * because it is the slow part and would have to run under the flat transport
+ * budget first. A fixed deadline is independent of the read: it sits inside the
+ * 20 s per-node client timeout the Docker Labels tab and the Map use
+ * (`LABELS_NODE_TIMEOUT_MS`, `MAP_NODE_TIMEOUT_MS`), with room for the
  * transfer, so a large hub is not cut off before it can build its answer.
  *
  * The deadline covers the whole read, and the 5 s daemon check is a maximum
@@ -51,8 +52,25 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  * milliseconds, so the build gets almost the full deadline. A build allowed only
  * a fixed slice after a ping that can itself cost 5 s is what left a 458-
  * container hub timing out in the real tab.
+ *
+ * It applies to the hub's own label inventory, dependency graph and networking
+ * summary. Remote and Pilot reads keep {@link FLEET_READ_BUDGET_MS}: they are
+ * one round trip, not host-sized work.
  */
-export const LOCAL_LABEL_INVENTORY_DEADLINE_MS = 18_000;
+export const LOCAL_FLEET_READ_DEADLINE_MS = 18_000;
+
+/** The two caps of a local Fleet read: one liveness check, then one deadline. */
+export interface LocalFleetReadBudget {
+  /** Budget for the cheap daemon check; a wedged socket costs this and no more. */
+  livenessBudgetMs: number;
+  /** Deadline for the whole read, measured from its start. */
+  deadlineMs: number;
+}
+
+export const LOCAL_FLEET_READ_BUDGET: LocalFleetReadBudget = {
+  livenessBudgetMs: FLEET_READ_BUDGET_MS,
+  deadlineMs: LOCAL_FLEET_READ_DEADLINE_MS,
+};
 
 /** A read that outlived the fleet-read budget, so a caller can tell it from a transport failure. */
 export class FleetReadTimeoutError extends Error {
@@ -111,6 +129,34 @@ export async function withinFleetReadBudget<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Bound a hub-local Fleet read by one deadline, with a cheap daemon check
+ * inside it.
+ *
+ * The check proves Docker answers at all before the expensive build starts; a
+ * socket that never answers costs one transport budget instead of the whole
+ * local deadline. Both stages share the deadline, measured from the start, so a
+ * slow build is not given a second allowance after a slow check.
+ *
+ * `ping` and `work` are thunks so a caller that joins an already-running build
+ * still gets its own deadline around that shared work.
+ */
+export async function withinLocalFleetReadBudget<T>(
+  label: string,
+  ping: () => Promise<unknown>,
+  work: () => Promise<T>,
+  budget: LocalFleetReadBudget = LOCAL_FLEET_READ_BUDGET,
+): Promise<T> {
+  return withinFleetReadBudget(
+    (async () => {
+      await withinFleetReadBudget(ping(), label, budget.livenessBudgetMs);
+      return work();
+    })(),
+    label,
+    budget.deadlineMs,
+  );
 }
 
 /**

@@ -2180,6 +2180,12 @@ class DockerController {
    * Containers with runtime labels for the label-inventory API. Resolves stack
    * membership with the same multi-fallback strategy as bulk status. Captures the
    * image ref so label provenance can distinguish image-inherited labels.
+   *
+   * `/containers/json` already returns each container's labels and image ID, so
+   * the inventory is built from that one listing. Inspecting every container
+   * added a Docker round trip per container (hundreds on a large hub) without
+   * changing a value; inspect remains only as a fallback for an older API that
+   * omits the fields.
    */
   public async listContainersForLabelInventory(): Promise<LabelInventoryRow[]> {
     const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
@@ -2187,7 +2193,8 @@ class DockerController {
       Id?: string;
       Names?: string[];
       State?: string;
-      Labels?: Record<string, string>;
+      Labels?: Record<string, string> | null;
+      Image?: string;
       ImageID?: string;
     }>;
     const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
@@ -2206,16 +2213,32 @@ class DockerController {
         const id = c.Id ?? '';
         const name = (c.Names?.[0] ?? '').replace(/^\//, '');
         const state = c.State ?? 'unknown';
+        const listedLabels = c.Labels ?? undefined;
         const stack = DockerController.resolveContainerStack(
-          c.Labels,
+          listedLabels,
           projectToStack,
           knownStackSet,
           absDirToStack,
           resolvedBase,
         );
-        const service = c.Labels?.['com.docker.compose.service'] ?? null;
+        const service = listedLabels?.['com.docker.compose.service'] ?? null;
         if (!id) {
           results[i] = { id, name, state, stack, service, labels: {}, imageId: c.ImageID ?? '', inspectFailed: true };
+          continue;
+        }
+        // The listing carries the same label map and image ID as an inspect.
+        // Use it unless an older API omitted the label field entirely.
+        if (c.Labels !== undefined) {
+          results[i] = {
+            id,
+            name,
+            state,
+            stack,
+            service,
+            labels: c.Labels ?? {},
+            imageId: c.ImageID || c.Image || '',
+            inspectFailed: false,
+          };
           continue;
         }
         let labels: Record<string, string>;
@@ -2228,7 +2251,7 @@ class DockerController {
         } catch (err) {
           console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(id), err);
           labels = c.Labels ?? {};
-          imageId = c.ImageID ?? '';
+          imageId = c.ImageID || c.Image || '';
           inspectFailed = true;
         }
         results[i] = { id, name, state, stack, service, labels, imageId, inspectFailed };

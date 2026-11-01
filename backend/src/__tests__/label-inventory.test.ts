@@ -10,6 +10,7 @@ import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { _resetLocalLabelInventoryShareForTests } from '../helpers/localLabelInventory';
 import {
   buildNodeLabelInventory,
   buildStackLabelInventory,
@@ -104,7 +105,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  _resetLocalLabelInventoryShareForTests();
+});
 
 describe('buildNodeLabelInventory', () => {
   it('builds inverted index and compose-system provenance', async () => {

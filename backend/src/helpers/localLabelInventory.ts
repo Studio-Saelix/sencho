@@ -5,61 +5,119 @@ import {
   type NodeLabelInventory,
 } from '../services/LabelInventoryService';
 import {
-  FLEET_READ_BUDGET_MS,
-  LOCAL_LABEL_INVENTORY_DEADLINE_MS,
-  withinFleetReadBudget,
+  LOCAL_FLEET_READ_BUDGET,
+  LOCAL_FLEET_READ_DEADLINE_MS,
+  withinLocalFleetReadBudget,
+  type LocalFleetReadBudget,
 } from './fleetReadBudget';
 
-export interface LocalLabelInventoryBudget {
-  /** Budget for the cheap daemon check; a wedged socket costs this and no more. */
-  livenessBudgetMs: number;
-  /** Deadline for the whole read, measured from its start. */
-  deadlineMs: number;
-}
-
-const DEFAULT_BUDGET: LocalLabelInventoryBudget = {
-  livenessBudgetMs: FLEET_READ_BUDGET_MS,
-  deadlineMs: LOCAL_LABEL_INVENTORY_DEADLINE_MS,
-};
+export type LocalLabelInventoryBudget = LocalFleetReadBudget;
 
 /**
- * Read the hub's own Docker label inventory inside the fleet-read budgets.
+ * How long a completed hub build stays available to another reader.
+ *
+ * A tab load that reaches the deadline still leaves its build running in this
+ * process. Keeping that finished inventory briefly lets Retry answer from it
+ * instead of paying for the same listing again. Labels are static until a
+ * container is recreated, so a few seconds of reuse cannot show a value the
+ * host no longer has.
+ */
+export const LOCAL_LABEL_INVENTORY_SHARE_TTL_MS = 10_000;
+
+/**
+ * How long one build may stay in the share map while it never settles. A
+ * Docker call that hangs forever must not poison every later read: after this
+ * point a new reader starts a fresh build instead of joining the old one.
+ */
+const MAX_SHARED_BUILD_AGE_MS = LOCAL_FLEET_READ_DEADLINE_MS + 10_000;
+
+class SharedLabelBuild {
+  public settledAt: number | null = null;
+  public readonly promise: Promise<NodeLabelInventory>;
+
+  public constructor(
+    public readonly startedAt: number,
+    build: Promise<NodeLabelInventory>,
+  ) {
+    this.promise = build.then((inventory) => {
+      this.settledAt = Date.now();
+      return inventory;
+    });
+  }
+
+  /** Time the freshness check counts from: completion once settled, start while running. */
+  public get ageFrom(): number {
+    return this.settledAt ?? this.startedAt;
+  }
+}
+
+const sharedBuilds = new Map<string, SharedLabelBuild>();
+
+function shareKey(nodeId: number, options: LabelInventoryOptions): string {
+  return `${nodeId}:${options.revealSecrets === true ? 'reveal' : 'plain'}`;
+}
+
+/**
+ * Share one in-flight (or just-completed) hub build between readers.
+ *
+ * The build runs outside the caller's deadline so a reader that times out does
+ * not cancel the work: the next request, which is usually the tab's Retry,
+ * joins the same build and gets its result for the cost of waiting only the
+ * remainder.
+ */
+function readSharedLabelBuild(nodeId: number, options: LabelInventoryOptions): Promise<NodeLabelInventory> {
+  const key = shareKey(nodeId, options);
+  const now = Date.now();
+  const existing = sharedBuilds.get(key);
+  if (existing) {
+    const age = now - existing.ageFrom;
+    const stillFresh = existing.settledAt === null
+      ? age < MAX_SHARED_BUILD_AGE_MS
+      : age < LOCAL_LABEL_INVENTORY_SHARE_TTL_MS;
+    if (stillFresh) return existing.promise;
+    sharedBuilds.delete(key);
+  }
+
+  const entry = new SharedLabelBuild(now, buildNodeLabelInventory(nodeId, options));
+  entry.promise.catch(() => {
+    // A failed build has no result to share; the next reader tries again.
+    if (sharedBuilds.get(key) === entry) sharedBuilds.delete(key);
+  });
+  sharedBuilds.set(key, entry);
+  return entry.promise;
+}
+
+/** Drop in-flight and cached builds. Tests call this between isolated cases. */
+export function _resetLocalLabelInventoryShareForTests(): void {
+  sharedBuilds.clear();
+}
+
+/**
+ * Read the hub's own Docker label inventory inside the local Fleet budget.
  *
  * The listing (`/containers/json`) scales with the host: on a busy hub with
  * hundreds of containers it alone can outlast the transport budget, so it
  * cannot also be the first-contact check. A cheap ping proves the daemon
- * answers at all, and the build that follows (its own listing plus the
- * per-container inspections) runs under the local deadline.
+ * answers at all, and the build that follows runs under the local deadline.
  *
  * The two stages share one deadline rather than each getting a fixed
  * allowance: the ping normally answers in milliseconds, so the build gets
- * almost the whole deadline. Giving the build a separate slice after a ping
- * that may itself cost the transport budget left a 458-container hub timing
- * out in the real tab. A socket that never answers the ping still
+ * almost the whole deadline. A socket that never answers the ping still
  * costs one transport budget, and one that wedges mid-build is held to the
  * deadline, while a healthy large hub is not cut off before it has said how
  * many containers it holds.
  *
- * `budget` is a seam for tests; callers use the fleet budget and the deadline.
+ * `budget` is a seam for tests; callers use the Fleet budget and the deadline.
  */
 export async function readLocalLabelInventory(
   nodeId: number,
   options: LabelInventoryOptions = {},
-  budget: LocalLabelInventoryBudget = DEFAULT_BUDGET,
+  budget: LocalLabelInventoryBudget = LOCAL_FLEET_READ_BUDGET,
 ): Promise<NodeLabelInventory> {
-  return withinFleetReadBudget(
-    readLocalLabelInventoryStages(nodeId, options, budget),
+  return withinLocalFleetReadBudget(
     'container labels',
-    budget.deadlineMs,
+    () => DockerController.getInstance(nodeId).ping(),
+    () => readSharedLabelBuild(nodeId, options),
+    budget,
   );
-}
-
-async function readLocalLabelInventoryStages(
-  nodeId: number,
-  options: LabelInventoryOptions,
-  budget: LocalLabelInventoryBudget,
-): Promise<NodeLabelInventory> {
-  const docker = DockerController.getInstance(nodeId);
-  await withinFleetReadBudget(docker.ping(), 'container labels', budget.livenessBudgetMs);
-  return buildNodeLabelInventory(nodeId, options);
 }

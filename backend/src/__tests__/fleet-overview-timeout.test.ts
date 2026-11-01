@@ -16,6 +16,7 @@ import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
 import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 import { _resetHostSampleStateForTests } from '../helpers/hostSample';
+import { _resetLocalLabelInventoryShareForTests } from '../helpers/localLabelInventory';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
@@ -69,6 +70,7 @@ afterAll(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  _resetLocalLabelInventoryShareForTests();
   const db = DatabaseService.getInstance();
   for (const node of db.getNodes()) {
     if (node.type === 'remote') db.deleteNode(node.id);
@@ -370,6 +372,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
 
   function stubLocalDocker(): void {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      ping: vi.fn().mockResolvedValue(undefined),
       getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
     } as unknown as DockerController);
   }
@@ -421,6 +424,53 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     expect(elapsedMs).toBeGreaterThan(READ_BUDGET_FLOOR_MS);
     expect(elapsedMs).toBeLessThan(READ_BUDGET_CEILING_MS);
   }, 30_000);
+
+  describe('hub-local reads use the local deadline', () => {
+    /**
+     * The hub's own graph and summary build from a Docker snapshot that grows
+     * with the host. 5.5 s is longer than the flat remote budget and shorter
+     * than the local deadline the route must apply.
+     */
+    function stubSlowLocalDocker(delayMs: number): void {
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve({ containers: [], networks: [], volumes: [] }), delayMs);
+        })),
+      } as unknown as DockerController);
+    }
+
+    it('does not cut the hub\'s own dependency graph at the flat 5 s budget', async () => {
+      stubSlowLocalDocker(5_500);
+
+      const started = Date.now();
+      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      // The route merges each node's graph, so the local host node is in
+      // `nodes` and a cut read would instead appear in `nodeErrors`.
+      expect(res.body.nodeErrors).toEqual([]);
+      expect((res.body.nodes as { nodeId?: number }[]).some(n => n.nodeId === 1)).toBe(true);
+      expect(elapsedMs).toBeGreaterThan(5_000);
+      expect(elapsedMs).toBeLessThan(18_000);
+    }, 30_000);
+
+    it('does not cut the hub\'s own networking summary at the flat 5 s budget', async () => {
+      stubSlowLocalDocker(5_500);
+
+      const started = Date.now();
+      const res = await request(app).get('/api/fleet/networking-summary?nodeId=1').set('Authorization', authHeader);
+      const elapsedMs = Date.now() - started;
+
+      expect(res.status).toBe(200);
+      const row = (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[])[0];
+      expect(row).toMatchObject({ nodeId: 1, status: 'ok', error: null });
+      expect(row.summary).not.toBeNull();
+      expect(elapsedMs).toBeGreaterThan(5_000);
+      expect(elapsedMs).toBeLessThan(18_000);
+    }, 30_000);
+  });
 
   describe('GET /api/fleet/networking-summary?nodeId=', () => {
     it('narrows the fan-out to one node', async () => {
