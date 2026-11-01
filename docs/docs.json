@@ -199,7 +199,8 @@
                   "features/rbac",
                   "features/sso",
                   "getting-started/sso-quickstart",
-                  "features/api-tokens"
+                  "features/api-tokens",
+                  "features/mcp"
                 ]
               }
             ]
@@ -367,6 +368,16 @@
               "GET /api/fleet/snapshots/{id}",
               "POST /api/fleet/snapshots/{id}/restore",
               "DELETE /api/fleet/snapshots/{id}"
+            ]
+          },
+          {
+            "group": "Observation",
+            "pages": [
+              "GET /api/fleet/observation/nodes",
+              "GET /api/fleet/observation/health",
+              "GET /api/stacks/platform/observation",
+              "GET /api/stacks/{stackName}/observation/status",
+              "GET /api/stacks/{stackName}/observation/readiness"
             ]
           },
           {

@@ -248,7 +248,12 @@ function parseIfMatchMtime(raw: string | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-async function requireStackExists(
+/**
+ * True when the stack exists on the node. Exported for the observation router,
+ * which answers its own 404 code (`STACK_NOT_FOUND`) instead of duplicating the
+ * same containment-shaped check.
+ */
+export async function requireStackExists(
   nodeId: number,
   stackName: string,
   res: Response,

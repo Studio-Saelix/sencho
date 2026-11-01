@@ -12,7 +12,7 @@ import {
 } from '../middleware/auth';
 import { authRateLimiter } from '../middleware/rateLimiters';
 import { requireAdmin } from '../middleware/tierGates';
-import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { rejectApiTokenScope, rejectObserveOnlyTokenScope } from '../middleware/apiTokenScope';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
   BCRYPT_SALT_ROUNDS,
@@ -220,6 +220,10 @@ authRouter.post('/logout', (req: Request, res: Response): void => {
 });
 
 authRouter.get('/check', authMiddleware, (req: Request, res: Response): void => {
+  // Mounted ahead of the scope gate, so the narrowing is explicit here: this
+  // route answers with the token creator's identity, which an agent credential
+  // has no reason to see.
+  if (rejectObserveOnlyTokenScope(req, res)) return;
   res.json({ authenticated: true, user: req.user });
 });
 

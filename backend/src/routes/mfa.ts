@@ -10,7 +10,7 @@ import {
   reissueSessionAfterTokenBump,
 } from '../middleware/auth';
 import { authRateLimiter } from '../middleware/rateLimiters';
-import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { rejectApiTokenScope, rejectObserveOnlyTokenScope } from '../middleware/apiTokenScope';
 import {
   MFA_PENDING_COOKIE_NAME,
   MFA_PENDING_SCOPE,
@@ -185,6 +185,9 @@ mfaRouter.post('/login/mfa', authRateLimiter, async (req: Request, res: Response
 
 /** Report the current user's MFA state. Used by the Account settings UI. */
 mfaRouter.get('/mfa/status', authMiddleware, (req: Request, res: Response): void => {
+  // Ahead of the scope gate like /auth/check; an Observe Only token must not
+  // read the creator's MFA posture.
+  if (rejectObserveOnlyTokenScope(req, res)) return;
   try {
     if (!req.user) {
       res.status(401).json({ error: 'Authentication required' });

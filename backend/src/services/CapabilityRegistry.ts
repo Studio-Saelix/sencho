@@ -79,6 +79,7 @@ export const CAPABILITIES = [
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
   'host-usage-unknown-v1',
+  'agent-observation-v1',
 ] as const;
 
 /**
@@ -91,6 +92,15 @@ export const CAPABILITIES = [
 export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/**
+ * Read-only observation projections for AI clients (`/api/stacks/platform/
+ * observation` and the per-stack observation routes; the fleet observation
+ * routes are hub-served and never reach a remote). A remote without it is
+ * refused with `capability_unavailable` by the hub proxy rather than a
+ * path-shaped 404, so the client can say "upgrade this node".
+ */
+export const AGENT_OBSERVATION_CAPABILITY = 'agent-observation-v1' as const satisfies Capability;
 
 /** Legacy Host Console advertisement (Admiral hubs still accept this on remotes). */
 export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capability;

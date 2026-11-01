@@ -846,13 +846,30 @@ export interface SecretPushRow {
     pushed_at: number;
 }
 
-export type ApiTokenScope = 'read-only' | 'deploy-only' | 'full-admin';
+/**
+ * Every scope a token can hold. One list shared by the create route, the
+ * enforcement gate and the tests so a new scope cannot be accepted at creation
+ * and denied everywhere else by omission.
+ */
+export const API_TOKEN_SCOPES = [
+    'read-only',
+    'deploy-only',
+    'full-admin',
+    'observe-only',
+] as const;
 
-/** Map an API token's scope to the synthesized user role used during request authorization. */
+export type ApiTokenScope = (typeof API_TOKEN_SCOPES)[number];
+
+/**
+ * Map an API token's scope to the synthesized user role used during request
+ * authorization. `observe-only` resolves to `viewer` like `read-only`; the
+ * narrower reach comes from the scope gate, not from a different role.
+ */
 export const API_TOKEN_SCOPE_TO_ROLE: Record<ApiTokenScope, UserRole> = {
     'read-only': 'viewer',
     'deploy-only': 'deployer',
     'full-admin': 'admin',
+    'observe-only': 'viewer',
 };
 
 export interface ApiToken {

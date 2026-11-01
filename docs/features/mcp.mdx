@@ -1,0 +1,185 @@
+---
+title: MCP Server
+sidebarTitle: MCP server
+description: Connect an MCP client to a read-only observation surface for your fleet, using a credential that can reach five endpoints and nothing else.
+keywords: ["mcp", "model context protocol", "ai", "observe only", "read-only"]
+---
+
+<Note>
+  MCP access is available on every Sencho tier. Creating the Observe Only token it uses requires an admin Sencho user.
+</Note>
+
+The `sencho-mcp` adapter connects a Model Context Protocol (MCP) client to your Sencho hub. It is a stdio server: your MCP client launches it as a local process, the adapter calls five read-only endpoints on Sencho, and the answers come back as tool output. A client can then answer questions about nodes, stacks, container health, update and rollback readiness, and fleet-wide findings without holding a credential that can change anything.
+
+The adapter lives in [sencho-mcp](https://github.com/Studio-Saelix/sencho-mcp). It speaks stdio only. It opens no port, accepts no inbound connection, and has no write tool.
+
+Every call is authenticated with an Observe Only API token, the narrowest scope Sencho issues. The token reaches five endpoints. Everything else is refused.
+
+## What it can read
+
+An Observe Only token reaches exactly five read-only endpoints, and the adapter exposes one tool per endpoint:
+
+| What you can ask | Endpoint | Tool |
+|------------------|----------|------|
+| Which nodes are in the fleet, how each is reached, and whether it is online or cordoned | `GET /api/fleet/observation/nodes` | `sencho_list_nodes` |
+| Which stacks run on a node, their state, and how many containers are up | `GET /api/stacks/platform/observation` | `sencho_list_stacks` |
+| Which containers a stack has, and their state, health, restart count, exit code, and start time | `GET /api/stacks/:stackName/observation/status` | `sencho_get_stack_status` |
+| Whether a stack is ready to update or roll back, and the strongest reason behind each verdict | `GET /api/stacks/:stackName/observation/readiness` | `sencho_get_stack_readiness` |
+| What needs attention across the fleet, node by node and finding by finding | `GET /api/fleet/observation/health` | `sencho_get_fleet_health` |
+
+That is the whole surface. There is no endpoint for a Compose file, an environment value, a log stream, a shell, an arbitrary URL, or a state change, so no prompt can reach one through the adapter.
+
+The three stack reads are node-scoped. A request targets one node through the `x-node-id` header and defaults to the hub's local node; the node list and fleet health tools describe every node in the fleet.
+
+## What it never returns
+
+Every projection is built from an allowlist, not by filtering a larger object. A response carries names, states, counts, timestamps, and stable reason codes, and nothing else. It never includes:
+
+- Compose file contents or any part of a stack definition.
+- Environment variable values or secret values.
+- Container labels.
+- Log lines.
+- Filesystem paths.
+- Node URLs or credentials.
+- The free-text explanation behind a verdict. You get the reason id, so the client chooses its own words.
+
+This is what makes the scope safe to hand to a client you do not fully control: the adapter cannot return a secret that the endpoint never sends.
+
+## Create an Observe Only token
+
+<Steps>
+  <Step title="Open Settings → Access → API Tokens">
+    Click your avatar, then **Settings**. The tab lives in the **Access** group of the Settings sidebar. See [API Tokens](/features/api-tokens) for the full token reference, including scopes, rate limits, and revocation.
+  </Step>
+  <Step title="Click Create token">
+    Give it a name that says which client holds it, for example `mcp-laptop` or `mcp-ci-runner`. Names must be unique among your active tokens.
+  </Step>
+  <Step title="Choose Observe Only and an expiry">
+    Observe Only can reach only the five observation endpoints. It must expire: choose 30, 60, or 90 days, or 1 year. There is no non-expiring option for this scope.
+  </Step>
+  <Step title="Copy the token">
+    Sencho shows the value once. Store it in a file the adapter can read, or in the secret store your client already uses.
+  </Step>
+</Steps>
+
+The token is owned by the admin user who created it. It appears on **Settings → Access → API Tokens** with an **Observe Only** badge and its expiry date.
+
+## Install the adapter
+
+The adapter is installed from source. There is no npm package yet.
+
+```bash
+git clone https://github.com/Studio-Saelix/sencho-mcp.git
+cd sencho-mcp
+npm ci
+npm run build
+```
+
+The build writes the entry point to `dist/index.js`. The [repository README](https://github.com/Studio-Saelix/sencho-mcp#readme) is the authoritative install guide for the adapter, including the Node.js version it expects; follow it if it differs from the steps here.
+
+## Configure the adapter
+
+The adapter reads its settings from the environment:
+
+| Variable | Required | What it does |
+|----------|----------|--------------|
+| `SENCHO_URL` | Yes | Base URL of your Sencho instance, for example `https://sencho.example.com:1852`. |
+| `SENCHO_TOKEN_FILE` | One of these | Path to a file containing the Observe Only token. This is the preferred form: the token stays out of the process environment and out of the client configuration file. |
+| `SENCHO_TOKEN` | One of these | The token value inline. Use it when the client cannot read a file. |
+| `SENCHO_TIMEOUT_MS` | No | Per-request timeout in milliseconds. Defaults to `15000`, with a maximum of `60000`. |
+
+Set `SENCHO_TOKEN_FILE` or `SENCHO_TOKEN`, not both. A token file is easier to rotate: replace its contents and restart the client, and the token never appears in a process listing or a configuration file that gets copied around. Restrict the file to the account that runs the client:
+
+```bash
+chmod 600 /home/user/.config/sencho/observe-token
+```
+
+## Add it to your MCP client
+
+Any MCP client that can launch a local stdio server can run the adapter. The client configuration names the command, the built entry point, and the environment:
+
+```json
+{
+  "mcpServers": {
+    "sencho": {
+      "command": "node",
+      "args": ["/home/user/sencho-mcp/dist/index.js"],
+      "env": {
+        "SENCHO_URL": "https://sencho.example.com:1852",
+        "SENCHO_TOKEN_FILE": "/home/user/.config/sencho/observe-token"
+      }
+    }
+  }
+}
+```
+
+The `mcpServers` object is the common shape; place this block where your client expects its MCP server definitions and reload or restart the client so it picks up the new server.
+
+## The five tools
+
+The adapter exposes five tools and no others. Every tool is annotated read-only, and there is no log, environment, file, shell, or arbitrary-request tool.
+
+Every response uses the same envelope:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": 1767225600000,
+  "data": {}
+}
+```
+
+`schemaVersion` is `1`. `generatedAt` is the epoch-millisecond timestamp of the evidence behind the answer, not the moment the adapter serialized it. `data` holds the projection described below.
+
+| Tool | What `data` carries |
+|------|---------------------|
+| `sencho_list_nodes` | An array of nodes. Each node has `id`, `name`, `type` (`local` or `remote`), `transport` (`local`, `proxy`, or `pilot`), `status` (`online`, `offline`, or `unknown`), `lastContactAt` (epoch ms or `null`), and `cordoned`. |
+| `sencho_list_stacks` | A page of stacks: `degraded`, `total`, `nextCursor`, and `stacks`. Each stack has `name`, `status` (`running`, `exited`, `partial`, or `unknown`), `running` and `total` container counts (or `null` when the node could not report them), `source` (`local` or `git`), and `isSelf`. `nextCursor` is non-null when more stacks exist. A directory whose name has characters other than letters, digits, `_`, and `-` is not listed and is not counted in `total`, because no per-stack call accepts that name. |
+| `sencho_get_stack_status` | `stack`, `outcome` (`ok` or `unavailable`), `containers`, and `truncated`. Each container has `name`, `service`, `state` (`created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead`, or `other`), `health` (`healthy`, `unhealthy`, `starting`, `none`, or `null`), `restartCount`, `exitCode`, and `startedAt`. |
+| `sencho_get_stack_readiness` | `stack`, `update` (or `null`), `rollback` (or `null`), and `unavailableReason`. An update slot carries `verdict` (`ready`, `ready_with_warnings`, `review_required`, `blocked`, or `unknown`), `topReasonId`, `hasUpdate`, and `computedAt`. A rollback slot carries `overall` (`ready`, `partial`, or `not_ready`), `topReasonId`, and `computedAt`. |
+| `sencho_get_fleet_health` | `stale`, `domains`, `domainsOmitted`, `summary`, `nodes`, `findings`, and `findingsTruncated`. |
+
+Two tools answer with a condition rather than an error, because the request succeeded and the honest answer is that the evidence is missing:
+
+- **`sencho_get_stack_status`** returns at most 100 containers and sets `truncated` when the stack has more. Containers that are not running or are unhealthy come first, then those still starting, then the rest, each group by name, so the cap drops healthy containers before it drops a problem one. An `outcome` of `unavailable` means the node could not read its own containers at that moment. The container list is empty, and the next call may succeed.
+- **`sencho_get_stack_readiness`** sets `unavailableReason` to `summary_truncated` or `domain_error` only when both verdict slots are `null`.
+
+`sencho_get_fleet_health` is the widest response:
+
+- Each node carries `id`, `name`, `transport`, an overall `state`, `reachability` (`status`, `contactAt`, `probedLive`, `latencyMs`), a `cells` object keyed by domain, and `stackCount`. A cell carries `state`, `reasonCode`, `evidenceAgeMs`, and `source` (`live` or `stored`).
+- Each finding carries `id`, `domain`, `nodeId`, `stack`, `code`, `severity`, and `count`. Findings arrive worst first and are capped at 50; `findingsTruncated` says when the cap applied.
+- `control` is withheld from the observation surface, and `domainsOmitted` names it. The response describes the same fleet aggregate that the [Fleet Readiness](/features/fleet-view#the-readiness-tab) tab renders, with finding prose and actions withheld.
+
+Nothing in this surface is scored. A check that could not run reads as `unknown` or `unavailable`, never as healthy, and the two states stay distinct so a client can tell missing evidence from incomplete evidence.
+
+An error body is `{ error, code }`. The codes this surface can return are `SCOPE_DENIED` (the token tried a path outside the five), `PERMISSION_DENIED` (the account cannot read that node or stack), `capability_unavailable` (the targeted node is too old for observation), `node_unreachable` (the targeted remote node is down, or did not give a usable answer to the capability check, status 503), `NODE_NOT_FOUND`, `STACK_NOT_FOUND`, `INVALID_CURSOR`, and `INVALID_LIMIT`.
+
+## Limits worth knowing
+
+- **Reads are not written to the audit log.** MCP activity shows on **Settings → Access → API Tokens** as the token's name and its **Last used** time. It creates no [audit-log](/features/audit-log) entries, because nothing it can do changes state.
+- **No per-node or per-stack narrowing.** An Observe Only token sees every node and stack the hub knows, the same set a viewer sees across the fleet, and the scope cannot be limited to particular nodes or stacks.
+- **Dismissed findings still appear.** [Fleet Readiness](/features/fleet-view#the-readiness-tab) applies dismissals in the UI. The observation read never touches that state, so `sencho_get_fleet_health` still reports a finding you dismissed there.
+- **Fleet health can be up to 15 seconds old.** The aggregate is cached for up to 15 seconds and shared across callers, so a burst of clients collapses onto one fleet-wide read. `generatedAt` and each cell's `evidenceAgeMs` tell you how fresh the evidence is.
+- **Old nodes cannot be observed.** A remote node running an older Sencho is reported as `unsupported` by the adapter, and the API answers `capability_unavailable`. Upgrade that node before connecting a client to it. A remote node that is down, or that does not answer correctly at its API URL (a Distributed API Proxy node), answers `node_unreachable` instead, which means check the node and try again, not upgrade. A Distributed API Proxy node that answers but rejects the API token stored for it on the hub is not detected by that check: the request is forwarded and the node's own `401 Invalid or expired token` comes back with no code. That 401 is about the node's stored credential, not the Observe Only token (a response forwarded from a node carries an `x-sencho-proxy: 1` header, which a 401 about your own token does not), so generate a new Node Token on the remote and update the node in **Settings → Infrastructure → Nodes** on the hub, not the client. A Pilot node whose tunnel is disconnected, and a node with no API URL or token configured, answer a 503 without a code.
+- **There are no write tools.** The adapter can only read. It cannot deploy, start, stop, edit, delete, or run a command.
+- **The token must expire.** The scope offers 30, 60, or 90 days or 1 year, and no non-expiring option.
+
+## Revoke access
+
+Revoke the token from **Settings → Access → API Tokens**: click the trash icon on the token's card and confirm. The adapter's next call fails with `credential_rejected`, and the client should be reconfigured with a new token or have the server entry removed.
+
+Expiry works the same way. Once the token passes its expiry date, the adapter can no longer authenticate. Issue a replacement and update the token file (or `SENCHO_TOKEN`) before the old one lapses.
+
+## Related
+
+<Columns cols={2}>
+  <Card title="API Tokens" icon="key" href="/features/api-tokens">
+    The full scope reference, creation walkthrough, rate limits, and revocation.
+  </Card>
+  <Card title="Fleet Readiness" icon="layout-grid" href="/features/fleet-view#the-readiness-tab">
+    The findings page that the fleet health tool reports on, with the actions that fix each finding.
+  </Card>
+  <Card title="Node Compatibility" icon="server" href="/features/node-compatibility">
+    How Sencho detects a node that does not advertise the observation capability.
+  </Card>
+</Columns>

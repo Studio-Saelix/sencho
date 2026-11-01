@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { DatabaseService, type ApiToken } from '../services/DatabaseService';
+import { API_TOKEN_SCOPES, DatabaseService, type ApiToken } from '../services/DatabaseService';
 import { looksLikeApiToken, verifyApiTokenChecksum } from './apiTokenFormat';
 
 /**
@@ -9,7 +9,10 @@ import { looksLikeApiToken, verifyApiTokenChecksum } from './apiTokenFormat';
  */
 export type ApiTokenValidation =
   | { ok: true; token: ApiToken }
-  | { ok: false; reason: 'not-api-token' | 'checksum' | 'not-found' | 'revoked' | 'expired' };
+  | {
+      ok: false;
+      reason: 'not-api-token' | 'checksum' | 'not-found' | 'revoked' | 'expired' | 'unknown-scope';
+    };
 
 /**
  * Validate an API token with no side effects: format, checksum (timing-safe),
@@ -27,6 +30,9 @@ export function validateApiToken(token: string): ApiTokenValidation {
   if (!apiToken) return { ok: false, reason: 'not-found' };
   if (apiToken.revoked_at) return { ok: false, reason: 'revoked' };
   if (apiToken.expires_at && apiToken.expires_at < Date.now()) return { ok: false, reason: 'expired' };
+  if (!(API_TOKEN_SCOPES as readonly string[]).includes(apiToken.scope)) {
+    return { ok: false, reason: 'unknown-scope' };
+  }
   return { ok: true, token: apiToken };
 }
 

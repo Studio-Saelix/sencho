@@ -19,7 +19,10 @@ export const nodeContextMiddleware: RequestHandler = (req: Request, res: Respons
   if (req.path.startsWith('/api/') && !isProxyExemptPath(req.path)) {
     const node = DatabaseService.getInstance().getNode(req.nodeId);
     if (!node) {
-      res.status(404).json({ error: `Node with id ${req.nodeId} not found or was deleted.` });
+      res.status(404).json({
+        error: `Node with id ${req.nodeId} not found or was deleted.`,
+        code: 'NODE_NOT_FOUND',
+      });
       return;
     }
   }

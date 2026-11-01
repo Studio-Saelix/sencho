@@ -108,6 +108,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `fleet-readiness-v1` | Per-node readiness evidence and the per-stack readiness rollup behind the Readiness tab |
 | `health-gate-observation-v1` | Health observation of a stack on a remote node, for health-gated rollouts and updates |
 | `host-usage-unknown-v1` | Nullable host CPU and memory usage (unknown when a nested container cannot read the Docker host's cgroup) |
+| `agent-observation-v1` | Read-only observation projections for MCP clients and other AI observers |
 
 <Note>
   `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node has no scanner installed, it omits this capability and the scanning UI is replaced by a lock card whose body reads "Install a scanner from the Scanner setup tab." instead of the generic upgrade message.
