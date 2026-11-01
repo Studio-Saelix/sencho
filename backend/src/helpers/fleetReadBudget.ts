@@ -45,16 +45,22 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  * Docker answers every call. The listing cannot be used to size that budget,
  * because it is the slow part and would have to run under the flat transport
  * budget first. A fixed deadline is independent of the read: it sits inside the
- * 20 s per-node client timeout the Docker Labels tab and the Map use
+ * 28 s per-node client timeout the Docker Labels tab and the Map use
  * (`LABELS_NODE_TIMEOUT_MS`, `MAP_NODE_TIMEOUT_MS`), with room for the
  * transfer, so a large hub is not cut off before it can build its answer. The
  * networking summary has no per-node client timeout; this deadline bounds it on
  * its own.
  *
+ * 25 s is sized from a measured hub: 461 containers on one vCPU build the map
+ * in 5 to 9 s alone, and 15 to 17.5 s while a browser has the dashboard open,
+ * so 18 s cut about two loads in five. The deadline leaves that worst case
+ * about 40% headroom; a build that still outlives it is kept for the retry
+ * (see {@link LocalFleetBuildShare}).
+ *
  * The deadline bounds the caller's wait, not the work. The local builders
  * cannot be cancelled, so a build that outlives the deadline finishes on its
- * own; the label inventory shares that build with a Retry instead of starting
- * the listing again. Where a local read checks the daemon first, that check is
+ * own; the hub's label inventory, dependency graph and networking summary
+ * share that build with a Retry instead of starting it again. Where a local read checks the daemon first, that check is
  * a maximum inside the deadline rather than an allowance added on top: the
  * ping normally answers in milliseconds, so the build gets almost the full
  * deadline. A build allowed only a fixed slice after a ping that can itself
@@ -65,7 +71,7 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  * read even though that node does the same host-sized work; the remote's own
  * build is not bounded by this constant.
  */
-export const LOCAL_FLEET_READ_DEADLINE_MS = 18_000;
+export const LOCAL_FLEET_READ_DEADLINE_MS = 25_000;
 
 /** The two caps of a local Fleet read: one liveness check, then one deadline. */
 export interface LocalFleetReadBudget {

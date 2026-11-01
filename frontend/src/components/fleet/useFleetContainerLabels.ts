@@ -7,7 +7,7 @@ import type { ContainerLabelRow, FleetLabelInventoryResponse, LabelIndexRow, Lab
 const LABELS_CONCURRENCY = 4;
 
 /** A node that has not answered by now is reported as failed, so Refresh is not held indefinitely behind it. */
-export const LABELS_NODE_TIMEOUT_MS = 20_000;
+export const LABELS_NODE_TIMEOUT_MS = 28_000;
 
 export interface LabelsNodeRef {
   id: number;

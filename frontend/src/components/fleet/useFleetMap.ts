@@ -10,7 +10,7 @@ export const MAP_STALE_MS = 60_000;
 const MAP_CONCURRENCY = 4;
 
 /** A node that has not answered by now is reported as failed, so Refresh and Retry never stay locked behind it. */
-export const MAP_NODE_TIMEOUT_MS = 20_000;
+export const MAP_NODE_TIMEOUT_MS = 28_000;
 
 export interface MapNodeRef {
   id: number;

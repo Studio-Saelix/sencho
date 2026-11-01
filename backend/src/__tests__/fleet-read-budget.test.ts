@@ -32,7 +32,7 @@ describe('fleet read budget', () => {
 
   it('names a budget overrun instead of surfacing the runtime abort text', () => {
     expect(describeFleetReadFailure(new FleetReadTimeoutError(FLEET_READ_BUDGET_MS, 'labels'))).toBe('Timed out after 5s');
-    expect(describeFleetReadFailure(new FleetReadTimeoutError(LOCAL_FLEET_READ_DEADLINE_MS, 'labels'))).toBe('Timed out after 18s');
+    expect(describeFleetReadFailure(new FleetReadTimeoutError(LOCAL_FLEET_READ_DEADLINE_MS, 'labels'))).toBe('Timed out after 25s');
     expect(describeFleetReadFailure(new DOMException('aborted', 'TimeoutError'))).toBe('Timed out after 5s');
     expect(describeFleetReadFailure(new Error('connect ECONNREFUSED'))).toBe('connect ECONNREFUSED');
     expect(describeFleetReadFailure('boom')).toBe('Failed to reach node');

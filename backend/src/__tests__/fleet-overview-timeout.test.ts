@@ -16,7 +16,7 @@ import { CacheService } from '../services/CacheService';
 import DockerController from '../services/DockerController';
 import { HOST_USAGE_UNKNOWN_HEADER } from '../services/CapabilityRegistry';
 import { _resetHostSampleStateForTests } from '../helpers/hostSample';
-import { _resetLocalLabelInventoryShareForTests } from '../helpers/localLabelInventory';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 import { createTestApiToken } from './helpers/apiTokenTestHelper';
 
 let tmpDir: string;
@@ -70,7 +70,7 @@ afterAll(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  _resetLocalLabelInventoryShareForTests();
+  _resetLocalFleetBuildSharesForTests();
   const db = DatabaseService.getInstance();
   for (const node of db.getNodes()) {
     if (node.type === 'remote') db.deleteNode(node.id);
@@ -474,7 +474,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(res.body.nodeErrors).toEqual([]);
       expect((res.body.nodes as { nodeId?: number }[]).some(n => n.nodeId === localNodeId())).toBe(true);
       expect(elapsedMs).toBeGreaterThan(5_000);
-      expect(elapsedMs).toBeLessThan(18_000);
+      expect(elapsedMs).toBeLessThan(25_000);
     }, 30_000);
 
     it('does not cut the hub\'s own networking summary at the flat 5 s budget', async () => {
@@ -489,7 +489,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(row).toMatchObject({ nodeId: localNodeId(), status: 'ok', error: null });
       expect(row.summary).not.toBeNull();
       expect(elapsedMs).toBeGreaterThan(5_000);
-      expect(elapsedMs).toBeLessThan(18_000);
+      expect(elapsedMs).toBeLessThan(25_000);
     }, 30_000);
 
     it('cuts a wedged local daemon at the 5 s liveness check before building the graph', async () => {
@@ -511,7 +511,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(elapsedMs).toBeLessThan(12_000);
     }, 30_000);
 
-    it('cuts a local graph that outlives the local deadline at 18 s', async () => {
+    it('cuts a local graph that outlives the local deadline at 25 s', async () => {
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
         ping: vi.fn().mockResolvedValue(undefined),
         getDependencySnapshot: vi.fn(() => new Promise<never>(() => {})),
@@ -523,10 +523,10 @@ describe('node-data fan-outs share the fleet-read budget', () => {
 
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
-        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 18s' });
-      expect(elapsedMs).toBeGreaterThan(17_000);
-      expect(elapsedMs).toBeLessThan(26_000);
-    }, 30_000);
+        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 25s' });
+      expect(elapsedMs).toBeGreaterThan(24_000);
+      expect(elapsedMs).toBeLessThan(33_000);
+    }, 40_000);
   });
 
   describe('GET /api/fleet/networking-summary?nodeId=', () => {
@@ -713,17 +713,20 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(requested.every((u: string) => originOf(u) === HEALTHY_BASE)).toBe(true);
     });
 
-    it('serves a retry from the hub build the first request already ran', async () => {
-      const list = vi.fn().mockResolvedValue([{
-        id: 'c1',
-        name: 'web-1',
+    it('reads the hub again on a refresh instead of replaying the answer it already returned', async () => {
+      const container = (id: string) => ({
+        id,
+        name: id,
         state: 'running',
         stack: null,
         service: 'web',
         labels: { 'traefik.enable': 'true' },
         imageId: 'sha256:image',
         inspectFailed: false,
-      }]);
+      });
+      const list = vi.fn()
+        .mockResolvedValueOnce([container('c1')])
+        .mockResolvedValueOnce([container('c1'), container('c2')]);
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
         ping: vi.fn().mockResolvedValue(undefined),
         listContainersForLabelInventory: list,
@@ -731,18 +734,29 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       } as unknown as DockerController);
 
       const first = await getLabels(`?nodeId=${localNodeId()}`);
-      const second = await getLabels(`?nodeId=${localNodeId()}`);
+      // A container started after the first answer must show on the next read,
+      // not after the old answer's share window.
+      const refresh = await getLabels(`?nodeId=${localNodeId()}`);
 
       expect(first.status).toBe(200);
-      expect(second.status).toBe(200);
-      expect(list).toHaveBeenCalledTimes(1);
-      type Row = { status: string; inventory: { containers: { id: string }[]; generatedAt: number } | null };
-      const firstRow = (first.body.nodes as Row[])[0];
-      const secondRow = (second.body.nodes as Row[])[0];
-      expect(firstRow.status).toBe('ok');
-      expect(firstRow.inventory?.containers.map(c => c.id)).toEqual(['c1']);
-      expect(secondRow.inventory?.containers.map(c => c.id)).toEqual(['c1']);
-      expect(secondRow.inventory?.generatedAt).toBe(firstRow.inventory?.generatedAt);
+      expect(refresh.status).toBe(200);
+      expect(list).toHaveBeenCalledTimes(2);
+      type Row = { status: string; inventory: { containers: { id: string }[] } | null };
+      expect(((first.body.nodes as Row[])[0]).inventory?.containers.map(c => c.id)).toEqual(['c1']);
+      expect(((refresh.body.nodes as Row[])[0]).inventory?.containers.map(c => c.id)).toEqual(['c1', 'c2']);
+    });
+
+    it('reads the hub\'s map again on a refresh', async () => {
+      const getDependencySnapshot = vi.fn(async () => ({ containers: [], networks: [], volumes: [] }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+      await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
+
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(2);
     });
 
     it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {
@@ -801,7 +815,7 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     it('returns a hub build that outlasts the old 12-second ceiling', async () => {
       // At 458 containers the hub's build alone needed more than the old
       // fixed 12 s slice after the ping in the real tab. The read now owns one
-      // 18 s deadline, so a 12.5 s build (a fast ping leaves nearly all of it)
+      // 25 s deadline, so a 12.5 s build (a fast ping leaves nearly all of it)
       // must return every row instead of a `Timed out after 12s` row.
       const containers = Array.from({ length: 3 }, (_, i) => ({
         id: `container-${i}`,

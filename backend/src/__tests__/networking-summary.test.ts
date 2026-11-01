@@ -13,6 +13,7 @@ import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './he
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -49,6 +50,7 @@ describe('networking summary', () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    _resetLocalFleetBuildSharesForTests();
     DatabaseService.getInstance().deleteStackExposureIntents(1, STACK);
     DatabaseService.getInstance().deleteMeshStack(1, STACK);
     fs.rmSync(stackDir, { recursive: true, force: true });
@@ -251,7 +253,7 @@ describe('networking summary', () => {
     expect(local.summary?.exposed.stacks).toContain(STACK);
   });
 
-  it('cuts a hub summary that outlives the local deadline at 18 s', async () => {
+  it('cuts a hub summary that outlives the local deadline at 25 s', async () => {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getDependencySnapshot: vi.fn(() => new Promise<never>(() => {})),
     } as unknown as DockerController);
@@ -262,10 +264,10 @@ describe('networking summary', () => {
 
     expect(res.status).toBe(200);
     const local = (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[])[0];
-    expect(local).toMatchObject({ status: 'error', summary: null, error: 'Timed out after 18s' });
-    expect(elapsedMs).toBeGreaterThan(17_000);
-    expect(elapsedMs).toBeLessThan(26_000);
-  }, 30_000);
+    expect(local).toMatchObject({ status: 'error', summary: null, error: 'Timed out after 25s' });
+    expect(elapsedMs).toBeGreaterThan(24_000);
+    expect(elapsedMs).toBeLessThan(33_000);
+  }, 40_000);
 
   it('degrades a remote that errors to a node-error while keeping the hub', async () => {
     const db = DatabaseService.getInstance();

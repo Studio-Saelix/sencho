@@ -8,7 +8,7 @@ import { ControlIdentityMismatchError, FleetSyncService, StaleSyncPushError } fr
 import { MAX_SYNC_ROWS, SYNC_ERROR_CODES } from '../services/fleetSyncConstants';
 import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPDATE_TIMEOUT_MS, UPDATE_TIMEOUT_MSG, TERMINAL_TTL_MS } from '../services/FleetUpdateTrackerService';
 import { NodeRegistry, type ProxyTarget } from '../services/NodeRegistry';
-import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
+import { type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
 import { type MemoryWire } from '../helpers/hostMemory';
 import { readLocalHostSample, hostSampleToWire } from '../helpers/hostSample';
@@ -89,18 +89,16 @@ import {
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import {
-  LOCAL_FLEET_READ_DEADLINE_MS,
   describeFleetReadFailure,
   fleetReadSignal,
-  withinFleetReadBudget,
-  withinLocalFleetReadBudget,
 } from '../helpers/fleetReadBudget';
 import { readLocalLabelInventory } from '../helpers/localLabelInventory';
+import { readLocalDependencyGraph, readLocalNetworkingSummary } from '../helpers/localFleetReads';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { READINESS_DOMAINS, type ReadinessDomainKey } from '../services/readiness/types';
-import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
+import { mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
@@ -824,11 +822,7 @@ fleetRouter.get('/readiness', authMiddleware, async (req: Request, res: Response
  */
 async function readNodeGraph(node: Node): Promise<FleetNodeGraphResult> {
   if (node.type === 'local') {
-    const graph = await withinLocalFleetReadBudget(
-      'dependency graph',
-      () => DockerController.getInstance(node.id).ping(),
-      () => buildLocalGraph(node.id, node.name),
-    );
+    const graph = await readLocalDependencyGraph(node.id, node.name);
     return { nodeId: node.id, nodeName: node.name, status: 'ok', graph, error: null };
   }
 
@@ -1113,14 +1107,8 @@ fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res:
         if (node.type === 'local') {
           // The hub's own snapshot scales with its stack and container count,
           // so it runs under the local deadline; remotes stay on the flat
-          // transport budget below. No daemon ping gates this read: the
-          // summary deliberately keeps its declared signals when Docker fails,
-          // so a down daemon must not turn a partial answer into a node error.
-          const summary = await withinFleetReadBudget(
-            computeNodeNetworkingSummary(node.id),
-            'networking summary',
-            LOCAL_FLEET_READ_DEADLINE_MS,
-          );
+          // transport budget below.
+          const summary = await readLocalNetworkingSummary(node.id);
           return { nodeId: node.id, nodeName: node.name, status: 'ok', summary, error: null };
         }
         const target = NodeRegistry.getInstance().getProxyTarget(node.id);

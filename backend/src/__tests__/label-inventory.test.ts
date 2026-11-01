@@ -10,7 +10,7 @@ import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { _resetLocalLabelInventoryShareForTests } from '../helpers/localLabelInventory';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 import {
   buildNodeLabelInventory,
   buildStackLabelInventory,
@@ -107,7 +107,7 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 afterEach(() => {
   vi.restoreAllMocks();
-  _resetLocalLabelInventoryShareForTests();
+  _resetLocalFleetBuildSharesForTests();
 });
 
 describe('buildNodeLabelInventory', () => {

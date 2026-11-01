@@ -9,7 +9,7 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
-import { _resetLocalLabelInventoryShareForTests } from '../helpers/localLabelInventory';
+import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -44,7 +44,7 @@ beforeAll(async () => {
 afterAll(() => cleanupTestDb(tmpDir));
 
 afterEach(() => {
-  _resetLocalLabelInventoryShareForTests();
+  _resetLocalFleetBuildSharesForTests();
 });
 
 describe('fleet topology reads require node:read', () => {
