@@ -41,6 +41,14 @@ describe('classifyStackApiPath', () => {
       expect(classifyStackApiPath('POST', '/stacks/web/drift/recheck')).toEqual({
         kind: 'named-stack', stackName: 'web', action: 'stack:read',
       });
+      // The per-stack observation suffixes. Missing these fails closed as
+      // unknown-named, which would 403 every observer on a remote node.
+      expect(classifyStackApiPath('GET', '/stacks/web/observation/status')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
+      expect(classifyStackApiPath('GET', '/stacks/web/observation/readiness')).toEqual({
+        kind: 'named-stack', stackName: 'web', action: 'stack:read',
+      });
     });
 
     it('maps edit routes to stack:edit', () => {
@@ -146,6 +154,9 @@ describe('classifyStackApiPath', () => {
       // Two segments, so without the exclusion it would read `platform` as a
       // stack name and demand an exact grant on a stack called `platform`.
       expect(classifyStackApiPath('GET', '/stacks/platform/docker-context')).toEqual({ kind: 'static' });
+      // The read-only AI observation list. `platform` stays reserved, so this
+      // edit withholds no stack name that had routes before it.
+      expect(classifyStackApiPath('GET', '/stacks/platform/observation')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/scan')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/import/move')).toEqual({ kind: 'static' });
       expect(classifyStackApiPath('POST', '/stacks/bulk')).toEqual({ kind: 'static' });
@@ -197,6 +208,8 @@ describe('classifyStackApiPath', () => {
 
     it('returns unknown-named for unrecognized /stacks/<name>/... suffixes', () => {
       expect(classifyStackApiPath('GET', '/stacks/web/weird')).toEqual({ kind: 'unknown-named' });
+      expect(classifyStackApiPath('GET', '/stacks/web/observation/other')).toEqual({ kind: 'unknown-named' });
+      expect(classifyStackApiPath('POST', '/stacks/web/observation/status')).toEqual({ kind: 'unknown-named' });
       expect(classifyStackApiPath('POST', '/stacks/web/not-a-real-action')).toEqual({
         kind: 'unknown-named',
       });

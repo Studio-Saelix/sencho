@@ -26,6 +26,7 @@ import { gitopsApplicationsRouter } from './routes/gitopsApplications';
 import { usersRouter } from './routes/users';
 import { gitSourcesRouter, stackGitSourceRouter } from './routes/gitSources';
 import { fleetRouter } from './routes/fleet';
+import { fleetObservationRouter } from './routes/fleetObservation';
 import { findingDismissalsRouter } from './routes/findingDismissals';
 import { fleetActionsRouter } from './routes/fleetActions';
 import { readinessRouter } from './routes/readiness';
@@ -59,6 +60,7 @@ import { dashboardRouter } from './routes/dashboard';
 import { containersRouter, portsRouter } from './routes/containers';
 import { nodesRouter } from './routes/nodes';
 import { stacksRouter } from './routes/stacks';
+import { stackObservationRouter } from './routes/stackObservation';
 import { stackActivityRouter } from './routes/stackActivity';
 import { stackMetricsRouter } from './routes/stackMetrics';
 import { gitopsMetricsRouter } from './routes/gitopsMetrics';
@@ -135,6 +137,9 @@ app.use('/api/api-tokens', apiTokensRouter);
 app.use('/api/audit-log', auditLogRouter);
 // Mounted ahead of the fleet router so its exact paths are not swallowed.
 app.use('/api/fleet/dismissals', findingDismissalsRouter);
+// Read-only AI observation projections; mounted ahead of the fleet router so
+// its exact paths are not swallowed.
+app.use('/api/fleet/observation', fleetObservationRouter);
 app.use('/api/fleet', fleetRouter);
 app.use('/api/fleet-actions', fleetActionsRouter);
 // Node-local readiness slices. Deliberately outside the `/api/fleet/` prefix:
@@ -181,6 +186,9 @@ app.use('/api/networking', networkingRouter);
 app.use('/api/registry-delivery', registryDeliveryRouter);
 app.use('/api/nodes', nodesRouter);
 app.use('/api/stacks', stackActivityRouter);
+// Read-only AI observation projections; ahead of the generic stacks router so
+// its `/:stackName` handlers never see these paths.
+app.use('/api/stacks', stackObservationRouter);
 app.use('/api/stacks', stacksRouter);
 app.use('/api/stack-metrics', stackMetricsRouter);
 app.use('/api/gitops-metrics', gitopsMetricsRouter);

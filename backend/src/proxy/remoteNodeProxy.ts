@@ -33,6 +33,7 @@ import {
   SERVICE_SCOPED_UPDATE_CAPABILITY,
   SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
   SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+  AGENT_OBSERVATION_CAPABILITY,
 } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
@@ -523,6 +524,22 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
         if (!supported) {
           res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
+          return;
+        }
+      }
+
+      // Agent observation needs the node's own projection routes. A remote
+      // without the capability answers `capability_unavailable` here, BEFORE the
+      // mixed-version RBAC gate: an old node would otherwise answer the new
+      // paths with the RBAC gate's codless 403, which reads as "this user may
+      // not" instead of "upgrade this node".
+      if (isAgentObservationRoute(req.method, req.path)) {
+        const supported = await remoteAdvertisesCapability(req.nodeId, AGENT_OBSERVATION_CAPABILITY);
+        if (!supported) {
+          res.status(400).json({
+            error: `Remote node "${node.name}" does not support AI agent observation. Upgrade it before connecting an AI client to it.`,
+            code: 'capability_unavailable',
+          });
           return;
         }
       }
@@ -1041,6 +1058,20 @@ function isServiceScopedUpdateRoute(req: Request): boolean {
     return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
   }
   return false;
+}
+
+/**
+ * The per-node agent observation projections (path is post-/api strip).
+ *
+ * Trailing slashes are normalized first: Express matches them, so the remote
+ * must be gated on the same set the local routers accept. The fleet observation
+ * routes are not listed because `/api/fleet/` never reaches this proxy.
+ */
+function isAgentObservationRoute(method: string, path: string): boolean {
+  if (method.toUpperCase() !== 'GET') return false;
+  const normalized = (path.split('?')[0] ?? path).replace(/\/+$/, '');
+  return normalized === '/stacks/platform/observation'
+    || /^\/stacks\/[^/]+\/observation\/(?:status|readiness)$/.test(normalized);
 }
 
 /** POST /alerts (path is post-/api strip). */
