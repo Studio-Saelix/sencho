@@ -417,8 +417,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [inspectImage, setInspectImage] = useState<(DockerImage & { nodeId: string | number }) | null>(null);
     const [browseVolume, setBrowseVolume] = useState<string | null>(null);
 
-    // External (unmanaged) container state
-    const [selectedOrphans, setSelectedOrphans] = useState<string[]>([]);
+    // External (unmanaged) container state. A selection belongs to the read it
+    // was made on: `list` is that read's payload, so a fresh read (or another
+    // node's list) starts with nothing selected instead of carrying the old ids
+    // over. Derived at render, so no effect copies the list back into state.
+    const [orphanSelection, setOrphanSelection] = useState<{
+        list: Record<string, UnmanagedContainer[]> | null;
+        ids: string[];
+    }>({ list: null, ids: [] });
     const [bulkPurgeConfirm, setBulkPurgeConfirm] = useState(false);
 
     // Vulnerability scanning state
@@ -483,12 +489,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         setUsageLoad({ status: 'loading' });
         void loadUsage();
     }, [activeNode]);
-
-    // A fresh external-container read invalidates any selection made against the
-    // previous list.
-    useEffect(() => {
-        setSelectedOrphans([]);
-    }, [orphansRegion.data]);
 
     // A selected image belongs to the node it was listed on.
     useEffect(() => {
@@ -635,13 +635,29 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
-    const toggleOrphan = (id: string) =>
-        setSelectedOrphans(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-
     const totalOrphansCount = Object.values(orphans).flat().length;
+    // The selection is valid only for the read it was made on: a different
+    // payload (a refresh, or another node's list) reads as empty even when it
+    // re-lists the same ids, and only ids this payload holds can be selected,
+    // so a purge never carries one the operator cannot see.
+    const orphanIdSet = new Set(Object.values(orphans).flat().map(c => c.Id));
+    const selectedOrphans = orphanSelection.list === orphansRegion.data
+        ? orphanSelection.ids.filter(id => orphanIdSet.has(id))
+        : [];
+    const toggleOrphan = (id: string) =>
+        setOrphanSelection(prev => {
+            const ids = prev.list === orphansRegion.data ? prev.ids : [];
+            return {
+                list: orphansRegion.data,
+                ids: ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id],
+            };
+        });
     const selectAllOrphans = () => {
-        const allIds = Object.values(orphans).flat().map(c => c.Id);
-        setSelectedOrphans(selectedOrphans.length === allIds.length ? [] : allIds);
+        const allIds = [...orphanIdSet];
+        setOrphanSelection({
+            list: orphansRegion.data,
+            ids: selectedOrphans.length === allIds.length ? [] : allIds,
+        });
     };
 
     const handlePurgeOrphans = async () => {

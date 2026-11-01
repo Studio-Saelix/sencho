@@ -961,6 +961,61 @@ describe('ResourcesView', () => {
       expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
     });
 
+    it('clears the external-container selection when a refresh re-lists the same ids', async () => {
+      // The prune refreshes every region, and the external-container read that
+      // comes back lists the same container. Only the payload identity tells
+      // the page the selection was made against a read it no longer owns.
+      const orphans = {
+        'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+      };
+      // Every read hands back a fresh body, as a real response does, so the
+      // refresh is a new payload even though it lists the same container.
+      mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === '/system/orphans') return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+        if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('old:v1')], volumes: [], networks: [] }));
+        if (url === '/system/prune/plan' && opts?.method === 'POST') {
+          return Promise.resolve(jsonResponse(samplePrunePlan({
+            scope: 'managed',
+            targets: ['networks'],
+            items: [{ target: 'networks', id: 'n1', name: 'old_net', managed: true, reason: 'Network has no attached containers', network: {} }],
+            reclaimableBytes: 0,
+          })));
+        }
+        if (url === '/system/prune/system' && opts?.method === 'POST') {
+          return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 0, outcomes: [] }));
+        }
+        return Promise.resolve(jsonResponse({}));
+      });
+
+      const user = userEvent.setup();
+      render(<ResourcesView />);
+      await user.click(await screen.findByRole('tab', { name: /external/i }));
+      await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+      expect(screen.getByRole('button', { name: 'Purge selected (1)' })).toBeEnabled();
+
+      await user.click(screen.getByRole('button', { name: 'More cleanup actions' }));
+      await user.click(await screen.findByRole('menuitem', { name: 'Prune unused networks' }));
+      await user.click(await screen.findByRole('button', { name: 'Prune' }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalled());
+
+      // Waits for the refreshed read to land: until it does the old payload is
+      // still the one on screen, and with it the old selection.
+      await waitFor(() => {
+        expect(screen.getByRole('checkbox', { name: 'Select web' })).not.toBeChecked();
+        expect(screen.getByRole('button', { name: 'Purge selected (0)' })).toBeDisabled();
+      });
+
+      // A deliberate selection on the refreshed list is what the purge carries.
+      await user.click(screen.getByRole('checkbox', { name: 'Select web' }));
+      await user.click(screen.getByRole('button', { name: 'Purge selected (1)' }));
+      await user.click(await screen.findByRole('button', { name: 'Purge' }));
+      await waitFor(() => {
+        const purgeCall = mockedFetch.mock.calls.find(([url]) => url === '/system/prune/orphans');
+        expect(JSON.parse(String((purgeCall?.[1] as RequestInit).body))).toEqual({ containerIds: ['c1'] });
+      });
+    });
+
     describe('purging external containers', () => {
       const orphans = {
         'legacy-app': [
