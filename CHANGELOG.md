@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.98.2](https://github.com/Studio-Saelix/sencho/compare/v0.98.1...v0.98.2) (2026-11-01)
 
 
+### Highlights
+
+<!-- highlights-hash: ea29b3ca8bfe1783 -->
+
+Sencho can now hand out a read-only token scope with observation endpoints, so an AI agent or monitoring tool can watch your fleet without being able to change anything. Off-site snapshot archives can be encrypted with a passphrase, and the deploy gate now treats evidence availability as an explicit policy you can set rather than an implicit rule.
+
+Fleet operations are safer around the Docker connection itself. Sencho refuses any operation that would stop the container carrying its own Docker connection, and when a deploy is refused you can recreate the Docker endpoint on its own. The Actions tab is now a quieter list with task sheets, unreachable nodes no longer advertise an update, and the connection pin shows consistently on the phone card and the topology map.
+
+Compose stacks get a few practical improvements: Sencho detects tunnel and private-overlay exposure, explains recreates caused by a different Compose version, and reconciles a rendered double dollar sign with the container's single one. The io.sencho.* label contract is now documented, and the anatomy view shows the resolved host port for variable mappings.
+
+Mesh membership confirmations are more honest, addresses are copyable, and failures read more clearly, with proxy-mode dial headers and a CA bundle plus precise dial failure labels. Aliases and port reservations stay stable while a node is offline, and a leftover paid-tier gate is gone. The Recovery Vault is renamed Snapshot Vault and the managed vault sits behind the experimental flag, while the data-recovery foundation contracts land with no backup or restore behavior yet.
+
 ### Added
 
 * **api:** add an Observe Only token scope and read-only observation endpoints for AI agents ([#2226](https://github.com/Studio-Saelix/sencho/issues/2226)) ([729da01](https://github.com/Studio-Saelix/sencho/commit/729da01ba6e7ff964d3299b4897f8bd36b148a12))
