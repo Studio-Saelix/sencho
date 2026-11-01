@@ -1,6 +1,9 @@
 import type { Response } from 'express';
 import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
 
+/** The machine code a client switches on when a volume removal is refused to protect the repository. */
+export const RECOVERY_VOLUME_PROTECTED_CODE = 'recovery_volume_protected';
+
 /**
  * The refusal when a stack's volume removal would delete the recovery repository.
  *
@@ -12,8 +15,6 @@ import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
  * is refused and the stack can still be taken down or deleted without it. The
  * same refusal covers a stack whose volumes could not be read at all.
  */
-export const RECOVERY_VOLUME_PROTECTED_CODE = 'recovery_volume_protected';
-
 export class RecoveryVolumeProtectedError extends Error {
   readonly code = RECOVERY_VOLUME_PROTECTED_CODE;
 
@@ -54,6 +55,7 @@ export function recoveryVolumeRefusalMessage(): string {
 /** The refusal text when the stack's volumes could not be read, so nothing can be promised. */
 export function recoveryVolumeUnverifiedMessage(): string {
   return 'Sencho could not read this stack\'s volumes to check that none is a recovery repository volume, so volumes were not removed. '
+    + 'This usually means its compose file or an env file it names is missing or unreadable. '
     + 'Run the operation without removing volumes, or retry once the stack\'s compose configuration renders again.';
 }
 

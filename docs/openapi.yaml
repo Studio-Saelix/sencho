@@ -1835,6 +1835,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
+        - name: pruneVolumes
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When `true`, also removes the stack's compose volumes. Refused with `423` when the stack declares a recovery repository volume.
       responses:
         "200":
           description: Stack deleted.

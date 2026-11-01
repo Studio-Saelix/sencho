@@ -2970,9 +2970,13 @@ describe('ComposeService - a volume removal that would delete the recovery repos
       const svc = ComposeService.getInstance(1);
       vi.spyOn(svc, 'renderConfig').mockResolvedValue({ ...result });
 
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       await expect(svc.runDown('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
       await expect(svc.downStack('my-stack', { removeVolumes: true })).rejects.toMatchObject({ code: 'recovery_volume_protected' });
       expect(mockSpawn).not.toHaveBeenCalledWith('docker', expect.arrayContaining(['down']), expect.anything());
+      // The refusal is never silent: the node log says the check could not run.
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('recovery repository'))).toBe(true);
+      warn.mockRestore();
     });
   }
 

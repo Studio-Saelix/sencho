@@ -379,8 +379,8 @@ export class ComposeService {
    *
    * Any render that does not produce a model refuses, a non-zero exit included:
    * `down` loads the project with fewer checks than `config` (it does not resolve
-   * env files, for one), so a project `config` rejects can still be one `down
-   * --volumes` removes volumes from. Removing what cannot be seen is not a pass.
+   * service `env_file:` entries or enforce required interpolation), so a project
+   * `config` rejects can still be one `down --volumes` removes volumes from. Removing what cannot be seen is not a pass.
    * Callers that must still tear such a stack down do it without removing volumes.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
@@ -393,9 +393,14 @@ export class ComposeService {
         // would read as "declares nothing"; only an object is a model.
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
           declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
+        } else {
+          console.warn('[ComposeService] The render of %s was not a model, so its volumes cannot be checked for the recovery repository.', sanitizeForLog(stackName));
         }
       } else {
-        console.warn('[ComposeService] The render of %s gave no model for the recovery repository check (timed out: %s, exit: %s).', sanitizeForLog(stackName), result.timedOut, String(result.code));
+        console.warn(
+          '[ComposeService] The render of %s gave no model for the recovery repository check (timed out: %s, exit: %s): %s',
+          sanitizeForLog(stackName), result.timedOut, String(result.code), sanitizeForLog(renderErrorLine(result.stderr)),
+        );
       }
     } catch (error) {
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));

@@ -231,7 +231,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
             // repository, or its volumes could not be read) must not strand the
             // rollback: take the stack down without removing volumes.
             if (!isRecoveryVolumeProtectedError(volumeErr)) throw volumeErr;
-            console.warn('[Templates] Rollback without removing volumes for %s: %s', sanitizeForLog(stackName), sanitizeForLog(volumeErr.message));
+            console.error('[Templates] Rollback of %s keeps its volumes: %s', sanitizeForLog(stackName), sanitizeForLog(volumeErr.message));
             await compose.downStack(stackName);
           }
         } catch (downErr) {
