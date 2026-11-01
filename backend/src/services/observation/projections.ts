@@ -266,6 +266,12 @@ function attentionRank(container: ObservedContainer): number {
   return container.health === 'starting' ? 1 : 2;
 }
 
+function compareCodePoints(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 /**
  * The container list, ordered so the {@link CONTAINER_LIMIT} cap keeps the
  * containers that explain an incident: anything not running or unhealthy first,
@@ -286,10 +292,6 @@ export function projectStackStatus(
     containers: ordered.slice(0, CONTAINER_LIMIT),
     truncated: ordered.length > CONTAINER_LIMIT,
   };
-}
-
-function compareCodePoints(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export function projectUnavailableStackStatus(stack: string): ObservedStackStatusData {
