@@ -471,14 +471,19 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     /** After a mutation: refresh every region. The tables keep their current rows
      *  until each response lands, so the page never drops back to a cold skeleton;
      *  disk usage is not awaited, because the tables must not wait on it. The
-     *  warning flag resets so each refresh reports at most one failure. */
-    const refreshAll = () => {
+     *  table regions are awaited so a mutation stays busy until the payload that
+     *  still lists the removed rows is replaced: a second click on a control that
+     *  targets them must not reach the server ("no such container"). The warning
+     *  flag resets so each refresh reports at most one failure. */
+    const refreshAll = async () => {
         refreshWarnedRef.current = false;
         void loadUsage({ background: true });
-        inventoryRegion.refresh();
-        orphansRegion.refresh();
-        rollbackRegion.refresh();
-        scanSummariesRegion.refresh();
+        await Promise.all([
+            inventoryRegion.refresh(),
+            orphansRegion.refresh(),
+            rollbackRegion.refresh(),
+            scanSummariesRegion.refresh(),
+        ]);
     };
 
     useEffect(() => {
@@ -597,7 +602,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Pruned ${scopeLabel} ${confirmPrune.target}.${reclaimedLabel}`);
             }
-            refreshAll();
+            await refreshAll();
             setConfirmPrune(null);
         } catch (error) {
             console.error('Failed to prune', error);
@@ -624,7 +629,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 throw new Error(data?.error || `Failed to delete ${confirmDelete.type.slice(0, -1)}`);
             }
             toast.success(`Deleted ${confirmDelete.type.slice(0, -1)}`);
-            refreshAll();
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || `Failed to delete ${confirmDelete.type.slice(0, -1)}`));
@@ -676,7 +681,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (!data?.results) {
                 // Nothing says which containers were removed, so success is not claimed.
                 toast.warning('The purge finished but its result could not be read. Check the list below.');
-                refreshAll();
+                await refreshAll();
                 return;
             }
             const failed = data.results.filter(r => !r.success);
@@ -687,7 +692,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.warning(`Purged ${selectedOrphans.length - failed.length} of ${selectedOrphans.length} external containers. ${failed[0].error ?? 'Some could not be removed.'}`);
             }
-            refreshAll();
+            await refreshAll();
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || 'Failed to purge selected containers.'));
@@ -754,7 +759,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             } else {
                 toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
             }
-            refreshAll();
+            await refreshAll();
             setConfirmReclaim(false);
         } catch (error) {
             console.error('Failed to reclaim', error);
@@ -998,6 +1003,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                             size="icon"
                                                                             className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
                                                                             disabled={img.isSencho}
+                                                                            aria-label={`Delete image ${img.RepoTags?.[0] || img.Id.substring(0, 12)}`}
                                                                             onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
                                                                         >
                                                                             <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -1103,6 +1109,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                             size="icon"
                                                                             className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
                                                                             disabled={vol.isSencho}
+                                                                            aria-label={`Delete volume ${vol.Name}`}
                                                                             onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
                                                                         >
                                                                             <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />

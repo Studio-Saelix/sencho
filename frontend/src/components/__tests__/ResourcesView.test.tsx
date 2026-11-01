@@ -15,7 +15,7 @@
  *    admin-only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -260,9 +260,163 @@ describe('ResourcesView', () => {
 
     // The refresh is still pending: the row stays and no skeleton replaces it.
     expect(screen.getByText('keep:me')).toBeInTheDocument();
+    // The prune stays busy (dialog open, confirm disabled) until that refreshed
+    // payload lands, so the stale row cannot be pruned again.
+    const pruneDialog = screen.getByRole('alertdialog');
+    expect(within(pruneDialog).getByRole('button', { name: /Prun/ })).toBeDisabled();
 
     releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
     await waitFor(() => expect(screen.queryByText('keep:me')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a delete busy until the refreshed inventory drops the removed image', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('unused:v1')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/images/delete' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('unused:v1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Delete image unused:v1' }));
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The delete answered, but the row still names the removed image: the
+    // action stays busy until the refresh replaces it, so a second click cannot
+    // send the stale id and collect "Image not found".
+    expect(screen.getAllByText('unused:v1').length).toBeGreaterThan(0);
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('unused:v1')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a purge busy until the refreshed external list drops the purged containers', async () => {
+    const orphans = {
+      'legacy-app': [{ Id: 'c1', Names: ['/web'], State: 'running', Status: 'Up', Image: 'nginx' }],
+    };
+    let orphansCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/orphans') {
+        orphansCalls += 1;
+        if (orphansCalls === 1) return Promise.resolve(jsonResponse(structuredClone(orphans)));
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/prune/orphans') {
+        return Promise.resolve(jsonResponse({ results: [{ id: 'c1', success: true }] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /external/i }));
+    await user.click(await screen.findByRole('checkbox', { name: 'Select web' }));
+    await user.click(screen.getByRole('button', { name: 'Purge selected (1)' }));
+    await user.click(await screen.findByRole('button', { name: 'Purge' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The purge answered, but the list still shows the container and the
+    // selection still names its id: the dialog stays busy until the refreshed
+    // list lands instead of allowing an immediate second purge of that id.
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Purge' })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({}));
+    await waitFor(() => expect(screen.queryByText('web')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a reclaim busy until the refreshed inventory drops the removed items', async () => {
+    let resourcesCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') {
+        resourcesCalls += 1;
+        if (resourcesCalls === 1) {
+          return Promise.resolve(jsonResponse({ images: [image('old:v1')], volumes: [], networks: [] }));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1500, outcomes: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    expect(await screen.findByText('old:v1')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Reclaim' }));
+    await user.click(await screen.findByRole('button', { name: /Reclaim/ }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    expect(screen.getByText('old:v1')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: /Reclaim/ })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse({ images: [], volumes: [], networks: [] }));
+    await waitFor(() => expect(screen.queryByText('old:v1')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('keeps a rollback release busy until the refreshed generations drop the released one', async () => {
+    let rollbackCalls = 0;
+    let releaseRefresh: ((r: Response) => void) | undefined;
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/rollback/generations') {
+        rollbackCalls += 1;
+        if (rollbackCalls === 1) {
+          return Promise.resolve(jsonResponse([{
+            id: 'gen-1', shortId: 'abc123456789', stackName: 'seerr', status: 'active',
+            isCurrent: true, phase: 'immediate_verified', createdAt: Date.now(), artifactExpiresAt: null, releasable: true,
+          }]));
+        }
+        return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+      }
+      if (url === '/system/rollback/generations/gen-1/release' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, message: 'Rollback protection released' }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await user.click(await screen.findByRole('tab', { name: /rollback/i }));
+    expect(await screen.findByText('abc123456789')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Release rollback protection for abc123456789' }));
+    await user.click(await screen.findByRole('button', { name: 'Release' }));
+    await waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // The released generation is still listed until its own refresh lands, so
+    // the dialog stays busy instead of allowing a second release of that id.
+    expect(screen.getByText('abc123456789')).toBeInTheDocument();
+    expect(within(screen.getByRole('alertdialog')).getByRole('button', { name: /Releas/ })).toBeDisabled();
+
+    releaseRefresh!(jsonResponse([]));
+    await waitFor(() => expect(screen.queryByText('abc123456789')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
   });
 
   it('shows an error with Retry when the inventory fails to load, not an empty table', async () => {

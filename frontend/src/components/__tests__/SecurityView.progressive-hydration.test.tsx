@@ -31,17 +31,23 @@ vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/components/security/OverviewTab', () => ({
   OverviewTab: ({
     overview,
+    trend,
     trendState,
+    exploitIntel,
     exploitIntelState,
   }: {
     overview: { scannedImages: number } | null;
+    trend: unknown[];
     trendState: string;
+    exploitIntel: unknown[];
     exploitIntelState: string;
   }) => (
     <div>
       <div data-testid="overview-state">{overview ? 'ready' : 'loading'}</div>
       <div data-testid="trend-state">{trendState}</div>
+      <div data-testid="trend-points">{trend.length}</div>
       <div data-testid="intel-state">{exploitIntelState}</div>
+      <div data-testid="intel-count">{exploitIntel.length}</div>
     </div>
   ),
 }));
@@ -171,6 +177,41 @@ describe('SecurityView progressive hydration', () => {
     await waitFor(() => expect(screen.getByTestId('trend-state')).toHaveTextContent('unavailable'));
     expect(screen.getByTestId('intel-state')).toHaveTextContent('unavailable');
     expect(screen.getByTestId('overview-state')).toHaveTextContent('ready');
+  });
+
+  it('renders an older node without trend and exploit-intel endpoints as empty charts', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/security/overview') return jsonOk(overviewBody());
+      if (url === '/security/image-summaries') return jsonOk({});
+      if (url === '/security/overview/trend' || url === '/security/overview/exploit-intel') return jsonFail(404);
+      if (url === '/fleet/role') return jsonOk({ role: 'control' });
+      return jsonOk([]);
+    });
+
+    render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+
+    // A 404 is a permanent capability gap, not a transient failure: both
+    // charts settle as ready with no rows, which is the empty-chart state.
+    await waitFor(() => expect(screen.getByTestId('trend-state')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('intel-state')).toHaveTextContent('ready');
+    expect(screen.getByTestId('trend-points')).toHaveTextContent('0');
+    expect(screen.getByTestId('intel-count')).toHaveTextContent('0');
+  });
+
+  it('keeps a real chart failure unavailable even when the other chart endpoint is missing', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/security/overview') return jsonOk(overviewBody());
+      if (url === '/security/image-summaries') return jsonOk({});
+      if (url === '/security/overview/trend') return jsonFail(404);
+      if (url === '/security/overview/exploit-intel') return jsonFail(500);
+      if (url === '/fleet/role') return jsonOk({ role: 'control' });
+      return jsonOk([]);
+    });
+
+    render(<SecurityView activeTab="overview" onTabChange={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('trend-state')).toHaveTextContent('ready'));
+    expect(screen.getByTestId('intel-state')).toHaveTextContent('unavailable');
   });
 
   it('drops a late image-summary response from the node the operator left', async () => {

@@ -59,6 +59,15 @@ type OverviewOutcome =
   | { kind: 'unsupported' }
   | { kind: 'failed' };
 
+/**
+ * What one of the secondary chart reads settled on. A 404 means an older node
+ * that does not serve the endpoint: the chart degrades to its empty state, the
+ * same as a successful read with no rows, because the gap is permanent rather
+ * than a request that might succeed on retry. A 5xx or transport error keeps
+ * reading as "unavailable right now".
+ */
+type ChartOutcome<T> = { kind: 'data'; data: T } | { kind: 'unsupported' };
+
 interface SecurityViewProps {
   activeTab: SecurityTab;
   onTabChange: (tab: SecurityTab) => void;
@@ -134,16 +143,22 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     return body;
   }, reloadToken, { onError: notifyRefreshFailed });
 
-  const trendRegion = useRegionData(nodeScope, async (signal) => {
+  const trendRegion = useRegionData<ChartOutcome<SecurityRiskTrendPoint[]>>(nodeScope, async (signal) => {
     const res = await apiFetch('/security/overview/trend', { signal });
+    // An older node without the endpoint degrades to an empty chart, not a
+    // permanent "unavailable right now".
+    if (res.status === 404) return { kind: 'unsupported' };
     if (!res.ok) throw new Error(`/security/overview/trend responded ${res.status}`);
     const body: unknown = await res.json();
     if (!Array.isArray(body)) throw new Error('/security/overview/trend returned a malformed body');
-    return body as SecurityRiskTrendPoint[];
+    return { kind: 'data', data: body as SecurityRiskTrendPoint[] };
   }, reloadToken, { onError: notifyRefreshFailed });
 
-  const intelRegion = useRegionData(nodeScope, async (signal) => {
+  const intelRegion = useRegionData<ChartOutcome<{ items: ExploitIntelFinding[]; truncated: boolean }>>(nodeScope, async (signal) => {
     const res = await apiFetch('/security/overview/exploit-intel', { signal });
+    // Both exploit charts share this read; an older node without the endpoint
+    // shows their empty states instead of an error placeholder.
+    if (res.status === 404) return { kind: 'unsupported' };
     if (!res.ok) throw new Error(`/security/overview/exploit-intel responded ${res.status}`);
     const body = await res.json() as { items?: unknown; truncated?: unknown } | null;
     // A body without an items array is a malformed read, not an empty finding set.
@@ -151,10 +166,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       throw new Error('/security/overview/exploit-intel returned a malformed body');
     }
     return {
-      items: body.items as ExploitIntelFinding[],
-      // True when the query hit its row cap: the list shows the highest-risk
-      // findings but not every one, so the UI discloses it.
-      truncated: body.truncated === true,
+      kind: 'data',
+      data: {
+        items: body.items as ExploitIntelFinding[],
+        // True when the query hit its row cap: the list shows the highest-risk
+        // findings but not every one, so the UI discloses it.
+        truncated: body.truncated === true,
+      },
     };
   }, reloadToken, { onError: notifyRefreshFailed });
 
@@ -174,13 +192,17 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   // no successful read yet is loading, and only a failed first read is an error.
   const summariesLoading = summariesRegion.data === null && summariesRegion.status === 'loading';
   const summariesError = summariesRegion.data === null && summariesRegion.status === 'failed';
-  const trend = trendRegion.data ?? [];
-  const trendState: ChartLoadState = trendRegion.data !== null
+  const trendOutcome = trendRegion.data;
+  const trend = trendOutcome?.kind === 'data' ? trendOutcome.data : [];
+  // An unsupported (404) outcome is a settled read: the chart shows its own
+  // empty state. Only a failed read is "unavailable right now".
+  const trendState: ChartLoadState = trendOutcome !== null
     ? 'ready'
     : trendRegion.status === 'failed' ? 'unavailable' : 'loading';
-  const exploitIntel = intelRegion.data?.items ?? [];
-  const exploitTruncated = intelRegion.data?.truncated ?? false;
-  const intelState: ChartLoadState = intelRegion.data !== null
+  const intelOutcome = intelRegion.data;
+  const exploitIntel = intelOutcome?.kind === 'data' ? intelOutcome.data.items : [];
+  const exploitTruncated = intelOutcome?.kind === 'data' ? intelOutcome.data.truncated : false;
+  const intelState: ChartLoadState = intelOutcome !== null
     ? 'ready'
     : intelRegion.status === 'failed' ? 'unavailable' : 'loading';
 

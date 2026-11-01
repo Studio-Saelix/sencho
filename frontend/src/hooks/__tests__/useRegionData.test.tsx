@@ -74,13 +74,84 @@ describe('useRegionData', () => {
     act(() => pending[0].resolve('first'));
     await waitFor(() => expect(result.current.data).toBe('first'));
 
-    act(() => result.current.refresh());
+    act(() => { void result.current.refresh(); });
     await waitFor(() => expect(pending).toHaveLength(2));
     expect(result.current.status).toBe('ready');
     expect(result.current.data).toBe('first');
 
     act(() => pending[1].resolve('second'));
     await waitFor(() => expect(result.current.data).toBe('second'));
+  });
+
+  it('resolves a refresh only once the read it started succeeds', async () => {
+    const { load, pending } = deferredLoader<string>();
+    const { result } = renderHook(() => useRegionData(1, load));
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve('first'));
+    await waitFor(() => expect(result.current.data).toBe('first'));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh().then(() => { settled = true; });
+    });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    // The new read is still in flight: callers that keep a destructive action
+    // busy until the refreshed payload lands must not be released yet.
+    await act(async () => { await Promise.resolve(); });
+    expect(settled).toBe(false);
+
+    act(() => pending[1].resolve('second'));
+    await waitFor(() => expect(settled).toBe(true));
+    expect(result.current.data).toBe('second');
+  });
+
+  it('resolves a refresh when the read it started fails', async () => {
+    const onError = vi.fn();
+    const { load, pending } = deferredLoader<string>();
+    const { result } = renderHook(() => useRegionData(1, load, 0, { onError }));
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve('first'));
+    await waitFor(() => expect(result.current.data).toBe('first'));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh().then(() => { settled = true; });
+    });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1].reject(new Error('refresh failed')));
+
+    // A failed refresh still settles its caller, so a mutation cannot stay busy
+    // forever when the follow-up read fails.
+    await waitFor(() => expect(settled).toBe(true));
+    expect(result.current.data).toBe('first');
+  });
+
+  it('resolves a refresh when a scope change supersedes the read it started', async () => {
+    const { load, pending } = deferredLoader<string>();
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: number }) => useRegionData(scope, load),
+      { initialProps: { scope: 1 } },
+    );
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0].resolve('node-1'));
+    await waitFor(() => expect(result.current.data).toBe('node-1'));
+
+    let settled = false;
+    act(() => {
+      void result.current.refresh().then(() => { settled = true; });
+    });
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    // The operator switches nodes before the refresh answers. The abandoned
+    // read must settle its caller even though its response is dropped.
+    rerender({ scope: 2 });
+    await waitFor(() => expect(pending).toHaveLength(3));
+    expect(settled).toBe(true);
+    act(() => pending[2].resolve('node-2'));
+    await waitFor(() => expect(result.current.data).toBe('node-2'));
   });
 
   it('keeps the visible payload when a refresh fails, and reports it as a refresh', async () => {
@@ -92,7 +163,7 @@ describe('useRegionData', () => {
     act(() => pending[0].resolve('first'));
     await waitFor(() => expect(result.current.data).toBe('first'));
 
-    act(() => result.current.refresh());
+    act(() => { void result.current.refresh(); });
     await waitFor(() => expect(pending).toHaveLength(2));
     act(() => pending[1].reject(new Error('/system/resources responded 500')));
 
@@ -139,7 +210,7 @@ describe('useRegionData', () => {
     await waitFor(() => expect(result.current.data).toEqual(['a']));
 
     // A read is in flight when a scan result arrives and is adopted.
-    act(() => result.current.refresh());
+    act(() => { void result.current.refresh(); });
     await waitFor(() => expect(pending).toHaveLength(2));
     act(() => result.current.apply(['a', 'b']));
 

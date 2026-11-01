@@ -22,8 +22,12 @@ export interface RegionData<T> {
    * the visible data, rather than blanking a region that the operator trusted.
    */
   status: RegionStatus;
-  /** Refetch, keeping the visible payload until the new response lands. */
-  refresh: () => void;
+  /**
+   * Refetch, keeping the visible payload until the new response lands. Resolves
+   * once the read it starts settles, so a caller that must not accept another
+   * action against the pre-refresh payload can keep its busy state until then.
+   */
+  refresh: () => Promise<void>;
   /**
    * Adopt a payload another response already fetched for this scope (a scan
    * completing, for example) without starting a request of its own.
@@ -77,6 +81,10 @@ export function useRegionData<T>(
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const controllerRef = useRef<AbortController | null>(null);
+  // Callers of `refresh` waiting for the read it starts. A refresh that the
+  // scope change or unmount supersedes still settles, because the run resolves
+  // its waiters in `finally` even when it is aborted.
+  const pendingRefreshRef = useRef<Array<() => void>>([]);
 
   // Callers pass fresh closures every render; only a scope change, a refresh key
   // change, or an explicit refresh may start a new request.
@@ -93,6 +101,13 @@ export function useRegionData<T>(
     const generation = ++generationRef.current;
     const controller = new AbortController();
     controllerRef.current = controller;
+    // Every refresh call that has not been picked up by a run yet is settled by
+    // this one, whether it succeeds, fails, or is superseded by a newer scope.
+    const waiters = pendingRefreshRef.current;
+    pendingRefreshRef.current = [];
+    const settleRefreshWaiters = () => {
+      for (const resolve of waiters) resolve();
+    };
     // A new scope starts empty. A refresh of the scope already on screen keeps
     // its payload until the new response lands.
     setStored((prev) => (
@@ -114,6 +129,8 @@ export function useRegionData<T>(
             : { scope, status: 'failed', data: null }
         ));
         onErrorRef.current?.(error, hadDataRef.current);
+      } finally {
+        settleRefreshWaiters();
       }
     })();
     return () => {
@@ -122,10 +139,28 @@ export function useRegionData<T>(
       generationRef.current += 1;
       controllerRef.current = null;
       controller.abort();
+      // This run is over as far as its caller is concerned: a refresh that the
+      // scope change or unmount superseded must not strand a pending action.
+      settleRefreshWaiters();
     };
   }, [scope, refreshKey, attempt]);
 
-  const refresh = useCallback(() => setAttempt((n) => n + 1), []);
+  // A refresh requested in the same tick as an unmount can be scheduled but
+  // never picked up by a run, which would leave its caller awaiting forever.
+  // Settle whatever the last run did not.
+  useEffect(() => () => {
+    const waiters = pendingRefreshRef.current;
+    pendingRefreshRef.current = [];
+    for (const resolve of waiters) resolve();
+  }, []);
+
+  const refresh = useCallback(() => {
+    let resolve!: () => void;
+    const settled = new Promise<void>((r) => { resolve = r; });
+    pendingRefreshRef.current.push(resolve);
+    setAttempt((n) => n + 1);
+    return settled;
+  }, []);
   // A payload another response fetched for this scope is newer than a read that
   // started before it, so adopting it abandons that read: an older response must
   // not overwrite fresher data when it finally lands. A payload for another
