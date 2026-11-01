@@ -22,6 +22,11 @@ let noCapServer: http.Server;
 let capNodeId: number;
 let noCapNodeId: number;
 let downNodeId: number;
+let metaErrorServer: http.Server;
+let metaErrorNodeId: number;
+let metaMalformedServer: http.Server;
+let metaMalformedNodeId: number;
+let pilotNodeId: number;
 
 const capPaths: string[] = [];
 const noCapPaths: string[] = [];
@@ -80,6 +85,29 @@ beforeAll(async () => {
     name: 'obs-down-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
     is_default: false, api_url: `http://127.0.0.1:${downPort}`, api_token: 'down-token',
   });
+  // A remote whose /api/meta answers 500, and one whose /api/meta is not Sencho's shape.
+  metaErrorServer = http.createServer((_req, res) => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end('{}');
+  });
+  metaMalformedServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<html>not sencho</html>');
+  });
+  const metaErrorPort = await listen(metaErrorServer);
+  const metaMalformedPort = await listen(metaMalformedServer);
+  metaErrorNodeId = db.addNode({
+    name: 'obs-meta-error-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
+    is_default: false, api_url: `http://127.0.0.1:${metaErrorPort}`, api_token: 'err-token',
+  });
+  metaMalformedNodeId = db.addNode({
+    name: 'obs-meta-malformed-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
+    is_default: false, api_url: `http://127.0.0.1:${metaMalformedPort}`, api_token: 'mal-token',
+  });
+  // Pilot node with no tunnel connected.
+  pilotNodeId = db.addNode({
+    name: 'obs-pilot-remote', type: 'remote', mode: 'pilot_agent', compose_dir: '/tmp', is_default: false,
+  });
   noCapNodeId = db.addNode({
     name: 'obs-nocap-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
     is_default: false, api_url: `http://127.0.0.1:${noCapPort}`, api_token: 'nocap-token',
@@ -89,6 +117,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((resolve) => capServer.close(() => resolve()));
   await new Promise<void>((resolve) => noCapServer.close(() => resolve()));
+  await new Promise<void>((resolve) => metaErrorServer.close(() => resolve()));
+  await new Promise<void>((resolve) => metaMalformedServer.close(() => resolve()));
   cleanupTestDb(tmpDir);
 });
 
@@ -144,6 +174,60 @@ describe('remote capability gate', () => {
       expect(res.body.code).toBe('node_unreachable');
       expect(res.body.error).not.toMatch(/upgrade/i);
     }
+  });
+
+  it.each([
+    ['a meta endpoint that answers HTTP 500', () => metaErrorNodeId],
+    ['a meta endpoint that is not Sencho\'s', () => metaMalformedNodeId],
+  ])('answers 503 node_unreachable for %s, never "upgrade it"', async (_label, nodeId) => {
+    const res = await request(app)
+      .get('/api/stacks/web/observation/status')
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(nodeId()));
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('node_unreachable');
+  });
+
+  it('answers 503 for a Pilot node with no tunnel, without ever claiming it is too old', async () => {
+    for (const path of [
+      '/api/stacks/web/observation/status',
+      '/api/stacks/web/observation/readiness',
+      '/api/stacks/platform/observation',
+    ]) {
+      const res = await request(app)
+        .get(path)
+        .set('Authorization', `Bearer ${viewerBearer}`)
+        .set('x-node-id', String(pilotNodeId));
+      expect(res.status).toBe(503);
+      expect(res.body.code).not.toBe('capability_unavailable');
+      expect(res.body.error).not.toMatch(/upgrade/i);
+    }
+  });
+
+  it('gates the case-variant and HEAD forms that Express would still route', async () => {
+    for (const [method, path] of [
+      ['get', '/api/stacks/web/OBSERVATION/Status'],
+      ['get', '/api/stacks/platform/Observation'],
+      ['head', '/api/stacks/web/observation/status'],
+    ] as const) {
+      noCapPaths.length = 0;
+      const res = await request(app)[method](path)
+        .set('Authorization', `Bearer ${adminBearer}`)
+        .set('x-node-id', String(noCapNodeId));
+      expect(res.status, `${method} ${path}`).toBe(400);
+      expect(observationCalls(noCapPaths)).toEqual([]);
+    }
+  });
+
+  it('forwards a stack name longer than 128 characters unchanged', async () => {
+    capPaths.length = 0;
+    const long = 'q'.repeat(130);
+    const res = await request(app)
+      .get(`/api/stacks/${long}/observation/status`)
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(capNodeId));
+    expect(res.status).toBe(200);
+    expect(observationCalls(capPaths)).toContain(`/api/stacks/${long}/observation/status`);
   });
 
   it('forwards to a supported remote and returns its projection', async () => {

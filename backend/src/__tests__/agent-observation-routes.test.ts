@@ -144,6 +144,24 @@ describe('GET /api/stacks/platform/observation', () => {
     expect(seen).toEqual(['alpha', long, longer]);
   });
 
+  it('pages names that differ only by case, underscore and hyphen without gaps or repeats', async () => {
+    const names = ['Alpha', 'alpha', 'alpha-1', 'alpha_1', 'alpha1', 'Beta', '0x'];
+    mockStatuses.mockResolvedValue(evidence(Object.fromEntries(names.map((n) => [`${n}.yml`, stackInfo()]))));
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < names.length + 1; page += 1) {
+      const url: string = `/api/stacks/platform/observation?limit=1${cursor ? `&cursor=${cursor}` : ''}`;
+      const res = await request(app).get(url).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      seen.push(...res.body.data.stacks.map((s: { name: string }) => s.name));
+      cursor = res.body.data.nextCursor;
+      if (cursor === null) break;
+    }
+    expect([...seen].sort()).toEqual([...names].sort());
+    expect(new Set(seen).size).toBe(names.length);
+  });
+
   it('does not list a directory the per-stack routes would reject', async () => {
     mockStatuses.mockResolvedValue(evidence({
       'web.yml': stackInfo(),

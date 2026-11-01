@@ -552,17 +552,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // that merely did not answer is reported as down, not as too old.
       if (isAgentObservationRoute(req.method, req.path)) {
         const capability = await probeRemoteCapability(req.nodeId, AGENT_OBSERVATION_CAPABILITY);
-        if (capability.kind === 'unreachable') {
-          res.status(503).json({
-            error: `Remote node "${node.name}" is not reachable right now, so its observation data cannot be read. Try again when it is back online.`,
-            code: 'node_unreachable',
-          });
-          return;
-        }
         if (capability.kind === 'unsupported') {
           res.status(400).json({
             error: `Remote node "${node.name}" does not support AI agent observation. Upgrade it before connecting an AI client to it.`,
             code: 'capability_unavailable',
+          });
+          return;
+        }
+        if (capability.kind !== 'supported') {
+          res.status(503).json({
+            error: `Remote node "${node.name}" did not give a usable answer, so its observation data cannot be read right now. Check that the node is online and its connection settings are valid, then try again.`,
+            code: 'node_unreachable',
           });
           return;
         }
@@ -1092,8 +1092,10 @@ function isServiceScopedUpdateRoute(req: Request): boolean {
  * routes are not listed because `/api/fleet/` never reaches this proxy.
  */
 function isAgentObservationRoute(method: string, path: string): boolean {
-  if (method.toUpperCase() !== 'GET') return false;
-  const normalized = (path.split('?')[0] ?? path).replace(/\/+$/, '');
+  const upper = method.toUpperCase();
+  if (upper !== 'GET' && upper !== 'HEAD') return false;
+  // Express matches routes case-insensitively, so the gate must too.
+  const normalized = (path.split('?')[0] ?? path).replace(/\/+$/, '').toLowerCase();
   return normalized === '/stacks/platform/observation'
     || /^\/stacks\/[^/]+\/observation\/(?:status|readiness)$/.test(normalized);
 }

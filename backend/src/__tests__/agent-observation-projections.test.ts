@@ -90,6 +90,11 @@ describe('node projection', () => {
       .toBe(projectNode(node({ mode: 'pilot_agent', pilot_last_seen: 1_700_000_123_000 })).lastContactAt);
   });
 
+  it('keeps a zero contact as zero, not null', () => {
+    expect(projectNode(node({ last_successful_contact: 0 })).lastContactAt).toBe(0);
+    expect(projectNode(node({ mode: 'pilot_agent', pilot_last_seen: 0 })).lastContactAt).toBe(0);
+  });
+
   it('keeps an absent contact null on every transport', () => {
     expect(projectNode(node({ last_successful_contact: null })).lastContactAt).toBeNull();
     expect(projectNode(node({ last_successful_contact: undefined })).lastContactAt).toBeNull();
@@ -160,7 +165,7 @@ describe('stack list projection', () => {
     expect(projectStackList(entries, null, 10, true).degraded).toBe(true);
   });
 
-  describe('names longer than the node-name bound', () => {
+  describe('very long stack names (130 characters and up)', () => {
     const long = 'q'.repeat(130);
     const longer = `${long}z`;
     const withNames = (names: string[]): StackStatusEntry[] => names.map((name) => ({ ...entries[0], name }));
@@ -218,7 +223,7 @@ describe('stack status projection', () => {
     expect(projected.truncated).toBe(true);
   });
 
-  it('echoes a stack name longer than the node-name bound unchanged', () => {
+  it('echoes a very long stack name unchanged', () => {
     const long = 'q'.repeat(130);
     expect(projectStackStatus(long, [container()]).stack).toBe(long);
     expect(projectUnavailableStackStatus(long).stack).toBe(long);
@@ -246,6 +251,27 @@ describe('stack status projection', () => {
       ]);
       expect(projected.containers.map((c) => c.name)).toEqual([
         'd-restarting', 'e-weird', 'c-starting', 'a-ok', 'b-ok',
+      ]);
+    });
+
+    it('orders equal-rank names by code point, not by locale', () => {
+      const names = ['a_1', 'B-1', 'a-2', '0', 'a-1'];
+      const projected = projectStackStatus('web', names.map((name) => container({ name })));
+      expect(projected.containers.map((c) => c.name)).toEqual(['0', 'B-1', 'a-1', 'a-2', 'a_1']);
+    });
+
+    it('treats a running container with no healthcheck like a healthy one', () => {
+      const projected = projectStackStatus('web', [
+        container({ name: 'a-starting', health: 'starting' }),
+        container({ name: 'b-none', health: 'none' }),
+        container({ name: 'c-null', health: null }),
+        container({ name: 'd-exited', state: 'exited' }),
+        container({ name: 'e-paused', state: 'paused' }),
+        container({ name: 'f-dead', state: 'dead' }),
+        container({ name: 'g-created', state: 'created' }),
+      ]);
+      expect(projected.containers.map((c) => c.name)).toEqual([
+        'd-exited', 'e-paused', 'f-dead', 'g-created', 'a-starting', 'b-none', 'c-null',
       ]);
     });
 

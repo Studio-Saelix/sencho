@@ -1123,7 +1123,10 @@ components:
           description: True when the underlying status evidence was incomplete.
         total:
           type: integer
-          description: Total stacks on the node, across every page.
+          description: >
+            Total listed stacks on the node, across every page. A directory whose
+            name has characters outside letters, digits, `_`, and `-` is not
+            listed and is not counted.
         nextCursor:
           type: ["string", "null"]
           description: Name of the last stack on this page when more stacks exist, otherwise null.
@@ -1171,7 +1174,8 @@ components:
           description: >
             At most 100 containers. Containers that are not running or are
             unhealthy come first, then those still starting, then the rest, each
-            group ordered by name, so the cap keeps the ones that explain a problem.
+            group ordered by name, so the cap drops healthy containers before it
+            drops a problem one.
           items:
             $ref: "#/components/schemas/ObservationContainer"
         truncated:
@@ -1754,7 +1758,10 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
-          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
+          description: >
+            The targeted remote node did not give a usable answer to the
+            capability check (`node_unreachable`). A disconnected Pilot tunnel or
+            a node with no API URL configured also answers 503, without a code.
           content:
             application/json:
               schema:
@@ -2312,7 +2319,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "503":
-          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
+          description: >
+            The targeted remote node did not give a usable answer to the
+            capability check (`node_unreachable`). A disconnected Pilot tunnel or
+            a node with no API URL configured also answers 503, without a code.
           content:
             application/json:
               schema:
@@ -2370,7 +2380,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "503":
-          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
+          description: >
+            The targeted remote node did not give a usable answer to the
+            capability check (`node_unreachable`). A disconnected Pilot tunnel or
+            a node with no API URL configured also answers 503, without a code.
           content:
             application/json:
               schema:

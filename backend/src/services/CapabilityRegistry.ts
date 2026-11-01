@@ -94,8 +94,9 @@ export type Capability = (typeof CAPABILITIES)[number];
 
 /**
  * Read-only observation projections for AI clients (`/api/stacks/platform/
- * observation`, the per-stack observation routes and the fleet observation
- * routes). A remote without it answers `capability_unavailable` rather than a
+ * observation` and the per-stack observation routes; the fleet observation
+ * routes are hub-served and never reach a remote). A remote without it is
+ * refused with `capability_unavailable` by the hub proxy rather than a
  * path-shaped 404, so the client can say "upgrade this node".
  */
 export const AGENT_OBSERVATION_CAPABILITY = 'agent-observation-v1' as const satisfies Capability;

@@ -30,7 +30,7 @@ import { requireStackExists } from './stacks';
  * only place the field allowlists live. The routes select evidence and bound it;
  * they never render Compose, read an env file, or compute a verdict.
  *
- * Mounted ahead of `stacksRouter` so the two observation paths never meet that
+ * Mounted ahead of `stacksRouter` so the three observation paths never meet that
  * router's generic `/:stackName` handlers, and registered in
  * `helpers/stackRouteAuth.ts` under `stack:read` so the hub pre-check and the
  * node-side classifier agree on who may ask.
@@ -92,8 +92,7 @@ stackObservationRouter.get('/platform/observation', async (req: Request, res: Re
         info,
         source: info.source,
         isSelf: info.isSelf,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      }));
     res.json(observationEnvelope(
       evidence.generatedAt,
       projectStackList(entries, cursor.value, limit.value, evidence.degraded),

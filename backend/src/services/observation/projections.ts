@@ -27,8 +27,8 @@ import { isValidStackName } from '../../utils/validation';
  * by inheritance; it has to be named here, which is the review the contract
  * exists to force.
  *
- * The other rule is that nothing here computes: the projections select and
- * bound evidence that canonical engines already produced.
+ * The other rule is that nothing here computes: the projections select, order
+ * and bound evidence that canonical engines already produced.
  */
 
 /** Bumped when a projection's shape changes in a way a client must notice. */
