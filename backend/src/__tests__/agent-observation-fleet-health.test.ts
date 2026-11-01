@@ -97,6 +97,35 @@ describe('GET /api/fleet/observation/nodes', () => {
     expect(res.body.data[0].transport).toBe('local');
   });
 
+  it('publishes lastContactAt in epoch ms for proxy and Pilot nodes alike', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const proxyId = db.addNode({
+      name: 'obs-unit-proxy', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
+      is_default: false, api_url: 'http://127.0.0.1:1', api_token: 't',
+    });
+    const pilotId = db.addNode({
+      name: 'obs-unit-pilot', type: 'remote', mode: 'pilot_agent', compose_dir: '/tmp', is_default: false,
+    });
+    const before = Date.now();
+    // The real writers: whole seconds for a proxy contact, ms for a Pilot stamp.
+    db.updateNodeLastContact(proxyId);
+    db.updateNode(pilotId, { pilot_last_seen: Date.now() });
+    const after = Date.now();
+
+    const res = await request(app).get('/api/fleet/observation/nodes').set('Authorization', authHeader);
+    const byId = new Map<number, { lastContactAt: number | null }>(
+      res.body.data.map((n: { id: number; lastContactAt: number | null }) => [n.id, n]),
+    );
+    const proxyAt = byId.get(proxyId)!.lastContactAt!;
+    const pilotAt = byId.get(pilotId)!.lastContactAt!;
+    // Seconds are truncated on write, so allow the one-second floor.
+    expect(proxyAt).toBeGreaterThanOrEqual(before - 1000);
+    expect(proxyAt).toBeLessThanOrEqual(after);
+    expect(pilotAt).toBeGreaterThanOrEqual(before);
+    expect(pilotAt).toBeLessThanOrEqual(after);
+  });
+
   it('requires authentication', async () => {
     expect((await request(app).get('/api/fleet/observation/nodes')).status).toBe(401);
   });

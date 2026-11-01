@@ -548,10 +548,18 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       // without the capability answers `capability_unavailable` here, BEFORE the
       // mixed-version RBAC gate: an old node would otherwise answer the new
       // paths with the RBAC gate's codless 403, which reads as "this user may
-      // not" instead of "upgrade this node".
+      // not" instead of "upgrade this node". The probe is tri-state so a node
+      // that merely did not answer is reported as down, not as too old.
       if (isAgentObservationRoute(req.method, req.path)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, AGENT_OBSERVATION_CAPABILITY);
-        if (!supported) {
+        const capability = await probeRemoteCapability(req.nodeId, AGENT_OBSERVATION_CAPABILITY);
+        if (capability.kind === 'unreachable') {
+          res.status(503).json({
+            error: `Remote node "${node.name}" is not reachable right now, so its observation data cannot be read. Try again when it is back online.`,
+            code: 'node_unreachable',
+          });
+          return;
+        }
+        if (capability.kind === 'unsupported') {
           res.status(400).json({
             error: `Remote node "${node.name}" does not support AI agent observation. Upgrade it before connecting an AI client to it.`,
             code: 'capability_unavailable',

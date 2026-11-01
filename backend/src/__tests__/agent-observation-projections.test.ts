@@ -45,7 +45,7 @@ function node(overrides: Partial<Node> = {}): Node {
     api_token: CANARY,
     pilot_last_seen: null,
     pilot_agent_version: CANARY,
-    last_successful_contact: 1_700_000_000_000,
+    last_successful_contact: 1_700_000_000,
     cordoned: true,
     cordoned_at: 2,
     cordoned_reason: CANARY,
@@ -76,7 +76,24 @@ describe('node projection', () => {
       'cordoned', 'id', 'lastContactAt', 'name', 'status', 'transport', 'type',
     ]);
     expect(projected.transport).toBe('proxy');
-    expect(projected.lastContactAt).toBe(1_700_000_000_000);
+  });
+
+  it('publishes lastContactAt in epoch ms for every transport', () => {
+    // `last_successful_contact` is stored in whole seconds, `pilot_last_seen` in ms.
+    expect(projectNode(node()).lastContactAt).toBe(1_700_000_000_000);
+    expect(projectNode(node({ type: 'local', last_successful_contact: 1_700_000_000 })).lastContactAt)
+      .toBe(1_700_000_000_000);
+    expect(projectNode(node({ mode: 'pilot_agent', pilot_last_seen: 1_700_000_000_000 })).lastContactAt)
+      .toBe(1_700_000_000_000);
+    // Same contact moment on both transports gives the same published value.
+    expect(projectNode(node({ last_successful_contact: 1_700_000_123 })).lastContactAt)
+      .toBe(projectNode(node({ mode: 'pilot_agent', pilot_last_seen: 1_700_000_123_000 })).lastContactAt);
+  });
+
+  it('keeps an absent contact null on every transport', () => {
+    expect(projectNode(node({ last_successful_contact: null })).lastContactAt).toBeNull();
+    expect(projectNode(node({ last_successful_contact: undefined })).lastContactAt).toBeNull();
+    expect(projectNode(node({ mode: 'pilot_agent', pilot_last_seen: null })).lastContactAt).toBeNull();
   });
 
   it('never carries paths, URLs, credentials, reasons or the agent version', () => {
@@ -142,6 +159,31 @@ describe('stack list projection', () => {
   it('passes degraded through', () => {
     expect(projectStackList(entries, null, 10, true).degraded).toBe(true);
   });
+
+  describe('names longer than the node-name bound', () => {
+    const long = 'q'.repeat(130);
+    const longer = `${long}z`;
+    const withNames = (names: string[]): StackStatusEntry[] => names.map((name) => ({ ...entries[0], name }));
+
+    it('lists them whole, so the name round-trips as a cursor', () => {
+      const all = withNames([longer, long, 'alpha']);
+      const first = projectStackList(all, null, 1, false);
+      expect(first.stacks[0].name).toBe('alpha');
+      const second = projectStackList(all, first.nextCursor, 1, false);
+      expect(second.stacks[0].name).toBe(long);
+      expect(second.nextCursor).toBe(long);
+      const third = projectStackList(all, second.nextCursor, 1, false);
+      expect(third.stacks[0].name).toBe(longer);
+      expect(third.nextCursor).toBeNull();
+    });
+  });
+
+  it('leaves out a directory no observation route can address', () => {
+    const all = (['alpha', 'my.stack', 'with space', 'beta'] as const).map((name) => ({ ...entries[0], name }));
+    const page = projectStackList(all, null, 10, false);
+    expect(page.stacks.map((s) => s.name)).toEqual(['alpha', 'beta']);
+    expect(page.total).toBe(2);
+  });
 });
 
 describe('stack status projection', () => {
@@ -174,6 +216,46 @@ describe('stack status projection', () => {
     const projected = projectStackStatus('web', facts);
     expect(projected.containers).toHaveLength(CONTAINER_LIMIT);
     expect(projected.truncated).toBe(true);
+  });
+
+  it('echoes a stack name longer than the node-name bound unchanged', () => {
+    const long = 'q'.repeat(130);
+    expect(projectStackStatus(long, [container()]).stack).toBe(long);
+    expect(projectUnavailableStackStatus(long).stack).toBe(long);
+  });
+
+  describe('container order under the cap', () => {
+    it('keeps the containers that need attention when the list is cut', () => {
+      const healthy = Array.from({ length: CONTAINER_LIMIT }, (_, i) => container({ name: `a-${String(i).padStart(3, '0')}` }));
+      const exited = container({ name: 'z-exited', state: 'exited', exitCode: 137 });
+      const unhealthy = container({ name: 'z-unhealthy', health: 'unhealthy' });
+      const projected = projectStackStatus('web', [...healthy, exited, unhealthy]);
+
+      expect(projected.truncated).toBe(true);
+      expect(projected.containers).toHaveLength(CONTAINER_LIMIT);
+      expect(projected.containers.slice(0, 2).map((c) => c.name)).toEqual(['z-exited', 'z-unhealthy']);
+    });
+
+    it('orders attention, then starting, then healthy, each by name', () => {
+      const projected = projectStackStatus('web', [
+        container({ name: 'b-ok' }),
+        container({ name: 'c-starting', health: 'starting' }),
+        container({ name: 'a-ok' }),
+        container({ name: 'd-restarting', state: 'restarting' }),
+        container({ name: 'e-weird', state: 'deadlocked' }),
+      ]);
+      expect(projected.containers.map((c) => c.name)).toEqual([
+        'd-restarting', 'e-weird', 'c-starting', 'a-ok', 'b-ok',
+      ]);
+    });
+
+    it('gives the same list whatever order Docker returned', () => {
+      const facts = ['m-3', 'm-7', 'm-14', 'm-1'].map((name) => container({ name }));
+      const forward = projectStackStatus('web', facts).containers.map((c) => c.name);
+      const reversed = projectStackStatus('web', [...facts].reverse()).containers.map((c) => c.name);
+      expect(forward).toEqual(reversed);
+      expect(forward).toEqual(['m-1', 'm-14', 'm-3', 'm-7']);
+    });
   });
 
   it('answers unavailable as a 200-shaped payload with no containers', () => {

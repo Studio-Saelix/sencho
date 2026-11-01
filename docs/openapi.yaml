@@ -1086,7 +1086,9 @@ components:
           enum: [online, offline, unknown]
         lastContactAt:
           type: ["integer", "null"]
-          description: Epoch ms of the last contact this hub can vouch for, or null.
+          description: >
+            Epoch ms of the last contact this hub can vouch for, or null. The unit
+            is the same for local, proxy, and Pilot nodes.
         cordoned:
           type: boolean
 
@@ -1166,7 +1168,10 @@ components:
             moment. It is a successful response carrying no container list, not an error.
         containers:
           type: array
-          description: At most 100 containers.
+          description: >
+            At most 100 containers. Containers that are not running or are
+            unhealthy come first, then those still starting, then the rest, each
+            group ordered by name, so the cap keeps the ones that explain a problem.
           items:
             $ref: "#/components/schemas/ObservationContainer"
         truncated:
@@ -1698,7 +1703,9 @@ paths:
         token: name, status, running and total container counts, source, and whether
         the stack is this instance. Stacks are ordered by name; the cursor is the
         name of the last stack on the previous page, so a stack deleted between two
-        pages does not shift the rest of the list. `degraded` reports that the
+        pages does not shift the rest of the list. A directory whose name has
+        characters outside letters, digits, `_`, and `-` is not listed, because
+        no per-stack route accepts it. `degraded` reports that the
         underlying status evidence was incomplete. This is one of the five paths an
         Observe Only token may reach. Requires `stack:read` permission.
       parameters:
@@ -1709,7 +1716,7 @@ paths:
           description: Name of the last stack on the previous page. Omit for the first page.
           schema:
             type: string
-            pattern: '^[A-Za-z0-9_-]{1,128}$'
+            pattern: '^[A-Za-z0-9_-]+$'
         - name: limit
           in: query
           required: false
@@ -1746,6 +1753,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -2298,6 +2311,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -2346,6 +2365,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The stack does not exist on the node (`STACK_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The targeted remote node did not answer (`node_unreachable`), or its Pilot tunnel is disconnected.
           content:
             application/json:
               schema:

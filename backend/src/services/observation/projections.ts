@@ -15,6 +15,7 @@ import {
   type StackReadinessRow,
 } from '../readiness/types';
 import type { ReadinessVerdict, RollbackOverall } from '../updateGuard/types';
+import { isValidStackName } from '../../utils/validation';
 
 /**
  * The projection contract shared by every observation route and by the
@@ -54,9 +55,6 @@ export const FINDINGS_LIMIT = 50;
 export const STACK_PAGE_DEFAULT = 100;
 export const STACK_PAGE_MAX = 200;
 
-/** The stack-name alphabet, matching `isValidStackName`. */
-export const STACK_NAME_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-
 function bounded(value: string, maxLength: number): string {
   return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
@@ -79,6 +77,17 @@ export interface ObservedNode {
 }
 
 /**
+ * The node's last contact in epoch ms. The two sources keep different units:
+ * `pilot_last_seen` is stamped in ms and `last_successful_contact` in whole
+ * seconds (`updateNodeLastContact`), so the proxy value is scaled here and the
+ * published field has one unit for every transport.
+ */
+function lastContactAtMs(node: Node): number | null {
+  if (node.mode === 'pilot_agent') return node.pilot_last_seen ?? null;
+  return node.last_successful_contact == null ? null : node.last_successful_contact * 1000;
+}
+
+/**
  * A node as an AI client may see it.
  *
  * Deliberately absent: `compose_dir`, `api_url`, `api_token`, the sealing
@@ -97,9 +106,7 @@ export function projectNode(node: Node): ObservedNode {
     type: node.type === 'remote' ? 'remote' : 'local',
     transport,
     status: node.status,
-    lastContactAt: node.mode === 'pilot_agent'
-      ? (node.pilot_last_seen ?? null)
-      : (node.last_successful_contact ?? null),
+    lastContactAt: lastContactAtMs(node),
     cordoned: node.cordoned === true,
   };
 }
@@ -141,6 +148,12 @@ export interface StackStatusEntry {
  * strict-greater slice, so a stack deleted between two pages does not shift the
  * rest of the list. Bounds: `limit` is 1..{@link STACK_PAGE_MAX}; the caller
  * validates it before reaching here.
+ *
+ * A name is published exactly as stored, never cut: the client feeds it back as
+ * the cursor and as the `:stackName` of the per-stack routes, and both accept
+ * only `isValidStackName` names. A directory whose name fails that check cannot
+ * be addressed by any of those routes, so it is left out of the list and out of
+ * `total` rather than listed under a name the client cannot use.
  */
 export function projectStackList(
   entries: readonly StackStatusEntry[],
@@ -148,7 +161,9 @@ export function projectStackList(
   limit: number,
   degraded: boolean,
 ): ObservedStackList {
-  const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  const sorted = entries
+    .filter((entry) => isValidStackName(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const start = cursor === null
     ? 0
     : (() => {
@@ -164,7 +179,7 @@ export function projectStackList(
     total: sorted.length,
     nextCursor,
     stacks: page.map((entry): ObservedStackSummary => ({
-      name: bounded(entry.name, NODE_NAME_MAX_LENGTH),
+      name: entry.name,
       status: entry.info.status,
       running: typeof entry.info.running === 'number' ? entry.info.running : null,
       total: typeof entry.info.total === 'number' ? entry.info.total : null,
@@ -245,21 +260,41 @@ function projectContainer(fact: StackContainerFact): ObservedContainer {
   };
 }
 
+/** 0 = needs attention, 1 = still starting, 2 = running and not unhealthy. */
+function attentionRank(container: ObservedContainer): number {
+  if (container.state !== 'running' || container.health === 'unhealthy') return 0;
+  return container.health === 'starting' ? 1 : 2;
+}
+
+/**
+ * The container list, ordered so the {@link CONTAINER_LIMIT} cap keeps the
+ * containers that explain an incident: anything not running or unhealthy first,
+ * then those still starting, then the healthy ones, each group by name. Docker's
+ * own order is arbitrary, so without this a cap could cut the one exited
+ * container the caller asked about the stack to find.
+ */
 export function projectStackStatus(
   stack: string,
   facts: readonly StackContainerFact[],
 ): ObservedStackStatusData {
+  const ordered = facts
+    .map(projectContainer)
+    .sort((a, b) => attentionRank(a) - attentionRank(b) || compareCodePoints(a.name, b.name));
   return {
-    stack: bounded(stack, NODE_NAME_MAX_LENGTH),
+    stack,
     outcome: 'ok',
-    containers: facts.slice(0, CONTAINER_LIMIT).map(projectContainer),
-    truncated: facts.length > CONTAINER_LIMIT,
+    containers: ordered.slice(0, CONTAINER_LIMIT),
+    truncated: ordered.length > CONTAINER_LIMIT,
   };
+}
+
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export function projectUnavailableStackStatus(stack: string): ObservedStackStatusData {
   return {
-    stack: bounded(stack, NODE_NAME_MAX_LENGTH),
+    stack,
     outcome: 'unavailable',
     containers: [],
     truncated: false,
@@ -300,7 +335,7 @@ export function projectStackReadiness(row: StackReadinessRow): ObservedStackRead
     ? row.unavailableReason
     : null;
   return {
-    stack: bounded(row.stack, NODE_NAME_MAX_LENGTH),
+    stack: row.stack,
     update: row.update === null
       ? null
       : {

@@ -122,6 +122,40 @@ describe('GET /api/stacks/platform/observation', () => {
     expect(res.body.data.degraded).toBe(true);
   });
 
+  it('pages through names longer than 128 characters without losing the cursor', async () => {
+    const long = 'q'.repeat(130);
+    const longer = `${long}z`;
+    mockStatuses.mockResolvedValue(evidence({
+      [`${longer}.yml`]: stackInfo(),
+      [`${long}.yml`]: stackInfo(),
+      'alpha.yml': stackInfo(),
+    }));
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page += 1) {
+      const url: string = `/api/stacks/platform/observation?limit=1${cursor ? `&cursor=${cursor}` : ''}`;
+      const res = await request(app).get(url).set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      seen.push(...res.body.data.stacks.map((s: { name: string }) => s.name));
+      cursor = res.body.data.nextCursor;
+      if (cursor === null) break;
+    }
+    expect(seen).toEqual(['alpha', long, longer]);
+  });
+
+  it('does not list a directory the per-stack routes would reject', async () => {
+    mockStatuses.mockResolvedValue(evidence({
+      'web.yml': stackInfo(),
+      'my.stack.yml': stackInfo(),
+    }));
+    const res = await request(app)
+      .get('/api/stacks/platform/observation')
+      .set('Authorization', authHeader);
+    expect(res.body.data.stacks.map((s: { name: string }) => s.name)).toEqual(['web']);
+    expect(res.body.data.total).toBe(1);
+  });
+
   it.each(['abc', '0', '201', '-1', '1.5'])('rejects limit=%s with INVALID_LIMIT', async (limit) => {
     const res = await request(app)
       .get(`/api/stacks/platform/observation?limit=${limit}`)
@@ -130,7 +164,7 @@ describe('GET /api/stacks/platform/observation', () => {
     expect(res.body.code).toBe('INVALID_LIMIT');
   });
 
-  it.each(['a/b', 'a.b', '../x', 'x'.repeat(129)])('rejects cursor=%s with INVALID_CURSOR', async (cursor) => {
+  it.each(['a/b', 'a.b', '../x'])('rejects cursor=%s with INVALID_CURSOR', async (cursor) => {
     const res = await request(app)
       .get(`/api/stacks/platform/observation?cursor=${encodeURIComponent(cursor)}`)
       .set('Authorization', authHeader);
@@ -182,6 +216,38 @@ describe('GET /api/stacks/:stackName/observation/status', () => {
     expect(res.body.data.containers).toEqual([]);
   });
 
+  it('echoes and serves a stack name longer than 128 characters, as the list publishes it', async () => {
+    const long = 'q'.repeat(130);
+    seedStacks([long]);
+    const res = await request(app)
+      .get(`/api/stacks/${long}/observation/status`)
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.data.stack).toBe(long);
+
+    mockHealthFacts.mockResolvedValue({ kind: 'unavailable', cause: 'docker', detail: 'no socket' });
+    const unavailable = await request(app)
+      .get(`/api/stacks/${long}/observation/status`)
+      .set('Authorization', authHeader);
+    expect(unavailable.body.data.stack).toBe(long);
+  });
+
+  it('keeps an exited container when the cap cuts the list', async () => {
+    mockHealthFacts.mockResolvedValue({
+      kind: 'ok',
+      containers: [
+        ...Array.from({ length: 105 }, (_, i) => container(`m-${i}`)),
+        container('z-exited', 'exited'),
+      ],
+    });
+    const res = await request(app)
+      .get('/api/stacks/web/observation/status')
+      .set('Authorization', authHeader);
+    expect(res.body.data.truncated).toBe(true);
+    expect(res.body.data.containers).toHaveLength(100);
+    expect(res.body.data.containers[0]).toMatchObject({ name: 'z-exited', state: 'exited' });
+  });
+
   it('bounds the list at 100 containers', async () => {
     mockHealthFacts.mockResolvedValue({
       kind: 'ok',
@@ -196,6 +262,18 @@ describe('GET /api/stacks/:stackName/observation/status', () => {
 });
 
 describe('GET /api/stacks/:stackName/observation/readiness', () => {
+  it('echoes a stack name longer than 128 characters unchanged', async () => {
+    const long = 'r'.repeat(130);
+    seedStacks([long]);
+    vi.spyOn(UpdateGuardService.prototype, 'computeUpdateReadiness').mockRejectedValue(new Error('boom'));
+    vi.spyOn(UpdateGuardService.prototype, 'computeRollbackReadiness').mockRejectedValue(new Error('boom'));
+    const res = await request(app)
+      .get(`/api/stacks/${long}/observation/readiness`)
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.data.stack).toBe(long);
+  });
+
   it('computes the named stack and projects only ids and verdicts', async () => {
     const computedAt = 1_700_000_100_000;
     const updateSpy = vi.spyOn(UpdateGuardService.prototype, 'computeUpdateReadiness').mockImplementation(async (

@@ -141,7 +141,7 @@ Every response uses the same envelope:
 
 Two tools answer with a condition rather than an error, because the request succeeded and the honest answer is that the evidence is missing:
 
-- **`sencho_get_stack_status`** returns at most 100 containers and sets `truncated` when the stack has more. An `outcome` of `unavailable` means the node could not read its own containers at that moment. The container list is empty, and the next call may succeed.
+- **`sencho_get_stack_status`** returns at most 100 containers and sets `truncated` when the stack has more. Containers that are not running or are unhealthy come first, then those still starting, then the healthy ones, each group by name, so the cap never drops the container that explains a problem. An `outcome` of `unavailable` means the node could not read its own containers at that moment. The container list is empty, and the next call may succeed.
 - **`sencho_get_stack_readiness`** sets `unavailableReason` to `summary_truncated` or `domain_error` only when both verdict slots are `null`.
 
 `sencho_get_fleet_health` is the widest response:
@@ -152,7 +152,7 @@ Two tools answer with a condition rather than an error, because the request succ
 
 Nothing in this surface is scored. A check that could not run reads as `unknown` or `unavailable`, never as healthy, and the two states stay distinct so a client can tell missing evidence from incomplete evidence.
 
-An error body is `{ error, code }`. The codes this surface can return are `SCOPE_DENIED` (the token tried a path outside the five), `PERMISSION_DENIED` (the account cannot read that node or stack), `capability_unavailable` (the targeted node is too old for observation), `NODE_NOT_FOUND`, `STACK_NOT_FOUND`, `INVALID_CURSOR`, and `INVALID_LIMIT`.
+An error body is `{ error, code }`. The codes this surface can return are `SCOPE_DENIED` (the token tried a path outside the five), `PERMISSION_DENIED` (the account cannot read that node or stack), `capability_unavailable` (the targeted node is too old for observation), `node_unreachable` (the targeted remote node did not answer, status 503), `NODE_NOT_FOUND`, `STACK_NOT_FOUND`, `INVALID_CURSOR`, and `INVALID_LIMIT`.
 
 ## Limits worth knowing
 
@@ -160,7 +160,7 @@ An error body is `{ error, code }`. The codes this surface can return are `SCOPE
 - **No per-node or per-stack narrowing.** An Observe Only token sees every node and stack the hub knows, the same set a viewer sees across the fleet, and the scope cannot be limited to particular nodes or stacks.
 - **Dismissed findings still appear.** [Fleet Readiness](/features/fleet-view#the-readiness-tab) applies dismissals in the UI. The observation read never touches that state, so `sencho_get_fleet_health` still reports a finding you dismissed there.
 - **Fleet health can be up to 15 seconds old.** The aggregate is cached for up to 15 seconds and shared across callers, so a burst of clients collapses onto one fleet-wide read. `generatedAt` and each cell's `evidenceAgeMs` tell you how fresh the evidence is.
-- **Old nodes cannot be observed.** A remote node running an older Sencho is reported as `unsupported` by the adapter, and the API answers `capability_unavailable`. Upgrade that node before connecting a client to it.
+- **Old nodes cannot be observed.** A remote node running an older Sencho is reported as `unsupported` by the adapter, and the API answers `capability_unavailable`. Upgrade that node before connecting a client to it. A remote node that is down answers `node_unreachable` instead, which means try again later, not upgrade.
 - **There are no write tools.** The adapter can only read. It cannot deploy, start, stop, edit, delete, or run a command.
 - **The token must expire.** The scope offers 30, 60, or 90 days or 1 year, and no non-expiring option.
 

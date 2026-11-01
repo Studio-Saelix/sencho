@@ -16,7 +16,6 @@ import {
   projectStackReadiness,
   projectStackStatus,
   projectUnavailableStackStatus,
-  STACK_NAME_PATTERN,
   STACK_PAGE_DEFAULT,
   STACK_PAGE_MAX,
   type StackStatusEntry,
@@ -50,7 +49,7 @@ function parseLimit(raw: unknown): Parsed<number> {
 
 function parseCursor(raw: unknown): Parsed<string | null> {
   if (raw === undefined || raw === '') return { ok: true, value: null };
-  if (typeof raw !== 'string' || !STACK_NAME_PATTERN.test(raw)) return { ok: false };
+  if (typeof raw !== 'string' || !isValidStackName(raw)) return { ok: false };
   return { ok: true, value: raw };
 }
 

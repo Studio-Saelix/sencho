@@ -21,6 +21,7 @@ let capServer: http.Server;
 let noCapServer: http.Server;
 let capNodeId: number;
 let noCapNodeId: number;
+let downNodeId: number;
 
 const capPaths: string[] = [];
 const noCapPaths: string[] = [];
@@ -71,6 +72,14 @@ beforeAll(async () => {
     name: 'obs-cap-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
     is_default: false, api_url: `http://127.0.0.1:${capPort}`, api_token: 'cap-token',
   });
+  // A port nothing listens on: bind a server, learn its port, close it.
+  const downServer = http.createServer();
+  const downPort = await listen(downServer);
+  await new Promise<void>((resolve) => downServer.close(() => resolve()));
+  downNodeId = db.addNode({
+    name: 'obs-down-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
+    is_default: false, api_url: `http://127.0.0.1:${downPort}`, api_token: 'down-token',
+  });
   noCapNodeId = db.addNode({
     name: 'obs-nocap-remote', type: 'remote', mode: 'proxy', compose_dir: '/tmp',
     is_default: false, api_url: `http://127.0.0.1:${noCapPort}`, api_token: 'nocap-token',
@@ -117,6 +126,24 @@ describe('remote capability gate', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('capability_unavailable');
+  });
+
+  it.each([
+    ['/api/stacks/web/observation/status'],
+    ['/api/stacks/web/observation/readiness'],
+    ['/api/stacks/platform/observation'],
+    ['/api/stacks/platform/observation/'],
+  ])('answers 503 node_unreachable, not "upgrade it", when the remote is down: %s', async (path) => {
+    for (const bearer of [adminBearer, viewerBearer]) {
+      const res = await request(app)
+        .get(path)
+        .set('Authorization', `Bearer ${bearer}`)
+        .set('x-node-id', String(downNodeId));
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('node_unreachable');
+      expect(res.body.error).not.toMatch(/upgrade/i);
+    }
   });
 
   it('forwards to a supported remote and returns its projection', async () => {
