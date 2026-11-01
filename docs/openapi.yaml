@@ -1754,7 +1754,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
         "503":
@@ -2312,7 +2320,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -2376,7 +2392,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: >
+            Authentication required. Provide a valid Bearer token. On a remote
+            node, a 401 that carries an `x-sencho-proxy: 1` response header came
+            from the node rejecting the API token stored for it on the hub, not
+            from the caller's own token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
