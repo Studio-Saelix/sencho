@@ -210,6 +210,16 @@ describe('ComposeLabelsPanel', () => {
     expect(screen.queryByTestId('mismatch-changed')).toBeNull();
   });
 
+  it('shows a load error, not an empty inventory, when the body cannot be read', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({ stackName: 'demo', services: 'not-an-array' }),
+    } as unknown as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Could not load Compose labels for this stack.')).toBeInTheDocument();
+    expect(screen.queryByText('No Compose or runtime labels found for this stack.')).toBeNull();
+  });
+
   it('a source facet hides that source; turning off Compose File hides declared labels', async () => {
     const user = userEvent.setup();
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => searchMock } as Response);

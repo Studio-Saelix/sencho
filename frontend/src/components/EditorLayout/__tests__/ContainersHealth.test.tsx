@@ -961,16 +961,25 @@ describe('io.sencho.* labels on the container list', () => {
       expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
     });
 
-    it('does not flag a one-shot helper that finished cleanly, a running one, or a service with no containers', () => {
+    it('does not flag a one-shot helper that finished cleanly, a running one, a helper with no declared replicas, or a stopped stack', () => {
       hiddenOnly([box('redis', { State: 'exited', Status: 'Exited (0) 3 hours ago' })]);
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
       cleanup();
       hiddenOnly([box('redis')]);
       expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
       cleanup();
+      hiddenOnly([], [svc('api'), svc('redis', { expectedReplicas: 0 }), svc('web')]);
+      expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
+      cleanup();
+      // Every container is down, so the stack is stopped: a missing helper is not news.
+      renderStack(entryFor(resolution), [box('web', { State: 'exited', Status: 'Exited (0)' }), box('api', { State: 'exited', Status: 'Exited (0)' })], specs());
+      expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
+    });
+
+    it('flags a hidden helper that has no container while the rest of the stack runs', () => {
       hiddenOnly([]);
       expect(screen.getByTestId('hidden-services-row')).toBeInTheDocument();
-      expect(screen.queryByTestId('hidden-services-attention')).toBeNull();
+      expect(screen.getByTestId('hidden-services-attention')).toHaveTextContent('1 needs attention');
     });
 
     it('flags a replicated helper when only some replicas exist or one of them is unhealthy', () => {
