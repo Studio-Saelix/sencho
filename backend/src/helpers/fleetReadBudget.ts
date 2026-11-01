@@ -53,17 +53,17 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  *
  * 25 s is sized from a measured hub: 461 containers on one vCPU build the map
  * in 5 to 9 s alone, and 15 to 17.5 s while a browser has the dashboard open,
- * so 18 s cut about two loads in five. The deadline leaves that worst case
+ * so an 18 s deadline cut a share of loads. The deadline leaves that worst case
  * about 40% headroom; a build that still outlives it is kept for the retry
- * (see {@link LocalFleetBuildShare}).
+ * (see `LocalFleetBuildShare` in `localFleetBuildShare.ts`).
  *
  * The deadline bounds the caller's wait, not the work. The local builders
  * cannot be cancelled, so a build that outlives the deadline finishes on its
  * own; the hub's label inventory, dependency graph and networking summary
- * share that build with a Retry instead of starting it again. Where a local read checks the daemon first, that check is
- * a maximum inside the deadline rather than an allowance added on top: the
- * ping normally answers in milliseconds, so the build gets almost the full
- * deadline. A build allowed only a fixed slice after a ping that can itself
+ * share that build with a Retry instead of starting it again. Where a local
+ * read checks the daemon first, that check is a maximum inside the deadline
+ * rather than an allowance added on top: the ping normally answers in
+ * milliseconds, so the build gets almost the full deadline. A build allowed only a fixed slice after a ping that can itself
  * cost 5 s is what left a 458-container hub timing out in the real tab.
  *
  * It applies to the hub's own label inventory, dependency graph and networking

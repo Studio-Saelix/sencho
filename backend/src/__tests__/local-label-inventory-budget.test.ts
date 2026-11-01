@@ -122,8 +122,8 @@ describe('readLocalLabelInventory', () => {
 
   it('gives the build the rest of the one deadline, not a second budget after the ping', async () => {
     // At 458 containers the build alone needed more than the old fixed
-    // 12 s slice (two thirds of an 18 s deadline) in the real tab. Here the
-    // build takes 350 ms of the 400 ms deadline and still returns every row,
+    // 12 s slice in the real tab. Here the build takes 350 ms of the 400 ms
+    // deadline and still returns every row,
     // because the ping's fast answer leaves it that time instead of the ping
     // being an allowance the build also needs.
     const docker = stubDocker({ containerCount: 458, buildDelayMs: 350 });
@@ -266,13 +266,51 @@ describe('readLocalLabelInventory sharing', () => {
     expect(retry.containers).toHaveLength(4);
   });
 
-  it('does not share a plain inventory with a reveal read', async () => {
-    const docker = stubDocker({ containerCount: 1, buildDelayMs: 10 });
+  /** Leave a build for `options` running (cut reader), then hand back the way to finish it. */
+  async function leaveBuildBehind(nodeId: number, options: { revealSecrets?: boolean }, docker: ReturnType<typeof stubDocker>, buildGate: () => void) {
+    const cut = await readLocalLabelInventory(nodeId, options, { livenessBudgetMs: 50, deadlineMs: 50 }).catch((err: unknown) => err);
+    expect(cut).toBeInstanceOf(FleetReadTimeoutError);
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    buildGate();
+  }
 
-    await readLocalLabelInventory(1, {}, TEST_BUDGET);
+  it('does not hand a reveal build to a plain read, or a plain build to a reveal read', async () => {
+    // The unread build of one mode is still available when the other mode
+    // reads, so only a separate share keeps revealed values from a plain reader.
+    for (const [left, other] of [[{ revealSecrets: true }, {}], [{}, { revealSecrets: true }]] as const) {
+      _resetLocalFleetBuildSharesForTests();
+      let release!: () => void;
+      const buildGate = new Promise<void>((resolve) => { release = resolve; });
+      const docker = stubDocker({ containerCount: 1, buildGate });
+
+      await leaveBuildBehind(1, left, docker, release);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await readLocalLabelInventory(1, other, TEST_BUDGET);
+
+      expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it('lets a reveal retry join the reveal build a cut reveal read left behind', async () => {
+    let release!: () => void;
+    const buildGate = new Promise<void>((resolve) => { release = resolve; });
+    const docker = stubDocker({ containerCount: 2, buildGate });
+
+    await leaveBuildBehind(1, { revealSecrets: true }, docker, release);
+    const retry = await readLocalLabelInventory(1, { revealSecrets: true }, TEST_BUDGET);
+
+    expect(retry.containers).toHaveLength(2);
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the reveal option through to the build', async () => {
+    stubDocker({ containerCount: 1 });
+    const build = await import('../services/LabelInventoryService');
+    const spy = vi.spyOn(build, 'buildNodeLabelInventory');
+
     await readLocalLabelInventory(1, { revealSecrets: true }, TEST_BUDGET);
 
-    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledWith(1, { revealSecrets: true });
   });
 
   it('rebuilds after an unread finished build outlives the share window', async () => {
@@ -294,10 +332,13 @@ describe('readLocalLabelInventory sharing', () => {
     expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);
   });
 
-  it('does not serve one node inventory to another node', async () => {
-    const docker = stubDocker({ containerCount: 1 });
+  it('does not serve one node\'s unread build to another node', async () => {
+    let release!: () => void;
+    const buildGate = new Promise<void>((resolve) => { release = resolve; });
+    const docker = stubDocker({ containerCount: 1, buildGate });
 
-    await readLocalLabelInventory(1, {}, TEST_BUDGET);
+    await leaveBuildBehind(1, {}, docker, release);
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await readLocalLabelInventory(2, {}, TEST_BUDGET);
 
     expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(2);

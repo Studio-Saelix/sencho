@@ -2041,8 +2041,7 @@ describe('DockerController - inspectContainerLabelsAndImage', () => {
 describe('DockerController - listContainersForLabelInventory', () => {
   it('builds a large inventory from the container list without inspecting every container', async () => {
     // At 458 containers the old path issued one inspect per container, which
-    // left the hub's own label read cut at its 18 s local deadline (since
-    // raised to 25 s) inside the tab's client timeout. The list response already carries the same
+    // left the hub's own label read cut at the then 18 s local deadline, inside the tab's client timeout. The list response already carries the same
     // labels and image ID.
     mockDocker.listContainers.mockResolvedValue(Array.from({ length: 458 }, (_, i) => ({
       Id: `container-${i}`,

@@ -746,6 +746,48 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(((refresh.body.nodes as Row[])[0]).inventory?.containers.map(c => c.id)).toEqual(['c1', 'c2']);
     });
 
+    it.each([
+      ['dependency-map', '/api/fleet/dependency-map'],
+      ['networking-summary', '/api/fleet/networking-summary'],
+    ])('builds the hub\'s %s once for two concurrent requests', async (_name, route) => {
+      const getDependencySnapshot = vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve({ containers: [], networks: [], volumes: [] }), 300);
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getDependencySnapshot,
+      } as unknown as DockerController);
+
+      const [first, second] = await Promise.all([
+        request(app).get(`${route}?nodeId=${localNodeId()}`).set('Authorization', authHeader),
+        request(app).get(`${route}?nodeId=${localNodeId()}`).set('Authorization', authHeader),
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(getDependencySnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('builds the hub\'s labels once for two concurrent requests', async () => {
+      const listContainersForLabelInventory = vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve([]), 300);
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        listContainersForLabelInventory,
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const [first, second] = await Promise.all([
+        getLabels(`?nodeId=${localNodeId()}`),
+        getLabels(`?nodeId=${localNodeId()}`),
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(listContainersForLabelInventory).toHaveBeenCalledTimes(1);
+    });
+
     it('reads the hub\'s map again on a refresh', async () => {
       const getDependencySnapshot = vi.fn(async () => ({ containers: [], networks: [], volumes: [] }));
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({

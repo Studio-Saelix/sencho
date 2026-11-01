@@ -36,6 +36,12 @@ const allOk = () => answerBy({ 1: () => json(piece(1)), 2: () => json(piece(2)),
 beforeEach(() => { apiFetchMock.mockReset(); });
 afterEach(() => vi.useRealTimers());
 
+describe('map node timeout', () => {
+  it('stays above the hub\'s 25 s local read deadline so the server answers first', () => {
+    expect(MAP_NODE_TIMEOUT_MS).toBeGreaterThan(25_000);
+  });
+});
+
 describe('mergeMapPieces', () => {
   it('concatenates slices in node order and appends request failures as node errors', () => {
     const merged = mergeMapPieces(NODES, new Map([[2, piece(2)], [1, piece(1)]]), new Map([[3, 'Timed out after 8s']]));

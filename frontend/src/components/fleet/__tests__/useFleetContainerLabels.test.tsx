@@ -4,7 +4,7 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 const apiFetchMock = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetchMock(...args) }));
 
-import { useFleetContainerLabels, mergeLabelPieces, type LabelsNodeRef } from '../useFleetContainerLabels';
+import { useFleetContainerLabels, mergeLabelPieces, LABELS_NODE_TIMEOUT_MS, type LabelsNodeRef } from '../useFleetContainerLabels';
 import type { FleetLabelInventoryResponse, LabelIndexRow } from '@/lib/labelInventory';
 
 const NODES: LabelsNodeRef[] = [{ id: 1, name: 'Local' }, { id: 2, name: 'edge' }, { id: 3, name: 'pilot' }];
@@ -57,6 +57,12 @@ function answerBy(handlers: Record<number, () => Promise<Response> | Response>) 
 
 beforeEach(() => {
   apiFetchMock.mockReset();
+});
+
+describe('labels node timeout', () => {
+  it('stays above the hub\'s 25 s local read deadline so the server answers first', () => {
+    expect(LABELS_NODE_TIMEOUT_MS).toBeGreaterThan(25_000);
+  });
 });
 
 describe('mergeLabelPieces', () => {

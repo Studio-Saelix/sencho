@@ -111,13 +111,45 @@ describe('readLocalDependencyGraph', () => {
     expect(buildLocalGraph).toHaveBeenCalledTimes(2);
   });
 
-  it('does not serve one node\'s graph to another node', async () => {
-    buildLocalGraph.mockImplementation(async (id: number) => ({ ...graph(1), nodeId: id }));
+  it('does not serve one node\'s unread graph to another node or another name', async () => {
+    const hold = gate();
+    buildLocalGraph.mockImplementation(async (id: number, name: string) => { await hold.promise; return { ...graph(1), nodeId: id, nodeName: name }; });
 
-    await readLocalDependencyGraph(1, 'hub', TEST_BUDGET);
-    await readLocalDependencyGraph(2, 'other', TEST_BUDGET);
+    await readLocalDependencyGraph(1, 'hub', CUT_BUDGET).catch(() => undefined);
+    hold.release();
+    await settle();
 
-    expect(buildLocalGraph).toHaveBeenCalledTimes(2);
+    const otherNode = await readLocalDependencyGraph(2, 'hub', TEST_BUDGET);
+    const renamed = await readLocalDependencyGraph(1, 'renamed', TEST_BUDGET);
+
+    expect(otherNode).toMatchObject({ nodeId: 2 });
+    expect(renamed).toMatchObject({ nodeId: 1, nodeName: 'renamed' });
+    expect(buildLocalGraph).toHaveBeenCalledTimes(3);
+  });
+
+  it('still runs the daemon check for a retry that joins a running build', async () => {
+    const hold = gate();
+    buildLocalGraph.mockImplementation(async () => { await hold.promise; return graph(7); });
+    await readLocalDependencyGraph(1, 'hub', CUT_BUDGET).catch(() => undefined);
+
+    ping.mockImplementation(() => new Promise<never>(() => {}));
+    const error = await readLocalDependencyGraph(1, 'hub', TEST_BUDGET).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as FleetReadTimeoutError).budgetMs).toBe(TEST_BUDGET.livenessBudgetMs);
+    expect(ping).toHaveBeenCalledTimes(2);
+    expect(buildLocalGraph).toHaveBeenCalledTimes(1);
+    hold.release();
+  });
+
+  it('surfaces a daemon check that rejects without starting a build', async () => {
+    ping.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    const error = await readLocalDependencyGraph(1, 'hub', TEST_BUDGET).catch((err: unknown) => err);
+
+    expect(error).not.toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as Error).message).toContain('ECONNREFUSED');
+    expect(buildLocalGraph).not.toHaveBeenCalled();
   });
 });
 
@@ -152,6 +184,18 @@ describe('readLocalNetworkingSummary', () => {
 
     expect(ping).not.toHaveBeenCalled();
     expect(computeNodeNetworkingSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not serve one node\'s unread summary to another node', async () => {
+    const hold = gate();
+    computeNodeNetworkingSummary.mockImplementation(async (id: number) => { await hold.promise; return summary(id); });
+
+    await readLocalNetworkingSummary(1, { deadlineMs: 50 }).catch(() => undefined);
+    hold.release();
+    await settle();
+
+    expect((await readLocalNetworkingSummary(2, { deadlineMs: 400 })).exposed.count).toBe(2);
+    expect(computeNodeNetworkingSummary).toHaveBeenCalledTimes(2);
   });
 
   it('tries again after a build that rejected', async () => {
