@@ -1067,24 +1067,27 @@ export class RecoveryEngineService {
         lastDeepCheckAt: deep ? Date.now() : this.healthSnapshot?.lastDeepCheckAt ?? null,
       };
     };
+    const fail = (errorClass: RecoveryErrorClass): void => {
+      this.operations.finish(operationId, { state: 'failed', errorClass });
+    };
     try {
       // The one pull a plain provision may start, as for a first provision: a
       // status read never downloads, and this is a request to make it work.
       if (!await this.ensureHelperImage()) {
         record({ state: 'unavailable', reason: 'helper_unavailable' }, false);
-        this.operations.finish(operationId, { state: 'failed', errorClass: 'capability_unavailable' });
+        fail('capability_unavailable');
         return;
       }
       const cheap = await this.computeCheapHealth();
       // The cheap check reads the active repository, so its answer belongs to
       // this one only while this one is still active.
       if (!stillActive()) {
-        this.operations.finish(operationId, { state: 'failed', errorClass: 'lock_held' });
+        fail('lock_held');
         return;
       }
       if (cheap.state === 'unavailable') {
         record(cheap, false);
-        this.operations.finish(operationId, { state: 'failed', errorClass: errorClassForHealth(cheap.reason) });
+        fail(errorClassForHealth(cheap.reason));
         return;
       }
       const opened = await readRepositoryConfig({
@@ -1095,35 +1098,33 @@ export class RecoveryEngineService {
         operationId,
       });
       if (!stillActive()) {
-        this.operations.finish(operationId, { state: 'failed', errorClass: 'lock_held' });
+        fail('lock_held');
         return;
       }
       // An aborted read says nothing about the repository, so it records nothing.
       if (opened.kind === 'failed' && opened.errorClass === 'interrupted') {
-        this.operations.finish(operationId, { state: 'failed', errorClass: 'interrupted' });
+        fail('interrupted');
         return;
       }
       // Another repository id under the same key is as unusable as none: the
       // points recorded against this one cannot be read from it.
-      const mismatched = opened.kind === 'open' && opened.fingerprint !== repository.repositoryFingerprint;
-      if (mismatched) {
+      if (opened.kind === 'open' && opened.fingerprint !== repository.repositoryFingerprint) {
         console.warn('[Recovery] Repository %s opened, but the volume holds a different repository than the one on record', repository.id);
+        record({ state: 'unavailable', reason: 'repository_unavailable' }, true);
+        fail('repository_unavailable');
+        return;
       }
-      const health: LocalVolumeProtectionHealth = mismatched
-        ? { state: 'unavailable', reason: 'repository_unavailable' }
-        : healthForOpened(opened);
-      record(health, true);
-      if (health.state === 'available') {
+      record(healthForOpened(opened), true);
+      if (opened.kind === 'open') {
         this.operations.finish(operationId, { state: 'succeeded' });
       } else {
-        const errorClass = opened.kind === 'failed' ? opened.errorClass : 'repository_unavailable';
-        this.operations.finish(operationId, { state: 'failed', errorClass });
+        fail(opened.kind === 'failed' ? opened.errorClass : 'repository_unavailable');
       }
     } catch (err) {
       const errorClass = classifyRecoveryError(err);
       console.error('[Recovery] Repository confirmation failed:', errorMessageForLog(err));
       record({ state: 'unavailable', reason: healthReasonFor(errorClass) }, false);
-      this.operations.finish(operationId, { state: 'failed', errorClass });
+      fail(errorClass);
     }
   }
 
