@@ -1,10 +1,28 @@
+import {
+  DEPLOYED_TRUSTED_LABEL_KEYS,
+  MANAGED_LABEL_DECLARED_REASON,
+  MANAGED_LABEL_DEPLOYED_REASON,
+  MANAGED_LABEL_KEYS,
+  type SenchoLabelState,
+} from './senchoLabels';
+
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
+
+export type LabelBehaviorState = SenchoLabelState | 'inert';
+
+/** Whether Sencho acts on an `io.sencho.*` label. Absent for every other label and on older nodes. */
+export interface LabelBehavior {
+  state: LabelBehaviorState;
+  reason?: string;
+  summary?: string;
+}
 
 export interface LabelValue {
   key: string;
   value: string;
   source: LabelSource;
   redacted?: boolean;
+  behavior?: LabelBehavior;
 }
 
 export interface ContainerLabelRow {
@@ -30,6 +48,7 @@ export interface LabelIndexRow {
   value: string;
   redacted?: boolean;
   source: LabelSource;
+  behavior?: LabelBehavior;
   containers: LabelIndexContainerRef[];
 }
 
@@ -80,8 +99,103 @@ export interface StackLabelInventory {
   generatedAt: number;
 }
 
+export const BEHAVIOR_LABELS: Record<LabelBehaviorState, string> = {
+  active: 'Active',
+  invalid: 'Ignored',
+  unsupported: 'Unsupported',
+  inert: 'Inert',
+};
+
+export const SENCHO_LABELS_NODE_COPY =
+  'This node does not apply io.sencho.* labels. Update the node to use them.';
+
+export const SENCHO_LABEL_NOT_REPORTED_COPY =
+  'This node does not report whether Sencho acts on this label.';
+
+const SENCHO_NAMESPACE = 'io.sencho.';
+const UNREADABLE_BEHAVIOR_REASON = 'The node reported a label status this version of Sencho cannot read.';
+const MAX_BEHAVIOR_TEXT = 240;
+
+export function isSenchoLabelKey(key: string): boolean {
+  return key.startsWith(SENCHO_NAMESPACE);
+}
+
+/**
+ * The reason for a copy the client does not honor, mirroring the backend's inert
+ * reasons so both layers say the same thing about the same copy.
+ */
+function unhonoredInertReason(source: LabelSource): string {
+  if (source === 'image') return 'Set by the image, so Sencho does not act on it. Declare it in the Compose file instead.';
+  if (source === 'runtime') return 'Present only on the running container, so Sencho does not act on it. Declare it in the Compose file instead.';
+  return 'Its origin is unknown, so Sencho does not act on it.';
+}
+
+/**
+ * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
+ * stays absent (an older node), and a label outside the namespace never carries
+ * one. Anything unreadable becomes `unsupported` with a fixed reason. Only the
+ * declared Compose copy of a presentation label, or a deployed copy of the
+ * protective infrastructure label, keeps the reported state; everything else is
+ * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
+ * A claim the client drops carries the client's own reason, so a node's text
+ * cannot describe a state the screen does not show; a node that already reports
+ * inert keeps its reason, which names the origin.
+ */
+export function readLabelBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
+  if (raw === undefined || !isSenchoLabelKey(key)) return undefined;
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)
+    ? o.state as LabelBehaviorState
+    : null;
+  if (!o || !state || (o.reason !== undefined && typeof o.reason !== 'string') || (o.summary !== undefined && typeof o.summary !== 'string')) {
+    return { state: 'unsupported', reason: UNREADABLE_BEHAVIOR_REASON };
+  }
+  const reason = typeof o.reason === 'string' ? o.reason.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
+  const summary = typeof o.summary === 'string' ? o.summary.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
+  // The keys Sencho stamps on its own containers are never configuration, whatever a node reports.
+  if (MANAGED_LABEL_KEYS.includes(key)) {
+    return source === 'compose'
+      ? { state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON }
+      : { state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON };
+  }
+  const honored = source === 'compose' || DEPLOYED_TRUSTED_LABEL_KEYS.includes(key);
+  if (!honored && state !== 'inert') return { state: 'inert', reason: unhonoredInertReason(source) };
+  return {
+    state: honored ? state : 'inert',
+    ...(reason ? { reason } : {}),
+    ...(summary ? { summary } : {}),
+  };
+}
+
+function readLabelValues(labels: LabelValue[]): LabelValue[] {
+  return labels.map(({ behavior, ...rest }) => {
+    const read = readLabelBehavior(rest.source, rest.key, behavior);
+    return read ? { ...rest, behavior: read } : rest;
+  });
+}
+
+/** A stack inventory with every `behavior` read defensively. The stack route is proxied to the node unchecked. */
+export function withReadBehaviors(inventory: StackLabelInventory): StackLabelInventory {
+  // A proxied body that does not carry the inventory shape is a failed read, not an
+  // empty inventory; the caller shows its error state for a thrown payload.
+  if (!inventory || !Array.isArray(inventory.services)
+    || typeof inventory.stackName !== 'string'
+    || typeof inventory.renderable !== 'boolean'
+    || typeof inventory.generatedAt !== 'number') {
+    throw new Error('Unexpected label inventory payload');
+  }
+  return {
+    ...inventory,
+    services: inventory.services.map(svc => ({
+      ...svc,
+      declaredLabels: readLabelValues(svc.declaredLabels),
+      replicas: svc.replicas.map(rep => ({ ...rep, runtimeLabels: readLabelValues(rep.runtimeLabels) })),
+    })),
+  };
+}
+
 export const LABEL_DISAMBIGUATION_COPY =
-  'Docker labels are metadata declared on Compose services or attached to running containers. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
+  'Docker labels are metadata declared on Compose services or attached to running containers. Labels in the io.sencho.* namespace, when declared in the Compose file, tell Sencho how to present a service. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.';
 
 export const SOURCE_LABELS: Record<LabelSource, string> = {
   compose: 'Declared in Compose',

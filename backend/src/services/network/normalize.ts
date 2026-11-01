@@ -70,7 +70,8 @@ export type ManagedNetworkAttachmentPredicate = (
 
 /** Rendered model: resource names are already resolved by `docker compose config`. */
 export function fromEffectiveModel(m: EffectiveModel): NormalizedNetworkModel {
-  const networks: NormalizedNetworkModel['networks'] = {};
+  // No prototype, so a network keyed `__proto__` or `constructor` is plain data.
+  const networks = Object.create(null) as NormalizedNetworkModel['networks'];
   for (const [key, res] of Object.entries(m.networks)) {
     networks[key] = { runtimeName: res.name, external: res.external };
   }
@@ -83,7 +84,8 @@ export function fromEffectiveModel(m: EffectiveModel): NormalizedNetworkModel {
 
 /** Raw declared model: resolve runtime names here (project prefix / `name:` override). */
 export function fromDeclaredCompose(m: DeclaredCompose, projectName: string): NormalizedNetworkModel {
-  const networks: NormalizedNetworkModel['networks'] = {};
+  // No prototype, so a network keyed `__proto__` or `constructor` is plain data.
+  const networks = Object.create(null) as NormalizedNetworkModel['networks'];
   for (const [key, res] of Object.entries(m.networks)) {
     networks[key] = { runtimeName: runtimeResourceName(projectName, key, res.name, res.external), external: res.external };
   }

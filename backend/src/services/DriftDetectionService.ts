@@ -2,12 +2,14 @@ import DockerController from './DockerController';
 import type { DependencyContainer, DependencyNetwork } from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
+import { holdsTemplate } from '../helpers/composeDependencyParse';
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import {
   compareStackNetworks,
   fromDeclaredCompose,
+  isHostNetwork,
   type ManagedNetworkAttachmentPredicate,
 } from './network/normalize';
 import { resolveManagedMeshAttachment } from './network/managedMeshAttachment';
@@ -102,21 +104,221 @@ export function normalizeImageRef(ref: string): string {
 
 const portKey = (publishedPort: number, protocol: string): string => `${publishedPort}/${protocol}`;
 
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
 function formatPorts(ports: Set<string>): string {
   return ports.size ? [...ports].sort().join(', ') : 'none';
+}
+
+/** A published port as the running container reports it. */
+interface RuntimePort {
+  /** Host interface the binding sits on; '' or an all-interface form covers every one. */
+  hostIp: string;
+  publishedPort: number;
+  privatePort: number | null;
+  protocol: string;
 }
 
 /** Runtime aggregate for one service across its (possibly replicated) containers. */
 interface RuntimeService {
   images: Set<string>;
-  ports: Set<string>;
+  /** Unique by published port, container port, and protocol, across all replicas. */
+  ports: Map<string, RuntimePort>;
+  /** Each running container's own published ports, so a replica cannot borrow a sibling's. */
+  containerPorts: RuntimePort[][];
 }
+
+/** A declared port Docker assigns, matched to the container port it targets. */
+interface DynamicDeclaration {
+  hostIp: string;
+  startPort: number;
+  endPort: number;
+  protocol: string;
+}
+
+/**
+ * A dynamic declaration whose container side is still a template, so its
+ * target is unknown. The protocol and interface are known unless they too are
+ * templates. It is matched by whichever of those the declaration has, once per
+ * running binding.
+ */
+interface UnresolvedDeclaration {
+  hostIp: string;
+  protocol: string;
+}
+
+/**
+ * One binding a declared port needs on each running container, with the label
+ * a finding uses when no binding satisfies it and the indexes of the bindings
+ * it may use.
+ */
+interface PortRequirement {
+  label: string;
+  candidates: number[];
+}
+
+/**
+ * Assign each requirement its own binding, or report it missing. A maximum
+ * bipartite matching rather than a greedy pass: a declaration whose interface
+ * is still a template can use any candidate binding, and a greedy pass could
+ * let it take the one binding a resolved declaration needs and report drift
+ * where a valid assignment exists.
+ *
+ * Each requirement carries only the bindings it can use, so a stack whose
+ * declarations target distinct container ports costs one candidate each no
+ * matter how many it declares. The augmenting-path search is exact while it
+ * stays inside a fixed work budget, which bounds the cost per container. Only
+ * a graph with enough candidate pairs to exhaust the budget (many declarations
+ * that each match nearly every binding) falls back to a first-fit pass, which
+ * errs toward reporting drift, as the engine does elsewhere.
+ */
+const MAX_MATCH_EDGE_CHECKS = 1_000_000;
+
+function matchPortRequirements(
+  requirements: PortRequirement[],
+  bindings: RuntimePort[],
+): { missing: string[]; unexplained: RuntimePort[] } {
+  const owner = new Array<number>(bindings.length).fill(-1);
+  let checks = 0;
+  let exhausted = false;
+  const assign = (requirement: number, seen: boolean[]): boolean => {
+    for (const b of requirements[requirement].candidates) {
+      if (++checks > MAX_MATCH_EDGE_CHECKS) {
+        exhausted = true;
+        return false;
+      }
+      if (seen[b]) continue;
+      seen[b] = true;
+      if (owner[b] === -1 || assign(owner[b], seen)) {
+        owner[b] = requirement;
+        return true;
+      }
+      if (exhausted) return false;
+    }
+    return false;
+  };
+  const matched: boolean[] = [];
+  for (let requirement = 0; requirement < requirements.length && !exhausted; requirement++) {
+    matched[requirement] = assign(requirement, new Array<boolean>(bindings.length).fill(false));
+  }
+  if (!exhausted) {
+    return {
+      missing: requirements.filter((_, requirement) => !matched[requirement]).map((requirement) => requirement.label),
+      unexplained: bindings.filter((_, binding) => owner[binding] === -1),
+    };
+  }
+  const used = new Array<boolean>(bindings.length).fill(false);
+  const missing: string[] = [];
+  for (const requirement of requirements) {
+    const index = requirement.candidates.find((b) => !used[b]);
+    if (index === undefined) missing.push(requirement.label);
+    else used[index] = true;
+  }
+  return { missing, unexplained: bindings.filter((_, binding) => !used[binding]) };
+}
+
+/** The declared ports a service publishes, split by whether the host number is
+ *  known, and whether an auto-assigned declaration names its container target. */
+interface DeclaredPorts {
+  fixed: Set<string>;
+  dynamic: DynamicDeclaration[];
+  unknownTargets: UnresolvedDeclaration[];
+}
+
+function declaredPortsOf(svc: DeclaredService): DeclaredPorts {
+  const fixed = new Set<string>();
+  const dynamic: DynamicDeclaration[] = [];
+  const unknownTargets: UnresolvedDeclaration[] = [];
+  for (const p of svc.ports) {
+    if (!p.dynamic) {
+      fixed.add(portKey(p.publishedPort, p.protocol));
+      continue;
+    }
+    if (p.targetStartPort === undefined) {
+      unknownTargets.push({ hostIp: p.hostIp, protocol: p.protocol });
+      continue;
+    }
+    dynamic.push({
+      hostIp: p.hostIp,
+      startPort: p.targetStartPort,
+      endPort: p.targetEndPort ?? p.targetStartPort,
+      protocol: p.protocol,
+    });
+  }
+  // A declaration whose interface is still a template can use any candidate
+  // binding for its target; the matching below accounts for that.
+  return { fixed, dynamic, unknownTargets };
+}
+
+/** All-interface forms Docker reports and Compose accepts as equivalent. */
+function interfaceKey(ip: string): string {
+  const trimmed = ip.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return trimmed === '' || trimmed === '0.0.0.0' || trimmed === '::' ? '*' : trimmed;
+}
+
+/**
+ * The bindings each declared port may use, as indexes into the container's open
+ * bindings. A declaration with no interface asks for every interface, so only
+ * an all-interface binding satisfies it; a declaration naming one address needs
+ * a binding on that same address. An interface still holding a template was
+ * never resolved, so it constrains nothing and may use any binding the rest of
+ * the declaration allows. The lookups keep the candidate list short:
+ * declarations that target distinct container ports each get one candidate
+ * however many the stack declares.
+ */
+function portRequirements(declaredPorts: DeclaredPorts, bindings: RuntimePort[]): PortRequirement[] {
+  const byTargetInterface = new Map<string, number[]>();
+  const byTarget = new Map<string, number[]>();
+  const byInterface = new Map<string, number[]>();
+  const byProtocol = new Map<string, number[]>();
+  const add = (map: Map<string, number[]>, key: string, index: number): void => {
+    const list = map.get(key);
+    if (list) list.push(index);
+    else map.set(key, [index]);
+  };
+  bindings.forEach((p, index) => {
+    const iface = interfaceKey(p.hostIp);
+    const target = `${p.privatePort ?? '?'}/${p.protocol}`;
+    add(byTargetInterface, `${target}/${iface}`, index);
+    add(byTarget, target, index);
+    add(byInterface, `${p.protocol}/${iface}`, index);
+    add(byProtocol, p.protocol, index);
+  });
+  const requirements: PortRequirement[] = [];
+  for (const d of declaredPorts.dynamic) {
+    const wildcardInterface = holdsTemplate(d.hostIp);
+    for (let target = d.startPort; target <= d.endPort; target++) {
+      const key = `${target}/${d.protocol}`;
+      requirements.push({
+        label: `auto:${target}/${d.protocol}`,
+        candidates: (wildcardInterface
+          ? byTarget.get(key)
+          : byTargetInterface.get(`${key}/${interfaceKey(d.hostIp)}`)) ?? [],
+      });
+    }
+  }
+  // A declaration whose target never resolved is matched by protocol and
+  // interface, and still consumes its own binding so it cannot explain a
+  // second one.
+  for (const unknown of declaredPorts.unknownTargets) {
+    const candidates = holdsTemplate(unknown.hostIp)
+      ? byProtocol.get(unknown.protocol)
+      : byInterface.get(`${unknown.protocol}/${interfaceKey(unknown.hostIp)}`);
+    requirements.push({ label: `auto/${unknown.protocol}`, candidates: candidates ?? [] });
+  }
+  return requirements;
+}
+
+/** A declared port as it reads in a finding, with no invented host number. */
+function declaredPortLabel(p: { publishedPort: number; protocol: string; dynamic?: true; targetStartPort?: number; targetEndPort?: number }): string {
+  if (!p.dynamic) return portKey(p.publishedPort, p.protocol);
+  const target = p.targetStartPort === undefined
+    ? ''
+    : p.targetStartPort === (p.targetEndPort ?? p.targetStartPort)
+      ? `:${p.targetStartPort}`
+      : `:${p.targetStartPort}-${p.targetEndPort}`;
+  return `auto${target}/${p.protocol}`;
+}
+
+const runtimePortKey = (p: RuntimePort): string => `${p.publishedPort}/${p.privatePort ?? '?'}/${p.protocol}`;
 
 export interface AssembleStackDriftInput {
   stack: string;
@@ -228,9 +430,24 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
   for (const c of containers) {
     const name = c.service ?? c.name;
     if (RUNNING_STATES.has(c.state)) {
-      const agg = runtimeByService.get(name) ?? { images: new Set<string>(), ports: new Set<string>() };
+      const agg = runtimeByService.get(name) ?? {
+        images: new Set<string>(),
+        ports: new Map<string, RuntimePort>(),
+        containerPorts: [],
+      };
       if (c.image) agg.images.add(normalizeImageRef(c.image));
-      for (const p of c.ports) agg.ports.add(portKey(p.publishedPort, p.protocol));
+      const ownPorts = new Map<string, RuntimePort>();
+      for (const p of c.ports) {
+        const port: RuntimePort = {
+          hostIp: p.ip,
+          publishedPort: p.publishedPort,
+          privatePort: p.privatePort,
+          protocol: p.protocol,
+        };
+        ownPorts.set(runtimePortKey(port), port);
+        agg.ports.set(runtimePortKey(port), port);
+      }
+      agg.containerPorts.push([...ownPorts.values()]);
       runtimeByService.set(name, agg);
       continue;
     }
@@ -298,19 +515,58 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
       }
     }
 
-    // Ports compare as exact sets. The compose parser collapses a published
-    // range (e.g. "8000-8002:80") to its first port, while the runtime reports
-    // every port in the range, so a range can read as a mismatch. That errs
-    // toward reporting drift rather than hiding it, consistent with the engine's
-    // philosophy.
-    const declaredPorts = new Set(svc.ports.map((p) => portKey(p.publishedPort, p.protocol)));
-    if (!setsEqual(declaredPorts, runtime.ports)) {
+    // A service declared with network_mode: host has its port bindings
+    // discarded by Docker: every container port is reachable on the host
+    // directly, so the declared set and the runtime set cannot be compared.
+    // The Inspector treats the same mode as publishing every container port,
+    // and the operator docs say so.
+    if (isHostNetwork(svc.networkMode)) continue;
+
+    // Ports compare as exact sets, except that an auto-assigned port is matched
+    // by the container port it targets and the interface it declares: the host
+    // number Docker picked is not a declaration and must not read as drift. The
+    // compose parser collapses a published range (e.g. "8000-8002:80") to its
+    // first port, while the runtime reports every port in the range, so a range
+    // can read as a mismatch. That errs toward reporting drift rather than
+    // hiding it, consistent with the engine's philosophy.
+    //
+    // Each runtime binding is consumed at most once per container, fixed
+    // declarations first, so a binding a fixed declaration already explains can
+    // never stand in for an auto-assigned declaration that Docker did not
+    // publish. Two declarations therefore need two bindings, and a second
+    // declaration with no binding of its own reads as drift. The assignment is
+    // a maximum matching, so a declaration whose interface is still a template
+    // cannot take the binding a resolved declaration needs.
+    //
+    // The list API reports the host number a container is bound to, not whether
+    // the file asked for it. A fixed host number on a container port declared
+    // auto-assigned is therefore indistinguishable from the number Docker
+    // picked, and is treated as the picked one: a redeploy that drops a fixed
+    // host number is not reported until the container is recreated. The
+    // operator docs state this limitation.
+    const declaredPorts = declaredPortsOf(svc);
+    const runtimePorts = [...runtime.ports.values()];
+    const fixedRunning = (p: RuntimePort): boolean => declaredPorts.fixed.has(portKey(p.publishedPort, p.protocol));
+    const unexplained: RuntimePort[] = [];
+    // A replica must publish the declared container port itself; a sibling's
+    // picked number does not stand in for a replica that is missing it.
+    const missingDynamic = new Set<string>();
+    for (const containerPorts of runtime.containerPorts) {
+      // Fixed declarations take their bindings first, so what remains is only
+      // available to an auto-assigned declaration.
+      const open = containerPorts.filter((p) => !fixedRunning(p));
+      const matched = matchPortRequirements(portRequirements(declaredPorts, open), open);
+      for (const label of matched.missing) missingDynamic.add(label);
+      unexplained.push(...matched.unexplained);
+    }
+    const missingFixed = [...declaredPorts.fixed].filter((key) => !runtimePorts.some((p) => portKey(p.publishedPort, p.protocol) === key));
+    if (unexplained.length > 0 || missingFixed.length > 0 || missingDynamic.size > 0) {
       findings.push({
         kind: 'ports-mismatch',
         service: name,
         detail: `Service "${name}" publishes different ports than compose declares.`,
-        expected: formatPorts(declaredPorts),
-        actual: formatPorts(runtime.ports),
+        expected: formatPorts(new Set(svc.ports.map(declaredPortLabel))),
+        actual: formatPorts(new Set(runtimePorts.map((p) => portKey(p.publishedPort, p.protocol)))),
       });
     }
   }

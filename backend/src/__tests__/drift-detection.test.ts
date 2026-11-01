@@ -367,6 +367,43 @@ describe('assembleStackDrift - findings', () => {
     expect(findingKinds(report)).toEqual(['ports-mismatch']);
   });
 
+  it('skips port comparison for a host-network service, whose bindings Docker discards', () => {
+    const dynamic: DeclaredPort = {
+      hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true, targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web', networkMode: 'host', ports: [port(8080), dynamic] })]),
+      // Docker reports no published bindings for a host-network container:
+      // every container port is reachable on the host directly.
+      containers: [container({ id: 'c1', service: 'web', ports: [] })],
+    });
+    expect(report.status).toBe('in-sync');
+    expect(report.findings).toEqual([]);
+  });
+
+  it('still compares ports for a service that is not on the host network', () => {
+    const dynamic: DeclaredPort = {
+      hostIp: '', publishedPort: 0, protocol: 'tcp', dynamic: true, targetStartPort: 9000, targetEndPort: 9000,
+    };
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web', ports: [port(8080), dynamic] })]),
+      containers: [container({ id: 'c1', service: 'web', ports: [] })],
+    });
+    expect(findingKinds(report)).toEqual(['ports-mismatch']);
+  });
+
+  it('still reports an image mismatch for a host-network service', () => {
+    // The port skip must not hide the image finding.
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web', image: 'nginx:1.25', networkMode: 'host', ports: [port(8080)] })]),
+      containers: [container({ id: 'c1', service: 'web', image: 'nginx:1.24', ports: [] })],
+    });
+    expect(findingKinds(report)).toEqual(['image-mismatch']);
+  });
+
   it('collapses replicas of one service without a spurious undeclared finding', () => {
     const report = assembleStackDrift({
       stack: 'app',

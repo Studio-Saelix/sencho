@@ -7,8 +7,20 @@ import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
 import { sanitizeForLog } from '../utils/safeLog';
+import {
+  declaredLabelBehavior,
+  deployedCopyBehavior,
+  inertOriginOf,
+  parseLabelEntries,
+  resolveSenchoLabels,
+  unescapeRenderedDollar,
+  unrenderableSenchoLabels,
+  type LabelBehavior,
+  type LabelSource,
+  type SenchoLabelResolution,
+} from '../helpers/senchoLabels';
 
-export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
+export type { LabelSource };
 
 /**
  * Every valid label source, typed as a set of strings so the wire validator can test an
@@ -24,6 +36,8 @@ export interface LabelValue {
   value: string;
   source: LabelSource;
   redacted?: boolean;
+  /** Whether Sencho acts on this `io.sencho.*` label. Absent for every other label. */
+  behavior?: LabelBehavior;
 }
 
 export interface ContainerLabelRow {
@@ -49,6 +63,7 @@ export interface LabelIndexRow {
   value: string;
   redacted?: boolean;
   source: LabelSource;
+  behavior?: LabelBehavior;
   containers: LabelIndexContainerRef[];
 }
 
@@ -96,12 +111,6 @@ export interface LabelInventoryOptions {
 const INSPECT_CONCURRENCY = 8;
 const COMPOSE_SYSTEM_PREFIX = 'com.docker.compose.';
 
-function str(v: unknown): string | undefined {
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  return undefined;
-}
-
 /**
  * Truthful provenance for a runtime label. Precedence: compose-system prefix, then
  * (stack path only) a Compose-declared key with the same value, then an exact image
@@ -115,7 +124,9 @@ function resolveLabelSource(
   declared?: Record<string, string>,
 ): LabelSource {
   if (key.startsWith(COMPOSE_SYSTEM_PREFIX)) return 'compose-system';
-  if (declared && declared[key] === value) return 'compose';
+  // Rendered config writes a literal `$` as `$$`; the container carries the single `$`.
+  if (declared && Object.hasOwn(declared, key)
+    && (declared[key] === value || unescapeRenderedDollar(declared[key]) === value)) return 'compose';
   if (imageLabels) return imageLabels[key] === value ? 'image' : 'runtime';
   return 'unknown';
 }
@@ -144,29 +155,7 @@ async function buildImageLabelMap(
 }
 
 function parseLabelsMap(labels: unknown): Record<string, string> {
-  if (Array.isArray(labels)) {
-    const out: Record<string, string> = {};
-    for (const entry of labels) {
-      const raw = str(entry);
-      if (!raw) continue;
-      const eq = raw.indexOf('=');
-      if (eq === -1) {
-        out[raw] = '';
-      } else {
-        out[raw.slice(0, eq)] = raw.slice(eq + 1);
-      }
-    }
-    return out;
-  }
-  if (labels && typeof labels === 'object') {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(labels as Record<string, unknown>)) {
-      const val = str(v);
-      if (val !== undefined) out[k] = val;
-    }
-    return out;
-  }
-  return {};
+  return Object.fromEntries(parseLabelEntries(labels));
 }
 
 function toLabelValue(
@@ -174,9 +163,16 @@ function toLabelValue(
   value: string,
   source: LabelSource,
   revealSecrets: boolean,
+  behavior?: LabelBehavior,
 ): LabelValue {
   const redacted = redactLabelValue(key, value, revealSecrets);
-  return { key, value: redacted.value, source, ...(redacted.redacted ? { redacted: true } : {}) };
+  return {
+    key,
+    value: redacted.value,
+    source,
+    ...(redacted.redacted ? { redacted: true } : {}),
+    ...(behavior ? { behavior } : {}),
+  };
 }
 
 function stripContainerName(names: string[] | undefined): string {
@@ -218,6 +214,7 @@ function buildByLabelIndex(
           value: label.value,
           source: label.source,
           ...(label.redacted ? { redacted: true } : {}),
+          ...(label.behavior ? { behavior: label.behavior } : {}),
           containers: [],
         };
         map.set(mapKey, row);
@@ -280,8 +277,10 @@ export async function buildNodeLabelInventory(
       stack: row.stack,
       service: row.service,
       state: row.state,
+      // Nothing here comes from a rendered Compose model, so a presentation label is inert; the protective
+      // infrastructure label is reported as the guard reads it, because the guard acts across projects.
       labels: Object.entries(row.labels).map(([key, value]) =>
-        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets),
+        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets, deployedCopyBehavior(key, value, 'node-wide')),
       ).sort((a, b) => a.key.localeCompare(b.key)),
     };
   });
@@ -311,6 +310,7 @@ export async function buildStackLabelInventory(
   // for inspection failures so the two banners stay distinct.
   let renderFailed = false;
   const declaredByService = new Map<string, Record<string, string>>();
+  let sencho: SenchoLabelResolution = unrenderableSenchoLabels();
 
   if (result.rendered !== null) {
     try {
@@ -318,6 +318,7 @@ export async function buildStackLabelInventory(
       for (const [serviceName, svc] of Object.entries(parsed.services ?? {})) {
         declaredByService.set(serviceName, parseLabelsMap(svc.labels));
       }
+      sencho = resolveSenchoLabels(parsed);
       renderable = true;
     } catch (err) {
       console.error('[LabelInventory] Failed to parse rendered compose for stack %s:', sanitizeForLog(stackName), err);
@@ -360,7 +361,7 @@ export async function buildStackLabelInventory(
   const services: StackServiceLabelRow[] = [...serviceNames].sort().map((service) => {
     const declared = declaredByService.get(service) ?? {};
     const declaredLabels = Object.entries(declared)
-      .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets))
+      .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets, declaredLabelBehavior(sencho, service, key)))
       .sort((a, b) => a.key.localeCompare(b.key));
 
     const replicas: StackLabelReplica[] = (replicasByService.get(service) ?? []).map((rep) => {
@@ -383,7 +384,12 @@ export async function buildStackLabelInventory(
           const source: LabelSource = renderFailed && !key.startsWith(COMPOSE_SYSTEM_PREFIX)
             ? 'unknown'
             : resolveLabelSource(key, value, imageLabels, declared);
-          return toLabelValue(key, value, source, revealSecrets);
+          // A runtime label equal to the declared one is that same declaration; any other
+          // origin drives no presentation behavior, and only the protective label counts from a container.
+          const behavior = source === 'compose'
+            ? declaredLabelBehavior(sencho, service, key)
+            : deployedCopyBehavior(key, value, sencho.renderable ? inertOriginOf(source, Object.hasOwn(declared, key)) : 'unrendered');
+          return toLabelValue(key, value, source, revealSecrets, behavior);
         })
         .sort((a, b) => a.key.localeCompare(b.key));
       const runtimeMap = Object.fromEntries(Object.entries(rep.labels));

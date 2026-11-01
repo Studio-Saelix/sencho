@@ -1,27 +1,32 @@
 /**
  * Redacted networking + exposure summary for the Stack Dossier export, derived
  * from the /networking facts and /exposure intents. It carries only network
- * names, exposure intents, published port numbers, and binding scope; never an
+ * names, exposure intents, published port labels (a number, a range, or
+ * auto-assigned), binding scope, and the tunnel connector (provider and service
+ * name) that reaches a service; never an
  * env value or a label value, so nothing sensitive reaches the exported text.
  * Pure and side-effect free.
  */
+import { tunnelPathLabel } from '@/lib/tunnelExposure';
+import type { ServiceTunnelExposure } from '@/types/networking';
 
 export interface NetworkExposureSummary {
   stackIntent: string | null;
   networks: { name: string; external: boolean; internal: boolean }[];
-  services: { name: string; intent: string | null; ports: string[]; hostNetwork: boolean }[];
+  services: { name: string; intent: string | null; ports: string[]; hostNetwork: boolean; tunnel: string | null }[];
 }
 
 // Loose input shapes: the builder reads the raw parsed /networking and
 // /exposure JSON, so it stays decoupled from the panel's local interfaces.
-interface FactsPort { startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
-interface FactsService { name: string; publishedPorts?: FactsPort[]; networkMode?: string }
+interface FactsPort { startPort: number; endPort: number; protocol: string; dynamic?: true; allInterfaces: boolean; loopbackOnly: boolean }
+interface FactsService { name: string; publishedPorts?: FactsPort[]; networkMode?: string; tunnel?: ServiceTunnelExposure }
 interface FactsNetwork { name: string; external: boolean; internal: boolean }
 export interface NetworkFactsInput { renderable?: boolean; networks?: FactsNetwork[]; services?: FactsService[] }
 export interface ExposureIntentInput { service: string; intent: string }
 
 function portLabel(p: FactsPort): string {
-  const range = p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
+  // Docker assigns the host port at start, so no number exists to show.
+  const range = p.dynamic ? 'auto-assigned' : p.startPort === p.endPort ? `${p.startPort}` : `${p.startPort}-${p.endPort}`;
   const scope = p.allInterfaces ? ' (all interfaces)' : p.loopbackOnly ? ' (loopback)' : '';
   return `${range}/${p.protocol}${scope}`;
 }
@@ -39,9 +44,10 @@ export function buildNetworkExposureSummary(facts: NetworkFactsInput | null, int
     // network_mode: host publishes every container port on the host, so it is
     // exposure-relevant even with no declared ports.
     hostNetwork: s.networkMode === 'host',
+    tunnel: s.tunnel ? tunnelPathLabel(s.tunnel) : null,
   }));
   const empty = networks.length === 0 && stackIntent === null
-    && services.every(s => s.ports.length === 0 && s.intent === null && !s.hostNetwork);
+    && services.every(s => s.ports.length === 0 && s.intent === null && !s.hostNetwork && s.tunnel === null);
   return empty ? null : { stackIntent, networks, services };
 }
 
@@ -56,13 +62,14 @@ export function networkExposureSection(summary: NetworkExposureSummary | null): 
       return `- ${n.name}${flags ? ` (${flags})` : ''}`;
     }).join('\n'));
   }
-  const services = summary.services.filter(s => s.ports.length > 0 || s.intent || s.hostNetwork);
+  const services = summary.services.filter(s => s.ports.length > 0 || s.intent || s.hostNetwork || s.tunnel);
   if (services.length > 0) {
     parts.push('### Services', services.map(s => {
       const bits: string[] = [];
       if (s.intent) bits.push(`intent ${s.intent}`);
       if (s.hostNetwork) bits.push('host network (all ports exposed on host)');
       if (s.ports.length > 0) bits.push(`ports ${s.ports.join(', ')}`);
+      if (s.tunnel) bits.push(`reachable ${s.tunnel}`);
       return `- **${s.name}:** ${bits.join('; ')}`;
     }).join('\n'));
   }

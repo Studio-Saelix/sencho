@@ -93,6 +93,7 @@ const KIND_DISMISS_POLICY: Record<NetworkingFindingKind, DismissPolicy> = {
   'advanced-driver-caveat': 'any',
   'runtime-unavailable': 'timed',
   'exposure-intent-mismatch': 'any',
+  'tunnel-exposure': 'any',
   'port-conflict-node': 'none',
   'port-conflict-internal': 'none',
   'sensitive-service-broad-exposure': 'none',

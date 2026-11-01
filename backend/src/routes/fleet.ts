@@ -99,7 +99,8 @@ import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildFleetReadiness } from '../services/readiness/readinessAggregator';
 import { READINESS_DOMAINS, type ReadinessDomainKey } from '../services/readiness/types';
 import { mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
-import { VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { VALID_LABEL_SOURCES, type LabelIndexRow, type LabelValue, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { mergeLabelBehavior, sanitizeRemoteBehavior } from '../helpers/senchoLabels';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -962,6 +963,29 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
 }
 
 /**
+ * A remote's `behavior` annotations are optional and version-dependent, so they are
+ * rebuilt rather than validated: a value this version cannot read becomes an
+ * `unsupported` annotation instead of failing the node's whole inventory.
+ */
+function withSanitizedBehaviors(inventory: NodeLabelInventory): NodeLabelInventory {
+  const cleanLabel = (label: LabelValue): LabelValue => {
+    const { behavior: raw, ...rest } = label;
+    const behavior = sanitizeRemoteBehavior(label.source, label.key, raw);
+    return behavior ? { ...rest, behavior } : rest;
+  };
+  const cleanRow = (row: LabelIndexRow): LabelIndexRow => {
+    const { behavior: raw, ...rest } = row;
+    const behavior = sanitizeRemoteBehavior(row.source, row.key, raw);
+    return behavior ? { ...rest, behavior } : rest;
+  };
+  return {
+    ...inventory,
+    containers: inventory.containers.map(c => ({ ...c, labels: c.labels.map(cleanLabel) })),
+    byLabel: inventory.byLabel.map(cleanRow),
+  };
+}
+
+/**
  * Fleet-wide Docker label inventory, or one node's slice of it with `?nodeId=`
  * so the tab can draw each node as it answers. Auth + node:read (Community).
  * Remote nodes are read through their /api/system/container-labels within the
@@ -1018,7 +1042,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
           console.error(`[Fleet] Container labels: node ${sanitizeForLog(node.name)} returned a payload that failed shape validation (status ${resp.status})`);
           return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: 'Remote returned an unexpected label-inventory payload' };
         }
-        return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
+        return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory: withSanitizedBehaviors(inventory), error: null };
       }),
     );
 
@@ -1044,6 +1068,9 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
             })),
           });
         } else {
+          // Nodes on different versions can report one row with and without a status.
+          const behavior = mergeLabelBehavior(existing.behavior, row.behavior);
+          if (behavior) existing.behavior = behavior;
           existing.containers.push(...row.containers.map(c => ({
             ...c,
             nodeId: nodeResult.nodeId,
@@ -1082,10 +1109,13 @@ interface FleetNetworkingSummaryNode {
 function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  return (['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => {
-    const b = o[k] as { count?: unknown; stacks?: unknown } | undefined;
-    return !!b && typeof b.count === 'number' && Array.isArray(b.stacks);
-  });
+  const bucket = (b: unknown): boolean => {
+    if (!b || typeof b !== 'object') return false;
+    const value = b as { count?: unknown; stacks?: unknown };
+    return typeof value.count === 'number' && Array.isArray(value.stacks);
+  };
+  if (!(['exposed', 'unknownExposure', 'networkDrift'] as const).every(k => bucket(o[k]))) return false;
+  return o.unreadable === undefined || bucket(o.unreadable);
 }
 
 /**
@@ -1094,7 +1124,8 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
  * hub's summary in-process and reaches each remote through its node-local
  * /api/networking/summary route. A remote on an older version (no route) returns
  * 404 and degrades to a skip, so one unreachable or unsupported node never fails
- * the filter for the rest.
+ * the filter for the rest. A remote that has the route but predates the
+ * `unreadable` bucket is accepted without it, and reports no unreadable stacks.
  */
 fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;

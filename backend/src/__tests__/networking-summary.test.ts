@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { format } from 'util';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -14,6 +15,7 @@ import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { _resetLocalFleetBuildSharesForTests } from '../helpers/localFleetBuildShare';
+import { ComposeEnvFileError } from '../utils/composeDotenv';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -63,6 +65,220 @@ describe('networking summary', () => {
     expect(res.body.unknownExposure.stacks).toContain(STACK);
     expect(res.body.networkDrift.stacks).toEqual([]); // empty snapshot, no running containers
     expect(res.body.exposed.count).toBe(res.body.exposed.stacks.length);
+  });
+
+  it('counts a stack reached only through a tunnel connector as exposed until it has an intent', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    command: tunnel run\n    environment:\n      TUNNEL_TOKEN: secret-value\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('secret-value');
+
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, '', 'public', null);
+    const classified = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(classified.body.exposed.stacks).toContain(STACK);
+    expect(classified.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('counts a Tailscale subnet router only when TS_EXTRA_ARGS advertises routes', async () => {
+    const compose = (extraArgs: string) =>
+      `services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      - TS_AUTHKEY=tskey-secret\n      - TS_EXTRA_ARGS=${extraArgs}\n  app:\n    image: example/app:1\n`;
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('--advertise-tags=tag:container'));
+    const tagsOnly = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(tagsOnly.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('--advertise-routes=172.20.0.0/16'));
+    const router = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(router.body.exposed.stacks).toContain(STACK);
+    expect(JSON.stringify(router.body)).not.toContain('tskey-secret');
+  });
+
+  it('does not invent a connector from an inherited image or environment name', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: registry.example/constructor:1\n    environment:\n      toString: ordinary\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('counts a connector whose provider key and flags come from a service env_file', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('counts a custom image identified by a provider key from an env_file', async () => {
+    fs.writeFileSync(path.join(stackDir, 'edge.env'), 'TUNNEL_TOKEN=tunnel-secret\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    env_file: ./edge.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tunnel-secret');
+  });
+
+  it('interpolates an image reference from the stack .env before identifying the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'CF_IMAGE=cloudflare/cloudflared:latest\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cf:\n    image: ${CF_IMAGE}\n    command: tunnel run\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reads every authored layer from the deploy spec, including one that adds the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'override.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: --advertise-routes=10.0.0.0/24\n');
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'override.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('reads COMPOSE_FILE layers, including one that adds the connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'base.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'extra.yaml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=base.yaml:extra.yaml\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, not unexposed, when a required env_file is missing', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./missing.env\n  app:\n    image: example/app:1\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).not.toContain('missing.env');
+  });
+
+  it('tolerates a missing optional env_file and still reads the rest', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: cloudflare/cloudflared\n    env_file:\n      - path: ./missing.env\n        required: false\n    environment:\n      TUNNEL_TOKEN: tunnel-secret\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, not unexposed, when COMPOSE_FILE cannot be read', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=missing-layer.yaml\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).not.toContain('missing-layer.yaml');
+  });
+
+  it('reports a stack with include or extends as unreadable rather than unexposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'include:\n  - other.yaml\nservices:\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reads an interpolated TS_EXTRA_ARGS from the stack .env, as the rendered views do', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:-}\n  app:\n    image: example/app:1\n');
+    // Unset: Compose renders an empty value, so the node exposes only itself.
+    const unset = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(unset.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--accept-dns=false\n');
+    const quiet = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(quiet.body.exposed.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--advertise-routes=10.0.0.0/24\n');
+    const router = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(router.body.exposed.stacks).toContain(STACK);
+    expect(JSON.stringify(router.body)).not.toContain('10.0.0.0');
+
+    // An env file Compose would refuse leaves the value unresolved, counted as
+    // forwarding, and says so in the log without any value from the file.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=maybe\nTS_ARGS=--advertise-routes=10.9.0.0/24\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const unreadable = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(unreadable.body.exposed.stacks).toContain(STACK);
+    const logged = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(logged).toContain(`Stack ${STACK} env files cannot be read the way Compose reads them`);
+    expect(logged).not.toContain('10.9.0.0');
+  });
+
+  it('does not read the values of a stack .env that disables itself', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS:---advertise-exit-node}\n  app:\n    image: example/app:1\n');
+    // Compose leaves TS_ARGS unset, so its default forwards. Sencho has no lookup
+    // here and counts the value as unresolved, which gives the same answer.
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\nTS_ARGS=--accept-dns=false\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    // An ordinary configuration, not a warning.
+    expect(warn.mock.calls.map(args => format(...args)).filter(line => line.includes('[NetworkingSummary]'))).toEqual([]);
+  });
+
+  it('names a refused deploy spec or env-file selection in the log and never logs an env-file value', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: ${TS_ARGS}\n  app:\n    image: example/app:1\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = DatabaseService.getInstance();
+    const gitSource = vi.spyOn(db, 'getGitSource');
+    const selection = vi.spyOn(db, 'getStackProjectEnvFiles');
+
+    // A context directory a deploy refuses: the env files read fine, so the cause is the spec.
+    gitSource.mockReturnValue({ applied_deploy_spec: { files: ['compose.yaml'], contextDir: '../outside' } } as ReturnType<DatabaseService['getGitSource']>);
+    const refusedSpec = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(refusedSpec.body.exposed.stacks).toContain(STACK);
+    const specLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(specLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: Error: Invalid context directory in deploy spec`);
+    expect(specLog).not.toContain('env files cannot be read');
+
+    // A selection read that fails keeps its own cause instead of blaming env files.
+    warn.mockClear();
+    gitSource.mockReturnValue(undefined);
+    selection.mockImplementation(() => { throw new Error('SQLITE_BUSY: database is locked'); });
+    const refusedSelection = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(refusedSelection.body.exposed.stacks).toContain(STACK);
+    const selectionLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(selectionLog).toContain(`Stack ${STACK} interpolation failed; tunnel inputs left unresolved: Error: SQLITE_BUSY: database is locked`);
+    expect(selectionLog).not.toContain('env files cannot be read');
+
+    // An env-file error message can hold an interpolated value, so only its class name is logged.
+    warn.mockClear();
+    selection.mockReturnValue([]);
+    gitSource.mockImplementation(() => { throw new ComposeEnvFileError('required variable A is missing a value: hunter2-value'); });
+    const failedRead = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(failedRead.body.exposed.stacks).toContain(STACK);
+    const readLog = warn.mock.calls.map(args => format(...args)).join('\n');
+    expect(readLog).toContain('tunnel inputs left unresolved: ComposeEnvFileError');
+    expect(readLog).not.toContain('hunter2-value');
+  });
+
+  it('does not count a cloudflared DNS proxy as exposure', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  dns:\n    image: cloudflare/cloudflared:latest\n    command: proxy-dns\n  pihole:\n    image: pihole/pihole\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
   });
 
   it('flags a stack with an undeclared runtime network as network drift', async () => {
@@ -139,7 +355,7 @@ describe('networking summary', () => {
       expect(res.body.exposed.stacks).toContain(STACK);
       expect(res.body.exposed.stacks).toContain(linked);
       expect(res.body.unknownExposure.stacks).toContain(linked);
-      expect(warn.mock.calls.filter(call => String(call[0]).includes('Skipped stack'))).toEqual([]);
+      expect(warn.mock.calls.filter(call => String(call[0]).includes('reported unreadable'))).toEqual([]);
     } finally {
       fs.rmSync(linkedDir, { recursive: true, force: true });
     }
@@ -158,8 +374,9 @@ describe('networking summary', () => {
       expect(res.status).toBe(200);
       expect(res.body.exposed.stacks).not.toContain(linked);
       expect(res.body.unknownExposure.stacks).not.toContain(linked);
+      expect(res.body.unreadable.stacks).toContain(linked);
       const skipped = warn.mock.calls.find(call => call[1] === linked);
-      expect(skipped?.[0]).toContain('Skipped stack');
+      expect(skipped?.[0]).toContain('reported unreadable');
     } finally {
       fs.rmSync(linkedDir, { recursive: true, force: true });
     }
@@ -284,6 +501,484 @@ describe('networking summary', () => {
       expect(remote.summary).toBeNull();
     } finally {
       db.deleteNode(remoteId);
+    }
+  });
+
+  it('expands a TS_EXTRA_ARGS template inside a service env_file from the stack .env', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${TS_ARGS}\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tskey-secret');
+  });
+
+  it('reports a resolver-present but still unresolved long-form port as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('gives a service env_file assignment precedence over the project environment value', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_EXTRA_ARGS=--accept-dns=false\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('does not read a project environment TS_EXTRA_ARGS as the container value', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'TS_EXTRA_ARGS=--advertise-exit-node\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=--accept-dns=false\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('interpolates a long-form published port from the stack .env', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'WEB_PORT=8080\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT}\n        host_ip: 0.0.0.0\n        protocol: tcp\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('loads the first auto-discovered override even when its name uses the other base family', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'docker-compose.override.yml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('loads only the first of two auto-discovered overrides, as Compose does', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yml'),
+      'services:\n  cf:\n    image: cloudflare/cloudflared\n    command: tunnel run\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  cf:\n    image: nginx:latest\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('merges a services-free authored layer instead of skipping the stack', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "0.0.0.0:8080:80"\n');
+    fs.writeFileSync(path.join(stackDir, 'networks.yaml'), 'networks:\n  edge:\n    name: project_edge\n');
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'networks.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack whose compose file does not parse as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services: [\n');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(warn.mock.calls.map(args => format(...args)).join('\n')).toContain('does not parse');
+  });
+
+  it('reports a stack that uses extends as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: example/app:1\n    extends:\n      file: base.yaml\n      service: base\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports an env_file with syntax the Compose reader cannot follow as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY="unterminated\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports a required long-form port template as unreadable when the lookup is available but the value is not', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'OTHER=1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx:latest\n    ports:\n      - target: 80\n        published: ${WEB_PORT:?required}\n        host_ip: 0.0.0.0\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports an unresolved detection field as unreadable when the interpolation lookup is unavailable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  cf:\n    image: ${CF_IMAGE}\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('resolves a YAML merge key before looking for a connector', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), [
+      'x-cf: &cf',
+      '  image: cloudflare/cloudflared:latest',
+      '  command: tunnel run',
+      '  environment:',
+      '    - TUNNEL_TOKEN=tunnel-secret',
+      'services:',
+      '  tun:',
+      '    <<: *cf',
+      '  app:',
+      '    image: example/app:1',
+      '    network_mode: service:tun',
+      '',
+    ].join('\n'));
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(JSON.stringify(res.body)).not.toContain('tunnel-secret');
+  });
+
+  it('reports a layer that uses !reset or !override as unreadable rather than unexposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    network_mode: none\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.override.yaml'),
+      'services:\n  edge:\n    image: cloudflare/cloudflared:latest\n    network_mode: !reset null\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reads the mount target of a volume whose source is a template, and claims no absence when it cannot', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  edge:\n    image: example/edge:1\n    volumes:\n      - ${CF_DIR:-./cf}:/etc/cloudflared\n  app:\n    image: example/app:1\n');
+    const readable = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(readable.body.unreadable.stacks).not.toContain(STACK);
+
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    const opaque = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(opaque.body.unreadable.stacks).toContain(STACK);
+    expect(opaque.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('does not mistake a $$ escape for an unresolved template', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'IMG=example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  app:\n    image: ${IMG}\n    command: ["sh", "-c", "exec app --home $$HOME"]\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable, with its cause logged, when the deploy spec cannot be read', async () => {
+    const db = DatabaseService.getInstance();
+    vi.spyOn(db, 'getGitSource').mockImplementation(() => { throw new Error('database is locked'); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(warn.mock.calls.some(call => format(...call).includes('deploy spec') && format(...call).includes(STACK))).toBe(true);
+  });
+
+  it('reports a stack as unreadable when the auto-discovered override cannot be read', async () => {
+    const override = path.join(stackDir, 'compose.override.yaml');
+    fs.writeFileSync(override, 'services:\n  ts:\n    image: tailscale/tailscale\n');
+    fs.chmodSync(override, 0o000);
+    try {
+      if (process.getuid?.() === 0) return;
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    } finally {
+      fs.chmodSync(override, 0o644);
+    }
+  });
+
+  it('reports a stack as unreadable when an optional env_file exists but cannot be read', async () => {
+    const envFile = path.join(stackDir, 'ts.env');
+    fs.writeFileSync(envFile, 'TS_AUTHKEY=tskey-secret\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file:\n      - path: ./ts.env\n        required: false\n  app:\n    image: example/app:1\n');
+    fs.chmodSync(envFile, 0o000);
+    try {
+      if (process.getuid?.() === 0) return;
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    } finally {
+      fs.chmodSync(envFile, 0o644);
+    }
+  });
+
+  it('reports a stack as unreadable when the COMPOSE_FILE selection cannot be decided', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    fs.writeFileSync(path.join(stackDir, '.env'), 'NOT A VALID LINE\nCOMPOSE_FILE=extra.yaml\n');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+  });
+
+  it('reports a stack as unreadable when a deploy spec layer cannot be read', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: example/app:1\n');
+    vi.spyOn(DatabaseService.getInstance(), 'getGitSource').mockReturnValue({
+      applied_deploy_spec: { files: ['compose.yaml', 'missing.yaml'], contextDir: null },
+    } as ReturnType<DatabaseService['getGitSource']>);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('reports a service env_file path that stays a template as unreadable', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./${ENV_DIR}/ts.env\n  app:\n    image: example/app:1\n');
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it('lets a service environment TS_EXTRA_ARGS override the value in its env_file', async () => {
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_EXTRA_ARGS=--advertise-routes=10.0.0.0/24\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n    environment:\n      TS_AUTHKEY: tskey-secret\n      TS_EXTRA_ARGS: --accept-dns=false\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unreadable.stacks).not.toContain(STACK);
+  });
+
+  it('reports a template in an env_file as unreadable when the interpolation lookup is unavailable', async () => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), 'TS_AUTHKEY=tskey-secret\nTS_EXTRA_ARGS=${ARGS}\n');
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  it.each([
+    ['an exported template', 'export TS_EXTRA_ARGS=--advertise-routes=$ROUTES\n'],
+    ['a bare inherited name', 'TS_EXTRA_ARGS\n'],
+    ['an exported bare inherited name', 'export TS_EXTRA_ARGS\n'],
+  ])('reports %s in an env_file as unreadable when the interpolation lookup is unavailable', async (_label, line) => {
+    fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+    fs.writeFileSync(path.join(stackDir, 'ts.env'), `TS_AUTHKEY=tskey-secret\n${line}`);
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  ts:\n    image: tailscale/tailscale\n    env_file: ./ts.env\n  app:\n    image: example/app:1\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.unreadable.stacks).toContain(STACK);
+  });
+
+  describe('effective environment assignments', () => {
+    const ts = (service: string) => `services:\n  ts:\n    image: tailscale/tailscale\n${service}  app:\n    image: example/app:1\n`;
+    const edge = (service: string) => `services:\n  edge:\n    image: example/edge:1\n${service}  app:\n    image: example/app:1\n`;
+    const WG = (port: string) => `services:\n  wg:\n    image: lscr.io/linuxserver/wireguard:latest\n    ports:\n      - ${port}\n  app:\n    image: example/app:1\n`;
+
+    // Each case states what `docker compose config` renders for the same files
+    // (see the Docker-backed parity cases) and what the summary must report.
+    it.each<[string, Record<string, string>, boolean]>([
+      ['a long-form protocol the project environment answers', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=udp\n' }, true],
+      ['a long-form protocol that resolves to tcp', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: "${PROTO}" }'), '.env': 'PROTO=tcp\n' }, false],
+      ['an upper-case long-form protocol', { 'compose.yaml': WG('{ target: 51820, published: 51820, host_ip: 127.0.0.1, protocol: UDP }') }, true],
+      ['a short-form protocol the project environment answers', { 'compose.yaml': WG('"127.0.0.1:51820:51820/${PROTO}"'), '.env': 'PROTO=udp\n' }, true],
+      ['a required reference to an earlier assignment in the same env_file', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nARGS=--advertise-exit-node\nTS_EXTRA_ARGS=${ARGS:?set ARGS}\n' }, true],
+      ['a required reference the project environment answers', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=${ARGS:?set ARGS}\n', '.env': 'ARGS=--advertise-routes=10.0.0.0/8\n' }, true],
+      ['a bare env_file key with nothing to inherit', { 'compose.yaml': edge('    env_file: ./edge.env\n'), 'edge.env': 'TUNNEL_TOKEN\n' }, false],
+      ['a bare env_file key the project environment answers', { 'compose.yaml': edge('    env_file: ./edge.env\n'), 'edge.env': 'TUNNEL_TOKEN\n', '.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a quoted flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': "TS_AUTHKEY=k\nTS_EXTRA_ARGS='--advertise-exit-node'\n" }, false],
+      ['an unquoted flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n' }, true],
+      ['a null environment key over an env_file provider key', { 'compose.yaml': edge('    env_file: ./edge.env\n    environment:\n      TUNNEL_TOKEN:\n'), 'edge.env': 'TUNNEL_TOKEN=t\n' }, false],
+      ['a null environment key over an env_file forwarding key', { 'compose.yaml': ts('    env_file: ./ts.env\n    environment:\n      TS_ROUTES: ~\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_ROUTES=10.0.0.0/8\n' }, false],
+      ['a list-form key with no value that nothing answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n') }, false],
+      ['a list-form key with no value that the project environment answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n'), '.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a null TS_EXTRA_ARGS over an env_file value', { 'compose.yaml': ts('    env_file: ./ts.env\n    environment:\n      TS_EXTRA_ARGS:\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n' }, false],
+      ['a later boolean flag between repeated forwarding flags', { 'compose.yaml': ts('    environment:\n      TS_AUTHKEY: k\n      TS_EXTRA_ARGS: --advertise-exit-node=true --accept-dns --advertise-exit-node=false\n') }, false],
+      ['a list-form key with a value, then the same key with none that nothing answers', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN=t\n      - TUNNEL_TOKEN\n') }, false],
+      ['a list-form key with no value that nothing answers, then the same key with a value', { 'compose.yaml': edge('    environment:\n      - TUNNEL_TOKEN\n      - TUNNEL_TOKEN=t\n') }, true],
+      ['a literal dollar sign after a disabled flag in a raw env_file', { 'compose.yaml': ts('    env_file:\n      - path: ./ts.env\n        format: raw\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b\n' }, false],
+      ['a literal dollar sign after a disabled flag in a single-quoted env_file value', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': "TS_AUTHKEY=k\nTS_EXTRA_ARGS='--advertise-exit-node=true --advertise-exit-node=false --hostname=a$b'\n" }, false],
+      ['a second env_file that overrides the first value', { 'compose.yaml': ts('    env_file:\n      - ./ts.env\n      - ./ts2.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-exit-node\n', 'ts2.env': 'TS_EXTRA_ARGS=--accept-dns=false\n' }, false],
+      ['a second env_file that assigns a name the first left bare', { 'compose.yaml': edge('    env_file:\n      - ./edge.env\n      - ./edge2.env\n'), 'edge.env': 'TUNNEL_TOKEN\n', 'edge2.env': 'TUNNEL_TOKEN=t\n' }, true],
+      ['a bare name that inherits the first env_file value', { 'compose.yaml': edge('    env_file:\n      - ./edge.env\n      - ./edge2.env\n'), 'edge.env': 'TUNNEL_TOKEN=t\n', 'edge2.env': 'TUNNEL_TOKEN\n' }, true],
+      ['a raw env_file that starts with a byte order mark', { 'compose.yaml': edge('    env_file:\n      - path: ./edge.env\n        format: raw\n'), 'edge.env': '\ufeffTUNNEL_TOKEN=t\n' }, true],
+      ['a later boolean flag between repeated flags in an env_file', { 'compose.yaml': ts('    env_file: ./ts.env\n'), 'ts.env': 'TS_AUTHKEY=k\nTS_EXTRA_ARGS=--advertise-routes=10.0.0.0/8 --accept-routes --advertise-routes=\n' }, false],
+    ])('%s', async (_label, files, exposed) => {
+      for (const [file, content] of Object.entries(files)) fs.writeFileSync(path.join(stackDir, file), content);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+      if (exposed) {
+        expect(res.body.exposed.stacks).toContain(STACK);
+        expect(res.body.unknownExposure.stacks).toContain(STACK);
+      } else {
+        expect(res.body.exposed.stacks).not.toContain(STACK);
+      }
+    });
+
+    // A port Docker assigns at start still publishes; the summary must agree with
+    // the rendered model on every form (see the Docker-backed parity cases).
+    it.each([
+      ['a container-only UDP port', '"51820/udp"'],
+      ['an empty host port after an interface', '"127.0.0.1::51820/udp"'],
+      ['host port 0 after an interface', '"127.0.0.1:0:51820/udp"'],
+      ['a long entry with no published port', '{ target: 51820, protocol: udp }'],
+      ['a long entry published at 0', '{ target: 51820, published: 0, protocol: udp }'],
+      ['a bracketed IPv6 interface with a fixed host port', '"[::1]:51820:51820/udp"'],
+      ['a bracketed IPv6 interface with an empty host port', '"[::1]::51820/udp"'],
+      ['an unbracketed IPv6 interface with a fixed host port', '"::1:51820:51820/udp"'],
+    ])('finds a WireGuard server published through %s', async (_label, port) => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), WG(port));
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+      expect(res.body.exposed.stacks).toContain(STACK);
+      expect(res.body.unknownExposure.stacks).toContain(STACK);
+    });
+
+    it('counts a plain app with an auto-assigned port as exposed and unclassified, and a loopback one as unclassified only', async () => {
+      const compose = (port: string) => `services:\n  app:\n    image: example/app:1\n    ports:\n      - ${port}\n`;
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('"8080"'));
+      const wide = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(wide.body.exposed.stacks).toContain(STACK);
+      expect(wide.body.unknownExposure.stacks).toContain(STACK);
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose('"127.0.0.1::8080"'));
+      const loopback = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(loopback.body.exposed.stacks).not.toContain(STACK);
+      expect(loopback.body.unknownExposure.stacks).toContain(STACK);
+    });
+
+    it('does not take a dynamic TCP port, or `expose`, for a WireGuard server', async () => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), WG('"127.0.0.1::51820"'));
+      const tcp = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(tcp.body.exposed.stacks).not.toContain(STACK);
+      expect(tcp.body.unknownExposure.stacks).toContain(STACK); // it still publishes, on loopback
+
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+        'services:\n  wg:\n    image: lscr.io/linuxserver/wireguard:latest\n    expose:\n      - "51820/udp"\n  app:\n    image: example/app:1\n');
+      const expose = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(expose.body.exposed.stacks).not.toContain(STACK);
+      expect(expose.body.unknownExposure.stacks).not.toContain(STACK);
+    });
+
+    it.each([
+      ['cloudflared', 'image: cloudflare/cloudflared:latest\n    command: tunnel run\n    environment:\n      TUNNEL_TOKEN: t'],
+      ['tailscale', 'image: tailscale/tailscale\n    environment:\n      TS_AUTHKEY: k'],
+      ['wireguard', 'image: ghcr.io/wg-easy/wg-easy:15'],
+    ])('lets a %s host-network connector reach an app whose port Docker assigns', async (_provider, edgeService) => {
+      const compose = (appPort: string) =>
+        `services:\n  edge:\n    ${edgeService}\n    network_mode: host\n  app:\n    image: example/app:1\n    ports:\n      - ${appPort}\n`;
+      for (const port of ['"8080"', '"127.0.0.1::8080"', '"127.0.0.1:0:8080"', '{ target: 8080 }', '{ target: 8080, published: 0 }']) {
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose(port));
+        const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+        expect(res.body.exposed.stacks, port).toContain(STACK);
+        expect(res.body.unknownExposure.stacks, port).toContain(STACK);
+      }
+    });
+
+    // Compose trims U+0085 (NEL) as leading space in a raw env file; every name the
+    // summary reads from one has to survive it (see the Docker-backed parity cases).
+    const NEL = '\u0085';
+    const rawEdge = (image: string, namespace: boolean) =>
+      `services:\n  edge:\n    image: ${image}\n    env_file:\n      - path: ./edge.env\n        format: raw\n  app:\n    image: example/app:1\n${namespace ? '    network_mode: service:edge\n' : ''}`;
+    it.each([
+      ['TUNNEL_TOKEN', 'example/edge:1', 'TUNNEL_TOKEN=t', true],
+      ['TUNNEL_TOKEN_FILE', 'example/edge:1', 'TUNNEL_TOKEN_FILE=/run/secrets/t', true],
+      ['TS_AUTHKEY', 'example/edge:1', 'TS_AUTHKEY=k', true],
+      ['TS_AUTH_KEY', 'example/edge:1', 'TS_AUTH_KEY=k', true],
+      ['WG_HOST', 'example/edge:1', 'WG_HOST=vpn.example.com', true],
+      ['PEERS on a WireGuard image', 'lscr.io/linuxserver/wireguard:latest', 'PEERS=3', true],
+      ['TS_ROUTES', 'tailscale/tailscale', 'TS_ROUTES=10.0.0.0/8', false],
+      ['TS_SERVE_CONFIG', 'tailscale/tailscale', 'TS_SERVE_CONFIG=/config/serve.json', false],
+      ['TS_DEST_IP', 'tailscale/tailscale', 'TS_DEST_IP=10.0.0.5', false],
+      ['TS_EXTRA_ARGS', 'tailscale/tailscale', 'TS_EXTRA_ARGS=--advertise-exit-node', false],
+    ])('reads %s after leading NEL space in a raw env_file', async (_name, image, line, namespace) => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge(image, namespace));
+      for (const lead of [NEL, ` ${NEL}`, '  ', '\u00a0', '\u3000']) {
+        fs.writeFileSync(path.join(stackDir, 'edge.env'), `${lead}${line}\n`);
+        const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+        expect(res.body.unreadable.stacks, JSON.stringify(lead)).not.toContain(STACK);
+        expect(res.body.exposed.stacks, JSON.stringify(lead)).toContain(STACK);
+      }
+    });
+
+    it('does not trim a zero-width space off a raw env_file name, as Compose does not', async () => {
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), rawEdge('example/edge:1', true));
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), '\u200bTUNNEL_TOKEN=t\n');
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.exposed.stacks).not.toContain(STACK);
+      expect(res.body.unreadable.stacks).not.toContain(STACK);
+    });
+
+    it('lets a later layer unset a key an earlier layer set, and set one it left unset', async () => {
+      fs.writeFileSync(path.join(stackDir, 'override.yaml'), 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN:\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    environment:\n      TUNNEL_TOKEN: t\n'));
+      fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_FILE=compose.yaml:override.yaml\n');
+      const unset = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(unset.body.exposed.stacks).not.toContain(STACK);
+      expect(unset.body.unreadable.stacks).not.toContain(STACK);
+
+      fs.writeFileSync(path.join(stackDir, 'override.yaml'), 'services:\n  edge:\n    environment:\n      TUNNEL_TOKEN: t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    environment:\n      TUNNEL_TOKEN:\n'));
+      const set = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(set.body.exposed.stacks).toContain(STACK);
+    });
+
+    it.each([
+      ['a bare environment key', edge('    environment:\n      - TUNNEL_TOKEN\n'), {}],
+      ['a bare env_file key', edge('    env_file: ./edge.env\n'), { 'edge.env': 'TUNNEL_TOKEN\n' }],
+      ['a null environment key', edge('    environment:\n      TUNNEL_TOKEN:\n'), {}],
+    ])('reports %s as unreadable when the interpolation lookup is unavailable', async (_label, compose, extra) => {
+      fs.writeFileSync(path.join(stackDir, '.env'), 'COMPOSE_DISABLE_ENV_FILE=true\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), compose);
+      for (const [file, content] of Object.entries(extra)) fs.writeFileSync(path.join(stackDir, file), content);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    });
+
+    it.each(['dotenv', '${FMT:-raw}'])('reports an env_file with format %s as unreadable', async (format) => {
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), 'TUNNEL_TOKEN=t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge(`    env_file:\n      - path: ./edge.env\n        format: "${format}"\n`));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+      // The log names the service and the fixed reason, never the file's contents.
+      expect(warn.mock.calls.flat().join(' ')).toMatch(/service edge has an env_file with a format other than raw/);
+      expect(JSON.stringify(res.body)).not.toContain('TUNNEL_TOKEN=t');
+    });
+
+    it('reports a raw env_file it cannot read the way Compose does as unreadable', async () => {
+      fs.writeFileSync(path.join(stackDir, 'edge.env'), 'export TUNNEL_TOKEN=t\n');
+      fs.writeFileSync(path.join(stackDir, 'compose.yaml'), edge('    env_file:\n      - path: ./edge.env\n        format: raw\n'));
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+    });
+  });
+
+  it('keeps one stack\'s unexpected failure from failing the whole node summary', async () => {
+    const other = `${STACK}-other`;
+    const otherDir = path.join(process.env.COMPOSE_DIR as string, other);
+    fs.mkdirSync(otherDir, { recursive: true });
+    fs.writeFileSync(path.join(otherDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "0.0.0.0:8081:80"\n');
+    const parser = await import('../helpers/composeDependencyParse');
+    const real = parser.parseComposeDependencies;
+    const spy = vi.spyOn(parser, 'parseComposeDependencies').mockImplementation((content, options) => {
+      if (content.includes('8080')) throw new Error('unexpected');
+      return real(content, options);
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+      expect(res.status).toBe(200);
+      expect(res.body.unreadable.stacks).toContain(STACK);
+      expect(res.body.exposed.stacks).toContain(other);
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(otherDir, { recursive: true, force: true });
     }
   });
 

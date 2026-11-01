@@ -19,7 +19,7 @@ import type {
   DependencyVolume,
 } from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
-import type { DeclaredCompose } from '../helpers/composeDependencyParse';
+import { parseComposeDependencies, type DeclaredCompose } from '../helpers/composeDependencyParse';
 
 // ── builders ────────────────────────────────────────────────────────────
 
@@ -242,6 +242,22 @@ describe('assembleGraph - flags', () => {
     expect(g.nodes.find((n) => n.id === 'svc:alpha:a')?.flags).toContain('port-conflict');
     const flag = g.flags.find((f) => f.kind === 'port-conflict');
     expect(flag?.subjects).toContain('port:*:8080/tcp');
+  });
+
+  it('counts a fixed publication with a templated container port as a conflict claimant', () => {
+    // A caller with no env lookup cannot expand the container port. The host
+    // port is still declared, so the absent service keeps its 8080 claim.
+    const declared = parseComposeDependencies('services:\n  web:\n    image: nginx\n    ports:\n      - "8080:${APP_PORT}"\n');
+    const snapshot = snap({
+      containers: [
+        container({ id: 'c1', service: 'b', stack: 'beta', ports: [{ ip: '', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }] }),
+      ],
+    });
+    const g = assembleGraph({
+      nodeId: 1, nodeName: 'hub', stacks: ['alpha', 'beta'], snapshot,
+      declaredByStack: declMap([['alpha', declared], ['beta', emptyDeclared()]]), parseErrors: [],
+    });
+    expect(g.nodes.find((n) => n.id === 'svc:alpha:web')?.flags).toContain('port-conflict');
   });
 
   it('flags a declared volume that does not exist at runtime', () => {
