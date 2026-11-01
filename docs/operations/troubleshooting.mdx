@@ -608,11 +608,11 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 ## Volume protection says repository_not_initialized
 
-**Symptom:** `GET /api/recovery/node` reports `"reason": "repository_not_initialized"`, `GET /api/recovery/repository` reports `"initialized": false` with `"health": "unavailable"`, or a capture answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "repository_not_initialized"`.
+**Symptom:** `GET /api/recovery/node` reports `"reason": "repository_not_initialized"`, or a capture answers `503` with `"errorClass": "capability_unavailable"` and `"reason": "repository_not_initialized"`. `GET /api/recovery/repository` reports `"health": "unavailable"` and either `"initialized": false` or, when the repository volume was emptied, `"initialized": true`.
 
-**Cause:** The node has no active recovery repository yet. Recovery points are stored in a repository that is provisioned explicitly, not created on first use.
+**Cause:** Either the node has no active recovery repository yet (`"initialized": false`), because recovery points are stored in a repository that is provisioned explicitly, not created on first use; or the node has a repository on record but its volume no longer holds one (`"initialized": true`), for example after the volume's contents were deleted.
 
-**Fix:** Provision it with `POST /api/recovery/repository` and poll the returned operation. See [The recovery repository](/operations/volume-recovery-points#the-recovery-repository).
+**Fix:** With `"initialized": false`, provision it with `POST /api/recovery/repository` and poll the returned operation. With `"initialized": true`, a plain provision opens the volume, finds it empty, and ends `failed` with `repository_unavailable`; send the request with `"replace": true` to create a new repository. The points that were in the emptied volume cannot be read. See [The recovery repository](/operations/volume-recovery-points#the-recovery-repository).
 
 ---
 
@@ -620,9 +620,9 @@ If a triggered update never resolves once the underlying cause above is fixed, c
 
 **Symptom:** The node reports `"reason": "repository_unavailable"`, or an action fails with `repository_unavailable`. A restore of a point in a repository that was replaced answers `repository_unavailable` with `"reason": "repository_replaced"`; that repository is intact but no longer active.
 
-**Cause:** The active repository volume is missing or cannot be opened. The most common causes are a volume removed by a prune, a Docker data root that changed, and a repository whose files are damaged.
+**Cause:** The active repository volume is missing or cannot be opened. The most common causes are a volume removed by a prune, a Docker data root that changed, and a repository whose files are damaged. A volume that still exists but whose contents were deleted is reported as `repository_not_initialized` instead; see the entry above.
 
-**Fix:** Check that the repository volume still exists with `docker volume ls` (its name starts with `sencho-recovery-`). Restoring the volume from a host backup is the only way back to its points. If it is gone, provision a replacement repository and take new points; the old points cannot be read.
+**Fix:** Check that the repository volume still exists with `docker volume ls` (its name starts with `sencho-recovery-`). Restoring the volume from a host backup is the only way back to its points. If it is gone, provision a replacement repository with `"replace": true` and take new points; the old points cannot be read. A plain provision does not repair this: it ends `failed` with `repository_unavailable`.
 
 ---
 

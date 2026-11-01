@@ -5,6 +5,7 @@ import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import type { LocalVolumeProtectionHealth } from './capability';
 import {
   RepositoryProvisioner,
+  type RepositoryOpenResult,
   checkRepository,
   generationOfLocator,
   ownerNodeKeyFor,
@@ -249,12 +250,7 @@ export class RecoveryEngineService {
         secret,
         operationId,
       });
-      const health: LocalVolumeProtectionHealth = opened.kind === 'open'
-        ? { state: 'available' }
-        : opened.kind === 'absent'
-          ? { state: 'unavailable', reason: 'repository_not_initialized' }
-          : { state: 'unavailable', reason: healthReasonFor(opened.errorClass) };
-      this.healthSnapshot = { health, checkedAt: Date.now(), lastDeepCheckAt: Date.now() };
+      this.healthSnapshot = { health: healthForOpened(opened), checkedAt: Date.now(), lastDeepCheckAt: Date.now() };
     } catch (err) {
       const errorClass = classifyRecoveryError(err);
       this.healthSnapshot = {
@@ -699,7 +695,9 @@ export class RecoveryEngineService {
     if (started.replayed) return { operation: started.operation, replayed: true };
     const operationId = started.operation.id;
     if (confirmsOnly) {
-      this.operations.finish(operationId, { state: 'succeeded' });
+      // Confirming is a read that holds no lock, so it runs beside a capture. It
+      // answers `succeeded` only for a repository that opens, never for a row.
+      this.schedule(operationId, () => this.runRepositoryConfirm(operationId, active));
     } else {
       this.schedule(operationId, () => this.runRepositoryInit(operationId, input.replace, generation));
     }
@@ -1045,6 +1043,46 @@ export class RecoveryEngineService {
     }
   }
 
+  /**
+   * A plain provision of a repository that already has a fingerprint: open it
+   * and compare. A volume that is gone, empty, or holding another repository
+   * ends `failed` instead of `succeeded`, because nothing was repaired and the
+   * next capture would fail. Only `replace` makes a new repository.
+   */
+  private async runRepositoryConfirm(operationId: string, repository: RepositoryDescriptor): Promise<void> {
+    const signal = this.work.get(operationId)?.controller.signal;
+    try {
+      const cheap = await this.computeCheapHealth();
+      if (cheap.state === 'unavailable') {
+        this.healthSnapshot = { health: cheap, checkedAt: Date.now(), lastDeepCheckAt: this.healthSnapshot?.lastDeepCheckAt ?? null };
+        this.operations.finish(operationId, { state: 'failed', errorClass: errorClassForHealth(cheap.reason) });
+        return;
+      }
+      const opened = await readRepositoryConfig({
+        runner: this.helperRunner(),
+        repositoryVolume: repository.locator,
+        secret: this.repositories.readSecret(repository.id),
+        signal,
+        operationId,
+      });
+      // Another repository in the volume is as unusable as none: the points
+      // recorded against this one cannot be read from it.
+      const health = opened.kind === 'open' && opened.fingerprint !== repository.repositoryFingerprint
+        ? { state: 'unavailable' as const, reason: 'repository_unavailable' as const }
+        : healthForOpened(opened);
+      this.healthSnapshot = { health, checkedAt: Date.now(), lastDeepCheckAt: Date.now() };
+      if (health.state === 'available') {
+        this.operations.finish(operationId, { state: 'succeeded' });
+      } else {
+        const errorClass = opened.kind === 'failed' ? opened.errorClass : 'repository_unavailable';
+        this.operations.finish(operationId, { state: 'failed', errorClass });
+      }
+    } catch (err) {
+      console.error('[Recovery] Repository confirmation failed:', errorMessageForLog(err));
+      this.operations.finish(operationId, { state: 'failed', errorClass: classifyRecoveryError(err) });
+    }
+  }
+
   private async runRepositoryInit(operationId: string, replace: boolean, generation: number): Promise<void> {
     const docker = this.docker();
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, docker);
@@ -1240,6 +1278,27 @@ export class RecoveryEngineService {
       });
     }
     return repository;
+  }
+}
+
+/** The health an opened (or unopenable) repository config means. */
+function healthForOpened(opened: RepositoryOpenResult): LocalVolumeProtectionHealth {
+  if (opened.kind === 'open') return { state: 'available' };
+  if (opened.kind === 'absent') return { state: 'unavailable', reason: 'repository_not_initialized' };
+  return { state: 'unavailable', reason: healthReasonFor(opened.errorClass) };
+}
+
+/** The error class an operation ends with for a health reason that stopped it. */
+function errorClassForHealth(
+  reason: Extract<LocalVolumeProtectionHealth, { state: 'unavailable' }>['reason'],
+): RecoveryErrorClass {
+  switch (reason) {
+    case 'repository_key_unavailable':
+      return 'repository_key_unavailable';
+    case 'helper_unavailable':
+      return 'capability_unavailable';
+    default:
+      return 'repository_unavailable';
   }
 }
 

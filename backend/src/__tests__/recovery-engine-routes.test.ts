@@ -219,6 +219,29 @@ describe('POST /api/recovery/repository', () => {
   });
 });
 
+describe('the log line for an unexpected failure', () => {
+  it('carries no control character from the method or the path', async () => {
+    const { logInternalFailure } = await import('../routes/recovery');
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    logInternalFailure('PO\nST', '/api/recovery/x\r\n[forged] line\u001b[31m', new Error('boom'));
+    const printed = spy.mock.calls[0].map(String).join(' ');
+    expect(printed).not.toMatch(/[\x00-\x1F\x7F]/);
+    expect(printed).toContain('POST');
+    expect(printed).toContain('/api/recovery/x[forged] line[31m');
+  });
+
+  it('is what a handler that throws an unclassified error logs', async () => {
+    service().markReadyForTests();
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(engine.RecoveryEngineService.prototype, 'admitRepositoryInit').mockRejectedValue(new Error('unexpected'));
+    const res = await request(app).post('/api/recovery/repository').set('Cookie', adminCookie)
+      .send({ idempotencyKey: randomUUID() });
+    expect(res.status).toBe(500);
+    expect(spy.mock.calls.some((call) => String(call[0]).startsWith('Recovery: %s %s failed:')
+      && call[1] === 'POST' && call[2] === '/repository')).toBe(true);
+  });
+});
+
 describe('POST /api/recovery/storage/points', () => {
   it('needs protect access, so a viewer is refused', async () => {
     seedRepository();

@@ -224,7 +224,7 @@ The repository password is generated once, encrypted with the instance key in `D
   Losing `sencho.db` or `encryption.key` makes the repository unreadable. There is no recovery path for a point whose key is gone. The points still exist in the repository volume, and nothing can open them. Back up both files together; see [Backup & Restore](/operations/backup).
 </Warning>
 
-To start a fresh repository, provision with `"replace": true`:
+Repeating the request on a node that already has a repository opens that repository and compares it with the one on record. The operation ends `succeeded` only when it opens. If the repository volume is gone, empty, or holds a different repository, the operation ends `failed` with `errorClass: "repository_unavailable"` and repairs nothing: provisioning again without `replace` will not change the answer. A key that no longer opens the repository ends `failed` with `repository_key_unavailable`. The check only reads, so it runs while a capture is running. Start a fresh repository when the old one cannot be opened:
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/recovery/repository \

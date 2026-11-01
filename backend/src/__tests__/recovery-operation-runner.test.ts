@@ -110,6 +110,28 @@ function probeRunner(dev = 63, ino = 42) {
   } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
 }
 
+const REPOSITORY_FINGERPRINT = 'f'.repeat(32);
+
+/**
+ * A helper runner that answers `restic cat config` as the repository volume
+ * would: a repository, an empty volume (exit 10), or a key that does not open it.
+ */
+function configRunner(answer: { exitCode: number; id?: string }) {
+  const runs: string[] = [];
+  const helper = {
+    run: async (spec: { profile: string; onStdoutLine?: (line: string) => void }) => {
+      runs.push(spec.profile);
+      if (spec.profile === 'config' && answer.exitCode === 0 && spec.onStdoutLine) {
+        spec.onStdoutLine(JSON.stringify({ version: 2, id: answer.id ?? REPOSITORY_FINGERPRINT }));
+      }
+      return { exitCode: answer.exitCode, stderrTail: '', aborted: false, killed: false };
+    },
+    removeForeignEpochHelpers: async () => 0,
+    countForeignEpochHelpers: async () => 0,
+  } as unknown as import('../services/recovery/restic/helperRunner').RecoveryHelperRunner;
+  return { helper, runs };
+}
+
 function engineReturning(overrides: Partial<{
   createPoint: () => Promise<{ ok: true; evidence: unknown } | { ok: false; errorClass: string }>;
   verifyPoint: () => Promise<{ ok: true; evidence: { result: string } } | { ok: false; errorClass: string }>;
@@ -146,9 +168,12 @@ async function seedProtectableVolume(): Promise<{ storage: import('../services/r
   return { storage, repositoryId: repository.id };
 }
 
+/** The helper a case installs in place of the probe-only default, cleared before each case. */
+let helperOverride: import('../services/recovery/restic/helperRunner').RecoveryHelperRunner | null = null;
+
 function service() {
   const instance = runner.RecoveryEngineService.getInstance(nodeId);
-  instance.setHelperRunnerForTests(probeRunner());
+  instance.setHelperRunnerForTests(helperOverride ?? probeRunner());
   return instance;
 }
 
@@ -181,6 +206,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  helperOverride = null;
   // Let the previous case's background work finish before the tables are cleared:
   // a leaked operation would otherwise write into this case's rows.
   await runner.RecoveryEngineService.getInstance(nodeId).whenIdleForTests();
@@ -411,10 +437,40 @@ describe('create point', () => {
   });
 });
 
+describe('the log line for a refused restore intent', () => {
+  it('carries no control character from the target volume name', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // The operation row does not exist, so the insert is refused by a constraint,
+    // which is the branch that logs the target volume.
+    expect(() => intents.RestoreIntentStore.getInstance().record({
+      operationId: 'no-such-operation', pointId: 'no-such-point', targetVolume: 'vol\r\n[forged] entry',
+      actor: 'alice', processEpoch: 'epoch-1',
+    })).toThrow();
+    const printed = warn.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+    expect(printed).toContain('vol[forged] entry');
+    expect(printed).not.toMatch(/[\x00-\x1F\x7F]/);
+    warn.mockRestore();
+  });
+});
+
 describe('repository provisioning', () => {
+  const HELPER_PIN = 'SENCHO_RECOVERY_HELPER_IMAGE';
+  let previousPin: string | undefined;
+
+  beforeEach(() => {
+    previousPin = process.env[HELPER_PIN];
+    process.env[HELPER_PIN] = `sha256:${'b'.repeat(64)}`;
+  });
+
+  afterEach(() => {
+    if (previousPin === undefined) delete process.env[HELPER_PIN];
+    else process.env[HELPER_PIN] = previousPin;
+  });
+
   it('a repeated request keeps the working repository instead of replacing it', async () => {
-    stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+    stubDocker(fakeDocker({ volumes: [{ name: 'sencho-recovery-test-g1', labels: {} }] }));
     const seeded = await seedProtectableVolume();
+    helperOverride = configRunner({ exitCode: 0 }).helper;
     service().markReadyForTests();
 
     const again = await service().admitRepositoryInit({
@@ -431,6 +487,90 @@ describe('repository provisioning', () => {
     expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
     const rows = recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_repositories').all();
     expect(rows).toHaveLength(1);
+  });
+
+  describe('a plain provision succeeds only for a repository that opens', () => {
+    const LOCATOR = 'sencho-recovery-test-g1';
+
+    async function plainProvision(
+      key: string,
+      options: { volumes?: FakeVolumeState[]; answer: { exitCode: number; id?: string } },
+    ) {
+      stubDocker(fakeDocker({ volumes: options.volumes ?? [{ name: LOCATOR, labels: {} }] }));
+      const seeded = await seedProtectableVolume();
+      const helper = configRunner(options.answer);
+      helperOverride = helper.helper;
+      service().markReadyForTests();
+      const admitted = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: key, replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      const stored = operations.RecoveryOperationStore.getInstance().get(admitted.operation.id);
+      return { stored, helper, seeded };
+    }
+
+    it('answers failed repository_unavailable when the volume holds no repository, and says why in the node health', async () => {
+      const { stored, seeded } = await plainProvision('plain-empty', { answer: { exitCode: 10 } });
+      expect(stored).toMatchObject({ state: 'failed', errorClass: 'repository_unavailable' });
+      expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_not_initialized' });
+      // Nothing was repaired: the same repository stays active, with no second row.
+      expect(repositoryStore.RecoveryRepositoryStore.getInstance().getActive()?.id).toBe(seeded.repositoryId);
+      expect(recoveryDbModule.recoveryDb().prepare('SELECT id FROM recovery_repositories').all()).toHaveLength(1);
+    });
+
+    it('answers failed repository_unavailable when the volume is gone, without starting a helper that would recreate it', async () => {
+      const { stored, helper } = await plainProvision('plain-removed', { volumes: [], answer: { exitCode: 0 } });
+      expect(stored).toMatchObject({ state: 'failed', errorClass: 'repository_unavailable' });
+      expect(helper.runs).toEqual([]);
+      expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
+    });
+
+    it('answers failed repository_unavailable when another repository sits in the volume', async () => {
+      const { stored } = await plainProvision('plain-other', { answer: { exitCode: 0, id: 'a'.repeat(32) } });
+      expect(stored).toMatchObject({ state: 'failed', errorClass: 'repository_unavailable' });
+      expect(service().health()).toEqual({ state: 'unavailable', reason: 'repository_unavailable' });
+    });
+
+    it('answers failed repository_key_unavailable when the stored key does not open the repository', async () => {
+      const { stored } = await plainProvision('plain-key', { answer: { exitCode: 12 } });
+      expect(stored).toMatchObject({ state: 'failed', errorClass: 'repository_key_unavailable' });
+    });
+
+    it('answers failed capability_unavailable when no helper image is pinned', async () => {
+      delete process.env[HELPER_PIN];
+      const { stored, helper } = await plainProvision('plain-no-helper', { answer: { exitCode: 0 } });
+      expect(stored).toMatchObject({ state: 'failed', errorClass: 'capability_unavailable' });
+      expect(helper.runs).toEqual([]);
+    });
+
+    it('clears an earlier unavailable health once the repository opens again', async () => {
+      const first = await plainProvision('plain-empty-first', { answer: { exitCode: 10 } });
+      expect(first.stored?.state).toBe('failed');
+      const helper = configRunner({ exitCode: 0 });
+      helperOverride = helper.helper;
+      const again = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'plain-opens-now', replace: false, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(operations.RecoveryOperationStore.getInstance().get(again.operation.id)?.state).toBe('succeeded');
+      expect(service().health()).toEqual({ state: 'available' });
+    });
+
+    it('a replace still repairs the empty volume', async () => {
+      const localRepository = await import('../services/recovery/localRepository');
+      stubDocker(fakeDocker({ volumes: [{ name: LOCATOR, labels: {} }] }));
+      await seedProtectableVolume();
+      service().markReadyForTests();
+      const spy = vi.spyOn(localRepository.RepositoryProvisioner.prototype, 'provision')
+        .mockResolvedValue({ repository: repositoryStore.RecoveryRepositoryStore.getInstance().getActive()!, created: true });
+      const replaced = await service().admitRepositoryInit({
+        actor: 'alice', idempotencyKey: 'replace-empty', replace: true, transport: 'local',
+      });
+      await service().whenIdleForTests();
+      expect(spy).toHaveBeenCalledOnce();
+      expect(operations.RecoveryOperationStore.getInstance().get(replaced.operation.id)?.state).toBe('succeeded');
+      vi.restoreAllMocks();
+    });
   });
 
   describe('provisioning is serialized with the work that uses the repository', () => {
@@ -732,14 +872,16 @@ describe('repository provisioning', () => {
     });
 
     it('lets a repeated provision confirm the working repository while a capture holds it', async () => {
-      stubDocker(fakeDocker({ volumes: [{ name: VOLUME, labels: {} }] }));
+      stubDocker(fakeDocker({ volumes: [{ name: 'sencho-recovery-test-g1', labels: {} }] }));
       const seeded = await seedProtectableVolume();
+      helperOverride = configRunner({ exitCode: 0 }).helper;
       service().markReadyForTests();
       holdActiveRepository(seeded.repositoryId, 'create_point');
 
       const again = await service().admitRepositoryInit({
         actor: 'alice', idempotencyKey: 'provision-during-capture', replace: false, transport: 'local',
       });
+      await service().whenIdleForTests();
       expect(operations.RecoveryOperationStore.getInstance().get(again.operation.id)?.state).toBe('succeeded');
     });
   });

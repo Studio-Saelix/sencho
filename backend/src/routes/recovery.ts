@@ -44,7 +44,7 @@ import type {
   RootCoverageReason,
   StorageDependent,
 } from '../services/recovery/types';
-import { errorMessageForLog } from '../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../utils/safeLog';
 import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
 import { parseEffectiveModel } from '../services/preflight/effectiveModel';
@@ -122,6 +122,15 @@ function requireRecoveryPermission(
   return false;
 }
 
+/**
+ * The log line for a handler that failed unexpectedly. The method and path come
+ * from the request, so each is stripped of control characters before it is
+ * printed; the error text is already redacted.
+ */
+export function logInternalFailure(method: string, path: string, err: unknown): void {
+  console.error('Recovery: %s %s failed:', sanitizeForLog(method), sanitizeForLog(path), errorMessageForLog(err));
+}
+
 /** Run a handler and turn every thrown recovery error into its documented answer. */
 function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
   return async (req: Request, res: Response): Promise<void> => {
@@ -130,7 +139,7 @@ function handle(fn: (req: Request, res: Response) => Promise<void> | void) {
     } catch (err) {
       const errorClass = classifyRecoveryError(err);
       if (errorClass === 'internal') {
-        console.error('Recovery: %s %s failed:', req.method, req.path, errorMessageForLog(err));
+        logInternalFailure(req.method, req.path, err);
       }
       const extra: Record<string, unknown> = {};
       if (err instanceof RecoveryError && err.reason !== undefined) extra.reason = err.reason;

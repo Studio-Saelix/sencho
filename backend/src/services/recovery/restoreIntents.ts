@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type Docker from 'dockerode';
-import { errorMessageForLog } from '../../utils/safeLog';
+import { errorMessageForLog, sanitizeForLog } from '../../utils/safeLog';
 import { recoveryDb } from './recoveryDb';
 import { RecoveryError } from './redaction';
 import { HELPER_LABEL_RESTORE_INTENT } from './restic/helperRunner';
@@ -133,7 +133,7 @@ export class RestoreIntentStore {
     } catch (err) {
       const message = (err as Error).message ?? '';
       if (/UNIQUE|constraint/i.test(message)) {
-        console.warn('[Recovery] Refused a second live restore into %s', input.targetVolume);
+        console.warn('[Recovery] Refused a second live restore into %s', sanitizeForLog(input.targetVolume));
         throw new RecoveryError('invalid_request');
       }
       throw err;
