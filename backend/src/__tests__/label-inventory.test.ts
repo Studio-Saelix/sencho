@@ -407,6 +407,34 @@ describe('buildStackLabelInventory', () => {
 });
 
 describe('io.sencho.* behavior annotations', () => {
+  it('reports the protective infrastructure label for the file and for each deployed copy', async () => {
+    writeStack('sl0', { 'compose.yaml': 'services:\n  proxy:\n    image: nginx\n' });
+    stubRender({ proxy: { 'io.sencho.infrastructure': 'true' }, bad: { 'io.sencho.infrastructure': 'yes' } });
+    stubDockerList([
+      {
+        id: 'c1', name: 'sl0-proxy-1', state: 'running', stack: 'sl0', service: 'proxy', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'true' },
+      },
+      {
+        id: 'c2', name: 'sl0-old-1', state: 'running', stack: 'sl0', service: 'old', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'maybe' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'sl0');
+    const declared = (service: string) => Object.fromEntries(
+      (inv.services.find(s => s.service === service)?.declaredLabels ?? []).map(l => [l.key, l.behavior]),
+    );
+    expect(declared('proxy')['io.sencho.infrastructure']).toMatchObject({ state: 'active' });
+    expect(declared('bad')['io.sencho.infrastructure']).toMatchObject({
+      state: 'invalid',
+      reason: expect.stringContaining('The only accepted value is true'),
+    });
+    // A service the file no longer holds, whose container still carries the label: honored, never inert.
+    const oldCopy = inv.services.find(s => s.service === 'old')?.replicas[0].runtimeLabels
+      .find(l => l.key === 'io.sencho.infrastructure')?.behavior;
+    expect(oldCopy).toMatchObject({ state: 'invalid', reason: expect.stringContaining('protected anyway') });
+  });
+
   it('marks declared labels active or invalid and image or runtime copies inert', async () => {
     writeStack('sl1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
     stubRender({
@@ -512,7 +540,7 @@ describe('io.sencho.* behavior annotations', () => {
     expect(labels.find(l => l.key === 'io.sencho.url')?.behavior).toMatchObject({ state: 'inert', reason: expect.stringContaining('could not be rendered') });
   });
 
-  it('never marks a node-wide io.sencho.* label active', async () => {
+  it('keeps a node-wide presentation label inert and marks a Sencho-set key as Sencho\'s own', async () => {
     stubDockerList([
       {
         id: 'c1', name: 'a-1', state: 'running', stack: 'a', service: 'web', imageId: 'img1',
@@ -522,11 +550,31 @@ describe('io.sencho.* behavior annotations', () => {
     const inv = await buildNodeLabelInventory(nodeId);
     const labels = inv.containers[0].labels;
     expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
-    expect(labels.find(l => l.key === 'io.sencho.mesh')?.behavior?.state).toBe('inert');
+    expect(labels.find(l => l.key === 'io.sencho.mesh')?.behavior).toMatchObject({ state: 'inert', reason: expect.stringContaining('Set by Sencho') });
     expect(labels.find(l => l.key === 'plain')?.behavior).toBeUndefined();
     expect(inv.byLabel.find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
     // The node-wide view has no Compose model, so its reason points at the stack view instead of claiming the label is undeclared.
     expect(labels.find(l => l.key === 'io.sencho.url')?.behavior?.reason).toContain('Compose Labels view');
+  });
+
+  it('reports the protective infrastructure label from deployed containers as the guard reads it', async () => {
+    stubDockerList([
+      {
+        id: 'c1', name: 'a-1', state: 'running', stack: 'a', service: 'proxy', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'true' },
+      },
+      {
+        id: 'c2', name: 'a-2', state: 'running', stack: 'a', service: 'other', imageId: 'img1',
+        labels: { 'io.sencho.infrastructure': 'maybe' },
+      },
+    ]);
+    const inv = await buildNodeLabelInventory(nodeId);
+    const behaviorOf = (containerIndex: number) => inv.containers[containerIndex].labels
+      .find(l => l.key === 'io.sencho.infrastructure')?.behavior;
+    expect(behaviorOf(0)).toMatchObject({ state: 'active', reason: expect.stringContaining('protects that container') });
+    expect(behaviorOf(1)).toMatchObject({ state: 'invalid', reason: expect.stringContaining('The only accepted value is true') });
+    const row = inv.byLabel.filter(r => r.key === 'io.sencho.infrastructure');
+    expect(row.map(r => r.behavior?.state).sort()).toEqual(['active', 'invalid']);
   });
 });
 
@@ -727,6 +775,32 @@ describe('GET /api/fleet/container-labels', () => {
         expect(res.body.nodeErrors[remoteId]).toBeUndefined();
         expect(rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior?.state).toBe('inert');
         expect(rowsOf(res.body).find(r => r.key === 'plain')?.behavior).toBeUndefined();
+      } finally {
+        DatabaseService.getInstance().deleteNode(remoteId);
+      }
+    });
+
+    it('sanitizes the same way through a Pilot loopback target', async () => {
+      stubDockerList([]);
+      const remoteId = addRemote('remote-pilot', 'pilot.invalid');
+      // A Pilot node is reached through a trusted loopback tunnel target, not a direct proxy.
+      vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? {
+        apiUrl: 'http://pilot.invalid:1853', apiToken: '', trustedLoopback: true,
+      } : null);
+      try {
+        respondWith({ 'pilot.invalid': payload(remoteId, [
+          row({ behavior: { state: 'active', reason: 'x'.repeat(5000) } }),
+          {
+            key: 'io.sencho.infrastructure', value: 'true', source: 'runtime', containers,
+            behavior: { state: 'active', reason: 'Read from the deployed container, so it protects it.' },
+          },
+        ]) });
+        const res = await fetchFleet();
+        expect(res.body.nodeErrors[remoteId]).toBeUndefined();
+        const url = rowsOf(res.body).find(r => r.key === 'io.sencho.url');
+        expect(url?.behavior?.state).toBe('inert');
+        expect(url?.behavior?.reason?.length).toBe(240);
+        expect(rowsOf(res.body).find(r => r.key === 'io.sencho.infrastructure')?.behavior).toMatchObject({ state: 'active' });
       } finally {
         DatabaseService.getInstance().deleteNode(remoteId);
       }

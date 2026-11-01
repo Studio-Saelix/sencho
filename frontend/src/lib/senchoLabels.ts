@@ -37,6 +37,13 @@ export type SenchoLabelResolution =
   | { renderable: false }
   | { renderable: true; services: Record<string, SenchoServiceLabels>; entries: SenchoLabelEntry[] };
 
+/**
+ * Keys whose value Sencho also honors on a deployed container, mirroring the
+ * backend registry's `trust: 'compose-or-deployed'`. Kept here so the client
+ * never downgrades the node's report for the protective label to Inert.
+ */
+export const DEPLOYED_TRUSTED_LABEL_KEYS: readonly string[] = ['io.sencho.infrastructure'];
+
 const LINK_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_LINK_NAME_LENGTH = 32;
 const UNREADABLE_STATE_REASON = 'The node reported a status this version of Sencho cannot read.';

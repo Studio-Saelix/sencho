@@ -1,4 +1,4 @@
-import type { SenchoLabelState } from './senchoLabels';
+import { DEPLOYED_TRUSTED_LABEL_KEYS, type SenchoLabelState } from './senchoLabels';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -117,10 +117,12 @@ export function isSenchoLabelKey(key: string): boolean {
 /**
  * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
  * stays absent (an older node). Anything unreadable becomes `unsupported` with a
- * fixed reason, and only the declared Compose copy of a label can be anything but
- * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
+ * fixed reason. Only the declared Compose copy of a presentation label, or a
+ * deployed copy of the protective infrastructure label, keeps the reported state;
+ * everything else is inert, so one wrong answer neither crashes a row nor shows
+ * an unearned Active.
  */
-export function readLabelBehavior(source: LabelSource, raw: unknown): LabelBehavior | undefined {
+export function readLabelBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
   if (raw === undefined) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)
@@ -131,8 +133,9 @@ export function readLabelBehavior(source: LabelSource, raw: unknown): LabelBehav
   }
   const reason = typeof o.reason === 'string' ? o.reason.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
   const summary = typeof o.summary === 'string' ? o.summary.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
+  const trustsDeployedCopy = DEPLOYED_TRUSTED_LABEL_KEYS.includes(key);
   return {
-    state: source === 'compose' ? state : 'inert',
+    state: source === 'compose' || trustsDeployedCopy ? state : 'inert',
     ...(reason ? { reason } : {}),
     ...(summary ? { summary } : {}),
   };
@@ -140,7 +143,7 @@ export function readLabelBehavior(source: LabelSource, raw: unknown): LabelBehav
 
 function readLabelValues(labels: LabelValue[]): LabelValue[] {
   return labels.map(({ behavior, ...rest }) => {
-    const read = readLabelBehavior(rest.source, behavior);
+    const read = readLabelBehavior(rest.source, rest.key, behavior);
     return read ? { ...rest, behavior: read } : rest;
   });
 }

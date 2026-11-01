@@ -6,12 +6,18 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  MANAGED_LABEL_DECLARED_REASON,
+  MANAGED_LABEL_DEPLOYED_REASON,
+  SENCHO_INFRASTRUCTURE_LABEL,
   SENCHO_LABEL_DEFINITIONS,
   SENCHO_LABELS_CAPABILITY,
+  SENCHO_MANAGED_LABELS,
   declaredLabelBehavior,
+  deployedCopyBehavior,
   findSenchoLabelDefinition,
-  inertLabelBehavior,
   inertOriginOf,
+  isDeployedTrustedLabel,
+  isManagedSenchoLabel,
   mergeLabelBehavior,
   normalizeLinkName,
   parseLabelEntries,
@@ -39,18 +45,46 @@ function model(services: Record<string, unknown>): unknown {
   return { name: 'demo', services: Object.fromEntries(Object.entries(services).map(([n, labels]) => [n, { labels }])) };
 }
 
+/** Every non-test TypeScript file under backend/src, for the registry coverage scan. */
+function backendSourceFiles(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== '__tests__' && entry.name !== 'node_modules') walk(full);
+      } else if (entry.name.endsWith('.ts') && !/\.(test|spec)\.ts$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+  };
+  walk(path.resolve(__dirname, '..'));
+  return out;
+}
+
 describe('registry', () => {
-  it('declares one definition per id, all service scoped, presentation only, and capability gated', () => {
+  it('declares one definition per id, all service scoped, and capability gated', () => {
     const ids = SENCHO_LABEL_DEFINITIONS.map(d => d.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const def of SENCHO_LABEL_DEFINITIONS) {
       expect(def.scope).toBe('service');
-      expect(def.effect).toBe('presentation');
       expect(def.onInvalid).toBe('ignore-with-diagnostic');
       expect(def.summary.length).toBeGreaterThan(0);
       expect(def.example.startsWith('io.sencho.')).toBe(true);
+      expect(['compose', 'compose-or-deployed']).toContain(def.trust);
     }
+    // Presentation is the rule; the protective label is the one documented exception.
+    expect(SENCHO_LABEL_DEFINITIONS.filter(d => d.effect !== 'presentation').map(d => d.id)).toEqual(['infrastructure']);
     expect(CAPABILITIES).toContain(SENCHO_LABELS_CAPABILITY);
+  });
+
+  it('reads a deployed copy of only the protective label', () => {
+    expect(SENCHO_LABEL_DEFINITIONS.filter(d => d.trust === 'compose-or-deployed').map(d => d.id)).toEqual(['infrastructure']);
+    expect(isDeployedTrustedLabel(SENCHO_INFRASTRUCTURE_LABEL)).toBe(true);
+    for (const key of ['io.sencho.url', 'io.sencho.url.docs', 'io.sencho.order', 'io.sencho.hidden']) {
+      expect(isDeployedTrustedLabel(key)).toBe(false);
+    }
+    for (const key of SENCHO_MANAGED_LABELS) expect(isDeployedTrustedLabel(key)).toBe(false);
   });
 
   it('gives every definition the parser that reads its value type', () => {
@@ -62,13 +96,46 @@ describe('registry', () => {
     }
   });
 
-  it('lists every registry key, example, and summary on the public docs page', () => {
+  it('lists every registry key and every key Sencho sets itself on the public docs page', () => {
     const docs = fs.readFileSync(path.resolve(__dirname, '../../../docs/features/sencho-labels.mdx'), 'utf8');
     for (const def of SENCHO_LABEL_DEFINITIONS) {
       const key = def.match.kind === 'exact' ? def.match.key : `${def.match.prefix}<name>`;
       expect(docs, `docs page names ${key}`).toContain(key);
     }
+    for (const key of SENCHO_MANAGED_LABELS) expect(docs, `docs page names ${key}`).toContain(key);
     expect(docs).toContain(SENCHO_LABELS_CAPABILITY);
+  });
+
+  it('knows every io.sencho key named in backend source', () => {
+    // Every Sencho label is either a registry definition or one Sencho stamps itself,
+    // so a new key cannot ship without declaring which it is.
+    const keys = new Set<string>();
+    for (const file of backendSourceFiles()) {
+      const source = fs.readFileSync(file, 'utf8');
+      for (const match of source.matchAll(/io\.sencho\.[A-Za-z0-9._-]+/g)) {
+        keys.add(match[0].replace(/[.-]+$/, ''));
+      }
+    }
+    expect(keys.size).toBeGreaterThan(0);
+    // A key is known when a definition owns it (exact, or the named-link prefix), when Sencho
+    // stamps it, or when it is the bare namespace that comments and the constant spell.
+    const unregistered = [...keys].filter(key =>
+      key !== 'io.sencho' && !isManagedSenchoLabel(key) && findSenchoLabelDefinition(key) === null);
+    expect(unregistered).toEqual([]);
+  });
+
+  it('agrees with the Docker endpoint guard on the accepted infrastructure value', async () => {
+    const { readInfrastructureLabels } = await import('../helpers/dockerEndpointGuard');
+    const def = findSenchoLabelDefinition(SENCHO_INFRASTRUCTURE_LABEL);
+    expect(def).not.toBeNull();
+    if (!def) return;
+    for (const value of ['true', 'True', 'TRUE', ' true', 'true ', '1', 'yes', 'false', '']) {
+      const rendered = `services:\n  web:\n    labels:\n      ${SENCHO_INFRASTRUCTURE_LABEL}: "${value}"\n`;
+      const { marked, invalid } = readInfrastructureLabels(rendered);
+      const parsed = def.parse(value).ok;
+      expect(marked.includes('web'), `guard marks ${JSON.stringify(value)}`).toBe(parsed);
+      expect(invalid.some(entry => entry.service === 'web')).toBe(!parsed);
+    }
   });
 
   it('routes keys to their definition and leaves foreign keys unmatched', () => {
@@ -76,6 +143,7 @@ describe('registry', () => {
     expect(findSenchoLabelDefinition('io.sencho.url.docs')?.id).toBe('url-named');
     expect(findSenchoLabelDefinition('io.sencho.order')?.id).toBe('order');
     expect(findSenchoLabelDefinition('io.sencho.hidden')?.id).toBe('hidden');
+    expect(findSenchoLabelDefinition(SENCHO_INFRASTRUCTURE_LABEL)?.id).toBe('infrastructure');
     expect(findSenchoLabelDefinition('io.sencho.unknown')).toBeNull();
     expect(findSenchoLabelDefinition('sencho.service.url')).toBeNull();
     expect(findSenchoLabelDefinition('com.docker.compose.service')).toBeNull();
@@ -298,18 +366,57 @@ describe('label behavior annotations', () => {
 
   it('treats everything as inert when the model did not render', () => {
     expect(declaredLabelBehavior(unrenderableSenchoLabels(), 'web', 'io.sencho.url')?.state).toBe('inert');
-    expect(inertLabelBehavior('io.sencho.url', 'unrendered')?.state).toBe('inert');
+    expect(deployedCopyBehavior('io.sencho.url', 'https://a.example.com', 'unrendered')?.state).toBe('inert');
   });
 
   it('explains each reason a copy is inert, with a distinct explanation', () => {
-    const origins = ['image', 'runtime', 'stale-runtime', 'unknown', 'unrendered', 'node-wide'] as const;
+    const origins = ['image', 'runtime', 'stale-runtime', 'unknown', 'unrendered', 'node-wide', 'sencho-managed'] as const;
     const reasons = origins.map(origin => {
-      const behavior = inertLabelBehavior('io.sencho.url', origin);
+      const behavior = deployedCopyBehavior('io.sencho.url', 'x', origin);
       expect(behavior?.state).toBe('inert');
       return behavior?.reason;
     });
     expect(new Set(reasons).size).toBe(origins.length);
-    expect(inertLabelBehavior('traefik.enable', 'runtime')).toBeUndefined();
+    expect(deployedCopyBehavior('traefik.enable', 'x', 'runtime')).toBeUndefined();
+  });
+
+  it('marks a declared infrastructure label active only for exactly true', () => {
+    const marked = resolveRendered(model({ web: { [SENCHO_INFRASTRUCTURE_LABEL]: 'true' }, bad: { [SENCHO_INFRASTRUCTURE_LABEL]: 'True' } }));
+    expect(declaredLabelBehavior(marked, 'web', SENCHO_INFRASTRUCTURE_LABEL)).toMatchObject({
+      state: 'active',
+      summary: expect.stringContaining('Docker connection'),
+    });
+    const invalid = declaredLabelBehavior(marked, 'bad', SENCHO_INFRASTRUCTURE_LABEL);
+    expect(invalid?.state).toBe('invalid');
+    expect(invalid?.reason).toContain('The only accepted value is true');
+    // The protective label changes no presentation metadata.
+    expect(marked.services.web).toEqual({ links: [], order: null, hidden: false });
+  });
+
+  it('reports a deployed infrastructure copy as the guard reads it, not as inert', () => {
+    expect(deployedCopyBehavior(SENCHO_INFRASTRUCTURE_LABEL, 'true', 'runtime')).toMatchObject({
+      state: 'active',
+      reason: expect.stringContaining('protects that container'),
+    });
+    expect(deployedCopyBehavior(SENCHO_INFRASTRUCTURE_LABEL, 'true', 'node-wide')?.state).toBe('active');
+    expect(deployedCopyBehavior(SENCHO_INFRASTRUCTURE_LABEL, 'maybe', 'image')).toMatchObject({
+      state: 'invalid',
+      reason: expect.stringContaining('only accepted value is true'),
+    });
+    expect(deployedCopyBehavior(SENCHO_INFRASTRUCTURE_LABEL, 'true', 'stale-runtime')?.state).toBe('active');
+    // Every other presentation label stays inert from the same copy.
+    for (const key of ['io.sencho.url', 'io.sencho.order', 'io.sencho.hidden']) {
+      expect(deployedCopyBehavior(key, 'true', 'runtime')?.state).toBe('inert');
+    }
+  });
+
+  it('reserves the keys Sencho stamps on its own containers', () => {
+    for (const key of SENCHO_MANAGED_LABELS) {
+      const declared = resolveRendered(model({ web: { [key]: 'true' } }));
+      expect(declaredLabelBehavior(declared, 'web', key)).toEqual({ state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON });
+      expect(declared.services.web).toEqual({ links: [], order: null, hidden: false });
+      expect(deployedCopyBehavior(key, 'true', 'runtime')).toEqual({ state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON });
+    }
   });
 
   it('attributes a runtime copy that differs from a declared one to a stale container', () => {
@@ -329,12 +436,12 @@ describe('label behavior annotations', () => {
 
 describe('remote behavior sanitizing', () => {
   it('keeps an absent behavior absent, so an older node reads as not reporting', () => {
-    expect(sanitizeRemoteBehavior('runtime', undefined)).toBeUndefined();
+    expect(sanitizeRemoteBehavior('runtime', 'io.sencho.url', undefined)).toBeUndefined();
   });
 
   it('rebuilds a readable behavior field by field and drops extra properties', () => {
     const raw = { state: 'invalid', reason: 'Use true or false.', summary: 'Collapses a helper.', extra: { deep: 1 } };
-    expect(sanitizeRemoteBehavior('compose', raw)).toEqual({ state: 'invalid', reason: 'Use true or false.', summary: 'Collapses a helper.' });
+    expect(sanitizeRemoteBehavior('compose', 'io.sencho.hidden', raw)).toEqual({ state: 'invalid', reason: 'Use true or false.', summary: 'Collapses a helper.' });
   });
 
   it.each([
@@ -346,22 +453,29 @@ describe('remote behavior sanitizing', () => {
     ['a non-string summary', { state: 'active', summary: {} }],
     ['no state', { reason: 'x' }],
   ])('degrades %s to unsupported with a fixed reason', (_label, raw) => {
-    expect(sanitizeRemoteBehavior('compose', raw)).toEqual({
+    expect(sanitizeRemoteBehavior('compose', 'io.sencho.url', raw)).toEqual({
       state: 'unsupported',
       reason: expect.stringContaining('cannot read'),
     });
   });
 
-  it('forces every source other than the declared Compose copy to inert', () => {
+  it('forces every source other than the declared Compose copy to inert, except the protective label', () => {
     for (const source of ['runtime', 'image', 'unknown', 'compose-system'] as const) {
-      expect(sanitizeRemoteBehavior(source, { state: 'active' })?.state).toBe('inert');
+      expect(sanitizeRemoteBehavior(source, 'io.sencho.url', { state: 'active' })?.state).toBe('inert');
+      expect(sanitizeRemoteBehavior(source, 'io.sencho.order', { state: 'active' })?.state).toBe('inert');
     }
-    expect(sanitizeRemoteBehavior('compose', { state: 'active' })?.state).toBe('active');
+    expect(sanitizeRemoteBehavior('compose', 'io.sencho.url', { state: 'active' })?.state).toBe('active');
+    // A remote node reports the deployed infrastructure copy as active or invalid; keeping it is what makes the audit truthful.
+    expect(sanitizeRemoteBehavior('runtime', SENCHO_INFRASTRUCTURE_LABEL, { state: 'active' })?.state).toBe('active');
+    expect(sanitizeRemoteBehavior('image', SENCHO_INFRASTRUCTURE_LABEL, { state: 'invalid' })?.state).toBe('invalid');
+    for (const key of SENCHO_MANAGED_LABELS) {
+      expect(sanitizeRemoteBehavior('runtime', key, { state: 'active' })?.state).toBe('inert');
+    }
   });
 
   it('bounds the text a remote can send', () => {
     const long = 'x'.repeat(5000);
-    const out = sanitizeRemoteBehavior('compose', { state: 'invalid', reason: long, summary: long });
+    const out = sanitizeRemoteBehavior('compose', 'io.sencho.url', { state: 'invalid', reason: long, summary: long });
     expect(out?.reason?.length).toBe(240);
     expect(out?.summary?.length).toBe(240);
   });

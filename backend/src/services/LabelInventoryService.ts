@@ -9,7 +9,7 @@ import { redactLabelValue } from '../helpers/labelValueRedaction';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
   declaredLabelBehavior,
-  inertLabelBehavior,
+  deployedCopyBehavior,
   inertOriginOf,
   parseLabelEntries,
   resolveSenchoLabels,
@@ -277,9 +277,10 @@ export async function buildNodeLabelInventory(
       stack: row.stack,
       service: row.service,
       state: row.state,
-      // Nothing here comes from a rendered Compose model, so every io.sencho.* label is inert.
+      // Nothing here comes from a rendered Compose model, so a presentation label is inert; the protective
+      // infrastructure label is reported as the guard reads it, because the guard acts across projects.
       labels: Object.entries(row.labels).map(([key, value]) =>
-        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets, inertLabelBehavior(key, 'node-wide')),
+        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets, deployedCopyBehavior(key, value, 'node-wide')),
       ).sort((a, b) => a.key.localeCompare(b.key)),
     };
   });
@@ -384,10 +385,10 @@ export async function buildStackLabelInventory(
             ? 'unknown'
             : resolveLabelSource(key, value, imageLabels, declared);
           // A runtime label equal to the declared one is that same declaration; any other
-          // origin never drives behavior.
+          // origin drives no presentation behavior, and only the protective label counts from a container.
           const behavior = source === 'compose'
             ? declaredLabelBehavior(sencho, service, key)
-            : inertLabelBehavior(key, sencho.renderable ? inertOriginOf(source, Object.hasOwn(declared, key)) : 'unrendered');
+            : deployedCopyBehavior(key, value, sencho.renderable ? inertOriginOf(source, Object.hasOwn(declared, key)) : 'unrendered');
           return toLabelValue(key, value, source, revealSecrets, behavior);
         })
         .sort((a, b) => a.key.localeCompare(b.key));

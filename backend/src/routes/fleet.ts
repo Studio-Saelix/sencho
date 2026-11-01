@@ -963,12 +963,12 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
 function withSanitizedBehaviors(inventory: NodeLabelInventory): NodeLabelInventory {
   const cleanLabel = (label: LabelValue): LabelValue => {
     const { behavior: raw, ...rest } = label;
-    const behavior = sanitizeRemoteBehavior(label.source, raw);
+    const behavior = sanitizeRemoteBehavior(label.source, label.key, raw);
     return behavior ? { ...rest, behavior } : rest;
   };
   const cleanRow = (row: LabelIndexRow): LabelIndexRow => {
     const { behavior: raw, ...rest } = row;
-    const behavior = sanitizeRemoteBehavior(row.source, raw);
+    const behavior = sanitizeRemoteBehavior(row.source, row.key, raw);
     return behavior ? { ...rest, behavior } : rest;
   };
   return {

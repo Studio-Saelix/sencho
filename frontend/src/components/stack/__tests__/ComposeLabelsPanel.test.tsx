@@ -68,6 +68,33 @@ describe('ComposeLabelsPanel', () => {
     expect(screen.getByTestId('mismatch-both')).toBeInTheDocument();
   });
 
+  it('keeps the node\'s Active on a deployed protective label and Inert on a deployed presentation label', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'proxy',
+          declaredLabels: [{ key: 'io.sencho.infrastructure', value: 'true', source: 'compose' as const, behavior: { state: 'active' } }],
+          replicas: [{
+            id: 'c1', name: 'demo-proxy-1', state: 'running',
+            runtimeLabels: [
+              { key: 'io.sencho.infrastructure', value: 'true', source: 'runtime' as const, behavior: { state: 'active', reason: 'Read from the deployed container.' } },
+              { key: 'io.sencho.url', value: 'https://x.example.com', source: 'runtime' as const, behavior: { state: 'active', reason: 'A remote claim.' } },
+            ],
+            onlyInCompose: [], onlyOnContainer: ['io.sencho.url'], inBoth: ['io.sencho.infrastructure'],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const badges = await screen.findAllByTestId('label-behavior');
+    const states = badges.map(badge => badge.dataset.state);
+    // The declared copy and the honored deployed copy are Active; the presentation label cannot become Active from a container.
+    expect(states.filter(state => state === 'active')).toHaveLength(2);
+    expect(states).toContain('inert');
+  });
+
   it('renders a value-changed badge when a label value drifted', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,

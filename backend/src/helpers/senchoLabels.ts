@@ -6,9 +6,17 @@
  *
  * Trust rule: only labels declared on a service of the rendered, authored
  * Compose model can become active. Image, runtime-only, and unknown-provenance
- * labels stay visible in the label audit but are inert (`inertLabelBehavior`).
+ * labels stay visible in the label audit but are inert (`deployedCopyBehavior`).
  * A model that did not render yields no metadata at all
- * (`unrenderableSenchoLabels`), never a guess from runtime state.
+ * (`unrenderableSenchoLabels`), never a guess from runtime state. The one
+ * exception is `io.sencho.infrastructure` (`trust: 'compose-or-deployed'`): the
+ * Docker endpoint guard reads it from deployed containers too, because a copy
+ * there can only add protection.
+ *
+ * Sencho also stamps a few keys on containers it creates. Those are listed in
+ * `SENCHO_MANAGED_LABELS`, never read as configuration, and never documented as
+ * user-settable; a backend test fails if a Sencho label key exists outside these
+ * two lists.
  *
  * Diagnostics carry the label key and a fixed reason, never the value: a value
  * can be an interpolated secret, and the audit already shows declared values
@@ -20,11 +28,21 @@ export const SENCHO_LABEL_NAMESPACE = 'io.sencho.';
 /** The application link label; the Compose editor and the URL pipeline key off it. */
 export const SENCHO_URL_LABEL = 'io.sencho.url';
 
+/** The protective label the Docker endpoint guard reads from the file and from deployed containers. */
+export const SENCHO_INFRASTRUCTURE_LABEL = 'io.sencho.infrastructure';
+
 /** Capability advertised by nodes that resolve this contract. Older nodes degrade as a whole. */
 export const SENCHO_LABELS_CAPABILITY = 'sencho-labels-v1';
 
-export type SenchoLabelId = 'url' | 'url-named' | 'order' | 'hidden';
+export type SenchoLabelId = 'url' | 'url-named' | 'order' | 'hidden' | 'infrastructure';
 export type SenchoLabelEffect = 'presentation' | 'operations';
+
+/**
+ * Where a label may be read from. `compose` is the rendered, authored model;
+ * `compose-or-deployed` also honors a copy on a deployed container, which is
+ * only ever protective.
+ */
+export type SenchoLabelTrust = 'compose' | 'compose-or-deployed';
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; reason: string };
 
@@ -44,6 +62,8 @@ interface SenchoLabelDefinitionBase {
   /** How duplicates and conflicting declarations resolve. */
   conflict: string;
   effect: SenchoLabelEffect;
+  /** Where the label is read from; `compose-or-deployed` is the protective exception. */
+  trust: SenchoLabelTrust;
   /** Every invalid value is ignored with a diagnostic; none breaks a view. */
   onInvalid: 'ignore-with-diagnostic';
   minCapability: typeof SENCHO_LABELS_CAPABILITY;
@@ -60,7 +80,8 @@ export type SenchoLabelDefinition =
   | (SenchoLabelDefinitionBase & { id: 'url'; match: ExactMatch; valueType: 'url'; parse: (raw: string) => ParseResult<string> })
   | (SenchoLabelDefinitionBase & { id: 'url-named'; match: PrefixMatch; valueType: 'url'; parse: (raw: string) => ParseResult<string> })
   | (SenchoLabelDefinitionBase & { id: 'order'; match: ExactMatch; valueType: 'integer'; parse: (raw: string) => ParseResult<number> })
-  | (SenchoLabelDefinitionBase & { id: 'hidden'; match: ExactMatch; valueType: 'boolean'; parse: (raw: string) => ParseResult<boolean> });
+  | (SenchoLabelDefinitionBase & { id: 'hidden'; match: ExactMatch; valueType: 'boolean'; parse: (raw: string) => ParseResult<boolean> })
+  | (SenchoLabelDefinitionBase & { id: 'infrastructure'; match: ExactMatch; valueType: 'literal-true'; trust: 'compose-or-deployed'; effect: 'operations'; parse: (raw: string) => ParseResult<true> });
 
 const MAX_URL_LENGTH = 2048;
 const MAX_LINK_NAME_LENGTH = 32;
@@ -118,6 +139,34 @@ function parseSenchoBoolean(raw: string): ParseResult<boolean> {
   return { ok: false, reason: 'Use true or false.' };
 }
 
+/** The only accepted value of the protective label; case-sensitive, exactly as the Docker endpoint guard reads it. */
+function parseSenchoLiteralTrue(raw: string): ParseResult<true> {
+  // The reason never echoes the value; it matches the guard's advice, which is to fix the label before the stack is changed again.
+  if (raw === 'true') return { ok: true, value: true };
+  return { ok: false, reason: 'The only accepted value is true. Sencho refuses changes to this stack until it is fixed.' };
+}
+
+/**
+ * Keys Sencho stamps on containers it creates (mesh sidecars, endpoint-provider
+ * helpers, and the operation that owns them). They are never configuration: a
+ * Compose declaration is reserved, and a copy on a container is Sencho's own.
+ */
+export const SENCHO_MANAGED_LABELS: readonly string[] = [
+  'io.sencho.mesh',
+  'io.sencho.helper',
+  'io.sencho.operation',
+];
+
+const MANAGED_LABELS: ReadonlySet<string> = new Set(SENCHO_MANAGED_LABELS);
+
+/** True for a key in `SENCHO_MANAGED_LABELS`, which Sencho sets and nobody configures. */
+export function isManagedSenchoLabel(key: string): boolean {
+  return MANAGED_LABELS.has(key);
+}
+
+export const MANAGED_LABEL_DECLARED_REASON = 'Reserved for containers Sencho creates; it has no effect in a Compose file.';
+export const MANAGED_LABEL_DEPLOYED_REASON = 'Set by Sencho on a container it manages.';
+
 /** The normalized name of a named link, or the reason the key suffix is not a usable name. */
 export function normalizeLinkName(rawName: string): ParseResult<string> {
   const name = rawName.trim().toLowerCase();
@@ -140,6 +189,7 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     precedence: 'A valid configured link replaces the generated published-port link for that service, unless Sencho cannot tell which service owns the port.',
     conflict: 'The merged Compose model decides the value; later files replace earlier ones.',
     effect: 'presentation',
+    trust: 'compose',
     onInvalid: 'ignore-with-diagnostic',
     minCapability: SENCHO_LABELS_CAPABILITY,
     summary: 'Application link for the service.',
@@ -155,6 +205,7 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     precedence: 'Named links are listed after the application link, sorted by name; they never replace a port link.',
     conflict: 'Names are lowercased; when two keys normalize to one name, the key that sorts first is kept and the other is ignored.',
     effect: 'presentation',
+    trust: 'compose',
     onInvalid: 'ignore-with-diagnostic',
     minCapability: SENCHO_LABELS_CAPABILITY,
     summary: 'Extra named link for the service (docs, admin, and so on).',
@@ -170,6 +221,7 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     precedence: 'Services with a valid order come first, ascending; services with the same number sort by name among themselves, and services without a valid order follow, sorted by name.',
     conflict: 'The merged Compose model decides the value. Equal values tie-break by service name.',
     effect: 'presentation',
+    trust: 'compose',
     onInvalid: 'ignore-with-diagnostic',
     minCapability: SENCHO_LABELS_CAPABILITY,
     summary: 'Display position of the service. Changes presentation only, never start order.',
@@ -185,10 +237,27 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     precedence: 'Hides the service from default lists only; health, security, drift, updates, and lifecycle still include it.',
     conflict: 'The merged Compose model decides the value.',
     effect: 'presentation',
+    trust: 'compose',
     onInvalid: 'ignore-with-diagnostic',
     minCapability: SENCHO_LABELS_CAPABILITY,
     summary: 'Collapses a helper service out of default lists.',
     example: 'io.sencho.hidden: "true"',
+  },
+  {
+    id: 'infrastructure',
+    match: { kind: 'exact', key: SENCHO_INFRASTRUCTURE_LABEL },
+    scope: 'service',
+    valueType: 'literal-true',
+    parse: parseSenchoLiteralTrue,
+    defaultBehavior: 'Sencho detects the container that carries its Docker connection on its own; the label only adds protection.',
+    precedence: 'Protective only: a copy on a deployed container counts even when the Compose file no longer sets it, and a marked service is protected whatever the deployed copy says.',
+    conflict: 'A second declaration cannot loosen it; one value other than true refuses changes to the stack until the label is fixed.',
+    effect: 'operations',
+    trust: 'compose-or-deployed',
+    onInvalid: 'ignore-with-diagnostic',
+    minCapability: SENCHO_LABELS_CAPABILITY,
+    summary: 'Marks the service that carries this node\'s Docker connection.',
+    example: 'io.sencho.infrastructure: "true"',
   },
 ];
 
@@ -321,6 +390,11 @@ function applyLabel(def: SenchoLabelDefinition, key: string, raw: string, draft:
       draft.resolved.hidden = hidden.value;
       return entry('active');
     }
+    case 'infrastructure': {
+      // Protective only: it is not part of the presentation metadata, so it records a state and changes nothing here.
+      const marked = def.parse(raw);
+      return marked.ok ? entry('active') : entry('invalid', marked.reason);
+    }
     default: {
       // Compile-time exhaustiveness: a new registry entry must get a case above.
       const unhandled: never = def;
@@ -340,7 +414,8 @@ function resolveService(service: string, labels: Map<string, string>, entries: S
     const write: EntryWriter = (state, reason) => {
       entries.push({ service, key, state, definition: def?.id ?? null, ...(reason ? { reason } : {}) });
     };
-    if (!def) write('unsupported', 'Sencho does not recognize this label.');
+    if (isManagedSenchoLabel(key)) write('invalid', MANAGED_LABEL_DECLARED_REASON);
+    else if (!def) write('unsupported', 'Sencho does not recognize this label.');
     else applyLabel(def, key, labels.get(key) ?? '', draft, write);
   }
   draft.resolved.links.push(...draft.named.sort((a, b) => compareText(a.name ?? '', b.name ?? '')));
@@ -386,8 +461,8 @@ export interface LabelBehavior {
   summary?: string;
 }
 
-/** Why a label that is not read from the rendered Compose model is inert. */
-export type InertOrigin = 'image' | 'runtime' | 'stale-runtime' | 'unknown' | 'unrendered' | 'node-wide';
+/** Why a label that is not read from the rendered Compose model has no effect, or how a deployed copy counts. */
+export type InertOrigin = 'image' | 'runtime' | 'stale-runtime' | 'unknown' | 'unrendered' | 'node-wide' | 'sencho-managed';
 
 const INERT_REASON: Record<InertOrigin, string> = {
   image: 'Set by the image, so Sencho does not act on it. Declare it in the Compose file instead.',
@@ -396,7 +471,13 @@ const INERT_REASON: Record<InertOrigin, string> = {
   unknown: 'Its origin is unknown, so Sencho does not act on it.',
   unrendered: 'Compose could not be rendered, so Sencho does not act on Sencho labels.',
   'node-wide': 'Sencho reads io.sencho.* labels from a stack\'s Compose file, not from running containers. Open the stack\'s Compose Labels view for their status.',
+  'sencho-managed': MANAGED_LABEL_DEPLOYED_REASON,
 };
+
+const DEPLOYED_INFRASTRUCTURE_ACTIVE_REASON =
+  'Read from the deployed container, so it protects that container: every operation that would stop or recreate it is refused until it is recreated without the label.';
+const DEPLOYED_INFRASTRUCTURE_INVALID_REASON =
+  'The only accepted value is true. The container is protected anyway until it is recreated without the label.';
 
 /** The inert origin of a runtime-side label, given where the audit attributed it. */
 export function inertOriginOf(source: LabelSource, declaredHasKey: boolean): InertOrigin {
@@ -405,9 +486,29 @@ export function inertOriginOf(source: LabelSource, declaredHasKey: boolean): Ine
   return 'unknown';
 }
 
-/** Annotation for an `io.sencho.*` label that is not read from the rendered Compose model. */
-export function inertLabelBehavior(key: string, origin: InertOrigin): LabelBehavior | undefined {
+/** Whether a deployed copy of this key is honored, which is the registry's `compose-or-deployed` exception. */
+export function isDeployedTrustedLabel(key: string): boolean {
+  return !isManagedSenchoLabel(key) && findSenchoLabelDefinition(key)?.trust === 'compose-or-deployed';
+}
+
+/**
+ * Annotation for an `io.sencho.*` label found on a deployed container or image.
+ * A key Sencho itself stamps is inert with its own reason. A `compose-or-deployed`
+ * key (the infrastructure label) keeps the state the Docker endpoint guard gives
+ * it, because a deployed copy is honored. Every other key is inert.
+ */
+export function deployedCopyBehavior(key: string, value: string, origin: InertOrigin): LabelBehavior | undefined {
   if (!isSenchoLabelKey(key)) return undefined;
+  if (isManagedSenchoLabel(key)) return { state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON };
+  const def = findSenchoLabelDefinition(key);
+  if (def?.trust === 'compose-or-deployed') {
+    const parsed = def.parse(value);
+    return {
+      state: parsed.ok ? 'active' : 'invalid',
+      reason: parsed.ok ? DEPLOYED_INFRASTRUCTURE_ACTIVE_REASON : DEPLOYED_INFRASTRUCTURE_INVALID_REASON,
+      summary: def.summary,
+    };
+  }
   return { state: 'inert', reason: INERT_REASON[origin] };
 }
 
@@ -451,10 +552,11 @@ function boundedText(value: unknown): string | undefined {
  * Rebuild a remote node's `behavior` field by field. Absent stays absent (an
  * older node, or a label outside the namespace). A value this version cannot
  * read degrades to `unsupported` with a fixed reason instead of failing the
- * node's whole inventory. Only the declared Compose copy of a label can be
- * anything but inert, so any other source is forced inert.
+ * node's whole inventory. Only the declared Compose copy of a presentation label
+ * can be anything but inert; the protective infrastructure label keeps its
+ * reported state from a deployed copy too.
  */
-export function sanitizeRemoteBehavior(source: LabelSource, raw: unknown): LabelBehavior | undefined {
+export function sanitizeRemoteBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
   if (raw === undefined) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && VALID_LABEL_BEHAVIOR_STATES.has(o.state)
@@ -466,7 +568,7 @@ export function sanitizeRemoteBehavior(source: LabelSource, raw: unknown): Label
   const reason = boundedText(o.reason);
   const summary = boundedText(o.summary);
   return {
-    state: source === 'compose' ? state : 'inert',
+    state: source === 'compose' || isDeployedTrustedLabel(key) ? state : 'inert',
     ...(reason ? { reason } : {}),
     ...(summary ? { summary } : {}),
   };
