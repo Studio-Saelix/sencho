@@ -23,7 +23,9 @@ function db() { return DatabaseService.getInstance(); }
 function doctor() { return ComposeDoctorService.getInstance(); }
 
 /** Mock the two Docker calls; render returns the given effective model JSON.
- *  Pass `'reject'` as the snapshot to simulate an unreachable Docker daemon. */
+ *  Pass `'reject'` as the snapshot to simulate an unreachable Docker daemon.
+ *  `listed` is what the container list returns (the Compose version check reads
+ *  it), and `composeVersion` is what `docker compose version --short` answers. */
 function stubDocker(
   rendered: object | null,
   stderr = '',
@@ -31,6 +33,8 @@ function stubDocker(
   inspectImage: ReturnType<typeof vi.fn> = vi.fn().mockRejectedValue(
     Object.assign(new Error('No such image'), { statusCode: 404 }),
   ),
+  listed: unknown[] = [],
+  composeVersion: string | null = null,
 ) {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
@@ -39,13 +43,14 @@ function stubDocker(
       code: rendered === null ? 1 : 0,
       timedOut: false,
     }),
+    composeVersion: vi.fn().mockResolvedValue(composeVersion),
   } as unknown as ComposeService);
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
     getDependencySnapshot: snapshot === 'reject'
       ? vi.fn().mockRejectedValue(new Error('docker down'))
       : vi.fn().mockResolvedValue(snapshot),
     getDocker: vi.fn(() => ({
-      listContainers: vi.fn().mockResolvedValue([]),
+      listContainers: vi.fn().mockResolvedValue(listed),
       getContainer: vi.fn(() => ({
         inspect: vi.fn().mockResolvedValue({ Config: {} }),
       })),
@@ -478,5 +483,116 @@ describe('exposure state feeds the exposure rules end to end', () => {
     stubDocker({ name: 'expe2e', services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} });
     await doctor().runPreflight(nodeId, 'expe2e', 'tester');
     expect(ruleIds('expe2e')).toContain('exposure-port-vs-dossier');
+  });
+});
+
+describe('Compose version mismatch note', () => {
+  const STACK = 'skewrun';
+  // A model with no rule findings of its own, so the only difference between
+  // the baseline run and the skew run is the note under test.
+  const cleanModel = () => ({
+    name: STACK,
+    services: {
+      proxy: { image: 'nginx:1.27', restart: 'unless-stopped', healthcheck: { test: ['CMD', 'true'] } },
+      web: { image: 'nginx:1.27', restart: 'unless-stopped', healthcheck: { test: ['CMD', 'true'] } },
+    },
+    networks: {},
+    volumes: {},
+  });
+  const label = (service: string, version: string, over: Record<string, string> = {}) => ({
+    Id: `${service}-${version}`,
+    Labels: {
+      'com.docker.compose.project': STACK,
+      'com.docker.compose.service': service,
+      'com.docker.compose.version': version,
+      ...over,
+    },
+  });
+
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => { fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true }); });
+
+  it('notes every service created by another version without changing the report status', async () => {
+    stubDocker(cleanModel());
+    const baseline = await doctor().runPreflight(nodeId, STACK, 'tester');
+
+    stubDocker(cleanModel(), '', { containers: [], networks: [], volumes: [] }, undefined, [
+      label('proxy', '2.38.1'),
+      label('web', '2.38.1'),
+    ], '5.6.0');
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+
+    const note = report.findings.filter(f => f.ruleId === 'compose-version-mismatch');
+    expect(note).toHaveLength(1);
+    expect(note[0].severity).toBe('info');
+    expect(note[0].message).toContain('proxy and web were created by Docker Compose 2.38.1');
+    expect(note[0].message).toContain('Docker Compose 5.6.0');
+    // A note never moves All Clear or the stored severity.
+    expect(report.status).toBe(baseline.status);
+    expect(report.highestSeverity).toBe(baseline.highestSeverity);
+    expect(report.activeStatus).toBe(baseline.activeStatus);
+  });
+
+  it('matches a stack container by its working directory when the project label differs', async () => {
+    stubDocker(cleanModel(), '', { containers: [], networks: [], volumes: [] }, undefined, [{
+      Id: 'wd-1',
+      Labels: {
+        'com.docker.compose.project': 'some-other-project-name',
+        'com.docker.compose.project.working_dir': path.join(process.env.COMPOSE_DIR as string, STACK),
+        'com.docker.compose.service': 'web',
+        'com.docker.compose.version': '2.38.1',
+      },
+    }], '5.6.0');
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    const note = report.findings.find(f => f.ruleId === 'compose-version-mismatch');
+    expect(note?.message).toContain('web was created by Docker Compose 2.38.1');
+  });
+
+  it('writes no note when the running version cannot be read, and still completes', async () => {
+    stubDocker(cleanModel(), '', { containers: [], networks: [], volumes: [] }, undefined, [label('web', '2.38.1')], null);
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'compose-version-mismatch')).toBe(false);
+  });
+
+  it('writes no note and logs when the container list fails, and still completes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({ rendered: JSON.stringify(cleanModel()), stderr: '', code: 0, timedOut: false }),
+      composeVersion: vi.fn().mockResolvedValue('5.6.0'),
+    } as unknown as ComposeService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+      getDocker: vi.fn(() => ({
+        listContainers: vi.fn().mockRejectedValue(new Error('docker gone')),
+        getContainer: vi.fn(() => ({ inspect: vi.fn().mockResolvedValue({ Config: {} }) })),
+      })),
+      inspectImage: vi.fn(),
+    } as unknown as DockerController);
+
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.renderable).toBe(true);
+    expect(report.findings.some(f => f.ruleId === 'compose-version-mismatch')).toBe(false);
+    expect(warn.mock.calls.some(call => String(call[0]).includes('Compose version check unavailable'))).toBe(true);
+  });
+
+  it('writes no note and logs when the version probe fails, and still completes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({ rendered: JSON.stringify(cleanModel()), stderr: '', code: 0, timedOut: false }),
+      composeVersion: vi.fn().mockRejectedValue(new Error('compose hung')),
+    } as unknown as ComposeService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({ containers: [], networks: [], volumes: [] }),
+      getDocker: vi.fn(() => ({
+        listContainers: vi.fn().mockResolvedValue([label('web', '2.38.1')]),
+        getContainer: vi.fn(() => ({ inspect: vi.fn().mockResolvedValue({ Config: {} }) })),
+      })),
+      inspectImage: vi.fn(),
+    } as unknown as DockerController);
+
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.renderable).toBe(true);
+    expect(report.findings.some(f => f.ruleId === 'compose-version-mismatch')).toBe(false);
+    expect(warn.mock.calls.some(call => String(call[0]).includes('Compose version check unavailable'))).toBe(true);
   });
 });

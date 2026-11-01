@@ -273,6 +273,18 @@ describe('the Docker socket proxy', () => {
     expect(p.configHash).toHaveBeenCalledWith('socket-proxy');
   });
 
+  it('lets an unchanged proxy through while an unrelated sibling was created by another version', async () => {
+    // The deploy recreates only `web`; the protected proxy's version and
+    // configuration match, so nothing protected would be recreated. The
+    // Doctor remediation for this same set must not claim a refusal.
+    mockListContainers.mockResolvedValue([
+      proxyContainer,
+      container(WEB_ID, 'web', { composeVersion: '5.1.3' }),
+    ]);
+
+    expect(await run({ kind: 'up' }, probes())).toBeNull();
+  });
+
   it('refuses a deploy that would recreate the proxy (the config hash moved)', async () => {
     mockListContainers.mockResolvedValue([proxyContainer, webContainer]);
 

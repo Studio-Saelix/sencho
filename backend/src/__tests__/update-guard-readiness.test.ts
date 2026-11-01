@@ -9,6 +9,7 @@ import {
   preflightSignal,
   updatePreviewSignal,
   buildServicesSignal,
+  composeVersionSignal,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
 import type { UpdatePreviewImage, UpdatePreviewSummary } from '../services/UpdatePreviewService';
@@ -23,6 +24,9 @@ const probe = (over: Partial<ContainerProbe> = {}): ContainerProbe => ({
   hasHealthcheck: false,
   restartPolicy: 'unless-stopped',
   mounts: [],
+  service: 'web',
+  composeVersion: '5.6.0',
+  oneOff: false,
   ...over,
 });
 
@@ -233,6 +237,56 @@ describe('aggregateVerdict', () => {
     expect(aggregateVerdict([containersSignal('error'), driftSignal(0)])).toBe('unknown');
     expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass' })])).toBe('ready_with_warnings');
     expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
+  });
+});
+
+describe('composeVersionSignal', () => {
+  it('warns when a container was created by another Compose version', () => {
+    const signal = composeVersionSignal({
+      runningVersion: '5.6.0',
+      services: [
+        { service: 'app', createdBy: ['2.38.1'] },
+        { service: 'proxy', createdBy: ['2.38.1'] },
+      ],
+    });
+    expect(signal.id).toBe('compose_version');
+    expect(signal.title).toBe('Compose version');
+    expect(signal.status).toBe('warning');
+    expect(signal.affectsVerdict).toBe(true);
+    expect(signal.detail).toContain('app and proxy were created by Docker Compose 2.38.1');
+    expect(signal.detail).toContain('This update runs Docker Compose 5.6.0');
+    expect(signal.detail).toContain('can recreate them even where nothing changed');
+  });
+
+  it('uses the singular for one affected service', () => {
+    const signal = composeVersionSignal({ runningVersion: '5.6.0', services: [{ service: 'proxy', createdBy: ['2.38.1'] }] });
+    expect(signal.detail).toContain('proxy was created by Docker Compose 2.38.1');
+    expect(signal.detail).toContain('can recreate it even where nothing changed');
+  });
+
+  it('is ok when no container records another version, including an empty stack', () => {
+    // An all-match stack and a stack with no containers yet both arrive as an
+    // empty service list, so they share one branch and one wording.
+    const signal = composeVersionSignal({ runningVersion: '5.6.0', services: [] });
+    expect(signal.status).toBe('ok');
+    expect(signal.affectsVerdict).toBe(true);
+    expect(signal.detail).toContain('No container in this stack was created by another Docker Compose version');
+    expect(signal.detail).toContain('Docker Compose 5.6.0');
+  });
+
+  it('is an informational unknown when the version cannot be read', () => {
+    for (const input of [null, 'error' as const]) {
+      const signal = composeVersionSignal(input);
+      expect(signal.status).toBe('unknown');
+      expect(signal.affectsVerdict).toBe(false);
+      expect(signal.detail).toContain('cannot tell');
+    }
+  });
+
+  it('only reaches ready_with_warnings, never a stronger verdict, on its own', () => {
+    const signal = composeVersionSignal({ runningVersion: '5.6.0', services: [{ service: 'proxy', createdBy: ['2.38.1'] }] });
+    expect(aggregateVerdict([composeVersionSignal(null), signal])).toBe('ready_with_warnings');
+    expect(aggregateVerdict([composeVersionSignal(null)])).toBe('ready');
   });
 });
 
