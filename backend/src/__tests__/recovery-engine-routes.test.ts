@@ -148,6 +148,33 @@ function seedRepository(): string {
   return repository.id;
 }
 
+async function seedPoint(): Promise<string> {
+  const repositoryId = seedRepository();
+  const storage = identityStore.StorageIdentityStore.getInstance().observe({
+    ownerNodeKey: 'docker-engine:routes',
+    kind: 'named_volume',
+    locator: 'app_data',
+    generationToken: 't1',
+    dependents: [],
+  });
+  const point = points.RecoveryPointStore.getInstance().begin({
+    kind: 'root',
+    storageId: storage.id,
+    expectedGenerationToken: 't1',
+    repositoryId,
+    trigger: 'manual',
+    actor: 'admin',
+    sourceOperationId: 'op-src',
+    sourceNodeKey: 'docker-engine:routes',
+    engineId: 'restic',
+  });
+  points.RecoveryPointStore.getInstance().finalize(point.id, {
+    status: 'succeeded',
+    evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
+  });
+  return point.id;
+}
+
 describe('GET /api/recovery/node', () => {
   it('needs a signed-in caller', async () => {
     expect((await request(app).get('/api/recovery/node')).status).toBe(401);
@@ -313,33 +340,6 @@ describe('POST /api/recovery/storage/points', () => {
 });
 
 describe('POST /api/recovery/points/:id/restore', () => {
-  async function seedPoint(): Promise<string> {
-    const repositoryId = seedRepository();
-    const storage = identityStore.StorageIdentityStore.getInstance().observe({
-      ownerNodeKey: 'docker-engine:routes',
-      kind: 'named_volume',
-      locator: 'app_data',
-      generationToken: 't1',
-      dependents: [],
-    });
-    const point = points.RecoveryPointStore.getInstance().begin({
-      kind: 'root',
-      storageId: storage.id,
-      expectedGenerationToken: 't1',
-      repositoryId,
-      trigger: 'manual',
-      actor: 'admin',
-      sourceOperationId: 'op-src',
-      sourceNodeKey: 'docker-engine:routes',
-      engineId: 'restic',
-    });
-    points.RecoveryPointStore.getInstance().finalize(point.id, {
-      status: 'succeeded',
-      evidence: { snapshotId: 'snap', capture: { fileCount: 1, byteCount: 1, skippedCount: 0 }, exclusions: [], consistency: 'unknown' },
-    });
-    return point.id;
-  }
-
   it('refuses a target name Sencho reserves', async () => {
     service().markReadyForTests();
     const pointId = await seedPoint();
@@ -363,12 +363,9 @@ describe('POST /api/recovery/points/:id/restore', () => {
   it('refuses a target that already exists, leaving it untouched', async () => {
     service().markReadyForTests();
     const pointId = await seedPoint();
-    const DockerController = (await import('../services/DockerController')).default;
-    vi.spyOn(DockerController.prototype, 'getDocker').mockReturnValue({
-      getVolume: () => ({
-        inspect: async () => ({ Name: 'existing', Driver: 'local', Labels: {}, CreatedAt: new Date().toISOString() }),
-      }),
-    } as unknown as import('dockerode'));
+    // Authorization runs before the target is looked at, so the stub answers the
+    // dependents reads too.
+    await stubDocker(['existing']);
     const res = await request(app).post(`/api/recovery/points/${pointId}/restore`).set('Cookie', adminCookie)
       .send({ targetVolumeName: 'existing', idempotencyKey: randomUUID() });
     expect(res.status).toBe(400);
@@ -475,6 +472,165 @@ describe('GET /api/recovery/operations/:id', () => {
     const res = await request(app).post(`/api/recovery/operations/${operation.operation.id}/cancel`).set('Cookie', adminCookie);
     expect(res.status).toBe(400);
     expect(res.body.reason).toBe('not_cancellable');
+  });
+});
+
+describe('an id or state is not reported to a caller who may not act on it', () => {
+  // The viewer holds stack:read only. Every case compares what that caller is told
+  // for a record that exists with what it is told for one that does not: the two
+  // must be the same refusal, and the administrator still gets the specific answer.
+  const unknown = () => randomUUID();
+
+  function repositoryOperation(): string {
+    return operations.RecoveryOperationStore.getInstance().start({
+      idempotencyKey: randomUUID(),
+      kind: 'repository_init',
+      actor: 'admin',
+      transport: 'local',
+      requestDigest: engine.sha256Digest(['repository_init', 'provision']),
+    }).operation.id;
+  }
+
+  function pendingPointId(): string {
+    const repositoryId = seedRepository();
+    const storage = identityStore.StorageIdentityStore.getInstance().observe({
+      ownerNodeKey: 'docker-engine:routes',
+      kind: 'named_volume',
+      locator: 'app_data',
+      generationToken: 't1',
+      dependents: [],
+    });
+    return points.RecoveryPointStore.getInstance().begin({
+      kind: 'root',
+      storageId: storage.id,
+      expectedGenerationToken: 't1',
+      repositoryId,
+      trigger: 'manual',
+      actor: 'admin',
+      sourceOperationId: 'op-pending',
+      sourceNodeKey: 'docker-engine:routes',
+      engineId: 'restic',
+    }).id;
+  }
+
+  it('answers the same 403 for an existing and an unknown operation id on a read', async () => {
+    const existing = await request(app).get(`/api/recovery/operations/${repositoryOperation()}`).set('Cookie', viewerCookie);
+    const missing = await request(app).get(`/api/recovery/operations/${unknown()}`).set('Cookie', viewerCookie);
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(missing.body).toEqual(existing.body);
+    expect((await request(app).get(`/api/recovery/operations/${unknown()}`).set('Cookie', adminCookie)).status).toBe(400);
+  });
+
+  it('checks access before state on a cancel, for an existing and an unknown operation id', async () => {
+    const operationId = repositoryOperation();
+    const existing = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', viewerCookie);
+    const missing = await request(app).post(`/api/recovery/operations/${unknown()}/cancel`).set('Cookie', viewerCookie);
+    expect(existing.status).toBe(403);
+    expect(existing.body.reason).toBeUndefined();
+    expect(missing.status).toBe(403);
+    expect(missing.body).toEqual(existing.body);
+
+    // The administrator still gets the state answer, and the unknown id its 400.
+    const admin = await request(app).post(`/api/recovery/operations/${operationId}/cancel`).set('Cookie', adminCookie);
+    expect(admin.status).toBe(400);
+    expect(admin.body.reason).toBe('not_cancellable');
+    const adminMissing = await request(app).post(`/api/recovery/operations/${unknown()}/cancel`).set('Cookie', adminCookie);
+    expect(adminMissing.status).toBe(400);
+    expect(adminMissing.body.reason).toBeUndefined();
+  });
+
+  it('answers the same 403 for a known and an unknown storage id when listing points', async () => {
+    const pointId = pendingPointId();
+    const storageId = points.RecoveryPointStore.getInstance().get(pointId)!.storageId;
+    const existing = await request(app).get(`/api/recovery/storage/${storageId}/points`).set('Cookie', viewerCookie);
+    const missing = await request(app).get(`/api/recovery/storage/${unknown()}/points`).set('Cookie', viewerCookie);
+    // The viewer reads every stack, so the known storage is readable; the unknown one is not distinguishable
+    // from a denial only when the caller could not have read it either.
+    expect(existing.status).toBe(200);
+    expect(missing.status).toBe(400);
+  });
+
+  it('refuses an unknown storage id to a caller without read access, exactly as a denied one', async () => {
+    const pointId = pendingPointId();
+    const storageId = points.RecoveryPointStore.getInstance().get(pointId)!.storageId;
+    const { ROLE_PERMISSIONS } = await import('../middleware/permissions');
+    const original = [...ROLE_PERMISSIONS.viewer];
+    ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original.filter((a) => a !== 'stack:read'));
+    try {
+      const existing = await request(app).get(`/api/recovery/storage/${storageId}/points`).set('Cookie', viewerCookie);
+      const missing = await request(app).get(`/api/recovery/storage/${unknown()}/points`).set('Cookie', viewerCookie);
+      expect(existing.status).toBe(403);
+      expect(missing.status).toBe(403);
+      expect(missing.body).toEqual(existing.body);
+    } finally {
+      ROLE_PERMISSIONS.viewer.splice(0, ROLE_PERMISSIONS.viewer.length, ...original);
+    }
+  });
+
+  it('answers the same 403 for an existing and an unknown point on verify, whatever the point\'s state', async () => {
+    service().markReadyForTests();
+    const pending = pendingPointId();
+    const send = (pointId: string, cookie: string) => request(app).post(`/api/recovery/points/${pointId}/verify`)
+      .set('Cookie', cookie).send({ idempotencyKey: randomUUID() });
+    const existing = await send(pending, viewerCookie);
+    const missing = await send(unknown(), viewerCookie);
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(missing.body).toEqual(existing.body);
+    // The administrator is told the specific reason: a pending point cannot be verified.
+    expect((await send(pending, adminCookie)).status).toBe(400);
+    expect((await send(unknown(), adminCookie)).status).toBe(400);
+  });
+
+  it('answers the same 403 for an existing and an unknown point on restore, without reporting whether the target exists', async () => {
+    service().markReadyForTests();
+    const pointId = await seedPoint();
+    await stubDocker(['existing_target']);
+    const send = (id: string, targetVolumeName: string, cookie: string) => request(app)
+      .post(`/api/recovery/points/${id}/restore`).set('Cookie', cookie)
+      .send({ targetVolumeName, idempotencyKey: randomUUID() });
+
+    const existingTarget = await send(pointId, 'existing_target', viewerCookie);
+    const freeTarget = await send(pointId, 'free_target', viewerCookie);
+    const unknownPoint = await send(unknown(), 'free_target', viewerCookie);
+    for (const res of [existingTarget, freeTarget, unknownPoint]) expect(res.status).toBe(403);
+    expect(existingTarget.body).toEqual(freeTarget.body);
+    expect(unknownPoint.body).toEqual(freeTarget.body);
+
+    // The administrator still gets the specific refusal for a target that exists.
+    const admin = await send(pointId, 'existing_target', adminCookie);
+    expect(admin.status).toBe(400);
+    expect(admin.body.errorClass).toBe('invalid_request');
+  });
+
+  it('answers the same 403 for an unknown, an ineligible and an eligible volume on create-point', async () => {
+    service().markReadyForTests();
+    seedRepository();
+    await stubDocker(['app_data']);
+    const send = (volumeName: string, cookie: string) => request(app).post('/api/recovery/storage/points')
+      .set('Cookie', cookie).send({ volumeName, idempotencyKey: randomUUID() });
+    const eligible = await send('app_data', viewerCookie);
+    const missing = await send('no_such_volume', viewerCookie);
+    const reserved = await send('sencho-recovery-abc-g1', viewerCookie);
+    for (const res of [eligible, missing, reserved]) expect(res.status).toBe(403);
+    expect(missing.body).toEqual(eligible.body);
+    expect(reserved.body).toEqual(eligible.body);
+    expect((await send('no_such_volume', adminCookie)).status).toBe(400);
+  });
+
+  it('answers the same 403 for a known and an unknown storage key when releasing a stale lock', async () => {
+    const pointId = pendingPointId();
+    const storageKey = identityStore.StorageIdentityStore.getInstance()
+      .getById(points.RecoveryPointStore.getInstance().get(pointId)!.storageId)!.storageKey;
+    const send = (resourceKey: string, cookie: string) => request(app).post('/api/recovery/locks/release')
+      .set('Cookie', cookie).send({ scope: 'storage', resourceKey });
+    const existing = await send(storageKey, viewerCookie);
+    const missing = await send(unknown(), viewerCookie);
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(missing.body).toEqual(existing.body);
+    expect((await send(unknown(), adminCookie)).status).toBe(400);
   });
 });
 

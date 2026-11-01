@@ -119,6 +119,34 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
   });
 });
 
+describe('POST /api/templates/deploy when the rollback would remove a recovery repository volume', () => {
+  it('keeps the stack files and reports no rollback, like any other refused teardown', async () => {
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new RecoveryVolumeProtectedError('declares a recovery repository volume'),
+    );
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'render_unavailable',
+      autoCreateEnabled: false,
+      stackName: 'repo-volume-rollback',
+      networks: [],
+      declaredExternalCount: 0,
+      renderError: YAML_WORDED_RENDER_ERROR,
+    });
+
+    const res = await request(app)
+      .post('/api/templates/deploy')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ stackName: 'repo-volume-rollback', template: minimalTemplate });
+
+    expect(res.status).toBe(500);
+    expect(res.body.rolledBack).toBe(false);
+    const { FileSystemService } = await import('../services/FileSystemService');
+    expect(await FileSystemService.getInstance().getStacks()).toContain('repo-volume-rollback');
+  });
+});
+
 describe('POST /api/templates/deploy when the rollback teardown is refused', () => {
   it('keeps the stack files, because containers may still be running, and reports no rollback', async () => {
     const { DockerEndpointProtectedError } = await import('../helpers/dockerEndpointGuard');

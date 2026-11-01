@@ -20,6 +20,7 @@ import {
   type IntegrityOutcome,
 } from './restic/resticOutput';
 import { resolveOwnerNodeKey } from './storageIdentity';
+import { RECOVERY_RESERVED_PREFIX } from './reservedNames';
 import type {
   BackupEngine,
   IntegrityMethod,
@@ -64,7 +65,7 @@ export function repositoryVolumeName(authorityId: string, ownerNodeKey: string, 
   const authority = createHash('sha256').update(authorityId).digest('hex').slice(0, 12);
   const owner = createHash('sha256').update(ownerNodeKey).digest('hex').slice(0, 12);
   if (generation < 1 || !Number.isSafeInteger(generation)) throw new RecoveryError('invalid_request');
-  return `sencho-recovery-${authority}-${owner}-g${generation}`;
+  return `${RECOVERY_RESERVED_PREFIX}${authority}-${owner}-g${generation}`;
 }
 
 /** The generation a repository locator names, or null when it names none. */
@@ -74,9 +75,6 @@ export function generationOfLocator(locator: string): number | null {
   const generation = Number(match[1]);
   return Number.isSafeInteger(generation) && generation >= 1 ? generation : null;
 }
-
-/** The reserved prefix every recovery-owned volume and image name starts with. */
-export const RECOVERY_RESERVED_PREFIX = 'sencho-recovery-';
 
 /** Owner engine key for a node, memoized: it never changes while the daemon lives. */
 const ownerKeyCache = new Map<number, Promise<string>>();

@@ -295,6 +295,8 @@ Nothing removes points, and nothing prunes the repository. Every point you creat
 - After you have checked a restored volume, remove it with `docker volume rm` like any other volume you no longer need.
 - A replacement repository starts empty but keeps the old volume, so a replace does not reclaim space by itself.
 
+Sencho never removes a repository volume. The volume remove route, the prune plan, the managed sweep, and the fleet prune skip it, and so does stack removal: taking a stack down with volumes removed, or deleting it with volumes pruned, answers `423` with `code: "recovery_volume_protected"` when the stack's compose file declares a volume under the `sencho-recovery-` prefix (or one Sencho records as a repository volume), or when Sencho cannot read the stack's volumes to check. Nothing is stopped or removed. Take the stack down, or delete it, without removing volumes, or remove that volume from the compose file first.
+
 ## Remote nodes
 
 A recovery request for a remote node runs on that node. The control instance forwards the call, the owning node authorizes it and does its own work, and only metadata comes back; the volume's bytes never pass through the control instance. Target a node with the `x-node-id` header or the `?nodeId=` query parameter.
@@ -473,6 +475,8 @@ Every error from these routes has the same shape. `code` is the upper-cased erro
 | `503` | `capability_unavailable`, `schema_unsupported`, `repository_unavailable`, `repository_key_unavailable`, `transport_unreachable`, `node_refused`, `node_error` |
 
 A remote node whose status answer the control instance cannot read answers `503` with `errorClass: "internal"` and `code: "NODE_DESCRIPTOR_INVALID"`. For a remote node, the control instance answers `503` with `errorClass: "transport_unreachable"` whenever it cannot reach the node when the request arrives: a stopped node, a disconnected Pilot tunnel, or a target it will not call. A Pilot tunnel that drops while a request is in flight answers a plain `502`; if that request started something, send it again with the same idempotency key to find out what happened. A per-user permission check the control instance makes itself, before the request reaches the node, answers with `error` and, usually, `code`, and no `errorClass`.
+
+Access is checked before anything about the record is reported. An id that names nothing (an operation, a storage, or a point), a point in a state the request cannot act on, a volume that does not exist or cannot be protected, and a restore target that already exists all answer `403 permission_denied` to a caller who is not allowed to act on that kind of record, the same answer as for a record the caller may not touch. A caller who holds the access on every stack gets the specific `400 invalid_request`. Cancelling a repository provisioning operation answers `403` unless the caller may configure the repository, and only then `400` with `reason: "not_cancellable"`.
 
 While the node is still starting, a mutating request answers `503` with `errorClass: "capability_unavailable"` and `reason: "engine_starting"`. Wait for startup to finish and retry.
 

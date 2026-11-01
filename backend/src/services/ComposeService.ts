@@ -20,6 +20,12 @@ import { resolveRegistryAuthAtSeam } from '../helpers/registryDeliverySeam';
 import { DriftLedgerService } from './DriftLedgerService';
 import SelfIdentityService from './SelfIdentityService';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
+import {
+  RecoveryVolumeProtectedError,
+  recoveryVolumeNamesIn,
+  recoveryVolumeRefusalMessage,
+  recoveryVolumeUnverifiedMessage,
+} from '../helpers/recoveryVolumeGuard';
 import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
@@ -361,6 +367,32 @@ export class ComposeService {
       });
     }
     if (refusal) throw new DockerEndpointProtectedError(refusal);
+  }
+
+  /**
+   * Refuse a `down --volumes` of a stack that declares a recovery repository
+   * volume. Compose removes every non-external volume a stack declares, so the
+   * repository would go with it; see `RecoveryVolumeProtectedError`. A render that
+   * cannot be read refuses too: removing what cannot be seen is not a pass. Runs
+   * on the node that owns the volume, so a hub request relayed over the node
+   * proxy or a Pilot tunnel reaches the same check.
+   */
+  private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
+    let declared: string[] | null = null;
+    try {
+      const result = await this.renderConfig(stackName);
+      if (result.rendered !== null) {
+        const model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
+        declared = Object.values(model.volumes).map((volume) => volume.name);
+      }
+    } catch (error) {
+      console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    }
+    if (declared === null) throw new RecoveryVolumeProtectedError(recoveryVolumeUnverifiedMessage());
+    const self = SelfIdentityService.getInstance();
+    if (recoveryVolumeNamesIn(declared, (name) => self.isRecoveryVolume(name)).length > 0) {
+      throw new RecoveryVolumeProtectedError(recoveryVolumeRefusalMessage());
+    }
   }
 
   /** The local image id behind `imageRef`, unknown when it cannot be inspected (Compose would then pull). */
@@ -1067,6 +1099,7 @@ export class ComposeService {
   /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
   async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
     const composeArgs = await this.authoredComposeArgs(stackName, args);
@@ -2993,6 +3026,7 @@ export class ComposeService {
   public async downStack(stackName: string, options?: { removeVolumes?: boolean }): Promise<void> {
     // Outside the try: the catch below swallows teardown failures, and a refusal must not be one.
     await this.assertDockerEndpointSafe(stackName, { kind: 'stop' });
+    if (options?.removeVolumes) await this.assertNoRecoveryVolumeRemoval(stackName);
     const stackPath = path.join(this.baseDir, stackName);
     try {
       const args = options?.removeVolumes

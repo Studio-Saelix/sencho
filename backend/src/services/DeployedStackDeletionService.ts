@@ -25,6 +25,7 @@ import { getErrorMessage } from '../utils/errors';
 import { removeStackMuteRules } from '../helpers/notificationSuppressionSync';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import {
   BLUEPRINT_MARKER_FILENAME,
@@ -66,7 +67,7 @@ export type DeleteDeployedStackResult =
   | { ok: true; status: 'deleted' | 'already_absent' }
   | {
       ok: false;
-      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'failed';
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'source_claimed_by_blueprint' | 'docker_endpoint_protected' | 'recovery_volume_protected' | 'failed';
       error: string;
       existingAction?: string;
     };
@@ -308,6 +309,12 @@ export class DeployedStackDeletionService {
         if (isDockerEndpointProtectedError(downErr)) {
           db.updateCleanupPendingStatus(intentId, 'cancelled');
           return { ok: false, code: 'docker_endpoint_protected', error: downErr.message };
+        }
+        // Same for a refused volume removal: nothing was torn down, and the
+        // volumes that would have gone include the recovery repository.
+        if (isRecoveryVolumeProtectedError(downErr)) {
+          db.updateCleanupPendingStatus(intentId, 'cancelled');
+          return { ok: false, code: 'recovery_volume_protected', error: downErr.message };
         }
         console.warn(
           '[DeployedStackDeletion] Compose down failed or no-op for %s:',

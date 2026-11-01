@@ -86,6 +86,20 @@ export function authorizeStorageAccess(
   return { allowed: deniedStacks.length === 0, action, checkedStacks, deniedStacks };
 }
 
+/**
+ * Whether the caller may be told that an id names nothing.
+ *
+ * A route that looks a record up before it authorizes would answer an unknown id
+ * differently from one the caller may not touch, so a caller with no access could
+ * learn which ids exist. An id that names nothing is therefore answered as a
+ * denial, unless the caller holds every access the record could have required:
+ * the same node-wide decision a storage with no dependent stack gets, for each
+ * access listed. A caller holding it could read the record anyway.
+ */
+export function mayLearnIdIsUnknown(req: Request, ...accesses: RecoveryAccess[]): boolean {
+  return accesses.every((access) => authorizeStorageAccess(req, access, null).allowed);
+}
+
 /** Guard form: answers 403 without naming the stacks, so a denial leaks no stack names. */
 export function requireStorageAccess(
   req: Request,

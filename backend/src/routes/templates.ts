@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { isDockerEndpointProtectedError } from '../helpers/dockerEndpointError';
+import { isRecoveryVolumeProtectedError } from '../helpers/recoveryVolumeGuard';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
 import { authMiddleware } from '../middleware/auth';
@@ -224,7 +225,7 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
           await ComposeService.getInstance(req.nodeId).downStack(stackName, { removeVolumes: true });
         } catch (downErr) {
           dockerDownCompleted = false;
-          dockerDownRefused = isDockerEndpointProtectedError(downErr);
+          dockerDownRefused = isDockerEndpointProtectedError(downErr) || isRecoveryVolumeProtectedError(downErr);
           console.error("[Templates] Rollback Stage 1 (Docker down) failed:", downErr);
         }
 

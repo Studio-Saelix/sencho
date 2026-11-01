@@ -11,8 +11,13 @@ import {
   SAME_FAILURE_DOMAIN_WARNING,
   sha256Digest,
 } from '../services/recovery/operationRunner';
-import { authorizeStorageAccess, RECOVERY_ACCESS_ACTION, type RecoveryAccess } from '../services/recovery/authorization';
-import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/localRepository';
+import {
+  authorizeStorageAccess,
+  mayLearnIdIsUnknown,
+  RECOVERY_ACCESS_ACTION,
+  type RecoveryAccess,
+} from '../services/recovery/authorization';
+import { RECOVERY_RESERVED_PREFIX } from '../services/recovery/reservedNames';
 import { RECOVERY_RESERVED_TARGET_PREFIX } from '../services/recovery/restoreIntents';
 import { RecoveryOperationStore } from '../services/recovery/operations';
 import { RecoveryPointStore } from '../services/recovery/recoveryPoints';
@@ -436,7 +441,13 @@ async function declaredVolumeNames(nodeId: number, stackName: string): Promise<s
 recoveryRouter.get('/storage/:storageId/points', handle(async (req, res) => {
   const storageId = paramOf(req, 'storageId');
   const storage = StorageIdentityStore.getInstance().getById(storageId);
-  if (!storage) throw new RecoveryError('invalid_request');
+  if (!storage) {
+    if (!mayLearnIdIsUnknown(req, 'read')) {
+      sendRecoveryError(res, 'permission_denied');
+      return;
+    }
+    throw new RecoveryError('invalid_request');
+  }
   const nodeId = req.nodeId;
   const docker = DockerController.getInstance(nodeId).getDocker();
   const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);
@@ -556,9 +567,6 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     || body.targetVolumeName.startsWith(RECOVERY_RESERVED_TARGET_PREFIX)) {
     throw new RecoveryError('invalid_request');
   }
-  const docker = DockerController.getInstance(req.nodeId).getDocker();
-  const existing = await inspectVolumeSource(docker, body.targetVolumeName).catch(() => null);
-  if (existing) throw new RecoveryError('invalid_request');
   const result = await engineService(req).admitRestore({
     nodeId: req.nodeId,
     pointId,
@@ -570,6 +578,11 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
     authorize: (context) => authorizeWith(req, 'restore')(context),
     authorizeCrossStack: (stackName) =>
       checkPermission(req, RECOVERY_ACCESS_ACTION.restore, 'stack', stackName),
+    assertTargetAvailable: async () => {
+      const docker = DockerController.getInstance(req.nodeId).getDocker();
+      const existing = await inspectVolumeSource(docker, body.targetVolumeName).catch(() => null);
+      if (existing) throw new RecoveryError('invalid_request');
+    },
   });
   res.status(result.replayed ? 200 : 202).json({ operation: result.operation });
 }));
@@ -579,7 +592,15 @@ recoveryRouter.post('/points/:pointId/restore', handle(async (req, res) => {
 /** The operation with its progress and whatever evidence it produced. */
 recoveryRouter.get('/operations/:id', handle(async (req, res) => {
   const operation = RecoveryOperationStore.getInstance().get(paramOf(req, 'id'));
-  if (!operation) throw new RecoveryError('invalid_request');
+  if (!operation) {
+    // A repository operation needs `configure`, so an unknown id is only reported
+    // to a caller who could read every kind.
+    if (!mayLearnIdIsUnknown(req, 'read', 'configure')) {
+      sendRecoveryError(res, 'permission_denied');
+      return;
+    }
+    throw new RecoveryError('invalid_request');
+  }
   if (!authorizeOperation(req, operation, 'read')) {
     sendRecoveryError(res, 'permission_denied');
     return;
@@ -591,16 +612,24 @@ recoveryRouter.get('/operations/:id', handle(async (req, res) => {
 /** Ask a running operation to stop. Its point is settled first, then the operation. */
 recoveryRouter.post('/operations/:id/cancel', handle(async (req, res) => {
   const operation = RecoveryOperationStore.getInstance().get(paramOf(req, 'id'));
-  if (!operation) throw new RecoveryError('invalid_request');
+  if (!operation) {
+    if (!mayLearnIdIsUnknown(req, 'protect', 'restore', 'configure')) {
+      sendRecoveryError(res, 'permission_denied');
+      return;
+    }
+    throw new RecoveryError('invalid_request');
+  }
+  // Access first: the state of an operation is not reported to a caller who may not
+  // touch it. A repository operation is held to `configure` by `authorizeOperation`.
+  const access: RecoveryAccess = operation.kind === 'restore' ? 'restore' : 'protect';
+  if (!authorizeOperation(req, operation, access)) {
+    sendRecoveryError(res, 'permission_denied');
+    return;
+  }
   if (operation.kind === 'repository_init') {
     // A half-provisioned repository is settled by the next provision attempt, not
     // by an abort in the middle of volume creation.
     sendRecoveryError(res, 'invalid_request', { reason: 'not_cancellable' });
-    return;
-  }
-  const access: RecoveryAccess = operation.kind === 'restore' ? 'restore' : 'protect';
-  if (!authorizeOperation(req, operation, access)) {
-    sendRecoveryError(res, 'permission_denied');
     return;
   }
   engineService(req).cancel(operation.id);
@@ -682,7 +711,13 @@ recoveryRouter.post('/locks/release', handle(async (req, res) => {
     if (!requireRecoveryPermission(req, res, 'system:settings')) return;
   } else {
     const current = StorageIdentityStore.getInstance().getCurrent(body.resourceKey);
-    if (!current) throw new RecoveryError('invalid_request');
+    if (!current) {
+      if (!mayLearnIdIsUnknown(req, 'restore')) {
+        sendRecoveryError(res, 'permission_denied');
+        return;
+      }
+      throw new RecoveryError('invalid_request');
+    }
     const nodeId = req.nodeId;
     const docker = DockerController.getInstance(nodeId).getDocker();
     const ownerNodeKey = await ownerNodeKeyFor(nodeId, docker);

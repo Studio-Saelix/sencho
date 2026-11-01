@@ -224,6 +224,34 @@ describe('DeployedStackDeletionService when the Docker endpoint guard refuses th
     down.mockRestore();
   });
 
+  it('keeps the stack when the node refuses to remove a recovery repository volume with it', async () => {
+    const { ComposeService } = await import('../services/ComposeService');
+    const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
+    const stackName = 'repo-volume-stack';
+    const dir = path.join(process.env.COMPOSE_DIR!, stackName);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services:\n  web:\n    image: nginx\n');
+    const down = vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
+      new RecoveryVolumeProtectedError('declares a recovery repository volume'),
+    );
+    const prune = vi.spyOn((await import('../services/DockerController')).default.prototype, 'pruneManagedOnly');
+
+    const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: NODE,
+      stackName,
+      pruneVolumes: true,
+      actor: 'tester',
+    });
+
+    expect(result).toMatchObject({ ok: false, code: 'recovery_volume_protected', error: 'declares a recovery repository volume' });
+    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+    expect(db().hasBlockingDeletionIntent(NODE, stackName)).toBe(false);
+    // The follow-up managed prune must not run either: the delete did not happen.
+    expect(prune).not.toHaveBeenCalled();
+    down.mockRestore();
+    prune.mockRestore();
+  });
+
   it('still carries on to delete the files when the teardown merely failed', async () => {
     const { ComposeService } = await import('../services/ComposeService');
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);

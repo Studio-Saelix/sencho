@@ -423,12 +423,20 @@ export class RecoveryEngineService {
     const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, docker);
     const knownStackNames = await knownStacksFor(this.nodeId);
 
+    // A volume that is unknown or ineligible has no dependents to check, so the
+    // caller is held to the node-wide access before being told which it is.
     const described = await describeVolumeLocator({
       docker,
       ownerNodeKey,
       volumeName: input.volumeName,
+    }).catch((err: unknown) => {
+      if (classifyRecoveryError(err) === 'invalid_request') this.requireNodeWideAccess(input.authorize);
+      throw err;
     });
-    if (!described.eligible) throw new RecoveryError('invalid_request');
+    if (!described.eligible) {
+      this.requireNodeWideAccess(input.authorize);
+      throw new RecoveryError('invalid_request');
+    }
     const resolution = await resolveVolumeDependents({
       nodeId: this.nodeId,
       ownerNodeKey,
@@ -515,37 +523,15 @@ export class RecoveryEngineService {
   }): Promise<AdmissionResult> {
     this.requireReady();
     const point = this.points.get(input.pointId);
+    const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
+    // Access first: an unknown point, one in a state this cannot act on, and one
+    // with no storage record are only reported to a caller the storage admits.
+    await this.requireStorageAccess(storage, input.authorize);
     if (!point) throw new RecoveryError('invalid_request');
     if (point.status !== 'succeeded' && point.status !== 'partial') throw new RecoveryError('invalid_request');
-    const storage = StorageIdentityStore.getInstance().getById(point.storageId);
     if (!storage) throw new RecoveryError('identity_unknown');
     const repository = this.repositories.get(point.repositoryId);
     if (!repository) throw new RecoveryError('repository_unavailable');
-
-    const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
-    const knownStackNames = await knownStacksFor(this.nodeId);
-    // The volume may be gone by now (that is when a point is needed), so the
-    // stored locator is described, not required.
-    const described = await describeStoredLocator({
-      docker: this.docker(),
-      ownerNodeKey,
-      locator: storage.locator,
-    });
-    const resolution = await resolveVolumeDependents({
-      nodeId: this.nodeId,
-      ownerNodeKey,
-      knownStackNames,
-      volumeName: storage.locator,
-      volumeLabels: described.labels,
-      render: true,
-      docker: this.docker(),
-    });
-    // An unrenderable model makes the full dependent set unknown; the check then
-    // runs without a stack, which the caller does for a null storage key.
-    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
-    if (!input.authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
-      throw new RecoveryError('permission_denied');
-    }
 
     const started = this.operations.admit(
       {
@@ -578,38 +564,26 @@ export class RecoveryEngineService {
     /** A null `storageKey` means the dependent set is unknown: check globally. */
     authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean;
     authorizeCrossStack: (stackName: string) => boolean;
+    /**
+     * Throws when the target volume cannot be restored into. It runs once the
+     * caller is authorized, because whether a volume exists is not reported to a
+     * caller who may not restore this point.
+     */
+    assertTargetAvailable?: () => Promise<void>;
   }): Promise<AdmissionResult> {
     this.requireReady();
     const point = this.points.get(input.pointId);
+    const storage = point ? StorageIdentityStore.getInstance().getById(point.storageId) : null;
+    await this.requireStorageAccess(storage, input.authorize);
     if (!point) throw new RecoveryError('invalid_request');
     if (point.status !== 'succeeded' && point.status !== 'partial') throw new RecoveryError('invalid_request');
     if (!point.snapshotId) throw new RecoveryError('invalid_request');
-    const storage = StorageIdentityStore.getInstance().getById(point.storageId);
     if (!storage) throw new RecoveryError('identity_unknown');
     const repository = this.repositories.get(point.repositoryId);
     if (!repository) throw new RecoveryError('repository_unavailable');
     this.requireRepositoryNotReplaced(repository.id);
 
-    const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
     const knownStackNames = await knownStacksFor(this.nodeId);
-    const described = await describeStoredLocator({
-      docker: this.docker(),
-      ownerNodeKey,
-      locator: storage.locator,
-    });
-    const resolution = await resolveVolumeDependents({
-      nodeId: this.nodeId,
-      ownerNodeKey,
-      knownStackNames,
-      volumeName: storage.locator,
-      volumeLabels: described.labels,
-      render: true,
-      docker: this.docker(),
-    });
-    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
-    if (!input.authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
-      throw new RecoveryError('permission_denied');
-    }
 
     // A target named `<project>_...` for a known stack's Compose project would
     // plant data under a name that stack's own volumes use, so it needs the same
@@ -624,6 +598,7 @@ export class RecoveryEngineService {
       if (!input.targetVolumeName.startsWith(`${prefix}_`)) continue;
       if (!input.authorizeCrossStack(stackName)) throw new RecoveryError('permission_denied');
     }
+    await input.assertTargetAvailable?.();
 
     // The check at the top ran before the awaits; a replace may have finished since.
     this.requireRepositoryNotReplaced(repository.id);
@@ -656,6 +631,52 @@ export class RecoveryEngineService {
     const intent = started.setup;
     this.schedule(operationId, () => this.runRestore(operationId, intent.id, point.id, repository));
     return { operation: this.operations.get(operationId) ?? started.operation, replayed: false };
+  }
+
+  /**
+   * Hold the caller to the access `authorize` encodes for a storage, before the
+   * caller is told anything about a record. A storage that is missing (an unknown
+   * point, or a point whose storage record is gone) has no dependents to check, so
+   * the node-wide decision applies, the same one a storage no stack declares gets.
+   */
+  private async requireStorageAccess(
+    storage: { storageKey: string; locator: string } | null,
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean,
+  ): Promise<void> {
+    if (!storage) {
+      this.requireNodeWideAccess(authorize);
+      return;
+    }
+    const ownerNodeKey = await ownerNodeKeyFor(this.nodeId, this.docker());
+    const knownStackNames = await knownStacksFor(this.nodeId);
+    // The volume may be gone by now (that is when a point is needed), so the
+    // stored locator is described, not required.
+    const described = await describeStoredLocator({
+      docker: this.docker(),
+      ownerNodeKey,
+      locator: storage.locator,
+    });
+    const resolution = await resolveVolumeDependents({
+      nodeId: this.nodeId,
+      ownerNodeKey,
+      knownStackNames,
+      volumeName: storage.locator,
+      volumeLabels: described.labels,
+      render: true,
+      docker: this.docker(),
+    });
+    // An unrenderable model makes the full dependent set unknown; the check then
+    // runs without a stack, which the caller does for a null storage key.
+    const storageKeyForCheck = resolution.kind === 'unrenderable' ? null : storage.storageKey;
+    if (!authorize({ storageKey: storageKeyForCheck, dependents: resolution.dependents })) {
+      throw new RecoveryError('permission_denied');
+    }
+  }
+
+  private requireNodeWideAccess(
+    authorize: (context: { storageKey: string | null; dependents: readonly StorageDependent[] }) => boolean,
+  ): void {
+    if (!authorize({ storageKey: null, dependents: [] })) throw new RecoveryError('permission_denied');
   }
 
   /** Provision, or replace, this node's repository. */

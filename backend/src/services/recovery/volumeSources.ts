@@ -9,7 +9,7 @@ import { RecoveryError } from './redaction';
 import { deriveStorageKey, isDockerVolumeName, StorageIdentityStore } from './storageIdentity';
 import { getRecoveryAuthorityId } from './recoveryDb';
 import { HELPER_LABEL_REPOSITORY, RecoveryHelperRunner } from './restic/helperRunner';
-import { RECOVERY_RESERVED_PREFIX } from './localRepository';
+import { RECOVERY_RESERVED_PREFIX } from './reservedNames';
 import { RECOVERY_HELPER_PROBE_PATH } from './restic/helperImage';
 import type { HelperProfile } from './restic/helperRunner';
 import type { StorageDependent } from './types';
