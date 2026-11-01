@@ -12,6 +12,7 @@ import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../ser
 import DockerController from '../services/DockerController';
 import { type MemoryWire } from '../helpers/hostMemory';
 import { readLocalHostSample, hostSampleToWire } from '../helpers/hostSample';
+import { requestAcceptsUnknownHostUsage } from '../helpers/hostUsageNegotiation';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -288,7 +289,7 @@ async function resolveUpdateTarget(requested?: string): Promise<string | undefin
   return pickCompareTarget(compareVersion, compareValid);
 }
 
-async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
+async function fetchLocalNodeOverview(node: Node, allowUnknownHostUsage: boolean): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
     const [allContainers, stacks, hostSample] = await Promise.all([
@@ -311,7 +312,7 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
     const managed = containers.filter(c => c.State === 'running' && isManagedByComposeDir(c)).length;
     const unmanaged = containers.filter(c => c.State === 'running' && !isManagedByComposeDir(c)).length;
 
-    const systemStats = hostSampleToWire(hostSample);
+    const systemStats = hostSampleToWire(hostSample, { allowUnknown: allowUnknownHostUsage });
 
     return {
       id: node.id,
@@ -407,7 +408,11 @@ function describeNodeReadError(error: unknown): string {
 // reconnect attempts land inside it (backoff 1s, 2s, 4s, 8s).
 const PILOT_RECONNECT_GRACE_MS = 30_000;
 
-async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise<FleetNodeOverview> {
+async function fetchRemoteNodeOverview(
+  node: Node,
+  db: DatabaseService,
+  allowUnknownHostUsage: boolean,
+): Promise<FleetNodeOverview> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target) {
     // `pilot_last_seen` is the last recorded moment the tunnel was up (stamped
@@ -424,12 +429,15 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
   const baseUrl = target.apiUrl.replace(/\/$/, '');
   const headers: Record<string, string> = target.apiToken
-    ? {
-        Authorization: `Bearer ${target.apiToken}`,
-        // This hub renders null host usage; ask a newer remote for it.
-        [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE,
-      }
-    : { [HOST_USAGE_UNKNOWN_HEADER]: HOST_USAGE_UNKNOWN_HEADER_VALUE };
+    ? { Authorization: `Bearer ${target.apiToken}` }
+    : {};
+  // The remote's shape must match what this hub's caller can render, exactly as
+  // the proxy hop decides it. A session (or a hub that sent the header) gets
+  // null; an API token that did not ask for nullable usage gets the numeric
+  // shape its monitoring script was written against.
+  if (allowUnknownHostUsage) {
+    headers[HOST_USAGE_UNKNOWN_HEADER] = HOST_USAGE_UNKNOWN_HEADER_VALUE;
+  }
   const t0 = Date.now();
 
   try {
@@ -658,12 +666,13 @@ fleetRouter.get('/overview', authMiddleware, async (req: Request, res: Response)
     const nodes = db.getNodes();
     if (debug) console.debug('[Fleet:debug] Overview requested, fetching', nodes.length, 'nodes');
 
+    const allowUnknownHostUsage = requestAcceptsUnknownHostUsage(req);
     const results = await Promise.allSettled(
       nodes.map(async (node): Promise<FleetNodeOverview> => {
         if (node.type === 'remote') {
-          return fetchRemoteNodeOverview(node, db);
+          return fetchRemoteNodeOverview(node, db, allowUnknownHostUsage);
         }
-        return fetchLocalNodeOverview(node);
+        return fetchLocalNodeOverview(node, allowUnknownHostUsage);
       }),
     );
 

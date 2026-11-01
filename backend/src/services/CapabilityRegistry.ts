@@ -200,11 +200,12 @@ export const HEALTH_GATE_OBSERVATION_CAPABILITY =
  * usage as `null` (a nested container with no trusted cgroup reading) and
  * whose UI renders that as unknown.
  *
- * A hub that advertises this capability sends the request header below with
- * every read it makes against a remote node; a remote that sees the header
- * answers with `null`. A hub older than this capability sends no header, so a
- * new remote answers with the pre-nested-support numeric shape instead of a
- * null that would render as `NaN%` and a Critical fleet card. The flag is also
+ * A hub that advertises this capability sends the request header below on a
+ * read only when that read's end caller can render unknown usage: a browser
+ * session always can, and an API token or upstream hub must send the header
+ * itself. A remote that sees the header answers with `null`; a caller that does
+ * not advertise it gets the pre-nested-support numeric shape instead of a null
+ * that would render as `NaN%` and a Critical fleet card. The flag is also
  * advertised on `/api/meta` for mixed-version diagnostics.
  */
 export const HOST_USAGE_UNKNOWN_CAPABILITY = 'host-usage-unknown-v1' as const satisfies Capability;
