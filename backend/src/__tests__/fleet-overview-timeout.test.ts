@@ -107,6 +107,10 @@ function addPilotNode(name: string): number {
   return id;
 }
 
+function localNodeId(): number {
+  return DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
+}
+
 function mockTargets(targets: Record<number, ProxyTarget | null>): void {
   vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => {
     if (Object.prototype.hasOwnProperty.call(targets, id)) return targets[id];
@@ -461,14 +465,14 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       stubSlowLocalDocker(5_500);
 
       const started = Date.now();
-      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
       const elapsedMs = Date.now() - started;
 
       expect(res.status).toBe(200);
       // The route merges each node's graph, so the local host node is in
       // `nodes` and a cut read would instead appear in `nodeErrors`.
       expect(res.body.nodeErrors).toEqual([]);
-      expect((res.body.nodes as { nodeId?: number }[]).some(n => n.nodeId === 1)).toBe(true);
+      expect((res.body.nodes as { nodeId?: number }[]).some(n => n.nodeId === localNodeId())).toBe(true);
       expect(elapsedMs).toBeGreaterThan(5_000);
       expect(elapsedMs).toBeLessThan(18_000);
     }, 30_000);
@@ -477,12 +481,12 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       stubSlowLocalDocker(5_500);
 
       const started = Date.now();
-      const res = await request(app).get('/api/fleet/networking-summary?nodeId=1').set('Authorization', authHeader);
+      const res = await request(app).get(`/api/fleet/networking-summary?nodeId=${localNodeId()}`).set('Authorization', authHeader);
       const elapsedMs = Date.now() - started;
 
       expect(res.status).toBe(200);
       const row = (res.body.nodes as { nodeId: number; status: string; summary: unknown; error: string | null }[])[0];
-      expect(row).toMatchObject({ nodeId: 1, status: 'ok', error: null });
+      expect(row).toMatchObject({ nodeId: localNodeId(), status: 'ok', error: null });
       expect(row.summary).not.toBeNull();
       expect(elapsedMs).toBeGreaterThan(5_000);
       expect(elapsedMs).toBeLessThan(18_000);
@@ -496,12 +500,12 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       } as unknown as DockerController);
 
       const started = Date.now();
-      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
       const elapsedMs = Date.now() - started;
 
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
-        .toMatchObject({ nodeId: 1, error: 'Timed out after 5s' });
+        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 5s' });
       expect(getDependencySnapshot).not.toHaveBeenCalled();
       expect(elapsedMs).toBeGreaterThan(4_000);
       expect(elapsedMs).toBeLessThan(12_000);
@@ -514,12 +518,12 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       } as unknown as DockerController);
 
       const started = Date.now();
-      const res = await request(app).get('/api/fleet/dependency-map?nodeId=1').set('Authorization', authHeader);
+      const res = await request(app).get(`/api/fleet/dependency-map?nodeId=${localNodeId()}`).set('Authorization', authHeader);
       const elapsedMs = Date.now() - started;
 
       expect(res.status).toBe(200);
       expect((res.body.nodeErrors as { nodeId: number; error: string }[])[0])
-        .toMatchObject({ nodeId: 1, error: 'Timed out after 18s' });
+        .toMatchObject({ nodeId: localNodeId(), error: 'Timed out after 18s' });
       expect(elapsedMs).toBeGreaterThan(17_000);
       expect(elapsedMs).toBeLessThan(26_000);
     }, 30_000);
@@ -710,20 +714,35 @@ describe('node-data fan-outs share the fleet-read budget', () => {
     });
 
     it('serves a retry from the hub build the first request already ran', async () => {
-      const list = vi.fn().mockResolvedValue([]);
+      const list = vi.fn().mockResolvedValue([{
+        id: 'c1',
+        name: 'web-1',
+        state: 'running',
+        stack: null,
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      }]);
       vi.spyOn(DockerController, 'getInstance').mockReturnValue({
         ping: vi.fn().mockResolvedValue(undefined),
         listContainersForLabelInventory: list,
-        inspectImageLabels: vi.fn(),
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
       } as unknown as DockerController);
 
-      const first = await getLabels('?nodeId=1');
-      const second = await getLabels('?nodeId=1');
+      const first = await getLabels(`?nodeId=${localNodeId()}`);
+      const second = await getLabels(`?nodeId=${localNodeId()}`);
 
       expect(first.status).toBe(200);
       expect(second.status).toBe(200);
       expect(list).toHaveBeenCalledTimes(1);
-      expect((second.body.nodes as { status: string }[])[0].status).toBe('ok');
+      type Row = { status: string; inventory: { containers: { id: string }[]; generatedAt: number } | null };
+      const firstRow = (first.body.nodes as Row[])[0];
+      const secondRow = (second.body.nodes as Row[])[0];
+      expect(firstRow.status).toBe('ok');
+      expect(firstRow.inventory?.containers.map(c => c.id)).toEqual(['c1']);
+      expect(secondRow.inventory?.containers.map(c => c.id)).toEqual(['c1']);
+      expect(secondRow.inventory?.generatedAt).toBe(firstRow.inventory?.generatedAt);
     });
 
     it('bounds the hub\'s own read by the time Docker takes to answer it', async () => {

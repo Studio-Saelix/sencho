@@ -115,4 +115,16 @@ describe('local fleet read budget', () => {
       vi.useRealTimers();
     }
   });
+
+  it('caps an inverted liveness budget at the overall deadline', async () => {
+    const error = await withinLocalFleetReadBudget(
+      'dependency graph',
+      () => new Promise<void>(() => {}),
+      async () => 'never runs',
+      { livenessBudgetMs: 200, deadlineMs: 50 },
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(FleetReadTimeoutError);
+    expect((error as FleetReadTimeoutError).budgetMs).toBe(50);
+  });
 });

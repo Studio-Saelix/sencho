@@ -226,6 +226,10 @@ describe('readLocalLabelInventory sharing', () => {
       { livenessBudgetMs: 50, deadlineMs: 50 },
     ).catch((err: unknown) => err);
     expect(firstError).toBeInstanceOf(FleetReadTimeoutError);
+    // The timed-out request must already have started the build the retry
+    // joins; a regression that delayed the build until after the deadline
+    // would otherwise pass the one-listing assertion below.
+    expect(docker.listContainersForLabelInventory).toHaveBeenCalledTimes(1);
 
     const retryPromise = readLocalLabelInventory(1, {}, TEST_BUDGET);
     releaseBuild();

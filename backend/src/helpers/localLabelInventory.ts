@@ -20,9 +20,9 @@ export type LocalLabelInventoryBudget = LocalFleetReadBudget;
  * A tab load that reaches the deadline still leaves its build running in this
  * process. Keeping that finished inventory briefly lets Retry answer from it
  * instead of paying for the same listing again. A still-existing container's
- * labels cannot change, but membership and state can lag by up to this window,
- * so a container removed or recreated just before a Refresh may still appear
- * until the share expires.
+ * labels cannot change, but the share can add this window on top of the
+ * build's own age, so a container removed or recreated just before a Refresh
+ * may still appear until the share expires.
  */
 export const LOCAL_LABEL_INVENTORY_SHARE_TTL_MS = 10_000;
 

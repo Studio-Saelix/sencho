@@ -17,10 +17,12 @@ import { getErrorMessage } from '../utils/errors';
  * healthy nodes to shave two seconds off the one bad node. 5 s also matches the
  * cap the fleet image-update reads already used, so one number replaces the
  * 8 s the map and networking summary carried and the 30 s the Docker Labels
- * inventory carried. The hub's own reads also cap their cheap daemon check
- * with it, but the whole read runs under
+ * inventory carried. The hub's label inventory and dependency graph also cap
+ * their cheap daemon check with it, but the whole read runs under
  * {@link LOCAL_FLEET_READ_DEADLINE_MS}, because those reads do host-sized
- * work rather than one round trip.
+ * work rather than one round trip. The networking summary runs under that
+ * deadline without a daemon check, because it keeps its declared signals when
+ * Docker fails.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
  * different contract: the Overview card probe stays at 3 s (it reads three small
@@ -52,11 +54,11 @@ export const FLEET_READ_BUDGET_MS = 5_000;
  * The deadline bounds the caller's wait, not the work. The local builders
  * cannot be cancelled, so a build that outlives the deadline finishes on its
  * own; the label inventory shares that build with a Retry instead of starting
- * the listing again. The daemon check is a maximum inside the deadline rather
- * than an allowance added on top: the ping normally answers in milliseconds,
- * so the build gets almost the full deadline. A build allowed only a fixed
- * slice after a ping that can itself cost 5 s is what left a 458-container hub
- * timing out in the real tab.
+ * the listing again. Where a local read checks the daemon first, that check is
+ * a maximum inside the deadline rather than an allowance added on top: the
+ * ping normally answers in milliseconds, so the build gets almost the full
+ * deadline. A build allowed only a fixed slice after a ping that can itself
+ * cost 5 s is what left a 458-container hub timing out in the real tab.
  *
  * It applies to the hub's own label inventory, dependency graph and networking
  * summary. The hub waits {@link FLEET_READ_BUDGET_MS} for a remote or Pilot
