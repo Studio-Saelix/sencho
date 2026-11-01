@@ -17,9 +17,10 @@ import { getErrorMessage } from '../utils/errors';
  * healthy nodes to shave two seconds off the one bad node. 5 s also matches the
  * cap the fleet image-update reads already used, so one number replaces the
  * 8 s the map and networking summary carried and the 30 s the Docker Labels
- * inventory carried. The hub's own label inventory uses it for a cheap daemon
- * check, then builds under {@link LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS},
- * because that read does work per container rather than one round trip.
+ * inventory carried. The hub's own label inventory also caps its cheap daemon
+ * check with it, but the whole read runs under
+ * {@link LOCAL_LABEL_INVENTORY_DEADLINE_MS}, because that read does work per
+ * container rather than one round trip.
  *
  * Two neighbouring reads keep their own budgets on purpose, because they are a
  * different contract: the Overview card probe stays at 3 s (it reads three small
@@ -33,19 +34,25 @@ import { getErrorMessage } from '../utils/errors';
 export const FLEET_READ_BUDGET_MS = 5_000;
 
 /**
- * Ceiling on the hub's own label inventory, once a cheap ping shows Docker is
- * answering.
+ * Deadline for the hub's own label inventory, measured from the start of the
+ * read.
  *
  * The hub's own read is different from a remote: it lists and inspects every
  * container on the host, so its cost grows with the node, and a host with a few
  * hundred containers needs several seconds even when Docker answers every call.
  * The listing cannot be used to size that budget, because it is the slow part
- * and would have to run under the flat transport budget first. A fixed ceiling
- * is independent of the read: the 5 s liveness check plus this ceiling (17 s)
- * stays inside the Docker Labels tab's 20 s per-node client timeout, with room
- * for the transfer, and a socket that wedges mid-build still yields a row.
+ * and would have to run under the flat transport budget first. A fixed deadline
+ * is independent of the read: it sits inside the Docker Labels tab's 20 s
+ * per-node client timeout (`LABELS_NODE_TIMEOUT_MS`), with room for the
+ * transfer, so a large hub is not cut off before it can build its answer.
+ *
+ * The deadline covers the whole read, and the 5 s daemon check is a maximum
+ * inside it rather than an allowance added on top: the ping normally answers in
+ * milliseconds, so the build gets almost the full deadline. A build allowed only
+ * a fixed slice after a ping that can itself cost 5 s is what left a 458-
+ * container hub timing out in the real tab.
  */
-export const LOCAL_LABEL_INVENTORY_BUDGET_CEILING_MS = 12_000;
+export const LOCAL_LABEL_INVENTORY_DEADLINE_MS = 18_000;
 
 /** A read that outlived the fleet-read budget, so a caller can tell it from a transport failure. */
 export class FleetReadTimeoutError extends Error {

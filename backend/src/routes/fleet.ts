@@ -960,7 +960,8 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
  * so the tab can draw each node as it answers. Auth + node:read (Community).
  * Remote nodes are read through their /api/system/container-labels within the
  * shared fleet-read budget; the hub's own read is built in-process under its
- * ping plus local ceiling. Unreachable nodes degrade to a per-node error.
+ * local deadline, with a daemon ping capped inside it. Unreachable nodes
+ * degrade to a per-node error.
  */
 fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'node:read')) return;
@@ -975,7 +976,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
         if (node.type === 'local') {
           // The hub's own read scales with the host, so a cheap daemon check
           // proves Docker answers within the transport budget and the build
-          // then runs under the local ceiling.
+          // then runs under the rest of the local deadline.
           const inventory = await readLocalLabelInventory(node.id, options);
           return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
         }

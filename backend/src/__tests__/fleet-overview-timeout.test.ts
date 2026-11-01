@@ -659,6 +659,39 @@ describe('node-data fan-outs share the fleet-read budget', () => {
       expect(res.body.nodeErrors).toEqual({});
     }, 30_000);
 
+    it('returns a hub build that outlasts the old 12-second ceiling', async () => {
+      // At 458 containers the hub's build alone needed more than the old
+      // fixed 12 s slice after the ping in the real tab. The read now owns one
+      // 18 s deadline, so a 12.5 s build (a fast ping leaves nearly all of it)
+      // must return every row instead of a `Timed out after 12s` row.
+      const containers = Array.from({ length: 3 }, (_, i) => ({
+        id: `container-${i}`,
+        name: `container-${i}`,
+        state: 'running',
+        stack: 'demo',
+        service: 'web',
+        labels: { 'traefik.enable': 'true' },
+        imageId: 'sha256:image',
+        inspectFailed: false,
+      }));
+      vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+        ping: vi.fn().mockResolvedValue(undefined),
+        getAllContainers: vi.fn(() => new Promise(() => {})),
+        listContainersForLabelInventory: vi.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(containers), 12_500);
+        })),
+        inspectImageLabels: vi.fn().mockResolvedValue({ labels: {} }),
+      } as unknown as DockerController);
+
+      const res = await getLabels('?nodeId=1');
+
+      expect(res.status).toBe(200);
+      const localRow = (res.body.nodes as { nodeId: number; status: string; inventory: { containers: unknown[] } | null }[])[0];
+      expect(localRow.status).toBe('ok');
+      expect(localRow.inventory?.containers).toHaveLength(3);
+      expect(res.body.nodeErrors).toEqual({});
+    }, 30_000);
+
     it.each(['abc', '0', '-3', '1.5', ''])('rejects a malformed nodeId (%s)', async (bad) => {
       const res = await getLabels(`?nodeId=${encodeURIComponent(bad)}`);
       expect(res.status).toBe(400);
