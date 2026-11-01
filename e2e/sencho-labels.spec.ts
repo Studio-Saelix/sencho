@@ -20,11 +20,12 @@ const COMPOSE = `services:
       io.sencho.order: "\${WEB_ORDER:-20}"
   api:
     image: nginx:alpine
+    # List syntax, so the rendered list form is exercised end to end too.
     labels:
-      io.sencho.order: "\${API_ORDER:-10}"
-      io.sencho.url.docs: https://\${DOCS_HOST:-docs.example.com}/api
-      io.sencho.hidden: "maybe"
-      io.sencho.future: "1"
+      - io.sencho.order=\${API_ORDER:-10}
+      - io.sencho.url.docs=https://\${DOCS_HOST:-docs.example.com}/api
+      - io.sencho.hidden=maybe
+      - io.sencho.future=1
   helper:
     image: nginx:alpine
     labels:

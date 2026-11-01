@@ -186,7 +186,7 @@ export const SENCHO_LABEL_DEFINITIONS: readonly SenchoLabelDefinition[] = [
     valueType: 'url',
     parse: parseSenchoUrlLabel,
     defaultBehavior: 'No configured link; a published port opens the generated host and port.',
-    precedence: 'A valid configured link replaces the generated published-port link for that service, unless Sencho cannot tell which service owns the port.',
+    precedence: 'A valid configured link wins over any address Sencho discovers about the service, which wins over the generated published-port link. It replaces that link for the service, unless Sencho cannot tell which service owns the port.',
     conflict: 'The merged Compose model decides the value; later files replace earlier ones.',
     effect: 'presentation',
     trust: 'compose',
@@ -548,16 +548,28 @@ function boundedText(value: unknown): string | undefined {
   return typeof value === 'string' ? value.slice(0, MAX_REMOTE_BEHAVIOR_TEXT) : undefined;
 }
 
+/** The inert origin a remote copy's source implies, for a reason the hub owns. */
+function remoteOriginOf(source: LabelSource): InertOrigin {
+  if (source === 'image') return 'image';
+  if (source === 'runtime') return 'runtime';
+  return 'unknown';
+}
+
 /**
  * Rebuild a remote node's `behavior` field by field. Absent stays absent (an
- * older node, or a label outside the namespace). A value this version cannot
- * read degrades to `unsupported` with a fixed reason instead of failing the
- * node's whole inventory. Only the declared Compose copy of a presentation label
- * can be anything but inert; the protective infrastructure label keeps its
- * reported state from a deployed copy too.
+ * older node), and a label outside the namespace never carries one. A value this
+ * version cannot read degrades to `unsupported` with a fixed reason instead of
+ * failing the node's whole inventory. Only the declared Compose copy of a
+ * presentation label can be anything but inert; the protective infrastructure
+ * label keeps its reported state from a deployed copy too.
+ *
+ * A claim the hub does not honor is dropped with the hub's own reason, so a
+ * remote's text can never describe a state the audit does not show. A node that
+ * already reports inert keeps its own reason, which names the origin (an image,
+ * a stale container) better than the hub can.
  */
 export function sanitizeRemoteBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || !isSenchoLabelKey(key)) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && VALID_LABEL_BEHAVIOR_STATES.has(o.state)
     ? o.state as LabelBehaviorState
@@ -565,10 +577,18 @@ export function sanitizeRemoteBehavior(source: LabelSource, key: string, raw: un
   if (!o || !state || (o.reason !== undefined && typeof o.reason !== 'string') || (o.summary !== undefined && typeof o.summary !== 'string')) {
     return { state: 'unsupported', reason: UNREADABLE_BEHAVIOR_REASON };
   }
+  // The keys Sencho stamps on its own containers are never configuration, whatever a node reports.
+  if (isManagedSenchoLabel(key)) {
+    return source === 'compose'
+      ? { state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON }
+      : { state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON };
+  }
+  const honored = source === 'compose' || isDeployedTrustedLabel(key);
+  if (!honored && state !== 'inert') return { state: 'inert', reason: INERT_REASON[remoteOriginOf(source)] };
   const reason = boundedText(o.reason);
   const summary = boundedText(o.summary);
   return {
-    state: source === 'compose' || isDeployedTrustedLabel(key) ? state : 'inert',
+    state: honored ? state : 'inert',
     ...(reason ? { reason } : {}),
     ...(summary ? { summary } : {}),
   };

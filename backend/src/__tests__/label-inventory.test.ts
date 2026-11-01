@@ -799,7 +799,8 @@ describe('GET /api/fleet/container-labels', () => {
         expect(res.body.nodeErrors[remoteId]).toBeUndefined();
         const url = rowsOf(res.body).find(r => r.key === 'io.sencho.url');
         expect(url?.behavior?.state).toBe('inert');
-        expect(url?.behavior?.reason?.length).toBe(240);
+        // The remote's oversized claim text is replaced, not merely truncated.
+        expect(url?.behavior?.reason).toContain('Present only on the running container');
         expect(rowsOf(res.body).find(r => r.key === 'io.sencho.infrastructure')?.behavior).toMatchObject({ state: 'active' });
       } finally {
         DatabaseService.getInstance().deleteNode(remoteId);
@@ -830,7 +831,7 @@ describe('GET /api/fleet/container-labels', () => {
       }
     });
 
-    it('forces a remote\'s active claim on a runtime-only label to inert and bounds its text', async () => {
+    it('drops a remote\'s active claim on a runtime-only label and replaces its text with the hub\'s own reason', async () => {
       stubDockerList([]);
       const remoteId = addRemote('remote-claim', 'claim.invalid');
       vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://claim.invalid', apiToken: 't', trustedLoopback: false } : null);
@@ -841,8 +842,11 @@ describe('GET /api/fleet/container-labels', () => {
         const res = await fetchFleet();
         const behavior = rowsOf(res.body).find(r => r.key === 'io.sencho.url')?.behavior;
         expect(behavior?.state).toBe('inert');
-        expect(behavior?.reason?.length).toBe(240);
+        // The node's claim is dropped, so its text cannot describe a state the audit does not show.
+        expect(behavior?.reason).toContain('Present only on the running container');
+        expect(behavior?.reason?.length).toBeLessThan(240);
         expect(JSON.stringify(behavior)).not.toContain('nested');
+        expect(JSON.stringify(behavior)).not.toContain('yyyy');
       } finally {
         DatabaseService.getInstance().deleteNode(remoteId);
       }

@@ -480,6 +480,25 @@ describe('remote behavior sanitizing', () => {
     expect(out?.summary?.length).toBe(240);
   });
 
+  it('drops a behavior for a key outside the namespace and for a claim the hub does not honor', () => {
+    expect(sanitizeRemoteBehavior('compose', 'traefik.enable', { state: 'active' })).toBeUndefined();
+    // A presentation label cannot be active from a running container; the hub's reason replaces the node's text.
+    expect(sanitizeRemoteBehavior('runtime', 'io.sencho.url', { state: 'active', reason: 'This link is active.' })).toEqual({
+      state: 'inert',
+      reason: expect.stringContaining('Present only on the running container'),
+    });
+    // A node that already reports inert keeps the reason that names the origin.
+    expect(sanitizeRemoteBehavior('runtime', 'io.sencho.url', { state: 'inert', reason: 'Present only on the running container.' }))
+      .toEqual({ state: 'inert', reason: 'Present only on the running container.' });
+  });
+
+  it('never trusts a remote about a key Sencho stamps on its own containers', () => {
+    for (const key of SENCHO_MANAGED_LABELS) {
+      expect(sanitizeRemoteBehavior('compose', key, { state: 'active' })).toEqual({ state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON });
+      expect(sanitizeRemoteBehavior('runtime', key, { state: 'active' })).toEqual({ state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON });
+    }
+  });
+
   it('keeps the more informative behavior when two nodes report one row', () => {
     const inert: LabelBehavior = { state: 'inert', reason: 'a' };
     const invalid: LabelBehavior = { state: 'invalid', reason: 'b' };

@@ -95,6 +95,24 @@ describe('ComposeLabelsPanel', () => {
     expect(states).toContain('inert');
   });
 
+  it('ignores a node claim on a key Sencho stamps on its own containers', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'io.sencho.mesh', value: 'true', source: 'compose' as const, behavior: { state: 'active', reason: 'Set by the mesh.' } }],
+          replicas: [],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    const badge = await screen.findByTestId('label-behavior');
+    expect(badge).toHaveTextContent('Ignored');
+    expect(await screen.findByText('Reserved for containers Sencho creates; it has no effect in a Compose file.')).toBeInTheDocument();
+  });
+
   it('renders a value-changed badge when a label value drifted', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,

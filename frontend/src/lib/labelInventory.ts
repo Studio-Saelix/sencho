@@ -1,4 +1,11 @@
-import { DEPLOYED_TRUSTED_LABEL_KEYS, type SenchoLabelState } from './senchoLabels';
+import {
+  DEPLOYED_TRUSTED_LABEL_KEYS,
+  MANAGED_LABEL_DECLARED_REASON,
+  MANAGED_LABEL_DEPLOYED_REASON,
+  MANAGED_LABEL_KEYS,
+  UNHONORED_BEHAVIOR_REASON,
+  type SenchoLabelState,
+} from './senchoLabels';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
 
@@ -116,14 +123,17 @@ export function isSenchoLabelKey(key: string): boolean {
 
 /**
  * Rebuild a node's `behavior` field by field before it reaches the screen. Absent
- * stays absent (an older node). Anything unreadable becomes `unsupported` with a
- * fixed reason. Only the declared Compose copy of a presentation label, or a
- * deployed copy of the protective infrastructure label, keeps the reported state;
- * everything else is inert, so one wrong answer neither crashes a row nor shows
- * an unearned Active.
+ * stays absent (an older node), and a label outside the namespace never carries
+ * one. Anything unreadable becomes `unsupported` with a fixed reason. Only the
+ * declared Compose copy of a presentation label, or a deployed copy of the
+ * protective infrastructure label, keeps the reported state; everything else is
+ * inert, so one wrong answer neither crashes a row nor shows an unearned Active.
+ * A claim the client drops carries the client's own reason, so a node's text
+ * cannot describe a state the screen does not show; a node that already reports
+ * inert keeps its reason, which names the origin.
  */
 export function readLabelBehavior(source: LabelSource, key: string, raw: unknown): LabelBehavior | undefined {
-  if (raw === undefined) return undefined;
+  if (raw === undefined || !isSenchoLabelKey(key)) return undefined;
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
   const state = o && typeof o.state === 'string' && Object.prototype.hasOwnProperty.call(BEHAVIOR_LABELS, o.state)
     ? o.state as LabelBehaviorState
@@ -133,9 +143,16 @@ export function readLabelBehavior(source: LabelSource, key: string, raw: unknown
   }
   const reason = typeof o.reason === 'string' ? o.reason.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
   const summary = typeof o.summary === 'string' ? o.summary.slice(0, MAX_BEHAVIOR_TEXT) : undefined;
-  const trustsDeployedCopy = DEPLOYED_TRUSTED_LABEL_KEYS.includes(key);
+  // The keys Sencho stamps on its own containers are never configuration, whatever a node reports.
+  if (MANAGED_LABEL_KEYS.includes(key)) {
+    return source === 'compose'
+      ? { state: 'invalid', reason: MANAGED_LABEL_DECLARED_REASON }
+      : { state: 'inert', reason: MANAGED_LABEL_DEPLOYED_REASON };
+  }
+  const honored = source === 'compose' || DEPLOYED_TRUSTED_LABEL_KEYS.includes(key);
+  if (!honored && state !== 'inert') return { state: 'inert', reason: UNHONORED_BEHAVIOR_REASON };
   return {
-    state: source === 'compose' || trustsDeployedCopy ? state : 'inert',
+    state: honored ? state : 'inert',
     ...(reason ? { reason } : {}),
     ...(summary ? { summary } : {}),
   };

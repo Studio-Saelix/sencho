@@ -44,6 +44,14 @@ export type SenchoLabelResolution =
  */
 export const DEPLOYED_TRUSTED_LABEL_KEYS: readonly string[] = ['io.sencho.infrastructure'];
 
+/** Keys Sencho stamps on containers it creates, mirroring the backend's SENCHO_MANAGED_LABELS. */
+export const MANAGED_LABEL_KEYS: readonly string[] = ['io.sencho.mesh', 'io.sencho.helper', 'io.sencho.operation'];
+
+export const MANAGED_LABEL_DECLARED_REASON = 'Reserved for containers Sencho creates; it has no effect in a Compose file.';
+export const MANAGED_LABEL_DEPLOYED_REASON = 'Set by Sencho on a container it manages.';
+/** The reason shown when a node claims a status the client does not honor for that copy. */
+export const UNHONORED_BEHAVIOR_REASON = 'Sencho does not act on this copy of the label.';
+
 const LINK_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_LINK_NAME_LENGTH = 32;
 const UNREADABLE_STATE_REASON = 'The node reported a status this version of Sencho cannot read.';
