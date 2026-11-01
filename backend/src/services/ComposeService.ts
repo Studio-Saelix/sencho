@@ -377,12 +377,11 @@ export class ComposeService {
    * safe. Runs on the node that owns the volume, so a hub request relayed over the
    * node proxy or a Pilot tunnel reaches the same check.
    *
-   * A render Compose itself rejects (a non-zero exit: broken YAML, a required
-   * variable with no value) lets the removal through, because `down --volumes`
-   * loads the same project, fails the same way and removes nothing; refusing there
-   * would also strand a stack that cannot be rendered. A render that did not finish
-   * (timeout, size cap, spawn failure) or that is not a model refuses: `down` could
-   * still succeed there, and removing what cannot be seen is not a pass.
+   * Any render that does not produce a model refuses, a non-zero exit included:
+   * `down` loads the project with fewer checks than `config` (it does not resolve
+   * env files, for one), so a project `config` rejects can still be one `down
+   * --volumes` removes volumes from. Removing what cannot be seen is not a pass.
+   * Callers that must still tear such a stack down do it without removing volumes.
    */
   private async assertNoRecoveryVolumeRemoval(stackName: string): Promise<void> {
     let declared: string[] | null = null;
@@ -395,11 +394,8 @@ export class ComposeService {
         if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
           declared = Object.values(parseEffectiveModel(parsed, stackName).volumes).map((volume) => volume.name);
         }
-      } else if (!result.timedOut && typeof result.code === 'number' && result.code !== 0) {
-        console.warn('[ComposeService] Compose rejected the project of %s (exit %d); the volume removal is left to Compose, which cannot load it either.', sanitizeForLog(stackName), result.code);
-        return;
       } else {
-        console.warn('[ComposeService] The render of %s did not finish for the recovery repository check (timed out: %s, exit: %s).', sanitizeForLog(stackName), result.timedOut, String(result.code));
+        console.warn('[ComposeService] The render of %s gave no model for the recovery repository check (timed out: %s, exit: %s).', sanitizeForLog(stackName), result.timedOut, String(result.code));
       }
     } catch (error) {
       console.warn('[ComposeService] Could not read the volumes of %s for the recovery repository check:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));

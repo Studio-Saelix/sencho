@@ -120,7 +120,7 @@ describe('POST /api/templates/deploy refused by the external-network gate', () =
 });
 
 describe('POST /api/templates/deploy rolled back through the real teardown', () => {
-  it('still removes the files of a stack Compose cannot render, so the same name can be retried', async () => {
+  it('still removes the files of a stack Compose cannot render, taking it down without volumes, so the same name can be retried', async () => {
     vi.restoreAllMocks();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -147,21 +147,24 @@ describe('POST /api/templates/deploy rolled back through the real teardown', () 
 
     expect(res.status).toBe(500);
     expect(res.body.rolledBack).toBe(true);
-    // The teardown ran with its volumes, which is what a stack that rendered would get.
-    expect(execute.mock.calls.some((call) => (call as unknown[])[1] instanceof Array
-      && ((call as unknown[])[1] as string[]).includes('--volumes'))).toBe(true);
+    // The volume removal was refused (nothing could be checked), so the stack was
+    // taken down on its own and no volume was removed.
+    const argLists = execute.mock.calls.map((call) => (call as unknown[])[1] as string[]);
+    expect(argLists.length).toBeGreaterThan(0);
+    expect(argLists.some((args) => args.includes('--volumes'))).toBe(false);
     const { FileSystemService } = await import('../services/FileSystemService');
     expect(await FileSystemService.getInstance().getStacks()).not.toContain('real-teardown');
   });
 });
 
-describe('POST /api/templates/deploy when the rollback would remove a recovery repository volume', () => {
-  it('keeps the stack files and reports no rollback, like any other refused teardown', async () => {
+describe('POST /api/templates/deploy when the volume removal of the rollback is refused', () => {
+  it('rolls back by taking the stack down without removing volumes, and still removes its files', async () => {
     const { RecoveryVolumeProtectedError } = await import('../helpers/recoveryVolumeGuard');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.spyOn(ComposeService.prototype, 'downStack').mockRejectedValue(
-      new RecoveryVolumeProtectedError('declares a recovery repository volume'),
-    );
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const downStack = vi.spyOn(ComposeService.prototype, 'downStack')
+      .mockRejectedValueOnce(new RecoveryVolumeProtectedError('declares a recovery repository volume'))
+      .mockResolvedValue(undefined);
     mockResolveMissingExternalNetworks.mockResolvedValue({
       status: 'render_unavailable',
       autoCreateEnabled: false,
@@ -177,9 +180,13 @@ describe('POST /api/templates/deploy when the rollback would remove a recovery r
       .send({ stackName: 'repo-volume-rollback', template: minimalTemplate });
 
     expect(res.status).toBe(500);
-    expect(res.body.rolledBack).toBe(false);
+    expect(res.body.rolledBack).toBe(true);
+    expect(downStack.mock.calls).toEqual([
+      ['repo-volume-rollback', { removeVolumes: true }],
+      ['repo-volume-rollback'],
+    ]);
     const { FileSystemService } = await import('../services/FileSystemService');
-    expect(await FileSystemService.getInstance().getStacks()).toContain('repo-volume-rollback');
+    expect(await FileSystemService.getInstance().getStacks()).not.toContain('repo-volume-rollback');
   });
 });
 

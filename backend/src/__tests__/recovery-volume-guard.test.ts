@@ -136,31 +136,27 @@ describe('DELETE /api/stacks/:name?pruneVolumes=true', () => {
     expect(fs.existsSync(dir)).toBe(false);
   });
 
-  it('deletes a stack whose compose file Compose rejects, so it is not stranded by the check', async () => {
-    const dir = writeStack('unrenderable');
-    vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
-      rendered: null, stderr: 'invalid compose file', code: 15, timedOut: false,
+  const unreadable = [
+    ['Compose rejects the file', { rendered: null, stderr: 'invalid compose file', code: 15, timedOut: false }],
+    ['the render timed out', { rendered: null, stderr: 'timed out', code: null, timedOut: true }],
+  ] as const;
+
+  for (const [label, result] of unreadable) {
+    it(`refuses the prune when ${label}, and deletes the same stack without it`, async () => {
+      const dir = writeStack('unreadable');
+      vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({ ...result });
+
+      const refused = await request(app).delete('/api/stacks/unreadable?pruneVolumes=true').set('Cookie', cookie);
+      expect(refused.status).toBe(423);
+      expect(refused.body.code).toBe('recovery_volume_protected');
+      expect(dockerSpawn).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
+
+      const deleted = await request(app).delete('/api/stacks/unreadable').set('Cookie', cookie);
+      expect(deleted.status).toBe(200);
+      expect(fs.existsSync(dir)).toBe(false);
     });
-
-    const res = await request(app).delete('/api/stacks/unrenderable?pruneVolumes=true').set('Cookie', cookie);
-
-    expect(res.status).toBe(200);
-    expect(fs.existsSync(dir)).toBe(false);
-  });
-
-  it('refuses the delete when the check of the stack\'s volumes did not finish', async () => {
-    const dir = writeStack('unfinished');
-    vi.spyOn(ComposeService.prototype, 'renderConfig').mockResolvedValue({
-      rendered: null, stderr: 'timed out', code: null, timedOut: true,
-    });
-
-    const res = await request(app).delete('/api/stacks/unfinished?pruneVolumes=true').set('Cookie', cookie);
-
-    expect(res.status).toBe(423);
-    expect(res.body.code).toBe('recovery_volume_protected');
-    expect(dockerSpawn).not.toHaveBeenCalled();
-    expect(fs.existsSync(path.join(dir, 'compose.yaml'))).toBe(true);
-  });
+  }
 
   it('still prunes the volumes of an ordinary stack', async () => {
     const dir = writeStack('ordinary');
