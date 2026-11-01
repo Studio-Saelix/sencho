@@ -502,9 +502,10 @@ export function useStackListState() {
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       if (stale()) { abortAttempt(attemptId); return []; }
       if (!res.ok) {
-        // A node that missed its read deadline or is unreachable names that,
-        // so the sidebar's retry state says why instead of printing a status
-        // code the operator cannot act on.
+        // A node the hub cannot read (a missed deadline, an unreachable host, a
+        // disconnected Pilot, no configured target, a refused address) names
+        // that, so the sidebar's retry state says why instead of printing a
+        // status code the operator cannot act on.
         const readFailure = classifyRemoteReadFailure(res);
         if (isUnreadableNode(readFailure)) {
           return applyStacksFailure(remoteReadFailureMessage(readFailure, {
