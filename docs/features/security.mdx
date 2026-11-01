@@ -105,9 +105,11 @@ an **action posture** breakdown (fixable, known-exploited, needs-review, accepte
 **top exploit-risk** list ranking actionable findings by known-exploited status then EPSS, and a
 **severity-by-exploitability** quadrant that separates high-severity-but-unlikely findings from the
 ones to act on first. The exploit-risk charts populate once exploit intelligence is enabled and images
-are scanned. A signal rail summarizes the supporting numbers (scanned images, fixable findings,
-secrets, Compose misconfigurations, stale scans, failed scans), and a status strip shows scanner health
-and the active node's deploy enforcement posture.
+are scanned. Each chart reads on its own, so the posture and review queue stay usable while a chart
+is still loading; a chart still reading shows a placeholder, and one whose read failed says it is
+unavailable instead of reporting no history. A signal rail summarizes the supporting numbers (scanned
+images, fixable findings, secrets, Compose misconfigurations, stale scans, failed scans), and a status
+strip shows scanner health and the active node's deploy enforcement posture.
 
 If a node does not report an overview (for example an older remote node), the page falls back to a
 clear "overview unavailable" state and the other tabs keep working.

@@ -52,7 +52,7 @@ The preview lists the exact items that will be removed (capped with an "and N mo
 
 ## Resource tabs
 
-Four tabs partition your inventory: **Images**, **Volumes**, **External**, and **Rollback**. Each tab shows a count. If the Images or Volumes list fails to load, the tab shows an error with a **Retry** button instead of an empty list.
+Four tabs partition your inventory: **Images**, **Volumes**, **External**, and **Rollback**. Each tab shows a count once its own read has answered; a tab whose data is still loading shows no number rather than an implied zero. The tabs load independently, so a slow or failed read behind one of them (rollback generations, external containers, or a scan-summary lookup) never holds the others on a skeleton or fails them. If a tab's read fails, that tab shows an error with a **Retry** button instead of an empty list.
 
 Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. **Prune unused networks** is in the **⋯** menu of the tab strip.
 
