@@ -1,4 +1,3 @@
-import si from 'systeminformation';
 import semver from 'semver';
 import DockerController from './DockerController';
 import { DatabaseService, Node, StackAlert } from './DatabaseService';
@@ -9,7 +8,7 @@ import { NotificationService } from './NotificationService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersionInfo } from '../utils/version-check';
-import { getHostMemory } from '../helpers/hostMemory';
+import { readLocalHostSample } from '../helpers/hostSample';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
@@ -123,8 +122,23 @@ const DEFAULT_HOST_ALERT_SUPPRESSION_MIN = 60;
 // the validated range.
 const MAX_HOST_ALERT_SUPPRESSION_MIN = 1440;
 
+// One warning per dimension per process: the mount is a deployment change, so
+// repeating it every 30s tick is noise, not new information.
+const warnedUnknownHostUsage = new Set<'cpu' | 'ram'>();
+
+function warnHostUsageUnknown(dimension: 'cpu' | 'ram'): void {
+    if (warnedUnknownHostUsage.has(dimension)) return;
+    warnedUnknownHostUsage.add(dimension);
+    const label = dimension === 'cpu' ? 'CPU' : 'memory';
+    console.warn(
+        `[Monitor] Host ${label} usage is not visible from this container; host ${label} alerts are paused. ` +
+        `Mount the Docker host's /sys/fs/cgroup at /host/sys/fs/cgroup to enable them.`,
+    );
+}
+
 export function _resetHostAlertSuppressionStateForTests(): void {
     hostAlertSuppressionState.clear();
+    warnedUnknownHostUsage.clear();
 }
 
 const STATS_TIMEOUT_MS = 10_000;
@@ -347,45 +361,61 @@ export class MonitorService {
             : Math.min(suppressionMinRaw, MAX_HOST_ALERT_SUPPRESSION_MIN);
         const suppressionMs = suppressionMin * 60 * 1000;
 
-        // 1. Host Limits — fetch CPU, RAM, disk concurrently
+        // 1. Host Limits: CPU, RAM, disk from one host-scoped sample. Capacity
+        // and (when nested) usage come from the Docker host, so a container
+        // inside an LXC alerts on the LXC's numbers, not the hypervisor's.
         if (settings['host_alerts_enabled'] !== '0') {
             try {
-                const [currentLoad, hostMem, fsSize] = await Promise.all([
-                    withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
-                    withTimeout(getHostMemory(), STATS_TIMEOUT_MS, 'host RAM stats'),
-                    withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
-                ]);
+                const sample = await withTimeout(
+                    readLocalHostSample(NodeRegistry.getInstance().getDefaultNodeId()),
+                    STATS_TIMEOUT_MS,
+                    'host stats',
+                );
 
-                const cpuUsage = currentLoad.currentLoad;
-                const cpuLimit = parseFloat(settings['host_cpu_limit']);
-                if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
-                    await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
-                        `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
+                if (sample.cpu.usage.kind === 'measured') {
+                    const cpuUsage = sample.cpu.usage.value;
+                    const cpuLimit = parseFloat(settings['host_cpu_limit']);
+                    if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
+                        await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
+                            `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
+                    } else {
+                        this.clearHostMetricSuppression('cpu');
+                    }
                 } else {
+                    // Unknown, never a value from the outer machine: skip the
+                    // threshold and clear suppression so a stale "Suppressed N"
+                    // does not outlive the state that set it.
                     this.clearHostMetricSuppression('cpu');
+                    warnHostUsageUnknown('cpu');
                 }
 
-                // ZFS ARC aware: reclaimable ARC is added back into available so a
-                // large ARC cache does not fire spurious host-memory alerts.
-                // Ballooned memory is deliberately NOT subtracted here: unlike
-                // ARC, ballooned pages are reclaimed by the hypervisor and the
-                // guest cannot get them back on demand. A ballooned VM with real
-                // memory pressure must still alert. See helpers/hostMemory.ts.
-                const ramUsage = hostMem.usagePercent;
-                const ramLimit = parseFloat(settings['host_ram_limit']);
-                if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
-                    await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
-                        `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
+                if (sample.memory.usage.kind === 'measured') {
+                    // ZFS ARC aware: reclaimable ARC is added back into available so a
+                    // large ARC cache does not fire spurious host-memory alerts.
+                    // Ballooned memory is deliberately NOT subtracted here: unlike
+                    // ARC, ballooned pages are reclaimed by the hypervisor and the
+                    // guest cannot get them back on demand. A ballooned VM with real
+                    // memory pressure must still alert. See helpers/hostMemory.ts.
+                    const ramUsage = sample.memory.usage.value.usagePercent;
+                    const ramLimit = parseFloat(settings['host_ram_limit']);
+                    if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
+                        await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
+                            `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
+                    } else {
+                        this.clearHostMetricSuppression('ram');
+                    }
                 } else {
                     this.clearHostMetricSuppression('ram');
+                    warnHostUsageUnknown('ram');
                 }
 
-                const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
-                if (mainDisk) {
+                if (sample.disk) {
                     const diskLimit = parseFloat(settings['host_disk_limit']);
-                    if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
+                    // Compare the raw percentage, not the one-decimal wire
+                    // string: 85.04% must still trip an 85% limit.
+                    if (!isNaN(diskLimit) && diskLimit > 0 && sample.disk.use > diskLimit) {
                         await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
-                            `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                            `Host Disk space utilization is critically high: ${sample.disk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
                     } else {
                         this.clearHostMetricSuppression('disk');
                     }

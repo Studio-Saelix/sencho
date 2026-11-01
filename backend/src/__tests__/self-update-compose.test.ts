@@ -240,17 +240,14 @@ describe('buildComposeReadArgs', () => {
 });
 
 describe('buildSelfUpdateComposeCmd (dependencies)', () => {
-  // Reapply recreates Sencho and leaves the dependency decision to Compose: the
-  // command passes neither --no-deps nor --always-recreate-deps. Compose 5.6
-  // recreates a changed depends_on service (a Docker socket proxy) and leaves an
-  // unchanged one running; 5.1.3 also recreates an unchanged one. The Reapply
-  // dialog, docs/features/remote-updates.mdx, and docs/operations/self-hosting.mdx
-  // therefore say Compose may recreate one. A flag that fixes the behavior at
-  // either extreme must update those pages and the dialog copy with it.
-  it('recreates Sencho and leaves its depends_on services to Compose', () => {
+  // A Sencho-only recreate never touches the services it depends on: --no-deps
+  // keeps Compose from recreating a Docker socket proxy (changed or unchanged),
+  // which is what cut the connection when a different Compose version than the
+  // running container's created it. The endpoint replacement is the only path
+  // that recreates that service, deliberately and with its own confirmation.
+  it('recreates Sencho alone and never lets Compose touch its depends_on services', () => {
     const cmd = buildSelfUpdateComposeCmd(['-f', '/opt/sencho/docker-compose.yml'], 'sencho', '/tmp/_sencho_err', '/app/data/.sencho-update-error', false);
-    expect(cmd).toContain("up -d --force-recreate 'sencho'");
-    expect(cmd).not.toContain('--no-deps');
+    expect(cmd).toContain("up -d --no-deps --force-recreate 'sencho'");
     expect(cmd).not.toContain('--always-recreate-deps');
   });
 });
@@ -266,7 +263,7 @@ describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
       targetPath: '/opt/sencho/docker-compose.yml',
     });
     // The copy runs before the recreate so a failed write never half-applies.
-    expect(cmd.indexOf('cp ')).toBeLessThan(cmd.indexOf('up -d --force-recreate'));
+    expect(cmd.indexOf('cp ')).toBeLessThan(cmd.indexOf('up -d --no-deps --force-recreate'));
     expect(cmd).toContain(
       `cp ${shQuote('/app/data/.sencho-compose-patch')} ${shQuote('/opt/sencho/docker-compose.yml')}`,
     );
@@ -279,7 +276,7 @@ describe('buildSelfUpdateComposeCmd (repin copy branch)', () => {
     });
     // A failed copy writes the error file and exits 1 before any recreate.
     expect(cmd).toContain('exit 1');
-    expect(cmd.indexOf('exit 1')).toBeLessThan(cmd.indexOf('up -d --force-recreate'));
+    expect(cmd.indexOf('exit 1')).toBeLessThan(cmd.indexOf('up -d --no-deps --force-recreate'));
     expect(cmd).toContain('Failed to write the updated compose file');
   });
 
@@ -338,6 +335,27 @@ describe('buildComposeConfigValidateArgs', () => {
     expect(cmd).toContain('config');
     expect(cmd).toContain(shQuote('docker-compose.yml'));
     expect(cmd).toContain(shQuote('/opt/sencho/override.yml'));
+  });
+
+  it.each([
+    ['a custom project', 'operator-project', true],
+    ['no project label', null, false],
+  ])('passes %s to the preliminary render so it matches staging and replacement', (_label, project, expected) => {
+    const args = buildComposeConfigValidateArgs({
+      workingDir: '/opt/sencho',
+      imageName: 'saelix/sencho:1.0.0',
+      configFiles: 'docker-compose.yml',
+      hostBindMounts: [],
+      project,
+    });
+    const cmd = args[args.length - 1];
+    if (expected) {
+      expect(cmd).toContain(`'-p' ${shQuote(project!)}`);
+      expect(cmd.indexOf('-p')).toBeLessThan(cmd.indexOf(shQuote('docker-compose.yml')));
+      expect(cmd.endsWith(' config')).toBe(true);
+    } else {
+      expect(cmd).not.toContain(' -p ');
+    }
   });
 });
 

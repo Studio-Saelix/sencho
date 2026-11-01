@@ -66,6 +66,7 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate), separate from the hard timeout above. If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
 | `SENCHO_ZFS_ARCSTATS_PATH` | *(auto)* | Path **inside the container** to the OpenZFS ARC kstat file, for [ZFS ARC-aware host memory](#zfs-arc-aware-host-memory). Sencho checks this path first, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set it only when your ARC stats live at a non-standard path. |
 | `SENCHO_PROC_MEMINFO_PATH` | *(auto)* | Path **inside the container** to `/proc/meminfo`, for [VM memory ballooning](#vm-memory-ballooning). Sencho checks this path first, then `/host/proc/meminfo`, then `/proc/meminfo`. Set it only when you need a custom meminfo path. |
+| `SENCHO_HOST_CGROUP_PATH` | `/host/sys/fs/cgroup` | Path **inside the container** to the Docker host's cgroup v2 root, used for [hosts inside an LXC or another container](#docker-hosts-inside-an-lxc-or-another-container). Set it only when you mount the cgroup tree somewhere other than `/host/sys/fs/cgroup`. |
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
 
@@ -98,6 +99,34 @@ volumes:
 ```
 
 Sencho checks `SENCHO_PROC_MEMINFO_PATH`, then `/host/proc/meminfo`, then `/proc/meminfo`. Set `SENCHO_PROC_MEMINFO_PATH` only if your meminfo lives somewhere else inside the container.
+
+## Docker hosts inside an LXC or another container
+
+When Sencho or a Pilot agent runs in Docker inside an LXC container (a Proxmox container, for example), the kernel inside the container belongs to the outer machine. A `/proc` read there reports the physical host's cores and memory, so the dashboard would show 112 cores and 1 TB for a 2-core, 4 GiB container.
+
+Sencho gets the capacity from Docker instead. The Docker daemon runs inside the LXC, so it reports the LXC's own core count and memory, and the dashboard, Fleet view, and host alerts all use those numbers. No configuration is needed for this part.
+
+Usage is different. CPU and memory usage of the LXC are cgroup limits that sit above the container's private cgroup namespace, so the container cannot read them unless you mount the host cgroup tree read-only:
+
+```yaml
+volumes:
+  - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+```
+
+With that mount, CPU and memory usage are read from the Docker host's cgroup v2 counters and match what `free` and `top` show inside the LXC. The mount is also what enables host CPU and memory alerts for a nested container.
+
+Requirements and behavior:
+
+- **cgroup v2 only.** A host running cgroup v1 (Proxmox VE 6 and older) reports usage as unknown.
+- **Identity check.** A cgroup reading is used only when it describes the Docker host: the cgroup's CPU set must match Docker's core count, and its memory limit must match Docker's memory total within 2%. Otherwise the reading belongs to a different scope and is ignored.
+- **`SENCHO_HOST_CGROUP_PATH`** overrides where the cgroup tree is read from. Set it only when you mount the tree somewhere other than `/host/sys/fs/cgroup`.
+- **Unknown is not zero.** When no trusted reading is available, the dashboard shows `--` with "usage unknown" for that dimension, the Fleet view shows the same, and the health verdict names the unknown dimension instead of claiming everything is nominal. A value from the outer machine is never reported for a host that Docker has described.
+- **Host alerts pause.** While CPU or memory usage is unknown, that threshold check is skipped (the other host checks keep running), and Sencho logs one warning naming the mount that enables it.
+- **A stalled Docker daemon keeps the last good capacity.** Sencho remembers the Docker host's core count and memory from the last successful probe, so a daemon that stalls for a few seconds does not flip a known nested host back to the kernel view or alert on the outer machine's numbers. The last good capacity keeps being served while probes retry every few seconds, and it updates as soon as the daemon answers. On a process that has never had a successful probe (for example, it started while the daemon was already down), capacity and usage still fall back to the kernel view, and host alerts can evaluate those numbers until the daemon answers.
+
+Upgrade the control instance before its nodes. A hub older than this release cannot render unknown host usage: while it is in front of an upgraded node, that node serves the older numeric shape (the kernel view for a nested host) so the old dashboard shows numeric fields instead of `NaN%`. Those numbers are the outer machine's when the node is nested, so an older hub can still show the wrong values; upgrading the hub is what enables `--` and "usage unknown". A caller that advertises `host-usage-unknown-v1` receives `null` and renders `--` with "usage unknown"; the hub advertises it on behalf of the dashboard session, and an API token gets the numeric shape unless its own request sends `x-sencho-host-usage-unknown: 1`.
+
+The same rules apply to a Pilot agent that runs inside an LXC: mount the cgroup tree in the agent's Compose file on that node. They also cover a Docker endpoint that points at another machine, where usage is reported as unknown rather than borrowed from the local kernel.
 
 ## Listen port
 

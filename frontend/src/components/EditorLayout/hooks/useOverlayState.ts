@@ -188,12 +188,37 @@ export function useOverlayState() {
   const openSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(true), []);
   const closeSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(false), []);
 
+  /** The Docker endpoint guard's refusal: its text and which target it refused. */
+  const [dockerEndpointProtected, setDockerEndpointProtected] = useState<{
+    message: string;
+    reason: import('@/lib/stackUpdate').DockerEndpointRefusalReason | null;
+    service: string | null;
+    /** The node and stack the refused operation targeted, so the handoff never retargets another one. */
+    nodeId: number | null;
+    nodeName: string | null;
+    nodeType: 'local' | 'remote' | null;
+    stackFile: string | null;
+  } | null>(null);
+  const openDockerEndpointProtected = useCallback((refusal: {
+    message: string;
+    reason: import('@/lib/stackUpdate').DockerEndpointRefusalReason | null;
+    service: string | null;
+    nodeId: number | null;
+    nodeName: string | null;
+    nodeType: 'local' | 'remote' | null;
+    stackFile: string | null;
+  }) => {
+    setDockerEndpointProtected(refusal);
+  }, []);
+
   /** Captured when Save & Reapply opens confirm; cleared on cancel, confirm, or ownership drift. */
   const [composeReapplyCapture, setComposeReapplyCapture] = useState<{
     nodeId: number;
     nodeType: 'local' | 'remote';
     nodeName: string;
     stackFile: string;
+    /** Preselected recreate scope (a handoff or the dedicated endpoint action). */
+    initialScope?: import('../../FleetView/LocalUpdateConfirmDialog').EndpointProviderScope;
   } | null>(null);
 
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);
@@ -218,6 +243,7 @@ export function useOverlayState() {
     preDeployAdvisory, setPreDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen, openSelfStackProtected, closeSelfStackProtected,
+    dockerEndpointProtected, setDockerEndpointProtected, openDockerEndpointProtected,
     composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,

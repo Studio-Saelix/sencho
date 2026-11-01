@@ -81,7 +81,7 @@ describe('buildSelfUpdateComposeCmd', () => {
 
   it('always recreates the service and persists the error file on failure', () => {
     const cmd = buildSelfUpdateComposeCmd(fFlags, 'sencho', stderrTmp, errorFile, true);
-    expect(cmd).toContain(`up -d --force-recreate ${shQuote('sencho')}`);
+    expect(cmd).toContain(`up -d --no-deps --force-recreate ${shQuote('sencho')}`);
     expect(cmd).toContain(`> ${errorFile}`);
   });
 
@@ -93,7 +93,7 @@ describe('buildSelfUpdateComposeCmd', () => {
     // The dangerous text survives only inside single quotes, never as bare shell.
     expect(cmd).toContain(shQuote('/tmp/compose.yml; ec=0; #'));
     expect(cmd).toContain(shQuote('svc; rm -rf /'));
-    expect(cmd).not.toContain('up -d --force-recreate svc; rm -rf /');
+    expect(cmd).not.toContain('up -d --no-deps --force-recreate svc; rm -rf /');
     // The recreate line stays intact: its redirection and the real exit-code
     // capture follow the quoted args, so the injected `ec=0` never runs as shell.
     expect(cmd).toContain(`2>${stderrTmp}; ec=$?;`);

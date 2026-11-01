@@ -28,8 +28,8 @@ A single rail summarises the state of every registered node so you can read the 
 
 | Tile | What it shows |
 |------|---------------|
-| **CPU** | Average CPU across online nodes. The value tints amber once the average is at or above 80%. |
-| **MEM** | Total RAM used across online nodes. |
+| **CPU** | Average CPU across online nodes, leaving out any node that reports unknown usage. The value tints amber once the average is at or above 80%, and reads `--` when no online node can report it. |
+| **MEM** | Total RAM used across online nodes, leaving out any node that reports unknown usage. |
 | **CONTAINERS** | Running containers across online nodes as `<running>/<total>`. |
 
 ### Tabs
@@ -99,7 +99,7 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
 | **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. It stays on the card next to the **Offline** badge while the node is unreachable. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
-| **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
+| **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. A host that cannot measure CPU or memory usage (a Sencho or Pilot agent inside an LXC without the cgroup mount) shows `--` and a **Show usage…** link instead of a bar. |
 | **Update to v…** button | Admin-only outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
 | **Update dev build** button | Admin-only, brand-colored button that replaces **Update to v…** when the local node is pinned to `sencho-dev:dev` and a newer integration build has been published. Pulls and recreates without rewriting the pinned tag. |
 | **Stack details** trigger | Footer button that toggles the stack drill-down. The label carries the stack count for the node. |
@@ -341,7 +341,7 @@ The **Changelog** tab shows the release notes for the latest published Sencho ve
 
 ### What happens when you click Update
 
-When you click **Update** on a remote row, Sencho dispatches the update command to that remote's API. The remote pulls the latest Docker image directly, then spawns a short-lived helper container that bind-mounts the compose working directory from the host and runs `docker compose up -d --force-recreate <service>`. The remote restarts with the new image; the table cell flips from **Updating** to a green **Updated** badge once the gateway detects the version change. The **Updated** state stays visible for a few seconds before the row settles back to **Up to date**.
+When you click **Update** on a remote row, Sencho dispatches the update command to that remote's API. The remote pulls the latest Docker image directly, then spawns a short-lived helper container that bind-mounts the compose working directory from the host and runs `docker compose up -d --no-deps --force-recreate <service>`. The remote restarts with the new image; the table cell flips from **Updating** to a green **Updated** badge once the gateway detects the version change. The **Updated** state stays visible for a few seconds before the row settles back to **Up to date**.
 
 When you click **Update** on the local row, a confirmation dialog appears first ("Update local node"). Confirming kicks off the same pull-and-recreate flow on the local Sencho instance. Because the gateway is restarting itself, a full-screen reconnecting overlay takes over the browser tab. The overlay polls `/api/health` every 3 seconds and dismisses itself once the new gateway answers. If the gateway has not returned within 5 minutes the overlay switches to a *Taking longer than expected* state with a **Reload to check** button rather than waiting indefinitely. A large image pull can legitimately run past that window, so this state is not a failure on its own.
 

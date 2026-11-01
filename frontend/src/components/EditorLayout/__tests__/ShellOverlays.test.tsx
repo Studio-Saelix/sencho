@@ -42,7 +42,21 @@ vi.mock('@/components/stack/SelfStackProtectedDialog', () => ({
   SelfStackProtectedDialog: (props: { onReapply?: () => Promise<void> }) =>
     props.onReapply ? <button type="button" onClick={() => props.onReapply?.()}>self-reapply</button> : <span>self-info-only</span>,
 }));
-vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({ LocalUpdateConfirmDialog: () => null }));
+vi.mock('../FleetView/LocalUpdateConfirmDialog', () => ({
+  LocalUpdateConfirmDialog: (props: { open: boolean; initialScope?: string; nodeName?: string }) =>
+    props.open ? <span>{`reapply-confirm:${props.initialScope ?? 'none'}:${props.nodeName ?? ''}`}</span> : null,
+}));
+vi.mock('@/components/stack/DockerEndpointProtectedDialog', () => ({
+  DockerEndpointProtectedDialog: (props: {
+    open: boolean; message: string; canRecreate: boolean; contextMoved?: boolean; onRecreate?: () => void; onOpenChange: (open: boolean) => void;
+  }) => props.open ? (
+    <div>
+      <span>{`endpoint-protected:${props.canRecreate ? 'eligible' : 'ineligible'}${props.contextMoved ? ':moved' : ''}`}</span>
+      <span>{props.message}</span>
+      <button type="button" onClick={() => { props.onOpenChange(false); props.onRecreate?.(); }}>recreate-endpoint</button>
+    </div>
+  ) : null,
+}));
 vi.mock('../FleetView/ReconnectingOverlay', () => ({ ReconnectingOverlay: () => null }));
 vi.mock('./DeleteStackDialog', () => ({ DeleteStackDialog: () => null }));
 vi.mock('./TakeDownStackDialog', () => ({ TakeDownStackDialog: () => null }));
@@ -70,6 +84,9 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
+    dockerEndpointProtected: null,
+    setDockerEndpointProtected: vi.fn(),
+    openDockerEndpointProtected: vi.fn(),
     setComposeReapplyCapture: vi.fn(),
     composeReapplyCapture: null,
     diffPreview: null,
@@ -110,6 +127,8 @@ function shellElement(
       setGitSourceOpen={() => {}}
       canSelfUpdate={false}
       reapplySelfTarget={(over.reapplySelfTarget ?? null) as never}
+      activeStackFile="web.yml"
+      isSelfStackSelected={false}
       composeReapply={(over.composeReapply ?? {}) as never}
       canSaveAndReapply={false}
       canOfferVolumeRemoval={false}
@@ -278,6 +297,87 @@ describe('ShellOverlays self-stack Reapply confirmation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'self-reapply' }));
     expect(setOpen).toHaveBeenCalledWith(false);
     expect(runReapply).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShellOverlays Docker endpoint refusal handoff', () => {
+  const target = { nodeId: 1, type: 'local' as const, name: 'Local' };
+
+  it('opens the endpoint preview for the active node and preselects endpoint-only', () => {
+    const setCapture = vi.fn();
+    const setProtected = vi.fn();
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'This deploy would recreate socket-proxy.', reason: 'provider', service: 'socket-proxy', nodeId: 1, nodeName: 'Local', nodeType: 'local', stackFile: 'web.yml' },
+        setDockerEndpointProtected: setProtected,
+        setComposeReapplyCapture: setCapture,
+      }),
+      {},
+      { reapplySelfTarget: target, composeReapply: { dispatching: false, runReapply: vi.fn() }, hydrationReady: () => true },
+    );
+    expect(screen.getByText('endpoint-protected:eligible')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'recreate-endpoint' }));
+    expect(setProtected).toHaveBeenCalledWith(null);
+    expect(setCapture).toHaveBeenCalledWith({
+      nodeId: 1,
+      nodeType: 'local',
+      nodeName: 'Local',
+      stackFile: 'web.yml',
+      initialScope: 'only',
+    });
+  });
+
+  it('offers no replacement to a caller who cannot reapply the node', () => {
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'refused', reason: 'provider', service: 'socket-proxy', nodeId: 1, nodeName: 'Local', nodeType: 'local', stackFile: 'web.yml' },
+        setDockerEndpointProtected: vi.fn(),
+      }),
+      {},
+      { reapplySelfTarget: null, hydrationReady: () => true },
+    );
+    expect(screen.getByText('endpoint-protected:ineligible')).toBeInTheDocument();
+  });
+
+  it('does not offer the replacement after the editor moved to another node', () => {
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'refused', reason: 'provider', service: 'socket-proxy', nodeId: 2, nodeName: 'Edge', nodeType: 'remote', stackFile: 'web.yml' },
+        setDockerEndpointProtected: vi.fn(),
+      }),
+      {},
+      { reapplySelfTarget: target, hydrationReady: () => true },
+    );
+    expect(screen.getByText('endpoint-protected:ineligible:moved')).toBeInTheDocument();
+  });
+
+  it('does not offer the replacement after the editor moved to another stack', () => {
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'refused', reason: 'provider', service: 'socket-proxy', nodeId: 1, nodeName: 'Local', nodeType: 'local', stackFile: 'other.yml' },
+        setDockerEndpointProtected: vi.fn(),
+      }),
+      {},
+      { reapplySelfTarget: target, hydrationReady: () => true },
+    );
+    expect(screen.getByText('endpoint-protected:ineligible:moved')).toBeInTheDocument();
+  });
+
+  it('sends nothing when status evidence is not authoritative', () => {
+    const setCapture = vi.fn();
+    const toastError = vi.spyOn(toastStore.toast, 'error').mockImplementation(() => '' as never);
+    renderShell(
+      makeOverlay({
+        dockerEndpointProtected: { message: 'refused', reason: 'provider', service: 'socket-proxy', nodeId: 1, nodeName: 'Local', nodeType: 'local', stackFile: 'web.yml' },
+        setDockerEndpointProtected: vi.fn(),
+        setComposeReapplyCapture: setCapture,
+      }),
+      {},
+      { reapplySelfTarget: target, hydrationReady: () => false },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'recreate-endpoint' }));
+    expect(toastError).toHaveBeenCalledWith('Status data unavailable. Refresh and try again.');
+    expect(setCapture).not.toHaveBeenCalled();
   });
 });
 

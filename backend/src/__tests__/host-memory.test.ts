@@ -23,7 +23,7 @@ vi.mock('systeminformation', () => ({
   default: { mem: (...args: unknown[]) => mockMem(...args) },
 }));
 
-import { getHostMemory, adjustForArc, adjustForBalloon, memoryToWire } from '../helpers/hostMemory';
+import { getHostMemory, adjustForArc, adjustForBalloon, memoryToWire, memoryUnknownWire } from '../helpers/hostMemory';
 
 // mem.active === total - available on Linux, so used/free below mirror the
 // real systeminformation shape the helper consumes.
@@ -400,6 +400,17 @@ describe('memoryToWire', () => {
   it('omits arcReclaimable when absent from the HostMemory object', () => {
     const wire = memoryToWire({ total: 1000, used: 400, free: 600, usagePercent: 40 });
     expect('arcReclaimable' in wire).toBe(false);
+  });
+
+  it('memoryUnknownWire keeps the total and nulls the usage fields', () => {
+    // A nested host with no cgroup mount: the Docker host's capacity is known,
+    // the usage is not, and no ARC/balloon field may leak the outer machine.
+    expect(memoryUnknownWire(4 * 1024 ** 3)).toEqual({
+      total: 4 * 1024 ** 3,
+      used: null,
+      free: null,
+      usagePercent: null,
+    });
   });
 
   it('includes both arcReclaimable and balloon fields when both are present', () => {

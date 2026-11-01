@@ -1,6 +1,5 @@
 import { Router, type Request, type Response } from 'express';
 import path from 'path';
-import si from 'systeminformation';
 import DockerController, { globalDockerNetwork } from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { CacheService } from '../services/CacheService';
@@ -9,7 +8,8 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
-import { getHostMemory, memoryToWire } from '../helpers/hostMemory';
+import { readLocalHostSample, hostSampleToWire } from '../helpers/hostSample';
+import { requestAcceptsUnknownHostUsage } from '../helpers/hostUsageNegotiation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isManagedByComposeDir } from '../utils/managed-containers';
@@ -282,7 +282,7 @@ metricsRouter.get('/logs/global/stream', authMiddleware, async (req: Request, re
 /**
  * Host-level CPU / memory / disk / network sample. Cached for 3s to collapse
  * overlapping samplers (dashboard polls every 5s, MonitorService samples
- * every 30s, `si.currentLoad()` blocks ~200ms per call). No write-path
+ * every 30s, a host sample blocks on `docker info` and CPU counters). No write-path
  * invalidation: these are pure host metrics.
  */
 metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Response): Promise<void> => {
@@ -291,41 +291,22 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
     const rxSec = Math.max(0, globalDockerNetwork.rxSec);
     const txSec = Math.max(0, globalDockerNetwork.txSec);
 
+    // Cache the sample, not the shaped wire: the shape depends on the caller,
+    // and a legacy hub and a current one can poll the same node inside one TTL.
+    // Remote-node requests are intercepted and proxied upstream before
+    // reaching here; this fetcher only runs for local nodes. Capacity comes
+    // from the Docker host, so a nested container reports the LXC's limits
+    // rather than the outer machine's. See helpers/hostSample.ts.
     const sample = await CacheService.getInstance().getOrFetch(
       `system-stats:${req.nodeId}`,
       SYSTEM_STATS_CACHE_TTL_MS,
-      async () => {
-        // Remote-node requests are intercepted and proxied upstream before
-        // reaching here; this fetcher only runs for local nodes.
-        const [currentLoad, hostMem, fsSize] = await Promise.all([
-          si.currentLoad(),
-          getHostMemory(),
-          si.fsSize(),
-        ]);
-
-        const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
-
-        return {
-          cpu: {
-            usage: currentLoad.currentLoad.toFixed(1),
-            cores: currentLoad.cpus.length,
-          },
-          // ARC/balloon aware: reclaimable ARC is added back into available,
-          // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
-          memory: memoryToWire(hostMem),
-          disk: mainDisk ? {
-            fs: mainDisk.fs,
-            mount: mainDisk.mount,
-            total: mainDisk.size,
-            used: mainDisk.used,
-            free: mainDisk.available,
-            usagePercent: mainDisk.use ? mainDisk.use.toFixed(1) : '0',
-          } : null,
-        };
-      },
+      () => readLocalHostSample(req.nodeId),
     );
 
-    res.json({ ...sample, network: { rxBytes: 0, txBytes: 0, rxSec, txSec } });
+    res.json({
+      ...hostSampleToWire(sample, { allowUnknown: requestAcceptsUnknownHostUsage(req) }),
+      network: { rxBytes: 0, txBytes: 0, rxSec, txSec },
+    });
   } catch (error) {
     console.error('Failed to fetch system stats:', error);
     res.status(500).json({ error: 'Failed to fetch system stats' });

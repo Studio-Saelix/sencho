@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { toast } from '@/components/ui/toast-store';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
+import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import { postStackUpdate, type StackUpdateOutcome } from '@/lib/stackUpdate';
 
@@ -64,6 +65,17 @@ export function useStackUpdate() {
             toast.error(message, { action: openEditor });
             return { ok: false as const, errorMessage: message };
           }
+          case 'docker-endpoint':
+            // This view has no endpoint-preview surface; hand the actual
+            // refusal to the editor so the same node, stack and provider are
+            // offered the safe replacement, not a generic navigation.
+            toast.error(outcome.refusal.message, {
+              action: {
+                label: 'Open stack editor',
+                onClick: () => { openEndpointRefusalInEditor(nodeId, stackName, outcome.refusal); },
+              },
+            });
+            return { ok: false as const, errorMessage: outcome.refusal.message };
           case 'busy':
             toast.error(outcome.message);
             return { ok: false as const, errorMessage: outcome.message };

@@ -4,6 +4,7 @@ import {
   dynamicTcpOwners,
   lockedServiceUrlReasons,
   parseServiceUrlResponse,
+  resolveInterpolatedHostPorts,
   resolveOpenAppTarget,
   resolvePublishedPortClick,
   serviceKeyGet,
@@ -13,8 +14,10 @@ import {
   serviceUrlEditState,
   serviceUrlSaveBlockedMessage,
   tcpOwners,
+  type AnatomyPortRef,
   type ServiceUrlEntry,
 } from './serviceUrlResolve';
+import type { PortRow } from './anatomyMarkdown';
 import { buildServiceUrl } from './serviceUrl';
 import { serviceUrlFromLabelValue } from './serviceUrlLabel';
 import { parse, parseDocument } from 'yaml';
@@ -41,6 +44,147 @@ describe('buildServiceUrl override', () => {
     })).toBe('https://app.example.com/library');
   });
 });
+
+describe('resolveInterpolatedHostPorts', () => {
+  const rawRow = (over: Partial<PortRow> = {}): PortRow => ({
+    host: '${WEB_PORT:-8080}',
+    container: '80',
+    proto: 'tcp',
+    published: true,
+    ...over,
+  });
+
+  const entry = (
+    ports: Record<string, AnatomyPortRef[]>,
+    over: Partial<ServiceUrlEntry> = {},
+  ): ServiceUrlEntry => ({
+    status: 'ready',
+    nodeId: 1,
+    stackName: 'web',
+    renderable: true,
+    serviceUrls: {},
+    serviceUrlEdit: {},
+    serviceUrlClear: {},
+    ports,
+    ...over,
+  });
+
+  it('resolves the host port from the single rendered row with the same target and protocol', () => {
+    const display = resolveInterpolatedHostPorts(
+      { web: [rawRow()] },
+      entry({ web: [{ host: '8080', container: '80', proto: 'tcp' }] }),
+    );
+    expect(display.web).toEqual([
+      { host: '8080', container: '80', proto: 'tcp', published: true, hostVariables: ['WEB_PORT'], hostResolved: true },
+    ]);
+  });
+
+  it('leaves literal rows exactly as parsed', () => {
+    const literal: PortRow = { host: '8080', container: '80', proto: 'tcp', published: true };
+    const display = resolveInterpolatedHostPorts(
+      { web: [literal] },
+      entry({ web: [{ host: '9999', container: '80', proto: 'tcp' }] }),
+    );
+    expect(display.web).toEqual([literal]);
+    expect(display.web[0]).not.toHaveProperty('hostVariables');
+    expect(display.web[0]).not.toHaveProperty('hostResolved');
+  });
+
+  it('keeps the expression while the rendered model is not usable', () => {
+    const raw = { web: [rawRow()] };
+    const rendered = { web: [{ host: '8080', container: '80', proto: 'tcp' }] };
+    for (const over of [
+      { status: 'loading' as const },
+      { status: 'unavailable' as const },
+      { status: 'unsupported' as const },
+      { renderable: false },
+    ]) {
+      expect(resolveInterpolatedHostPorts(raw, entry(rendered, over)).web[0].host).toBe('${WEB_PORT:-8080}');
+      expect(resolveInterpolatedHostPorts(raw, entry(rendered, over)).web[0].hostResolved).toBeUndefined();
+    }
+    expect(resolveInterpolatedHostPorts(raw, null).web[0].host).toBe('${WEB_PORT:-8080}');
+    expect(resolveInterpolatedHostPorts(raw, undefined).web[0].host).toBe('${WEB_PORT:-8080}');
+  });
+
+  it('keeps the expression when two rendered rows share the target and protocol', () => {
+    const display = resolveInterpolatedHostPorts(
+      { web: [rawRow()] },
+      entry({ web: [
+        { host: '8080', container: '80', proto: 'tcp' },
+        { host: '8081', container: '80', proto: 'tcp' },
+      ] }),
+    );
+    expect(display.web[0].host).toBe('${WEB_PORT:-8080}');
+  });
+
+  it('keeps the expression when the container side is itself a variable', () => {
+    const display = resolveInterpolatedHostPorts(
+      { web: [rawRow({ host: '${WEB_PORT}', container: '${APP_PORT}' })] },
+      entry({ web: [{ host: '8080', container: '${APP_PORT}', proto: 'tcp' }] }),
+    );
+    expect(display.web[0]).toMatchObject({ host: '${WEB_PORT}', hostVariables: ['WEB_PORT'] });
+    expect(display.web[0].hostResolved).toBeUndefined();
+  });
+
+  it('resolves tcp and udp independently on the same target', () => {
+    const display = resolveInterpolatedHostPorts(
+      {
+        web: [
+          rawRow(),
+          rawRow({ host: '${DNS_PORT:-5353}', proto: 'udp', container: '53' }),
+        ],
+      },
+      entry({ web: [
+        { host: '8080', container: '80', proto: 'tcp' },
+        { host: '5353', container: '53', proto: 'udp' },
+      ] }),
+    );
+    expect(display.web.map(r => [r.host, r.proto])).toEqual([['8080', 'tcp'], ['5353', 'udp']]);
+  });
+
+  it('keeps the expression when the service is absent from the rendered model', () => {
+    const display = resolveInterpolatedHostPorts(
+      { web: [rawRow()] },
+      entry({ api: [{ host: '8080', container: '80', proto: 'tcp' }] }),
+    );
+    expect(display.web[0].host).toBe('${WEB_PORT:-8080}');
+  });
+
+  it('keeps the expression for a dynamic or ranged rendered host', () => {
+    const raw = { web: [rawRow()] };
+    expect(resolveInterpolatedHostPorts(raw, entry({ web: [{ host: '0', container: '80', proto: 'tcp' }] })).web[0].host)
+      .toBe('${WEB_PORT:-8080}');
+    expect(resolveInterpolatedHostPorts(raw, entry({ web: [{ host: '', container: '80', proto: 'tcp' }] })).web[0].host)
+      .toBe('${WEB_PORT:-8080}');
+    expect(resolveInterpolatedHostPorts(raw, entry({ web: [{ host: '8080-8082', container: '80', proto: 'tcp' }] })).web[0].host)
+      .toBe('${WEB_PORT:-8080}');
+  });
+
+  it('keeps a service named constructor on the null-prototype map', () => {
+    const display = resolveInterpolatedHostPorts(
+      { constructor: [rawRow()] },
+      entry({ constructor: [{ host: '8080', container: '80', proto: 'tcp' }] }),
+    );
+    expect(Object.prototype.hasOwnProperty.call(display, 'constructor')).toBe(true);
+    expect(serviceKeyGet(display, 'constructor')?.[0].host).toBe('8080');
+  });
+
+  it('uses a ready entry whose last refresh failed', () => {
+    const display = resolveInterpolatedHostPorts(
+      { web: [rawRow()] },
+      entry({ web: [{ host: '8080', container: '80', proto: 'tcp' }] }, { refreshFailed: true }),
+    );
+    expect(display.web[0]).toMatchObject({ host: '8080', hostResolved: true });
+  });
+
+  it('keeps a container-only row untouched', () => {
+    const row: PortRow = { host: '${WEB_PORT}', container: '${WEB_PORT}', proto: 'tcp', published: false };
+    const display = resolveInterpolatedHostPorts({ web: [row] }, entry({ web: [{ host: '8080', container: '80', proto: 'tcp' }] }));
+    expect(display.web[0].host).toBe('${WEB_PORT}');
+    expect(display.web[0].hostResolved).toBeUndefined();
+  });
+});
+
 
 describe('tcpOwners', () => {
   it('ignores UDP on the same port number', () => {

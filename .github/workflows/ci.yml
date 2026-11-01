@@ -104,7 +104,7 @@ jobs:
   backend-docker-integration:
     name: Backend Docker integration
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     steps:
@@ -121,6 +121,12 @@ jobs:
       - name: Install Dependencies
         working-directory: ./backend
         run: npm ci
+
+      # The whole-node journey layers this checkout's compiled dist onto the
+      # published Sencho image, so the Docker integration job needs a build.
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
 
       - name: Docker integration tests (dedicated Vitest config)
         working-directory: ./backend
@@ -354,6 +360,7 @@ jobs:
         run: |
           node --check scripts/credit-changelog-contributors.mjs
           node --check scripts/release-notes-from-changelog.mjs
+          node --check scripts/release-highlights.mjs
           node --check scripts/audit-with-vex.mjs
           node --check scripts/check-pr-title.mjs
           node --check scripts/check-version-transition.mjs
@@ -362,6 +369,7 @@ jobs:
         run: |
           node --test scripts/credit-changelog-contributors.test.mjs
           node --test scripts/release-notes-from-changelog.test.mjs
+          node --test scripts/release-highlights.test.mjs
           node --test scripts/audit-with-vex.test.mjs
           node --test scripts/check-pr-title.test.mjs
           node --test scripts/check-version-transition.test.mjs

@@ -6,7 +6,7 @@ export type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown
 
 /** One input to the readiness verdict (preflight, drift, containers, ...). */
 export interface ReadinessSignal {
-  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk' | 'service';
+  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk' | 'compose_version' | 'service';
   status: SignalStatus;
   /** Short headline ("Compose Doctor", "Running containers"). */
   title: string;
@@ -73,6 +73,12 @@ export interface ContainerProbe {
   restartPolicy: string | null;
   /** Mount descriptors ("volume data", "bind /srv/app"), for coverage disclosure. */
   mounts: string[];
+  /** Compose service from the container label, or null for an orphan/empty label. */
+  service: string | null;
+  /** `com.docker.compose.version` from the container label, or null when it records none. */
+  composeVersion: string | null;
+  /** A `compose run` container, never brought up again by a stack update. */
+  oneOff: boolean;
 }
 
 /** Lifecycle of a post-update health gate observation. */

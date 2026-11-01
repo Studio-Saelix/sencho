@@ -185,6 +185,28 @@ describe('PreflightPanel', () => {
     expect(status).not.toHaveTextContent(/info/i);
   });
 
+  it('renders a Compose version mismatch as a Note without acknowledgement', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'pass',
+      activeStatus: 'pass',
+      activeCount: 0,
+      findings: [{
+        ruleId: 'compose-version-mismatch',
+        severity: 'info',
+        title: 'Created by another Docker Compose version',
+        message: 'proxy was created by Docker Compose 2.38.1. This node deploys with Docker Compose 5.6.0, which can record a container\'s configuration or image differently, so the next deploy or update can recreate it even if nothing in the file changed.',
+        remediation: 'Deploy this stack from one place.',
+      }],
+    })));
+    render(<PreflightPanel stackName="web" canEdit />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveTextContent(/all clear/i);
+    expect(screen.getByTestId('preflight-notes-section')).toHaveTextContent(/Created by another Docker Compose version/i);
+    expect(screen.queryByTestId('preflight-ack-btn-compose-version-mismatch-web')).not.toBeInTheDocument();
+    expect(status).not.toHaveTextContent(/info/i);
+  });
+
   it('excludes notes from the graded summary line when issue findings remain', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
       status: 'warning',

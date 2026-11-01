@@ -5,6 +5,7 @@ import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
 import { toast } from '../components/ui/toast-store';
 import { fetchActiveServiceRecovery, fetchStackRecoveries, requestServiceRestore, type StackRecoveryEntry } from '../lib/serviceUpdate';
+import { openEndpointRefusalInEditor } from '../lib/endpointRefusalHandoff';
 
 export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan' | 'pull';
 
@@ -616,7 +617,17 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
         });
         toast.dismiss(loadingId);
         if (!result.ok) {
-          toast.error(result.error);
+          if (result.endpointRefusal) {
+            const refusal = result.endpointRefusal;
+            toast.error(result.error, {
+              action: {
+                label: 'Open stack editor',
+                onClick: () => { openEndpointRefusalInEditor(gate.nodeId, gate.stackName, refusal); },
+              },
+            });
+          } else {
+            toast.error(result.error);
+          }
           return;
         }
         if (result.healthGateId && result.observing) {

@@ -18,6 +18,7 @@ import TerminalComponent from '@/components/Terminal';
 import { useDeployFeedback, VERB_LABELS, type HealthGateUiState } from '@/context/DeployFeedbackContext';
 import { useDeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
 import { requestServiceRestore } from '@/lib/serviceUpdate';
+import { openEndpointRefusalInEditor } from '@/lib/endpointRefusalHandoff';
 import { toast } from '@/components/ui/toast-store';
 
 const AUTO_CLOSE_SECONDS = 4;
@@ -408,7 +409,17 @@ function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
             deploySessionId: ds,
           });
           if (!result.ok) {
-            toast.error(result.error);
+            if (result.endpointRefusal) {
+              const refusal = result.endpointRefusal;
+              toast.error(result.error, {
+                action: {
+                  label: 'Open stack editor',
+                  onClick: () => { openEndpointRefusalInEditor(gate.nodeId, gate.stackName, refusal); },
+                },
+              });
+            } else {
+              toast.error(result.error);
+            }
             return { ok: false as const, errorMessage: result.error };
           }
           if (result.healthGateId && result.observing) {

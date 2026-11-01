@@ -1,134 +1,240 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-
-// vi.mock factories are hoisted above all other module-scope code, so a plain
-// array literal referenced from the factory would hit a temporal-dead-zone
-// ReferenceError; vi.hoisted() hoists the declaration itself alongside it.
-const mockEntries = vi.hoisted(() => [
-  { id: 'entry-a', title: 'First feature', blurb: 'Does the first thing.', screenshot: 'first.png' },
-  { id: 'entry-b', title: 'Second feature', blurb: 'Does the second thing.', docUrl: 'https://docs.sencho.io/features/second', screenshot: 'second.png' },
-]);
-vi.mock('@/whats-new/entries', () => ({ whatsNewEntries: mockEntries }));
 
 const mockSetEnabled = vi.fn();
 const mockMarkSeen = vi.fn();
+const mockPreference = vi.fn();
 vi.mock('@/hooks/useWhatsNewPreference', () => ({
-  useWhatsNewPreference: () => ({ enabled: true, hasUnseen: true, setEnabled: mockSetEnabled, markSeen: mockMarkSeen }),
+  useWhatsNewPreference: () => mockPreference(),
 }));
 
+const mockApiFetch = vi.fn();
+vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => mockApiFetch(...args) }));
+
 import { WhatsNewModal } from '../WhatsNewModal';
+
+function givenVersion(version: string | null) {
+  mockPreference.mockReturnValue({
+    enabled: true,
+    version,
+    hasUnseen: true,
+    setEnabled: mockSetEnabled,
+    markSeen: mockMarkSeen,
+  });
+}
+
+function notesResponse(version: string | null, releaseNotes: string | null, htmlUrl: string | null = 'https://github.com/o/r/releases/tag/v0.98.1') {
+  return { ok: true, json: async () => ({ version, releaseNotes, htmlUrl }) };
+}
+
+const WITH_HIGHLIGHTS = '### Highlights\n\n<!-- highlights-hash: 0123456789abcdef -->\n\nCordon is here.\n\n### Added\n\n* a change';
+const NO_HIGHLIGHTS = '### Added\n\n* a change';
+
+const noop = () => {};
 
 describe('WhatsNewModal', () => {
   beforeEach(() => {
     mockSetEnabled.mockClear();
     mockMarkSeen.mockClear();
+    mockApiFetch.mockReset();
+    givenVersion('0.98.1');
+    mockApiFetch.mockResolvedValue(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
-  it('renders every entry, newest first, with title and blurb', () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
-    expect(titles).toEqual(['Second feature', 'First feature']);
-    expect(screen.getByText('Does the second thing.')).toBeInTheDocument();
+  it('asks the local hub for the running version and shows its highlights only', async () => {
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledWith(
+      '/fleet/update-status/release-notes?version=0.98.1',
+      { localOnly: true },
+    );
+    expect(screen.getByText(/Release v?0\.98\.1/)).toBeInTheDocument();
+    // The change list below the block belongs to the Changelog tab, not here.
+    expect(screen.queryByText('a change')).not.toBeInTheDocument();
+    expect(screen.queryByText(/highlights-hash/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View on GitHub/ })).toHaveAttribute(
+      'href',
+      'https://github.com/o/r/releases/tag/v0.98.1',
+    );
   });
 
-  it('renders a doc link only for entries that have one, and a screenshot for each that does', () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    expect(screen.getAllByRole('link', { name: /Learn more/ })).toHaveLength(1);
-    expect(screen.getAllByRole('img').map((i) => i.getAttribute('src'))).toEqual([
-      '/whats-new/second.png',
-      '/whats-new/first.png',
-    ]);
+  it('says so when the release has no highlights', async () => {
+    mockApiFetch.mockResolvedValue(notesResponse('0.98.1', NO_HIGHLIGHTS));
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/no highlights/i)).toBeInTheDocument();
   });
 
-  it('drops only the screenshot that fails to load, leaving the rest of the entry and other images intact', () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    fireEvent.error(screen.getByAltText('Second feature'));
-    expect(screen.queryByAltText('Second feature')).not.toBeInTheDocument();
-    // A sibling entry's screenshot must survive, which is what makes the
-    // failure set per-entry rather than a single global flag.
-    expect(screen.getByAltText('First feature')).toBeInTheDocument();
-    // The failed entry keeps everything except its image.
-    expect(screen.getByText('Does the second thing.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /Learn more/ })).toBeInTheDocument();
+  it('shows the error state, not "no highlights", when the hub cannot load the release (502)', async () => {
+    mockApiFetch.mockResolvedValue({ ok: false, status: 502, json: async () => ({ error: 'Release notes unavailable' }) });
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no highlights/i)).not.toBeInTheDocument();
   });
 
-  it('marks the newest entry seen when opened', () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    expect(mockMarkSeen).toHaveBeenCalledTimes(1);
+  it('treats an answer for another version, or for none, as a failed load', async () => {
+    mockApiFetch.mockResolvedValue(notesResponse(null, null, null));
+    const { unmount } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+    unmount();
+
+    mockApiFetch.mockResolvedValue(notesResponse('0.99.0', WITH_HIGHLIGHTS));
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+    expect(screen.queryByText('Cordon is here.')).not.toBeInTheDocument();
   });
 
-  it('does not mark seen when closed', () => {
-    render(<WhatsNewModal open={false} onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
+  it('retries a failed load on the next open and does not fetch in a loop meanwhile', async () => {
+    mockApiFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) });
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
+
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('looks again on the next open when the release had no highlights yet', async () => {
+    mockApiFetch.mockResolvedValueOnce(notesResponse('0.98.1', NO_HIGHLIGHTS));
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/no highlights/i)).toBeInTheDocument();
+
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch when reopened after highlights loaded', async () => {
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    await screen.findByText('Cordon is here.');
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    await screen.findByText('Cordon is here.');
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a response that arrives after the version changed', async () => {
+    let resolveOld: (value: unknown) => void = noop;
+    mockApiFetch
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(notesResponse('0.99.0', '### Highlights\n\nNew release text.'));
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+
+    givenVersion('0.99.0');
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('New release text.')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOld(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    });
+    expect(screen.getByText('New release text.')).toBeInTheDocument();
+    expect(screen.queryByText('Cordon is here.')).not.toBeInTheDocument();
+  });
+
+  it('ignores a response that arrives after the modal was closed and reopened on a failure', async () => {
+    let resolveFirst: (value: unknown) => void = noop;
+    mockApiFetch
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) });
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirst(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    });
+    expect(screen.getByText(/could not be loaded/i)).toBeInTheDocument();
+    expect(screen.queryByText('Cordon is here.')).not.toBeInTheDocument();
+  });
+
+  it('does not fetch while closed or without a stable version', () => {
+    render(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    expect(mockApiFetch).not.toHaveBeenCalled();
+    givenVersion(null);
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(mockApiFetch).not.toHaveBeenCalled();
+  });
+
+  it('marks the release seen once the lookup answered, not before', async () => {
+    let resolveNotes: (value: unknown) => void = noop;
+    mockApiFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveNotes = resolve; }));
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
     expect(mockMarkSeen).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveNotes(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    });
+    await waitFor(() => expect(mockMarkSeen).toHaveBeenCalledTimes(1));
   });
 
-  it('"Never show again" disables the preference and closes the modal', async () => {
-    const onOpenChange = vi.fn();
-    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Never show again' }));
-    expect(mockSetEnabled).toHaveBeenCalledWith(false);
-    // The nav trigger disappears with the preference, so the modal must not
-    // be left open behind it.
-    expect(onOpenChange).toHaveBeenCalledWith(false);
+  it('also marks it seen after a failed lookup, so the dot clears on a hub that cannot reach GitHub', async () => {
+    mockApiFetch.mockResolvedValue({ ok: false, status: 502, json: async () => ({}) });
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+    await waitFor(() => expect(mockMarkSeen).toHaveBeenCalledTimes(1));
   });
 
-  it('"Got it" closes the modal without touching the preference', async () => {
+  it('shows the loading state, not the old error, while a retry is in flight', async () => {
+    mockApiFetch.mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) });
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText(/could not be loaded/i)).toBeInTheDocument();
+
+    let resolveRetry: (value: unknown) => void = noop;
+    mockApiFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+    await act(async () => {
+      resolveRetry(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    });
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+  });
+
+  it('ignores a failure that arrives late from a superseded request', async () => {
+    let rejectFirst: (reason: unknown) => void = noop;
+    mockApiFetch
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(notesResponse('0.98.1', WITH_HIGHLIGHTS));
+    const { rerender } = render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open={false} onOpenChange={noop} onViewChangelog={noop} />);
+    rerender(<WhatsNewModal open onOpenChange={noop} onViewChangelog={noop} />);
+    expect(await screen.findByText('Cordon is here.')).toBeInTheDocument();
+
+    await act(async () => {
+      rejectFirst(new Error('late network error'));
+    });
+    expect(screen.getByText('Cordon is here.')).toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/i)).not.toBeInTheDocument();
+    // A stale rejection that overwrote the loaded result would trigger another lookup.
+    expect(mockApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('"Got it" closes the modal without disabling the feature', async () => {
     const onOpenChange = vi.fn();
-    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={noop} />);
     await userEvent.click(screen.getByRole('button', { name: 'Got it' }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(mockSetEnabled).not.toHaveBeenCalled();
   });
 
-  it('"View full changelog" calls the callback', async () => {
+  it('"Never show again" disables the feature and closes the modal', async () => {
+    const onOpenChange = vi.fn();
+    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={noop} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Never show again' }));
+    expect(mockSetEnabled).toHaveBeenCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('"View full changelog" calls onViewChangelog', async () => {
     const onViewChangelog = vi.fn();
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={onViewChangelog} />);
+    render(<WhatsNewModal open onOpenChange={noop} onViewChangelog={onViewChangelog} />);
     await userEvent.click(screen.getByRole('button', { name: 'View full changelog' }));
     expect(onViewChangelog).toHaveBeenCalledTimes(1);
-  });
-
-  it('clicking a screenshot opens a zoomed overlay with the same image', async () => {
-    render(<WhatsNewModal open onOpenChange={vi.fn()} onViewChangelog={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
-    const zoomed = screen.getByRole('dialog', { name: 'Zoomed screenshot' });
-    expect(zoomed.querySelector('img')).toHaveAttribute('src', '/whats-new/second.png');
-  });
-
-  it('the close button dismisses only the zoom overlay, leaving the parent modal open', async () => {
-    const onOpenChange = vi.fn();
-    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Close zoomed screenshot' }));
-    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
-    // The regression this guards against: an earlier implementation portaled
-    // the overlay to document.body, outside Radix's Dialog content subtree,
-    // so Radix treated every zoom-dismiss click as an outside click and also
-    // closed the parent. If that regressed, onOpenChange(false) fires here.
-    expect(onOpenChange).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
-  });
-
-  it('clicking the backdrop dismisses only the zoom overlay, leaving the parent modal open', async () => {
-    const onOpenChange = vi.fn();
-    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
-    await userEvent.click(screen.getByRole('dialog', { name: 'Zoomed screenshot' }));
-    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
-    expect(onOpenChange).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
-  });
-
-  it('Escape dismisses only the zoom overlay, leaving the parent modal open', async () => {
-    const onOpenChange = vi.fn();
-    render(<WhatsNewModal open onOpenChange={onOpenChange} onViewChangelog={vi.fn()} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Zoom in on Second feature screenshot' }));
-    await userEvent.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog', { name: 'Zoomed screenshot' })).not.toBeInTheDocument();
-    // Radix's own Escape handling for the parent Dialog is a document-level
-    // capture listener; without stopPropagation this fires too and also
-    // requests the parent close.
-    expect(onOpenChange).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: "What's New" })).toBeInTheDocument();
   });
 });

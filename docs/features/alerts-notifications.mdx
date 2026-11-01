@@ -400,6 +400,8 @@ The suppression window defaults to 60 minutes and is configured per node in **Se
 
 The entire host threshold evaluation can be silenced per node from **Settings · Monitoring · Host Alerts · Host threshold alerts** while keeping the configured limit values. This toggle affects only the CPU, RAM, and disk threshold checks; crash capture, stack alert rules, and health gate checks all continue to run independently.
 
+On a Sencho or Pilot agent container nested inside an LXC, host CPU and memory usage are readable only when the Docker host's cgroup tree is mounted. Without that mount Sencho skips the CPU and RAM thresholds (disk keeps evaluating, and any existing suppression is cleared) and logs one warning naming the mount, rather than alerting on the outer machine's numbers. See [Docker hosts inside an LXC or another container](/getting-started/configuration#docker-hosts-inside-an-lxc-or-another-container).
+
 ### Reclaimable Docker data
 
 `info`/`system`: `This node has accumulated <N> GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.` 24-hour cooldown. On a multi-node fleet the bell attributes remotes with a node-name badge rather than embedding the name in the message.

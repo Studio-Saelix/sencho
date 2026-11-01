@@ -26,6 +26,14 @@ import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '..
 import { resolveStackEnvSources } from '../helpers/envFileResolution';
 import { isSelfStack } from '../helpers/selfStackGuard';
 import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
+import { listNodeContainers } from '../helpers/dockerEndpointGuard';
+import {
+  COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+  composeVersionContainerFromLabels,
+  findComposeVersionSkew,
+  type ComposeVersionSkew,
+} from '../helpers/composeVersionSkew';
+import { withTimeout } from '../utils/withTimeout';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
@@ -278,6 +286,7 @@ export class ComposeDoctorService {
     ]);
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls, exposureAvailable } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
+    const composeVersionSkew = await this.composeVersionSkew(nodeId, stackName);
 
     return {
       stackName,
@@ -303,7 +312,33 @@ export class ComposeDoctorService {
       exposureAvailable,
       isSelfStack: selfStack,
       healthchecks,
+      composeVersionSkew,
     };
+  }
+
+  /**
+   * Containers created by a different Compose version than this node deploys
+   * with. Best-effort: a failed listing or an unreadable version yields null (no
+   * note) with a logged warning, and the run still completes.
+   */
+  private async composeVersionSkew(nodeId: number, stackName: string): Promise<ComposeVersionSkew | null> {
+    try {
+      const listed = await withTimeout(
+        listNodeContainers(nodeId, stackName),
+        COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+        'preflight compose version container list',
+      );
+      const running = await withTimeout(
+        ComposeService.getInstance(nodeId).composeVersion(),
+        COMPOSE_VERSION_PROBE_TIMEOUT_MS,
+        'preflight compose version probe',
+      );
+      return findComposeVersionSkew(listed.stack.map(container => composeVersionContainerFromLabels(container.Labels)), running);
+    } catch (error) {
+      console.warn('[ComposeDoctor] Compose version check unavailable for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return null;
+    }
   }
 
   /**

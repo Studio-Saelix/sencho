@@ -19,6 +19,7 @@ import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationSt
 import { useUrlSync } from './EditorLayout/hooks/useUrlSync';
 import { shouldClearPendingDetailStack } from './EditorLayout/mobile-pending-detail';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
+import { loadedEndpointRefusal, type PendingEndpointRefusal } from './EditorLayout/hooks/pendingEndpointRefusal';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
 import { useSelectedStackLiveRefresh } from './EditorLayout/hooks/useSelectedStackLiveRefresh';
 import { useTheme } from '@/hooks/use-theme';
@@ -39,6 +40,7 @@ import { useHomeNavigation } from './EditorLayout/hooks/useHomeNavigation';
 import { resolveNodeSettleAction } from './EditorLayout/resolveNodeSettleAction';
 import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
 import { useComposeReapplyAction, type ComposeReapplyTarget } from './FleetView/hooks/useComposeReapplyAction';
+import { useEndpointProviderOption } from './FleetView/hooks/useEndpointProviderOption';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
     GlobalCommandPalette,
@@ -254,6 +256,20 @@ export default function EditorLayout() {
     isAdmin && canReapplyCompose && activeNode
       ? { nodeId: activeNode.id, type: activeNode.type === 'local' ? 'local' : 'remote', name: activeNode.name }
       : null;
+  // The dedicated "recreate only the Docker endpoint" action needs a provider
+  // this node can replace from here; the confirm itself re-reads the option and
+  // explains any refusal.
+  const selfEndpointProvider = useEndpointProviderOption(
+    isSelfStackSelected && isAdmin ? activeNode?.id ?? null : null,
+    isSelfStackSelected && isAdmin,
+  );
+  // Only the endpoint-only action, so it is offered only when the node can
+  // actually leave Sencho running. A node with the older stack-scope answer
+  // would otherwise open a "Recreate Docker endpoint" preview that restarts
+  // Sencho.
+  const canRecreateDockerEndpoint = canSaveAndReapply
+    && selfEndpointProvider?.state === 'available'
+    && selfEndpointProvider.providerOnly === true;
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -711,13 +727,23 @@ export default function EditorLayout() {
   // is already active, else stash it and switch nodes (the node-switch effect
   // loads the pending stack once the registry settles). Mobile shows the
   // optimistic detail surface immediately.
+  const [pendingEndpointRefusal, setPendingEndpointRefusal] = useState<PendingEndpointRefusal | null>(null);
+
   const handleFleetNavigateToNode = (
     nodeId: number,
     stackName: string,
     destination: SenchoOpenStackDetail['destination'] = 'stack',
+    endpointRefusal?: SenchoOpenStackDetail['endpointRefusal'],
   ) => {
     const node = nodes.find(n => n.id === nodeId);
-    if (!node) return;
+    if (!node) {
+      setPendingEndpointRefusal(null);
+      return;
+    }
+    // A refusal is bound to the node and stack it named. It is opened only once
+    // that stack is actually the active selection (see the effect below), so a
+    // node-switch or a canceled dirty-editor prompt cannot retarget it.
+    setPendingEndpointRefusal(endpointRefusal ? { nodeId, stackName, refusal: endpointRefusal } : null);
     setPendingAnatomyTab(
       destination === 'anatomy-networking' ? 'networking'
         : destination === 'doctor' ? 'doctor'
@@ -744,11 +770,37 @@ export default function EditorLayout() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<SenchoOpenStackDetail>).detail;
-      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName, detail.destination);
+      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName, detail.destination, detail.endpointRefusal);
     };
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, handler);
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
+
+  // Open the Docker endpoint handoff only for the stack the refusal named and
+  // only after it has loaded, so an eligible refusal reaches the same preview
+  // without being applied to another stack or node.
+  useEffect(() => {
+    const loaded = loadedEndpointRefusal(
+      pendingEndpointRefusal,
+      activeNode?.id ?? null,
+      files,
+      selectedFile,
+      isFileLoading,
+    );
+    if (!loaded || !pendingEndpointRefusal) return;
+    const refusal = pendingEndpointRefusal.refusal;
+    const nodeName = activeNode?.name ?? null;
+    const nodeType = activeNode?.type === 'local' ? 'local' : 'remote';
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the handoff is consumed once its target has loaded
+    setPendingEndpointRefusal(null);
+    overlayState.openDockerEndpointProtected({
+      ...refusal,
+      nodeId: loaded.nodeId,
+      nodeName,
+      nodeType,
+      stackFile: loaded.stackFile,
+    });
+  }, [pendingEndpointRefusal, activeNode, files, selectedFile, isFileLoading, overlayState.openDockerEndpointProtected]);
 
   // A hub-only destination (GitOps, Fleet, ...) asked for from a remote node,
   // e.g. a stack's Git indicator: switch to the hub, then open it there, the
@@ -1124,6 +1176,15 @@ export default function EditorLayout() {
       isSelfStack={isSelfStackSelected}
       actionsReady={actionsReady}
       canSaveAndReapply={canSaveAndReapply}
+      onRecreateDockerEndpoint={canRecreateDockerEndpoint && selectedFile && reapplySelfTarget ? () => {
+        overlayState.setComposeReapplyCapture({
+          nodeId: reapplySelfTarget.nodeId,
+          nodeType: reapplySelfTarget.type,
+          nodeName: reapplySelfTarget.name,
+          stackFile: selectedFile,
+          initialScope: 'only',
+        });
+      } : undefined}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
         if (!selectedFile) return;
@@ -1579,6 +1640,8 @@ export default function EditorLayout() {
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
           reapplySelfTarget={reapplySelfTarget}
+          activeStackFile={selectedFile}
+          isSelfStackSelected={isSelfStackSelected}
           composeReapply={composeReapply}
           canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}

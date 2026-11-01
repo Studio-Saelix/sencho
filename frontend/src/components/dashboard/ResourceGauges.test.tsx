@@ -239,3 +239,64 @@ describe('ResourceGauges memory tile', () => {
     expect(memoryBar(tile)).toBeNull();
   });
 });
+
+// A host whose usage cannot be measured (Sencho inside an LXC with no cgroup
+// mount) reports capacity with null usage. That is not 0%: it must read `--`,
+// carry no threshold tone, and name the docs section that explains the fix.
+const unknownStats: SystemStats = {
+  cpu: { usage: null, cores: 2 },
+  memory: { total: 4 * GiB, used: null, free: null, usagePercent: null },
+  disk: { fs: '/', mount: '/', total: 100 * GiB, used: 40 * GiB, free: 60 * GiB, usagePercent: '40' },
+};
+
+function cpuHero(): HTMLElement {
+  const hero = document.querySelector('.text-4xl');
+  if (!(hero instanceof HTMLElement)) throw new Error('CPU hero missing');
+  return hero;
+}
+
+describe('ResourceGauges unknown usage', () => {
+  it('renders the CPU hero as an untinted placeholder with the capacity and a docs link', () => {
+    render(<ResourceGauges systemStats={unknownStats} cpuHistory={[]} netHistory={[]} historyEndAt={null} />);
+
+    const hero = cpuHero();
+    expect(hero.textContent).toBe('--');
+    expect(hero.className).toContain('text-stat-value');
+    expect(hero.className).not.toContain('text-warning');
+    expect(hero.className).not.toContain('text-destructive');
+
+    const cpuTile = screen.getByText(/^CPU/).parentElement;
+    expect(cpuTile?.textContent).toContain('2 cores · usage unknown');
+    const link = screen.getAllByRole('link', { name: /Show usage/i })[0];
+    expect(link.getAttribute('href')).toContain('#docker-hosts-inside-an-lxc-or-another-container');
+  });
+
+  it('renders the memory tile as an untinted placeholder with the total, no bar, and a docs link', () => {
+    render(<ResourceGauges systemStats={unknownStats} cpuHistory={[]} netHistory={[]} historyEndAt={null} />);
+
+    const tile = memoryTile();
+    const hero = memoryHero(tile);
+    expect(hero.textContent).toBe('--');
+    expect(hero.className).toContain('text-stat-value');
+    expect(hero.className).not.toContain('text-warning');
+    expect(hero.className).not.toContain('text-destructive');
+    expect(tile.textContent).toContain('4 GB total · usage unknown');
+    expect(memoryBar(tile)).toBeNull();
+    expect(screen.getAllByRole('link', { name: /Show usage/i })).toHaveLength(2);
+  });
+
+  it('keeps the measured path unchanged when only memory is unknown', () => {
+    render(
+      <ResourceGauges
+        systemStats={{ ...unknownStats, cpu: { usage: '55.5', cores: 2 } }}
+        cpuHistory={[]}
+        netHistory={[]}
+        historyEndAt={null}
+      />,
+    );
+
+    expect(cpuHero().textContent).toBe('55.5%');
+    expect(cpuHero().className).toContain('text-stat-value');
+    expect(screen.getAllByRole('link', { name: /Show usage/i })).toHaveLength(1);
+  });
+});

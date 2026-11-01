@@ -51,6 +51,8 @@ export const CAPABILITIES = [
   'users',
   'registries',
   'self-update',
+  'endpoint-provider-replace',
+  'endpoint-provider-only',
   'vulnerability-scanning',
   'compose-doctor',
   'update-guard',
@@ -75,6 +77,7 @@ export const CAPABILITIES = [
   'fleet-readiness-v1',
   'blueprint-digest-pins-v1',
   'health-gate-observation-v1',
+  'host-usage-unknown-v1',
 ] as const;
 
 /**
@@ -195,6 +198,27 @@ export const HEALTH_GATE_OBSERVATION_CAPABILITY =
   'health-gate-observation-v1' as const satisfies Capability;
 
 /**
+ * A node whose `/api/system/stats` and fleet row can report CPU and memory
+ * usage as `null` (a nested container with no trusted cgroup reading) and
+ * whose UI renders that as unknown.
+ *
+ * A hub that advertises this capability sends the request header below on a
+ * read only when that read's end caller can render unknown usage: a browser
+ * session always can, and an API token or upstream hub must send the header
+ * itself. A remote that sees the header answers with `null`; a caller that does
+ * not advertise it gets the pre-nested-support numeric shape instead of a null
+ * that would render as `NaN%` and a Critical fleet card. The flag is also
+ * advertised on `/api/meta` for mixed-version diagnostics.
+ */
+export const HOST_USAGE_UNKNOWN_CAPABILITY = 'host-usage-unknown-v1' as const satisfies Capability;
+
+/** Request header a hub sets when it advertises `host-usage-unknown-v1`. */
+export const HOST_USAGE_UNKNOWN_HEADER = 'x-sencho-host-usage-unknown';
+
+/** Header value a capable hub sends. Any other value means "cannot render unknown". */
+export const HOST_USAGE_UNKNOWN_HEADER_VALUE = '1';
+
+/**
  * Leaves whose `/api/blueprints/apply-local` honors `digestPins` (deploys each
  * service at the pinned digest with `--pull never` instead of its authored
  * tag). A leaf without this flag ignores the field and redeploys by tag, so the
@@ -259,6 +283,13 @@ export interface RemoteMeta {
    * older than this field or offline. Safe to expose (no private repository path).
    */
   imageChannel: 'community' | 'hardened' | 'unknown' | null;
+  /** True while the remote is still verifying a Docker endpoint replacement it ran during an update. */
+  endpointProviderPending?: boolean;
+  /**
+   * When the remote last verified a Docker endpoint replacement. A provider-only
+   * Reapply leaves the process running, so this is what changes on success.
+   */
+  endpointProviderCompletedAt?: number | null;
 }
 
 export type RemoteMetaTransportFailure =
@@ -422,6 +453,10 @@ export async function probeRemoteMeta(
       imagePinKind: parseImagePinKind(res.data.imagePinKind),
       updateBlocked: res.data.updateBlocked === true,
       imageChannel: parseImageChannel(res.data.imageChannel),
+      endpointProviderPending: res.data.endpointProviderPending === true,
+      endpointProviderCompletedAt: typeof res.data.endpointProviderCompletedAt === 'number'
+        ? res.data.endpointProviderCompletedAt
+        : null,
     };
     if (isDebugEnabled()) {
       // Diagnostic aid for "why is this feature gated?": log the resolved version

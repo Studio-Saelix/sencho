@@ -10,14 +10,16 @@ export interface Stats {
 
 export interface SystemStats {
   cpu: {
-    usage: string;
+    /** Null when the host usage cannot be measured without leaking the outer machine (nested container, no cgroup mount). */
+    usage: string | null;
     cores: number;
   };
   memory: {
     total: number;
-    used: number;
-    free: number;
-    usagePercent: string;
+    /** Null together with `free` and `usagePercent` when host usage is unknown. */
+    used: number | null;
+    free: number | null;
+    usagePercent: string | null;
     arcReclaimable?: number;
     ballooned?: number;
     effectiveTotal?: number;

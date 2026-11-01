@@ -17,6 +17,7 @@ import { useSyncExternalStore } from 'react';
 import { render, act, cleanup } from '@testing-library/react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 
 // Types are erased, so they can sit outside the hoisted block the mock factories read.
 type TestNode = { id: number; name: string; type: string; is_default: boolean };
@@ -33,6 +34,15 @@ interface Captured {
       pendingLeaveAction: unknown;
       setPendingLeaveAction: (action: { run: () => void } | null) => void;
       setPendingUnsavedLoad: (load: string | null) => void;
+      dockerEndpointProtected?: {
+        message: string;
+        reason: string | null;
+        service: string | null;
+        nodeId: number | null;
+        nodeName: string | null;
+        nodeType: 'local' | 'remote' | null;
+        stackFile: string | null;
+      } | null;
     };
     stackActions: { discardAndLoadPending: () => void; cancelPendingUnsavedLoad: () => void };
   };
@@ -382,5 +392,75 @@ describe.each([[false], [true]])('the settings link through the real shell, isMo
     expect(toast.info).not.toHaveBeenCalled();
     expect(cap.shell.overlayState.pendingUnsavedLoad).toBe('app.yml');
     expect(store.activeNode.id).toBe(2);
+  });
+});
+
+describe('the Docker endpoint refusal handoff through the real shell', () => {
+  const STACK = 'sencho.yml';
+  const refusal = {
+    message: 'Deploying "socket-proxy" would cut the Docker connection Sencho is using, so it was refused.',
+    reason: 'provider' as const,
+    service: 'socket-proxy',
+  };
+
+  function json(body: unknown): Response {
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  async function waitUntil(predicate: () => boolean, label: string) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (predicate()) return;
+      await flush();
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  }
+
+  async function openRefusal(stackName: string = STACK): Promise<string[]> {
+    mobile.v = false;
+    const fetched: string[] = [];
+    // The same endpoints the editor uses in production: the stack list marks
+    // this stack as Sencho's own, and the node reports reapply plus a
+    // provider-only replacement.
+    vi.mocked(apiFetch).mockImplementation(async (input: string) => {
+      const path = String(input);
+      fetched.push(path);
+      if (path === '/stacks') return json([stackName]);
+      if (path === '/stacks/statuses') return json({ [stackName]: { status: 'running', isSelf: true } });
+      if (path === '/fleet/update-status') return json({ nodes: [{ nodeId: 2, canReapplyCompose: true }] });
+      if (path === '/fleet/nodes/2/endpoint-provider') {
+        return json({ state: 'available', service: 'socket-proxy', containerName: 'stack-socket-proxy-1', project: 'stack', providerOnly: true });
+      }
+      if (path === `/stacks/${stackName}`) return new Response('services:\n  socket-proxy:\n    image: linuxserver/socket-proxy\n', { status: 200 });
+      return json([]);
+    });
+    render(<EditorLayout />);
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(SENCHO_OPEN_STACK_EVENT, {
+        detail: { nodeId: 2, stackName, destination: 'editor', endpointRefusal: refusal },
+      }));
+    });
+    await waitUntil(() => cap.shell.overlayState.dockerEndpointProtected != null, 'the endpoint refusal overlay');
+    return fetched;
+  }
+
+  it('opens the preview for the refused node and stack from the shared event', async () => {
+    const fetched = await openRefusal();
+    expect(fetched).toContain(`/stacks/${STACK}`);
+    expect(cap.shell.overlayState.dockerEndpointProtected).toEqual({
+      ...refusal,
+      nodeId: 2,
+      nodeName: 'node-2',
+      nodeType: 'remote',
+      stackFile: STACK,
+    });
+  });
+
+  it('loads the refused stack itself, not whatever stack was open', async () => {
+    const fetched = await openRefusal('other.yml');
+    const detailRequests = fetched.filter(path => path === '/stacks/other.yml');
+    expect(detailRequests).toEqual(['/stacks/other.yml']);
+    expect(cap.shell.overlayState.dockerEndpointProtected?.stackFile).toBe('other.yml');
   });
 });
